@@ -1,0 +1,43 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"pgdu/internal/cli"
+	"pgdu/internal/pg"
+	"pgdu/internal/tui"
+)
+
+func main() {
+	cfg, err := cli.Parse(os.Args[1:])
+	if err != nil {
+		if errors.Is(err, cli.ErrHelp) {
+			os.Exit(0)
+		}
+		fmt.Fprintln(os.Stderr, "pgdu:", err)
+		os.Exit(2)
+	}
+
+	client := pg.New(cfg)
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Ping(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "pgdu: connect:", err)
+		os.Exit(1)
+	}
+
+	model := tui.NewModel(client)
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "pgdu:", err)
+		os.Exit(1)
+	}
+}
