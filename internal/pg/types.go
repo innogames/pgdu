@@ -67,11 +67,12 @@ type Part struct {
 // heap space the column occupies, derived entirely from planner statistics
 // (no table scan).
 type Column struct {
-	Name     string
-	Type     string  // e.g. "text", "varchar(64)", "integer"
-	AvgWidth int     // pg_stats.avg_width, bytes per non-null value
-	NullFrac float64 // pg_stats.null_frac, [0,1]
-	EstBytes int64   // avg_width × (1 − null_frac) × reltuples
+	Name      string
+	Type      string  // e.g. "text", "varchar(64)", "integer"
+	AvgWidth  int     // pg_stats.avg_width, bytes per non-null value
+	NullFrac  float64 // pg_stats.null_frac, [0,1]
+	EstBytes  int64   // avg_width × (1 − null_frac) × reltuples
+	Toastable bool    // column has TOAST-eligible storage AND its table has a TOAST relation
 }
 
 // TableBufferStat is one row of the shared-buffers view: how much of
@@ -96,4 +97,21 @@ func (s TableBufferStat) HitRatio() float64 {
 		return -1
 	}
 	return float64(s.Hits) / float64(total)
+}
+
+// BufferCacheSummary is a cluster-wide snapshot of shared_buffers occupancy,
+// split by who is using each page: the database the user is currently viewing,
+// any other database (including shared catalogs), or unused.
+type BufferCacheSummary struct {
+	TotalBytes   int64
+	ThisDBBytes  int64
+	OtherDBBytes int64
+}
+
+func (b BufferCacheSummary) FreeBytes() int64 {
+	free := b.TotalBytes - b.ThisDBBytes - b.OtherDBBytes
+	if free < 0 {
+		return 0
+	}
+	return free
 }

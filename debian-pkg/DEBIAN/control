@@ -1,0 +1,7 @@
+Package: pgdu
+Version: 0.1.0
+Architecture: amd64
+Maintainer: Matthias Dötsch <matthias.doetsch@innogames.com>
+Section: database
+Priority: optional
+Description: PostgreSQL table and index disk usage explorer

@@ -51,15 +51,22 @@ type sortMode int
 const (
 	sortBySize sortMode = iota
 	sortByName
+	sortByHitRatio
 )
 
 // item is the row data the renderer consumes; concrete payload is in `data`.
 type item struct {
-	name   string
-	size   int64
-	bloat  int64
-	detail string
-	data   any
+	name        string
+	size        int64
+	bloat       int64
+	hasBloat    bool // true once bloat has been measured (even if zero)
+	hasChildren bool // true when pressing Enter on this row drills into a submenu
+	detail      string
+	data        any
+
+	// Optional heap/index/toast breakdown for the tables level. When any are
+	// non-zero, the bar is rendered as three coloured segments.
+	heap, idx, toast int64
 }
 
 type screen struct {
@@ -83,6 +90,10 @@ type screen struct {
 	tableName string
 	tableOID  uint32
 	table     pg.Table
+
+	// Populated on the levelBufferTables screen alongside the row data.
+	bufferSummary    *pg.BufferCacheSummary
+	bufferSummaryErr error
 }
 
 type Model struct {
@@ -122,8 +133,8 @@ func NewModel(client *pg.Client) *Model {
 // toolItems is the static list shown on the root tool-picker screen.
 func toolItems() []item {
 	return []item{
-		{name: "Disk usage", detail: "browse tables by total relation size on disk", data: toolDisk},
-		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", data: toolBuffers},
+		{name: "Disk usage", detail: "browse tables by total relation size on disk", hasChildren: true, data: toolDisk},
+		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 	}
 }
 
@@ -162,6 +173,11 @@ type bufferStatsLoadedMsg struct {
 	stats      []pg.TableBufferStat
 	err        error
 }
+type bufferSummaryLoadedMsg struct {
+	db      string
+	summary pg.BufferCacheSummary
+	err     error
+}
 type columnsLoadedMsg struct {
 	tableOID uint32
 	columns  []pg.Column
@@ -189,11 +205,16 @@ func (m *Model) loadCurrent() tea.Cmd {
 	case levelTables:
 		return m.loadTablesCmd(s.db, s.schema)
 	case levelBufferTables:
-		return m.loadBufferStatsCmd(s.db, s.schema)
+		s.bufferSummary = nil
+		s.bufferSummaryErr = nil
+		return tea.Batch(
+			m.loadBufferStatsCmd(s.db, s.schema),
+			m.loadBufferSummaryCmd(s.db),
+		)
 	case levelParts:
 		return m.loadPartsCmd(s.table)
 	case levelColumns:
-		return m.loadColumnsCmd(s.db, s.tableOID)
+		return m.loadColumnsCmd(s.table)
 	}
 	return nil
 }
@@ -243,12 +264,12 @@ func (m *Model) fillBloatCmd(t pg.Table, parts []pg.Part) tea.Cmd {
 	}
 }
 
-func (m *Model) loadColumnsCmd(db string, oid uint32) tea.Cmd {
+func (m *Model) loadColumnsCmd(t pg.Table) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		cols, err := m.client.ListColumns(ctx, db, oid)
-		return columnsLoadedMsg{tableOID: oid, columns: cols, err: err}
+		cols, err := m.client.ListColumns(ctx, t)
+		return columnsLoadedMsg{tableOID: t.OID, columns: cols, err: err}
 	}
 }
 
@@ -258,6 +279,15 @@ func (m *Model) loadBufferStatsCmd(db, schema string) tea.Cmd {
 		defer cancel()
 		stats, err := m.client.TableBufferStats(ctx, db, schema)
 		return bufferStatsLoadedMsg{db: db, schema: schema, stats: stats, err: err}
+	}
+}
+
+func (m *Model) loadBufferSummaryCmd(db string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		sum, err := m.client.BufferCacheSummary(ctx, db)
+		return bufferSummaryLoadedMsg{db: db, summary: sum, err: err}
 	}
 }
 
@@ -284,7 +314,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg.err
 		s.items = s.items[:0]
 		for _, d := range msg.dbs {
-			s.items = append(s.items, item{name: d.Name, size: d.SizeBytes, data: d})
+			s.items = append(s.items, item{name: d.Name, size: d.SizeBytes, hasChildren: true, data: d})
 		}
 		m.applySort(s)
 
@@ -299,7 +329,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.items = s.items[:0]
 		for _, sc := range msg.schemas {
 			detail := fmt.Sprintf("%d tables", sc.TableCount)
-			s.items = append(s.items, item{name: sc.Name, size: sc.SizeBytes, detail: detail, data: sc})
+			s.items = append(s.items, item{name: sc.Name, size: sc.SizeBytes, hasChildren: true, detail: detail, data: sc})
 		}
 		m.applySort(s)
 
@@ -316,7 +346,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			detail := fmt.Sprintf("heap %s · idx %s · toast %s · ~%s rows",
 				humanize.Bytes(t.HeapBytes), humanize.Bytes(t.IndexesBytes),
 				humanize.Bytes(t.ToastBytes), formatRows(t.EstRows))
-			s.items = append(s.items, item{name: t.Name, size: t.TotalBytes, detail: detail, data: t})
+			s.items = append(s.items, item{
+				name: t.Name, size: t.TotalBytes, hasChildren: true,
+				detail: detail, data: t,
+				heap: t.HeapBytes, idx: t.IndexesBytes, toast: t.ToastBytes,
+			})
 		}
 		m.applySort(s)
 
@@ -351,6 +385,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.applySort(s)
 
+	case bufferSummaryLoadedMsg:
+		s := m.findLevel(levelBufferTables)
+		if s == nil || s.db != msg.db {
+			return m, nil
+		}
+		if msg.err != nil {
+			s.bufferSummaryErr = msg.err
+			s.bufferSummary = nil
+		} else {
+			sum := msg.summary
+			s.bufferSummary = &sum
+			s.bufferSummaryErr = nil
+		}
+
 	case columnsLoadedMsg:
 		s := m.findLevel(levelColumns)
 		if s == nil || s.tableOID != msg.tableOID {
@@ -374,9 +422,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s.err = msg.err
 			return m, nil
 		}
-		for i, p := range msg.parts {
-			if i < len(s.items) {
+		// applySort reorders s.items after partsLoadedMsg, so indexing by the
+		// original msg.parts position is wrong. Match by name (heap/toast and
+		// each index name are unique within a table).
+		byName := make(map[string]pg.Part, len(msg.parts))
+		for _, p := range msg.parts {
+			byName[p.Name] = p
+		}
+		for i := range s.items {
+			if p, ok := byName[s.items[i].name]; ok {
 				s.items[i].bloat = p.WastedBytes
+				s.items[i].hasBloat = p.HasBloat
 			}
 		}
 		m.applySort(s)
@@ -416,6 +472,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.SortName):
 		s.sort = sortByName
 		m.applySort(s)
+	case key.Matches(msg, m.keys.SortHitRatio):
+		if s.level == levelBufferTables {
+			s.sort = sortByHitRatio
+			m.applySort(s)
+		}
 	case key.Matches(msg, m.keys.Refresh):
 		return m, m.loadCurrent()
 	case key.Matches(msg, m.keys.ToggleBloat):
@@ -502,6 +563,12 @@ func (m *Model) View() string {
 		contentHeight = 3
 	}
 
+	if s.level == levelBufferTables && (s.bufferSummary != nil || s.bufferSummaryErr != nil) {
+		b.WriteString(m.renderBufferSummary(s))
+		b.WriteString("\n")
+		contentHeight--
+	}
+
 	switch {
 	case s.loading || !s.loaded:
 		b.WriteString(fmt.Sprintf("  %s loading %s…\n", m.spinner.View(), s.title))
@@ -519,9 +586,12 @@ func (m *Model) View() string {
 			b.WriteString("\n")
 		}
 	default:
-		if s.level == levelTools {
+		switch s.level {
+		case levelTools:
 			b.WriteString(m.renderToolPicker(s, contentHeight))
-		} else {
+		case levelBufferTables:
+			b.WriteString(m.renderBufferList(s, contentHeight))
+		default:
 			b.WriteString(m.renderList(s, contentHeight))
 		}
 	}
@@ -590,7 +660,12 @@ func (m *Model) renderToolPicker(s *screen, height int) string {
 			cursor = styleSelected.Render("▶ ")
 			name = styleSelected.Render(name)
 		}
+		childMark := "  "
+		if it.hasChildren {
+			childMark = styleMuted.Render("+ ")
+		}
 		b.WriteString(cursor)
+		b.WriteString(childMark)
 		b.WriteString(padRight(name, 20))
 		b.WriteString("  ")
 		b.WriteString(styleMuted.Render(it.detail))
@@ -600,6 +675,32 @@ func (m *Model) renderToolPicker(s *screen, height int) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// renderBufferSummary draws a single-line shared_buffers occupancy bar
+// segmented into "this db", "other dbs", and "free". The bar width matches the
+// per-row size bars so the eye lines them up.
+func (m *Model) renderBufferSummary(s *screen) string {
+	if s.bufferSummaryErr != nil {
+		return "  " + styleMuted.Render("shared_buffers: ") +
+			styleErr.Render(s.bufferSummaryErr.Error())
+	}
+	sum := s.bufferSummary
+	if sum == nil || sum.TotalBytes <= 0 {
+		return "  " + styleMuted.Render("shared_buffers: unavailable")
+	}
+	bar := renderBufferBar(sum.ThisDBBytes, sum.OtherDBBytes, sum.TotalBytes, m.barWidth(s))
+	usedPct := float64(sum.ThisDBBytes+sum.OtherDBBytes) * 100 / float64(sum.TotalBytes)
+	label := styleMuted.Render("shared_buffers")
+	stats := fmt.Sprintf(
+		"%.1f%% used  ·  this db %s  ·  other %s  ·  free %s  ·  total %s",
+		usedPct,
+		humanize.Bytes(sum.ThisDBBytes),
+		humanize.Bytes(sum.OtherDBBytes),
+		humanize.Bytes(sum.FreeBytes()),
+		humanize.Bytes(sum.TotalBytes),
+	)
+	return "  " + label + "  " + bar + "  " + styleMuted.Render(stats)
 }
 
 func (m *Model) renderList(s *screen, height int) string {
@@ -620,11 +721,14 @@ func (m *Model) renderList(s *screen, height int) string {
 	if end > len(s.items) {
 		end = len(s.items)
 	}
+	barW := m.barWidth(s)
 	var b strings.Builder
 	for i := s.offset; i < end; i++ {
 		it := s.items[i]
 		b.WriteString(renderRow(row{
-			size: it.size, bloat: it.bloat, maxSize: max,
+			size: it.size, bloat: it.bloat, hasBloat: it.hasBloat, hasChildren: it.hasChildren, maxSize: max,
+			barW: barW,
+			heap: it.heap, idx: it.idx, toast: it.toast,
 			name: it.name, detail: it.detail, selected: i == s.cursor,
 		}))
 		b.WriteString("\n")
@@ -634,6 +738,25 @@ func (m *Model) renderList(s *screen, height int) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// barWidth picks the size-bar width for the current screen. We grow it with
+// the terminal so wide windows aren't dominated by trailing whitespace, but
+// cap it so very wide terminals don't turn the bar into ASCII art at the
+// expense of the actual numeric columns.
+func (m *Model) barWidth(s *screen) int {
+	// Reserve space for the cursor, padding, numeric columns and the
+	// name/detail. The buffer view has the most numeric columns; reserve
+	// enough for it so the same width works everywhere.
+	const reserve = 70
+	w := m.width - reserve
+	if w < barWidthMin {
+		return barWidthMin
+	}
+	if w > 80 {
+		return 80
+	}
+	return w
 }
 
 // --- helpers ---
@@ -660,6 +783,24 @@ func (m *Model) applySort(s *screen) {
 		})
 	case sortByName:
 		sort.SliceStable(s.items, func(i, j int) bool { return s.items[i].name < s.items[j].name })
+	case sortByHitRatio:
+		// Ascending so the worst hit ratios bubble to the top — those are the
+		// tables you actually want to look at. Rows without recorded I/O (-1)
+		// sink to the bottom since their ratio is unknown.
+		sort.SliceStable(s.items, func(i, j int) bool {
+			ri, oki := itemHitRatio(s.items[i])
+			rj, okj := itemHitRatio(s.items[j])
+			if oki != okj {
+				return oki
+			}
+			if !oki {
+				return s.items[i].name < s.items[j].name
+			}
+			if ri != rj {
+				return ri < rj
+			}
+			return s.items[i].name < s.items[j].name
+		})
 	}
 	if s.cursor >= len(s.items) {
 		s.cursor = len(s.items) - 1
@@ -669,25 +810,28 @@ func (m *Model) applySort(s *screen) {
 	}
 }
 
+// itemHitRatio extracts the hit ratio from an item's payload when it carries
+// buffer-cache stats. The second return is false when the item has no such
+// payload, or when the table has no recorded I/O (HitRatio == -1).
+func itemHitRatio(it item) (float64, bool) {
+	st, ok := it.data.(pg.TableBufferStat)
+	if !ok {
+		return 0, false
+	}
+	r := st.HitRatio()
+	if r < 0 {
+		return 0, false
+	}
+	return r, true
+}
+
 func bufferStatToItem(s pg.TableBufferStat) item {
-	hr := s.HitRatio()
-	var hitStr string
-	if hr < 0 {
-		hitStr = "no I/O yet"
-	} else {
-		hitStr = fmt.Sprintf("hit %.1f%%", hr*100)
-	}
-	cachedPct := ""
-	if s.TotalBytes > 0 {
-		pct := float64(s.BufferedBytes) / float64(s.TotalBytes) * 100
-		cachedPct = fmt.Sprintf(" · cached %.1f%%", pct)
-	}
-	detail := fmt.Sprintf("%s · table %s%s", hitStr, humanize.Bytes(s.TotalBytes), cachedPct)
+	// detail is left empty: the per-row figures (table size, cached %, hit %)
+	// are rendered as their own columns in renderBufferList.
 	return item{
-		name:   s.Schema + "." + s.Name,
-		size:   s.BufferedBytes,
-		detail: detail,
-		data:   s,
+		name: s.Schema + "." + s.Name,
+		size: s.BufferedBytes,
+		data: s,
 	}
 }
 
@@ -696,7 +840,13 @@ func columnToItem(col pg.Column) item {
 	if col.NullFrac > 0.005 {
 		nullPart = fmt.Sprintf(" · %.0f%% null", col.NullFrac*100)
 	}
-	detail := fmt.Sprintf("%s · avg %s%s", col.Type, humanize.Bytes(int64(col.AvgWidth)), nullPart)
+	toastMark := ""
+	if col.Toastable {
+		// 🍞 flags columns whose values may live in TOAST: extended/external
+		// storage and a TOAST relation exists on the table.
+		toastMark = "🍞 "
+	}
+	detail := fmt.Sprintf("%s%s · avg %s%s", toastMark, col.Type, humanize.Bytes(int64(col.AvgWidth)), nullPart)
 	return item{
 		name:   col.Name,
 		size:   col.EstBytes,
@@ -724,17 +874,22 @@ func partToItem(p pg.Part) item {
 		detail = "index · " + strings.Join(tags, " · ")
 	}
 	return item{
-		name:   p.Name,
-		size:   p.SizeBytes,
-		bloat:  p.WastedBytes,
-		detail: detail,
-		data:   p,
+		name:        p.Name,
+		size:        p.SizeBytes,
+		bloat:       p.WastedBytes,
+		hasBloat:    p.HasBloat,
+		hasChildren: p.Kind == pg.PartHeap, // only heap drills into per-column view
+		detail:      detail,
+		data:        p,
 	}
 }
 
 func sortLabel(s sortMode) string {
-	if s == sortBySize {
+	switch s {
+	case sortBySize:
 		return "size↓"
+	case sortByHitRatio:
+		return "hit↑"
 	}
 	return "name"
 }

@@ -66,3 +66,20 @@ func (c *Client) TableBufferStats(ctx context.Context, db, schema string) ([]Tab
 	}
 	return out, rows.Err()
 }
+
+// BufferCacheSummary returns the cluster-wide shared_buffers occupancy split
+// between the current database, anything else, and free pages.
+func (c *Client) BufferCacheSummary(ctx context.Context, db string) (BufferCacheSummary, error) {
+	if err := c.EnsureBufferCache(ctx, db); err != nil {
+		return BufferCacheSummary{}, err
+	}
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return BufferCacheSummary{}, err
+	}
+	var s BufferCacheSummary
+	if err := pool.QueryRow(ctx, sqlBufferCacheSummary).Scan(&s.TotalBytes, &s.ThisDBBytes, &s.OtherDBBytes); err != nil {
+		return BufferCacheSummary{}, fmt.Errorf("buffer cache summary: %w", err)
+	}
+	return s, nil
+}

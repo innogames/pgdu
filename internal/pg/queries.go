@@ -69,7 +69,8 @@ SELECT a.attname,
        COALESCE(s.null_frac, 0)::float8                   AS null_frac,
        (COALESCE(s.avg_width, 0) *
         (1 - COALESCE(s.null_frac, 0)) *
-        GREATEST(c.reltuples, 0))::bigint                 AS est_bytes
+        GREATEST(c.reltuples, 0))::bigint                 AS est_bytes,
+       (a.attstorage IN ('e','x') AND c.reltoastrelid <> 0) AS toastable
 FROM   pg_attribute a
 JOIN   pg_class c     ON c.oid = a.attrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
@@ -152,6 +153,24 @@ SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_buffercache') AS in
 `
 
 const sqlBufferCacheCreate = `CREATE EXTENSION IF NOT EXISTS pg_buffercache`
+
+// sqlBufferCacheSummary reports cluster-wide shared_buffers occupancy split
+// into three buckets: pages owned by the database the user is browsing, pages
+// owned by anything else (other databases plus shared catalogs), and free
+// pages. Total = COUNT(*) × block_size is the exact configured shared_buffers
+// size in bytes (rounded to block boundaries).
+const sqlBufferCacheSummary = `
+WITH this_db AS (SELECT oid FROM pg_database WHERE datname = current_database())
+SELECT
+  COUNT(*) * current_setting('block_size')::int                              AS total_bytes,
+  COUNT(*) FILTER (WHERE reldatabase = (SELECT oid FROM this_db))
+    * current_setting('block_size')::int                                     AS this_db_bytes,
+  COUNT(*) FILTER (
+    WHERE relfilenode IS NOT NULL
+      AND reldatabase IS DISTINCT FROM (SELECT oid FROM this_db)
+  ) * current_setting('block_size')::int                                     AS other_db_bytes
+FROM pg_buffercache
+`
 
 // sqlBufferStats reports per-table shared-buffer footprint and cumulative I/O
 // counters for one schema. Buffer footprint sums the heap, toast and every

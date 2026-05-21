@@ -26,4 +26,11 @@ var (
 	styleBar      = lipgloss.NewStyle().Foreground(colorBar)
 	styleBloat    = lipgloss.NewStyle().Foreground(colorBloat)
 	styleBadge    = lipgloss.NewStyle().Foreground(colorOK)
+	styleBarAlt   = lipgloss.NewStyle().Foreground(colorAccent)
+
+	// Segment colors for the table-row bar. Heap reuses the default bar tint
+	// so the colour palette doesn't bloom; index and toast get distinct hues.
+	styleHeapSeg  = styleBar
+	styleIndexSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("114")) // soft green
+	styleToastSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("141")) // light purple
 )

@@ -98,7 +98,7 @@ func TestIntegration_FullChain(t *testing.T) {
 
 	// Per-column space estimate must come back with at least one row and the
 	// largest column's est_bytes should be > 0 on a non-empty seeded table.
-	cols, err := c.ListColumns(ctx, db, t0.OID)
+	cols, err := c.ListColumns(ctx, t0)
 	if err != nil || len(cols) == 0 {
 		t.Fatalf("ListColumns: err=%v len=%d", err, len(cols))
 	}
