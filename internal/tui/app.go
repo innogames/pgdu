@@ -50,6 +50,8 @@ const (
 	sortBySize sortMode = iota
 	sortByName
 	sortByHitRatio
+	sortByCached
+	sortByTotal
 	sortByRows
 )
 
@@ -58,7 +60,7 @@ const (
 // ratio so the worst-cached tables bubble to the top.
 func (sm sortMode) defaultDesc() bool {
 	switch sm {
-	case sortBySize, sortByRows:
+	case sortBySize, sortByRows, sortByCached, sortByTotal:
 		return true
 	case sortByName, sortByHitRatio:
 		return false
@@ -75,6 +77,10 @@ func (sm sortMode) name() string {
 		return "~rows"
 	case sortByHitRatio:
 		return "hit"
+	case sortByCached:
+		return "cached"
+	case sortByTotal:
+		return "total"
 	default:
 		return "name"
 	}
@@ -111,6 +117,26 @@ func (sm sortMode) less(a, b item) bool {
 	case sortByHitRatio:
 		ai, oka := itemHitRatio(a)
 		bi, okb := itemHitRatio(b)
+		if oka != okb {
+			return okb
+		}
+		if !oka {
+			return false
+		}
+		return ai < bi
+	case sortByCached:
+		ai, oka := itemCachedRatio(a)
+		bi, okb := itemCachedRatio(b)
+		if oka != okb {
+			return okb
+		}
+		if !oka {
+			return false
+		}
+		return ai < bi
+	case sortByTotal:
+		ai, oka := itemTotalBytes(a)
+		bi, okb := itemTotalBytes(b)
 		if oka != okb {
 			return okb
 		}

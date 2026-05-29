@@ -37,6 +37,30 @@ func itemHitRatio(it item) (float64, bool) {
 	return r, true
 }
 
+// itemTotalBytes extracts the on-disk total size for a buffer-tables item
+// (pg_total_relation_size, the "total" column). Returns (0, false) for
+// rows without buffer-stat data or where the catalog reported a zero size,
+// so those sort below tables we can measure.
+func itemTotalBytes(it item) (int64, bool) {
+	st, ok := it.data.(pg.TableBufferStat)
+	if !ok || st.TotalBytes <= 0 {
+		return 0, false
+	}
+	return st.TotalBytes, true
+}
+
+// itemCachedRatio extracts the fraction of a table currently in the shared
+// buffer cache (BufferedBytes / TotalBytes) from an item's payload. Returns
+// (0, false) for items without buffer-stat data or with no size information,
+// so those rows sort below tables that do have a measurable ratio.
+func itemCachedRatio(it item) (float64, bool) {
+	st, ok := it.data.(pg.TableBufferStat)
+	if !ok || st.TotalBytes <= 0 {
+		return 0, false
+	}
+	return float64(st.BufferedBytes) / float64(st.TotalBytes), true
+}
+
 // itemRows extracts the row-count estimate from a table item. Second return is
 // false for any item whose payload isn't a pg.Table, or when EstRows is
 // negative (planner stats unavailable).
@@ -63,7 +87,7 @@ func validSorts(l level) []sortMode {
 	case levelTables:
 		return []sortMode{sortBySize, sortByRows, sortByName}
 	case levelBufferTables:
-		return []sortMode{sortBySize, sortByName, sortByHitRatio}
+		return []sortMode{sortBySize, sortByTotal, sortByCached, sortByHitRatio, sortByName}
 	default:
 		return []sortMode{sortBySize, sortByName}
 	}

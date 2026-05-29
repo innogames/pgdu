@@ -189,6 +189,16 @@ type BufferCacheSummary struct {
 	TotalBytes   int64
 	ThisDBBytes  int64
 	OtherDBBytes int64
+	// ServerMemBytes is the host's total RAM (MemTotal from /proc/meminfo),
+	// read locally by pgdu — not from Postgres. Zero when unavailable.
+	ServerMemBytes int64
+	// ServerMemAvailableBytes is MemAvailable from /proc/meminfo: free pages
+	// plus reclaimable cache, i.e. what's actually usable by new workloads.
+	// Zero on kernels too old to expose MemAvailable, or when not readable.
+	ServerMemAvailableBytes int64
+	// ServerMemFreeBytes is MemFree from /proc/meminfo — strictly unallocated
+	// memory, excluding the kernel page cache. Zero when unavailable.
+	ServerMemFreeBytes int64
 }
 
 func (b BufferCacheSummary) FreeBytes() int64 {

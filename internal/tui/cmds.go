@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
+	"pgdu/internal/sysmem"
 )
 
 // --- messages ---
@@ -138,6 +139,12 @@ func (m *Model) loadBufferStatsCmd(db, schema string) tea.Cmd {
 func (m *Model) loadBufferSummaryCmd(db string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		sum, err := m.client.BufferCacheSummary(ctx, db)
+		if err == nil {
+			mem := sysmem.Read()
+			sum.ServerMemBytes = mem.Total
+			sum.ServerMemAvailableBytes = mem.Available
+			sum.ServerMemFreeBytes = mem.Free
+		}
 		return bufferSummaryLoadedMsg{db: db, summary: sum, err: err}
 	})
 }

@@ -28,12 +28,51 @@ var (
 	styleBadge    = lipgloss.NewStyle().Foreground(colorOK)
 	styleBarAlt   = lipgloss.NewStyle().Foreground(colorAccent)
 
+	// Server-memory bar: shared_buffers free pages, the kernel/app "other
+	// used" portion, and the reclaimable kernel page cache. Chosen to read
+	// distinctly from the per-table palette and from each other.
+	styleSBFree    = lipgloss.NewStyle().Foreground(lipgloss.Color("67"))  // steel blue
+	styleOtherUsed = lipgloss.NewStyle().Foreground(lipgloss.Color("173")) // warm orange
+	styleCache     = lipgloss.NewStyle().Foreground(lipgloss.Color("108")) // sage green — "kinda used"
+
 	// Segment colors for the table-row bar. Heap reuses the default bar tint
 	// so the colour palette doesn't bloom; index and toast get distinct hues.
 	styleHeapSeg  = styleBar
 	styleIndexSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("114")) // soft green
 	styleToastSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("231")) // white
+
+	// bufferSlicePalette is the cycle of distinct foreground colours used to
+	// paint per-table slices in the shared_buffers occupancy bar and the
+	// matching row bars in the list below. Sized at 16 so every row gets a
+	// colour without too much repetition; the first eight entries are
+	// reserved for the largest tables so the brightest, most distinct hues
+	// land on the slices that dominate the bar.
+	bufferSlicePalette = []lipgloss.Style{
+		lipgloss.NewStyle().Foreground(lipgloss.Color("33")),  // blue
+		lipgloss.NewStyle().Foreground(lipgloss.Color("165")), // magenta
+		lipgloss.NewStyle().Foreground(lipgloss.Color("208")), // orange
+		lipgloss.NewStyle().Foreground(lipgloss.Color("99")),  // violet
+		lipgloss.NewStyle().Foreground(lipgloss.Color("142")), // olive
+		lipgloss.NewStyle().Foreground(lipgloss.Color("169")), // pink
+		lipgloss.NewStyle().Foreground(lipgloss.Color("24")),  // navy
+		lipgloss.NewStyle().Foreground(lipgloss.Color("136")), // gold
+		lipgloss.NewStyle().Foreground(lipgloss.Color("75")),  // light blue
+		lipgloss.NewStyle().Foreground(lipgloss.Color("162")), // deep pink
+		lipgloss.NewStyle().Foreground(lipgloss.Color("184")), // chartreuse
+		lipgloss.NewStyle().Foreground(lipgloss.Color("105")), // lavender
+		lipgloss.NewStyle().Foreground(lipgloss.Color("215")), // peach
+		lipgloss.NewStyle().Foreground(lipgloss.Color("129")), // purple
+		lipgloss.NewStyle().Foreground(lipgloss.Color("49")),  // spring green
+		lipgloss.NewStyle().Foreground(lipgloss.Color("178")), // dark gold
+	}
 )
+
+// bufferSliceStyle returns the palette colour for slice index i, cycling on
+// overflow. Callers should still cap N to a sensible number so legends stay
+// readable.
+func bufferSliceStyle(i int) lipgloss.Style {
+	return bufferSlicePalette[i%len(bufferSlicePalette)]
+}
 
 // percentStyle picks a colour for a "higher is better" percentage value:
 // green near 100, cyan in the healthy band, yellow as a warning, red below.

@@ -105,10 +105,7 @@ func paintBar(width int, segs ...barSegment) string {
 	b.WriteString("[")
 	used := 0
 	for _, s := range segs {
-		c := s.cells
-		if c < 0 {
-			c = 0
-		}
+		c := max(s.cells, 0)
 		if used+c > width {
 			c = width - used
 		}
@@ -141,6 +138,17 @@ func renderBar(size, bloat, max int64, width int) string {
 	)
 }
 
+// renderSolidBar paints a single-segment bar in the caller's chosen style.
+// Used by the buffer-tables row renderer so each row can carry the palette
+// colour of its matching slice in the summary bar above.
+func renderSolidBar(size, max int64, width int, style lipgloss.Style) string {
+	if max <= 0 {
+		max = 1
+	}
+	filled := min(int(float64(width)*float64(size)/float64(max)), width)
+	return paintBar(width, barSegment{cells: filled, style: style})
+}
+
 // renderSegmentedBar paints a single bar split into three coloured segments
 // (heap / index / toast). Each segment's width is proportional to its bytes
 // over `max`; any width left over after the three segments — i.e. the
@@ -165,25 +173,86 @@ func renderSegmentedBar(heap, idx, toast, max int64, width int) string {
 	)
 }
 
-// renderBufferBar paints a three-segment occupancy bar: this-db (colorBar),
-// other-dbs (colorAccent), free (muted dots). Segments are sized
-// proportionally and any width loss from truncation is absorbed by the free
-// tail so the bar stays exactly `width` cells wide.
-func renderBufferBar(thisDB, otherDB, total int64, width int) string {
+// bufferSlice is one named contribution to the this-db portion of the
+// shared_buffers bar — typically the top-N tables by buffered bytes. OID
+// lets the row renderer match each list row back to its slice colour.
+type bufferSlice struct {
+	oid   uint32
+	name  string
+	bytes int64
+	style lipgloss.Style
+}
+
+// renderBufferBar paints a multi-segment occupancy bar: per-table slices
+// (palette colours) at the head, "this-db remainder" (colorBar) for the
+// rest of the current database, "other-dbs" (colorAccent), then free
+// (muted dots). When slices is empty/nil the result is the original
+// three-segment bar. Segments are sized proportionally and any width loss
+// from rounding is absorbed by the free tail so the bar stays exactly
+// `width` cells wide.
+func renderBufferBar(slices []bufferSlice, thisDBRemainder, otherDB, total int64, width int) string {
 	if total <= 0 {
 		total = 1
 	}
-	thisChars := max0(int(float64(width) * float64(thisDB) / float64(total)))
-	otherChars := max0(int(float64(width) * float64(otherDB) / float64(total)))
-	if thisChars > width {
-		thisChars = width
+	bytesToCells := func(b int64) int {
+		return max0(int(float64(width) * float64(b) / float64(total)))
 	}
-	if thisChars+otherChars > width {
-		otherChars = width - thisChars
+	segs := make([]barSegment, 0, len(slices)+2)
+	used := 0
+	for i, sl := range slices {
+		c := bytesToCells(sl.bytes)
+		if used+c > width {
+			c = width - used
+		}
+		segs = append(segs, barSegment{cells: c, style: bufferSliceStyle(i)})
+		used += c
 	}
+	rem := bytesToCells(thisDBRemainder)
+	if used+rem > width {
+		rem = width - used
+	}
+	segs = append(segs, barSegment{cells: rem, style: styleBar})
+	used += rem
+	other := bytesToCells(otherDB)
+	if used+other > width {
+		other = width - used
+	}
+	segs = append(segs, barSegment{cells: other, style: styleBarAlt})
+	return paintBar(width, segs...)
+}
+
+// renderServerMemBar paints the host-RAM occupancy: shared_buffers used,
+// shared_buffers free (empty PG pages), other-used (kernel/apps),
+// reclaimable cache, and then the truly-free tail. Segments are sized
+// proportionally over `total`; rounding loss falls into the free tail so
+// the bar stays exactly `width` cells wide.
+func renderServerMemBar(sbUsed, sbFree, otherUsed, cache, total int64, width int) string {
+	if total <= 0 {
+		total = 1
+	}
+	bytesToCells := func(b int64) int {
+		return max0(int(float64(width) * float64(b) / float64(total)))
+	}
+	used := 0
+	clamp := func(c int) int {
+		if used+c > width {
+			c = width - used
+		}
+		if c < 0 {
+			c = 0
+		}
+		used += c
+		return c
+	}
+	a := clamp(bytesToCells(sbUsed))
+	b := clamp(bytesToCells(sbFree))
+	c := clamp(bytesToCells(otherUsed))
+	d := clamp(bytesToCells(cache))
 	return paintBar(width,
-		barSegment{cells: thisChars, style: styleBar},
-		barSegment{cells: otherChars, style: styleBarAlt},
+		barSegment{cells: a, style: styleBar},
+		barSegment{cells: b, style: styleSBFree},
+		barSegment{cells: c, style: styleOtherUsed},
+		barSegment{cells: d, style: styleCache},
 	)
 }
 
@@ -213,8 +282,12 @@ const (
 // renderBufferList draws the shared-buffer occupancy view as a column table:
 // bar | buffered bytes | total table size | cached % | hit % | table name.
 // The bar visualises BufferedBytes scaled to the largest sibling so the eye
-// still gets a quick "which table dominates the cache" read.
-func (m *Model) renderBufferList(s *screen, height int) string {
+// still gets a quick "which table dominates the cache" read. rankByOID
+// maps each row to its rank among all buffered tables (0 = biggest); the
+// row picks its bar colour from bufferSlicePalette by that rank, cycling
+// on overflow, so the brightest hues match the top slices on the summary
+// bar above.
+func (m *Model) renderBufferList(s *screen, height int, rankByOID map[uint32]int) string {
 	vis := s.visibleIndexes()
 	max := maxItemSize(s.items, vis)
 
@@ -236,7 +309,11 @@ func (m *Model) renderBufferList(s *screen, height int) string {
 	for vi := s.offset; vi < end; vi++ {
 		it := s.items[vis[vi]]
 		st, _ := it.data.(pg.TableBufferStat)
-		b.WriteString(renderBufferRow(it, st, max, barW, vi == s.cursor))
+		barStyle := styleBar
+		if idx, ok := rankByOID[st.OID]; ok {
+			barStyle = bufferSliceStyle(idx)
+		}
+		b.WriteString(renderBufferRow(it, st, max, barW, vi == s.cursor, barStyle))
 		b.WriteString("\n")
 	}
 	for i := end - s.offset; i < rowsH; i++ {
@@ -257,20 +334,22 @@ func renderBufferHeader(sort sortMode, sortDesc bool, barW int) string {
 		return label
 	}
 	bufLabel := mark("buffered", sort == sortBySize)
+	totalLabel := mark("total", sort == sortByTotal)
+	cachedLabel := mark("cached", sort == sortByCached)
 	hitLabel := mark("hit", sort == sortByHitRatio)
 	nameLabel := mark("table", sort == sortByName)
 	// Pad: cursor (2) + bar slot (barW+2) + "  " then columns.
 	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
 		padRight(bufLabel, bufColBuffered) + "  " +
-		padRight("total", bufColTotal) + "  " +
-		padRight("cached", bufColCached) + "  " +
+		padRight(totalLabel, bufColTotal) + "  " +
+		padRight(cachedLabel, bufColCached) + "  " +
 		padRight(hitLabel, bufColHit) + "  " +
 		nameLabel
 	return styleMuted.Render(line)
 }
 
-func renderBufferRow(it item, st pg.TableBufferStat, maxSize int64, barW int, selected bool) string {
-	bar := renderBar(it.size, 0, maxSize, barW)
+func renderBufferRow(it item, st pg.TableBufferStat, maxSize int64, barW int, selected bool, barStyle lipgloss.Style) string {
+	bar := renderSolidBar(it.size, maxSize, barW, barStyle)
 	cursor := "  "
 	if selected {
 		cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")

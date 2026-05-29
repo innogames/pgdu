@@ -87,10 +87,7 @@ func viewportRange(cursor, offset, height, length int) (int, int) {
 	if offset < 0 {
 		offset = 0
 	}
-	end := offset + height
-	if end > length {
-		end = length
-	}
+	end := min(offset+height, length)
 	return offset, end
 }
 
