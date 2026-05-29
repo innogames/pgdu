@@ -7,12 +7,16 @@ lint:
   stage: test
   script:
     - make lint
+  tags:
+    - docker
 
 test:
   image: artifacts.innogames.de:5000/golang:latest
   stage: test
   script:
     - go test -race -count=1 ./...
+  tags:
+    - docker
 
 build:
   image: artifacts.innogames.de:5000/golang:latest
@@ -26,3 +30,5 @@ build:
       - pgdu
       - pgdu_*.deb
     expire_in: 1 week
+  tags:
+    - docker
