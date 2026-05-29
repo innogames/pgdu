@@ -310,7 +310,7 @@ func (m *Model) renderBufferList(s *screen, height int, rankByOID map[uint32]int
 		it := s.items[vis[vi]]
 		st, _ := it.data.(pg.TableBufferStat)
 		barStyle := styleBar
-		if idx, ok := rankByOID[st.OID]; ok {
+		if idx, ok := rankByOID[st.OID]; ok && idx < len(bufferSlicePalette) {
 			barStyle = bufferSliceStyle(idx)
 		}
 		b.WriteString(renderBufferRow(it, st, max, barW, vi == s.cursor, barStyle))

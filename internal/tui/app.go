@@ -264,6 +264,10 @@ type Model struct {
 	// when true, bloat is fetched on entering the parts view.
 	fetchBloat bool
 
+	// showInfo toggles the buffer-tables info overlay (? key) — a static
+	// explainer for the server-memory and shared_buffers bars.
+	showInfo bool
+
 	target string // host:port for header
 }
 

@@ -5,3 +5,4 @@ vendor
 .claude
 /pgdu_*.deb
 /pgdu
+/debian-pkg/usr/

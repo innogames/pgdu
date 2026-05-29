@@ -63,6 +63,8 @@ func (m *Model) View() string {
 	}
 
 	switch {
+	case m.showInfo && s.level == levelBufferTables:
+		b.WriteString(m.renderBufferInfo(contentHeight))
 	case s.extPrompt != nil && s.extPrompt.blocking:
 		b.WriteString(m.renderExtPrompt(s, contentHeight))
 	case s.loading || !s.loaded:
@@ -242,6 +244,43 @@ const summaryLabelWidth = 14
 // the stats line's readability.
 const summaryBarMax = 200
 
+// renderBufferInfo draws a static explainer for the server-memory and
+// shared_buffers bars, sized to fill `height` lines so the help row stays
+// pinned to the bottom. Shown when the user toggles `?` on
+// levelBufferTables.
+func (m *Model) renderBufferInfo(height int) string {
+	sw := func(style lipgloss.Style) string { return style.Render("▇") }
+	var b strings.Builder
+	mu := styleMuted.Render
+	b.WriteString("\n")
+	b.WriteString("  " + styleSelected.Render("Bar reference") + mu("  ·  press ") +
+		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" server memory ") + "  " +
+		mu("the whole host's RAM (MemTotal) — the superset") + "\n")
+	b.WriteString("    " + sw(styleBar) + "  " + mu("sb used      pages of shared_buffers actively caching data") + "\n")
+	b.WriteString("    " + sw(styleSBFree) + "  " + mu("sb free      empty pages reserved by Postgres but not yet used") + "\n")
+	b.WriteString("    " + sw(styleOtherUsed) + "  " + mu("other        memory used outside shared_buffers (other procs, kernel)") + "\n")
+	b.WriteString("    " + sw(styleCache) + "  " + mu("cache        reclaimable kernel buffers + page cache (≈ MemAvailable − MemFree)") + "\n")
+	b.WriteString("    " + mu("░  free         truly unallocated memory (MemFree)") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" shared_buffers ") + "  " +
+		mu("the Postgres-only subset of server memory — a slice of the bar above") + "\n")
+	b.WriteString("    " + sw(styleBar) + "  " + mu("this db      buffered pages belonging to the current database") + "\n")
+	b.WriteString("    " + sw(styleBarAlt) + "  " + mu("other dbs    buffered pages from other databases (and shared catalogs)") + "\n")
+	b.WriteString("    " + mu("░  free         empty pages within shared_buffers") + "\n\n")
+
+	b.WriteString("  " + mu("The top 10 tables by BufferedBytes each get a distinct palette hue;") + "\n")
+	b.WriteString("  " + mu("their row bar matches the slice on the shared_buffers bar above.") + "\n")
+	b.WriteString("  " + mu("Tables ranked 11+ use the default bar colour.") + "\n")
+
+	rendered := strings.Count(b.String(), "\n")
+	for i := rendered; i < height; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // summaryBarWidth picks the bar width for the two stacked summary bars.
 // Wider than the per-row bars by design — there's nothing to align against
 // once the stats text moved onto its own line.
@@ -265,7 +304,7 @@ func (m *Model) summaryBarWidth() int {
 // table so list rows below can pick the same palette colour by rank.
 func (m *Model) renderBufferSummary(s *screen) (string, map[uint32]int) {
 	if s.bufferSummaryErr != nil {
-		return "  " + styleMuted.Render("shared_buffers: ") +
+		return "  " + styleMuted.Render("shared buffers: ") +
 			styleErr.Render(s.bufferSummaryErr.Error()), nil
 	}
 	sum := s.bufferSummary
@@ -297,10 +336,9 @@ func (m *Model) renderBufferSummary(s *screen) (string, map[uint32]int) {
 			cache = 0
 		}
 		bar := renderServerMemBar(sbUsed, sbFree, otherUsed, cache, sum.ServerMemBytes, barW)
-		usedPct := float64(sum.ServerMemBytes-sum.ServerMemAvailableBytes) * 100 / float64(sum.ServerMemBytes)
 		muted := styleMuted.Render
 		sw := func(style lipgloss.Style) string { return style.Render("▇") + " " }
-		stats := muted(fmt.Sprintf("%.1f%% used  ·  sb %s (", usedPct, humanize.Bytes(sbTotal))) +
+		stats := muted(fmt.Sprintf("shared buffer %s (", humanize.Bytes(sbTotal))) +
 			sw(styleBar) + muted(fmt.Sprintf("used %s / ", humanize.Bytes(sbUsed))) +
 			sw(styleSBFree) + muted(fmt.Sprintf("free %s)  ·  ", humanize.Bytes(sbFree))) +
 			sw(styleOtherUsed) + muted(fmt.Sprintf("other %s  ·  ", humanize.Bytes(otherUsed))) +

@@ -45,6 +45,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
 	case key.Matches(msg, m.keys.Help):
+		// On the buffer-tables level the bars carry a lot of semantics that
+		// aren't obvious — use ? to toggle a dedicated reference overlay
+		// instead of expanding the key list. Other levels keep the standard
+		// help-expansion behaviour.
+		if s.level == levelBufferTables {
+			m.showInfo = !m.showInfo
+			break
+		}
 		m.help.ShowAll = !m.help.ShowAll
 	case key.Matches(msg, m.keys.Filter):
 		s.filterFocused = true
@@ -76,10 +84,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Install):
 		return m, m.triggerInstall(s)
 	case key.Matches(msg, m.keys.Back):
-		// Esc is shared with Back; when the filter is committed but blurred,
-		// Esc clears the filter instead of unwinding the stack. Other Back
-		// keys (←/h/backspace) always navigate back so the muscle memory for
-		// "go up a level" is preserved.
+		// Esc is shared with Back; when an overlay/filter is up, Esc closes
+		// that instead of unwinding the stack. Other Back keys (←/h/
+		// backspace) always navigate back so muscle memory for "go up a
+		// level" is preserved.
+		if msg.Type == tea.KeyEsc && m.showInfo {
+			m.showInfo = false
+			break
+		}
 		if msg.Type == tea.KeyEsc && s.filter != "" {
 			s.filter = ""
 			s.cursor = 0

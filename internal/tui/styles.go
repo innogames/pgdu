@@ -41,12 +41,11 @@ var (
 	styleIndexSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("114")) // soft green
 	styleToastSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("231")) // white
 
-	// bufferSlicePalette is the cycle of distinct foreground colours used to
+	// bufferSlicePalette is the set of distinct foreground colours used to
 	// paint per-table slices in the shared_buffers occupancy bar and the
-	// matching row bars in the list below. Sized at 16 so every row gets a
-	// colour without too much repetition; the first eight entries are
-	// reserved for the largest tables so the brightest, most distinct hues
-	// land on the slices that dominate the bar.
+	// matching row bars in the list. Capped at 10 — tables ranked beyond
+	// that fall back to the default bar colour rather than cycling palette
+	// hues, which would otherwise re-use a colour for an unrelated table.
 	bufferSlicePalette = []lipgloss.Style{
 		lipgloss.NewStyle().Foreground(lipgloss.Color("33")),  // blue
 		lipgloss.NewStyle().Foreground(lipgloss.Color("165")), // magenta
@@ -54,16 +53,10 @@ var (
 		lipgloss.NewStyle().Foreground(lipgloss.Color("99")),  // violet
 		lipgloss.NewStyle().Foreground(lipgloss.Color("142")), // olive
 		lipgloss.NewStyle().Foreground(lipgloss.Color("169")), // pink
-		lipgloss.NewStyle().Foreground(lipgloss.Color("24")),  // navy
-		lipgloss.NewStyle().Foreground(lipgloss.Color("136")), // gold
-		lipgloss.NewStyle().Foreground(lipgloss.Color("75")),  // light blue
-		lipgloss.NewStyle().Foreground(lipgloss.Color("162")), // deep pink
 		lipgloss.NewStyle().Foreground(lipgloss.Color("184")), // chartreuse
 		lipgloss.NewStyle().Foreground(lipgloss.Color("105")), // lavender
-		lipgloss.NewStyle().Foreground(lipgloss.Color("215")), // peach
-		lipgloss.NewStyle().Foreground(lipgloss.Color("129")), // purple
 		lipgloss.NewStyle().Foreground(lipgloss.Color("49")),  // spring green
-		lipgloss.NewStyle().Foreground(lipgloss.Color("178")), // dark gold
+		lipgloss.NewStyle().Foreground(lipgloss.Color("215")), // peach
 	}
 )
 
