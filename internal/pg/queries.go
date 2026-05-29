@@ -27,19 +27,44 @@ GROUP  BY n.nspname
 ORDER  BY size_bytes DESC
 `
 
+// toast_bytes uses pg_total_relation_size on the TOAST relation so it
+// covers the toast main fork *and* its index and FSM/VM — what users mean
+// by "how much does TOAST cost on disk". pg_relation_size alone reports
+// only the toast main fork, which under-counts (and reads as 0 whenever
+// the toast file was never written, even when the toast index has pages).
 const sqlTables = `
 SELECT c.oid,
        c.relname,
-       pg_relation_size(c.oid)                           AS heap_bytes,
-       pg_indexes_size(c.oid)                            AS indexes_bytes,
-       COALESCE(pg_relation_size(c.reltoastrelid), 0)    AS toast_bytes,
-       pg_total_relation_size(c.oid)                     AS total_bytes,
-       c.reltuples::bigint                               AS est_rows
+       pg_relation_size(c.oid)                                AS heap_bytes,
+       pg_indexes_size(c.oid)                                 AS indexes_bytes,
+       COALESCE(pg_total_relation_size(c.reltoastrelid), 0)   AS toast_bytes,
+       pg_total_relation_size(c.oid)                          AS total_bytes,
+       c.reltuples::bigint                                    AS est_rows,
+       COALESCE(c.reltoastrelid, 0)::oid                      AS toast_oid,
+       COALESCE((SELECT 'pg_toast.' || tc.relname
+                 FROM pg_class tc
+                 WHERE tc.oid = c.reltoastrelid), '')         AS toast_name
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 WHERE  n.nspname = $1
   AND  c.relkind IN ('r','m','p')
 ORDER  BY total_bytes DESC
+`
+
+// Per-table autovacuum/analyze counters. Joined onto the heap row of the
+// parts view so users can see "is this table being kept clean?" alongside its
+// size and bloat. pg_stat_all_tables also covers tables outside the default
+// search_path; matviews are absent and the LEFT JOIN at the call site yields
+// nil HeapStats for them.
+const sqlHeapStats = `
+SELECT COALESCE(n_live_tup, 0)::bigint,
+       COALESCE(n_dead_tup, 0)::bigint,
+       last_vacuum,
+       last_autovacuum,
+       last_analyze,
+       last_autoanalyze
+FROM   pg_stat_all_tables
+WHERE  relid = $1
 `
 
 const sqlIndexes = `
@@ -148,11 +173,14 @@ SELECT (pg_relation_size($1::regclass) * 0.10)::bigint AS wasted_bytes
 
 // --- shared-buffers view ---
 
-const sqlBufferCacheProbe = `
-SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_buffercache') AS installed
+// sqlExtensionProbe returns two booleans: whether the named extension is
+// installed in the current database, and whether it is available on the
+// server (i.e. CREATE EXTENSION would resolve it). The second column lets
+// the TUI offer an interactive install when the extension is reachable.
+const sqlExtensionProbe = `
+SELECT EXISTS(SELECT 1 FROM pg_extension          WHERE extname = $1) AS installed,
+       EXISTS(SELECT 1 FROM pg_available_extensions WHERE name = $1)  AS available
 `
-
-const sqlBufferCacheCreate = `CREATE EXTENSION IF NOT EXISTS pg_buffercache`
 
 // sqlBufferCacheSummary reports cluster-wide shared_buffers occupancy split
 // into three buckets: pages owned by the database the user is browsing, pages

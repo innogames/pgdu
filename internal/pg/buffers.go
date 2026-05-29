@@ -5,14 +5,60 @@ import (
 	"fmt"
 )
 
-// EnsureBufferCache makes sure pg_buffercache is installed in db. Result is
-// cached on the Client so repeated entries into the view don't re-probe.
-//
-// pg_buffercache is a built-in contrib extension but it's not enabled by
-// default; CREATE EXTENSION requires database-owner or superuser, and
-// querying its view requires SELECT (granted to pg_monitor by default in
-// modern Postgres). We surface those failures verbatim so the user can see
-// what privilege is missing.
+// ExtensionStatus reports whether ext is installed in db, and (if not)
+// whether it's available on the server so CREATE EXTENSION would succeed
+// given sufficient privileges.
+type ExtensionStatus struct {
+	Installed bool
+	Available bool
+}
+
+// ProbeExtension queries pg_extension / pg_available_extensions for one
+// optional extension.
+func (c *Client) ProbeExtension(ctx context.Context, db, ext string) (ExtensionStatus, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return ExtensionStatus{}, err
+	}
+	var s ExtensionStatus
+	if err := pool.QueryRow(ctx, sqlExtensionProbe, ext).Scan(&s.Installed, &s.Available); err != nil {
+		return ExtensionStatus{}, fmt.Errorf("probe extension %s: %w", ext, err)
+	}
+	return s, nil
+}
+
+// CreateExtension runs `CREATE EXTENSION IF NOT EXISTS <ext>` in db. The
+// extension name is identifier-quoted but not free-form — callers must pass
+// a known constant (e.g. "pg_buffercache", "pgstattuple"), never user input.
+func (c *Client) CreateExtension(ctx context.Context, db, ext string) error {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return err
+	}
+	// CREATE EXTENSION doesn't accept parameters; we trust the caller to pass
+	// a constant identifier. quoteIdent guards against any accidental injection.
+	stmt := "CREATE EXTENSION IF NOT EXISTS " + quoteIdent(ext)
+	if _, err := pool.Exec(ctx, stmt); err != nil {
+		return fmt.Errorf("create extension %s: %w", ext, err)
+	}
+	c.mu.Lock()
+	if ext == "pg_buffercache" {
+		c.bufCacheReady[db] = true
+	}
+	if ext == "pgstattuple" {
+		// Force ProbeBloat to re-evaluate on next call.
+		delete(c.bloatProbed, db)
+	}
+	c.mu.Unlock()
+	return nil
+}
+
+// EnsureBufferCache makes sure pg_buffercache is installed in db. When the
+// extension is missing we return a *MissingExtensionError so the TUI can
+// offer the user an interactive install instead of guessing — previous
+// versions of this code auto-ran CREATE EXTENSION, which silently masked
+// permission problems and surprised people who didn't realise pgdu was
+// taking that liberty.
 func (c *Client) EnsureBufferCache(ctx context.Context, db string) error {
 	c.mu.Lock()
 	if c.bufCacheReady[db] {
@@ -21,18 +67,12 @@ func (c *Client) EnsureBufferCache(ctx context.Context, db string) error {
 	}
 	c.mu.Unlock()
 
-	pool, err := c.PoolFor(ctx, db)
+	st, err := c.ProbeExtension(ctx, db, "pg_buffercache")
 	if err != nil {
 		return err
 	}
-	var installed bool
-	if err := pool.QueryRow(ctx, sqlBufferCacheProbe).Scan(&installed); err != nil {
-		return fmt.Errorf("probe pg_buffercache: %w", err)
-	}
-	if !installed {
-		if _, err := pool.Exec(ctx, sqlBufferCacheCreate); err != nil {
-			return fmt.Errorf("pg_buffercache not installed and CREATE EXTENSION failed (needs superuser or db owner): %w", err)
-		}
+	if !st.Installed {
+		return &MissingExtensionError{Extension: "pg_buffercache", DB: db, Installable: st.Available}
 	}
 	c.mu.Lock()
 	c.bufCacheReady[db] = true
@@ -53,18 +93,21 @@ func (c *Client) TableBufferStats(ctx context.Context, db, schema string) ([]Tab
 	}
 	rows, err := pool.Query(ctx, sqlBufferStats, schema)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("table buffer stats in %q.%q: %w", db, schema, err)
 	}
 	defer rows.Close()
 	var out []TableBufferStat
 	for rows.Next() {
 		s := TableBufferStat{DB: db, Schema: schema}
 		if err := rows.Scan(&s.OID, &s.Schema, &s.Name, &s.BufferedBytes, &s.TotalBytes, &s.Hits, &s.Reads); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("table buffer stats in %q.%q: %w", db, schema, err)
 		}
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("table buffer stats in %q.%q: %w", db, schema, err)
+	}
+	return out, nil
 }
 
 // BufferCacheSummary returns the cluster-wide shared_buffers occupancy split

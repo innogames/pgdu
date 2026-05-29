@@ -29,17 +29,23 @@ type row struct {
 	// drawn as three coloured segments instead of one solid block. Used by the
 	// tables level so the composition of each table is visible at a glance.
 	heap, idx, toast int64
+
+	// rows is the estimated row count; only rendered when hasRows is true.
+	rows    int64
+	hasRows bool
 }
 
 // barWidthMin is the fallback bar width when the terminal is too narrow for
-// the dynamic calculation to give us anything sensible.
-const barWidthMin = 20
+// the dynamic calculation to give us anything sensible. barWidthMax caps the
+// bar on very wide terminals so the bar doesn't turn into ASCII art at the
+// expense of the numeric columns.
+const (
+	barWidthMin = 20
+	barWidthMax = 80
+)
 
 func renderRow(r row) string {
-	w := r.barW
-	if w < barWidthMin {
-		w = barWidthMin
-	}
+	w := max(r.barW, barWidthMin)
 	var bar string
 	if r.heap > 0 || r.idx > 0 || r.toast > 0 {
 		bar = renderSegmentedBar(r.heap, r.idx, r.toast, r.maxSize, w)
@@ -67,11 +73,53 @@ func renderRow(r row) string {
 		}
 		bloatStr = styleMuted.Render(padRight(fmt.Sprintf("(%d%% bloat)", pct), 12)) + "  "
 	}
+	rowsStr := ""
+	if r.hasRows {
+		rowsStr = styleMuted.Render(padRight("~"+formatRows(r.rows), rowsColW)) + "  "
+	}
 	childMark := "  "
 	if r.hasChildren {
 		childMark = styleMuted.Render("+ ")
 	}
-	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + bloatStr + childMark + name + detail
+	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + rowsStr + bloatStr + childMark + name + detail
+}
+
+// rowsColW is the padded width of the ~rows column on the tables level.
+// formatRows produces at most "999.9M"/"999.9G" (6 chars) + the "~" prefix,
+// so 7 fits every realistic value with one space of slack.
+const rowsColW = 7
+
+// barSegment is one coloured run inside a bar. cells must be >= 0; paintBar
+// will clip if the segments together exceed the bar width.
+type barSegment struct {
+	cells int
+	style lipgloss.Style
+}
+
+// paintBar emits "[<segments…><muted padding>]" totalling exactly width cells
+// (excluding the brackets). Segments are rendered in order; any width left
+// over after them is filled with muted dots so the layout stays stable for
+// rows whose data doesn't reach the bar's max.
+func paintBar(width int, segs ...barSegment) string {
+	var b strings.Builder
+	b.WriteString("[")
+	used := 0
+	for _, s := range segs {
+		c := s.cells
+		if c < 0 {
+			c = 0
+		}
+		if used+c > width {
+			c = width - used
+		}
+		b.WriteString(s.style.Render(strings.Repeat("▇", c)))
+		used += c
+	}
+	if used < width {
+		b.WriteString(styleMuted.Render(strings.Repeat("░", width-used)))
+	}
+	b.WriteString("]")
+	return b.String()
 }
 
 // renderBar paints a fixed-width bar where the live portion is colorBar and
@@ -81,25 +129,16 @@ func renderBar(size, bloat, max int64, width int) string {
 	if max <= 0 {
 		max = 1
 	}
-	filled := int(float64(width) * float64(size) / float64(max))
-	if filled > width {
-		filled = width
-	}
+	filled := min(int(float64(width)*float64(size)/float64(max)), width)
 	var bloatChars int
 	if bloat > 0 && size > 0 {
-		bloatChars = int(float64(filled) * float64(bloat) / float64(size))
-		if bloatChars > filled {
-			bloatChars = filled
-		}
+		bloatChars = min(int(float64(filled)*float64(bloat)/float64(size)), filled)
 	}
 	live := filled - bloatChars
-	var b strings.Builder
-	b.WriteString("[")
-	b.WriteString(styleBar.Render(strings.Repeat("▇", live)))
-	b.WriteString(styleBloat.Render(strings.Repeat("▇", bloatChars)))
-	b.WriteString(styleMuted.Render(strings.Repeat("░", width-filled)))
-	b.WriteString("]")
-	return b.String()
+	return paintBar(width,
+		barSegment{cells: live, style: styleBar},
+		barSegment{cells: bloatChars, style: styleBloat},
+	)
 }
 
 // renderSegmentedBar paints a single bar split into three coloured segments
@@ -111,36 +150,19 @@ func renderSegmentedBar(heap, idx, toast, max int64, width int) string {
 	if max <= 0 {
 		max = 1
 	}
-	h := int(float64(width) * float64(heap) / float64(max))
-	i := int(float64(width) * float64(idx) / float64(max))
-	t := int(float64(width) * float64(toast) / float64(max))
-	if h < 0 {
-		h = 0
-	}
-	if i < 0 {
-		i = 0
-	}
-	if t < 0 {
-		t = 0
-	}
+	h := max0(int(float64(width) * float64(heap) / float64(max)))
+	i := max0(int(float64(width) * float64(idx) / float64(max)))
+	t := max0(int(float64(width) * float64(toast) / float64(max)))
 	if h+i+t > width {
 		// Rounding can in principle push us over by 1–2 cells; trim toast last
 		// since it's typically the largest segment and absorbs the loss best.
-		over := h + i + t - width
-		t -= over
-		if t < 0 {
-			t = 0
-		}
+		t = max0(width - h - i)
 	}
-	used := h + i + t
-	var b strings.Builder
-	b.WriteString("[")
-	b.WriteString(styleHeapSeg.Render(strings.Repeat("▇", h)))
-	b.WriteString(styleIndexSeg.Render(strings.Repeat("▇", i)))
-	b.WriteString(styleToastSeg.Render(strings.Repeat("▇", t)))
-	b.WriteString(styleMuted.Render(strings.Repeat("░", width-used)))
-	b.WriteString("]")
-	return b.String()
+	return paintBar(width,
+		barSegment{cells: h, style: styleHeapSeg},
+		barSegment{cells: i, style: styleIndexSeg},
+		barSegment{cells: t, style: styleToastSeg},
+	)
 }
 
 // renderBufferBar paints a three-segment occupancy bar: this-db (colorBar),
@@ -151,29 +173,25 @@ func renderBufferBar(thisDB, otherDB, total int64, width int) string {
 	if total <= 0 {
 		total = 1
 	}
-	thisChars := int(float64(width) * float64(thisDB) / float64(total))
-	otherChars := int(float64(width) * float64(otherDB) / float64(total))
-	if thisChars < 0 {
-		thisChars = 0
-	}
-	if otherChars < 0 {
-		otherChars = 0
+	thisChars := max0(int(float64(width) * float64(thisDB) / float64(total)))
+	otherChars := max0(int(float64(width) * float64(otherDB) / float64(total)))
+	if thisChars > width {
+		thisChars = width
 	}
 	if thisChars+otherChars > width {
 		otherChars = width - thisChars
-		if otherChars < 0 {
-			otherChars = 0
-			thisChars = width
-		}
 	}
-	freeChars := width - thisChars - otherChars
-	var b strings.Builder
-	b.WriteString("[")
-	b.WriteString(styleBar.Render(strings.Repeat("▇", thisChars)))
-	b.WriteString(styleBarAlt.Render(strings.Repeat("▇", otherChars)))
-	b.WriteString(styleMuted.Render(strings.Repeat("░", freeChars)))
-	b.WriteString("]")
-	return b.String()
+	return paintBar(width,
+		barSegment{cells: thisChars, style: styleBar},
+		barSegment{cells: otherChars, style: styleBarAlt},
+	)
+}
+
+func max0(n int) int {
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 func padRight(s string, n int) string {
@@ -197,38 +215,28 @@ const (
 // The bar visualises BufferedBytes scaled to the largest sibling so the eye
 // still gets a quick "which table dominates the cache" read.
 func (m *Model) renderBufferList(s *screen, height int) string {
-	var max int64
-	for _, it := range s.items {
-		if it.size > max {
-			max = it.size
-		}
-	}
+	vis := s.visibleIndexes()
+	max := maxItemSize(s.items, vis)
 
 	// Header consumes one line; clamp the row budget to what's left.
 	rowsH := height - 1
 	if rowsH < 0 {
 		rowsH = 0
 	}
-	if s.cursor < s.offset {
-		s.offset = s.cursor
+	if rowsH > 0 {
+		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
 	}
-	if rowsH > 0 && s.cursor >= s.offset+rowsH {
-		s.offset = s.cursor - rowsH + 1
-	}
-	end := s.offset + rowsH
-	if end > len(s.items) {
-		end = len(s.items)
-	}
+	end := min(s.offset+rowsH, len(vis))
 
 	barW := m.barWidth(s)
 
 	var b strings.Builder
-	b.WriteString(renderBufferHeader(s.sort, barW))
+	b.WriteString(renderBufferHeader(s.sort, s.sortDesc, barW))
 	b.WriteString("\n")
-	for i := s.offset; i < end; i++ {
-		it := s.items[i]
+	for vi := s.offset; vi < end; vi++ {
+		it := s.items[vis[vi]]
 		st, _ := it.data.(pg.TableBufferStat)
-		b.WriteString(renderBufferRow(it, st, max, barW, i == s.cursor))
+		b.WriteString(renderBufferRow(it, st, max, barW, vi == s.cursor))
 		b.WriteString("\n")
 	}
 	for i := end - s.offset; i < rowsH; i++ {
@@ -237,16 +245,20 @@ func (m *Model) renderBufferList(s *screen, height int) string {
 	return b.String()
 }
 
-func renderBufferHeader(sort sortMode, barW int) string {
-	mark := func(label string, active bool, arrow string) string {
+func renderBufferHeader(sort sortMode, sortDesc bool, barW int) string {
+	arrow := "↑"
+	if sortDesc {
+		arrow = "↓"
+	}
+	mark := func(label string, active bool) string {
 		if active {
 			return label + arrow
 		}
 		return label
 	}
-	bufLabel := mark("buffered", sort == sortBySize, "↓")
-	hitLabel := mark("hit", sort == sortByHitRatio, "↑")
-	nameLabel := mark("table", sort == sortByName, "↑")
+	bufLabel := mark("buffered", sort == sortBySize)
+	hitLabel := mark("hit", sort == sortByHitRatio)
+	nameLabel := mark("table", sort == sortByName)
 	// Pad: cursor (2) + bar slot (barW+2) + "  " then columns.
 	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
 		padRight(bufLabel, bufColBuffered) + "  " +
@@ -271,11 +283,13 @@ func renderBufferRow(it item, st pg.TableBufferStat, maxSize int64, barW int, se
 	totStr := humanize.Bytes(st.TotalBytes)
 	cachedStr := "—"
 	if st.TotalBytes > 0 {
-		cachedStr = fmt.Sprintf("%.1f%%", float64(st.BufferedBytes)/float64(st.TotalBytes)*100)
+		pct := float64(st.BufferedBytes) / float64(st.TotalBytes) * 100
+		cachedStr = percentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct))
 	}
 	hitStr := "—"
 	if hr := st.HitRatio(); hr >= 0 {
-		hitStr = fmt.Sprintf("%.1f%%", hr*100)
+		pct := hr * 100
+		hitStr = percentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct))
 	}
 	return cursor + bar + "  " +
 		padRight(bufStr, bufColBuffered) + "  " +

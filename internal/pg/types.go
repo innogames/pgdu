@@ -1,5 +1,29 @@
 package pg
 
+import (
+	"fmt"
+	"time"
+)
+
+// MissingExtensionError signals that an optional Postgres extension pgdu
+// would like to use isn't installed in the target database. The TUI uses
+// the typed error to offer an interactive `CREATE EXTENSION` instead of
+// either silently degrading or failing with an opaque message.
+type MissingExtensionError struct {
+	Extension string
+	DB        string
+	// Installable is true when the extension shows up in pg_available_extensions
+	// (i.e. CREATE EXTENSION would succeed given sufficient privileges).
+	Installable bool
+}
+
+func (e *MissingExtensionError) Error() string {
+	if e.Installable {
+		return fmt.Sprintf("extension %q is not installed in %q (can be installed)", e.Extension, e.DB)
+	}
+	return fmt.Sprintf("extension %q is not installed in %q and not available on the server", e.Extension, e.DB)
+}
+
 // Database row from sqlDatabases.
 type Database struct {
 	Name      string
@@ -25,6 +49,13 @@ type Table struct {
 	ToastBytes   int64
 	TotalBytes   int64
 	EstRows      int64
+
+	// ToastOID is c.reltoastrelid — non-zero whenever the table has a TOAST
+	// relation, even when ToastBytes is 0 (toast exists but currently holds
+	// no out-of-line values). ToastName is the qualified relation name
+	// ("pg_toast.pg_toast_<oid>") so it can be surfaced as metadata.
+	ToastOID  uint32
+	ToastName string
 }
 
 func (t Table) Qualified() string { return t.Schema + "." + t.Name }
@@ -61,6 +92,58 @@ type Part struct {
 	IsPrimary    bool
 	IsUnique     bool
 	AccessMethod string // for indexes
+
+	// HeapStats is populated only for PartHeap (from pg_stat_all_tables).
+	// Nil for other kinds, or for the heap when stats are unavailable.
+	HeapStats *HeapStats
+
+	// ToastName is the underlying TOAST relation name (e.g.
+	// "pg_toast.pg_toast_16438"). Populated only for PartToast — shown as
+	// metadata so users can correlate to pg_class entries.
+	ToastName string
+}
+
+// HeapStats summarises the autovacuum-relevant counters for one table's heap.
+// All fields come from pg_stat_all_tables; *time.Time fields are nil when the
+// table has never been (auto)vacuumed/(auto)analyzed.
+type HeapStats struct {
+	NLive           int64
+	NDead           int64
+	LastVacuum      *time.Time
+	LastAutovacuum  *time.Time
+	LastAnalyze     *time.Time
+	LastAutoanalyze *time.Time
+}
+
+// LastVacuumed returns the more recent of LastVacuum / LastAutovacuum, or nil.
+func (h *HeapStats) LastVacuumed() *time.Time {
+	return latest(h.LastVacuum, h.LastAutovacuum)
+}
+
+// LastAnalyzed returns the more recent of LastAnalyze / LastAutoanalyze, or nil.
+func (h *HeapStats) LastAnalyzed() *time.Time {
+	return latest(h.LastAnalyze, h.LastAutoanalyze)
+}
+
+// DeadFrac returns NDead / (NLive + NDead) in [0,1], or -1 when no rows.
+func (h *HeapStats) DeadFrac() float64 {
+	total := h.NLive + h.NDead
+	if total <= 0 {
+		return -1
+	}
+	return float64(h.NDead) / float64(total)
+}
+
+func latest(a, b *time.Time) *time.Time {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	case a.After(*b):
+		return a
+	}
+	return b
 }
 
 // Column is one row of the per-column space view: an estimate of how much

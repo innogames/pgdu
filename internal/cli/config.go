@@ -51,7 +51,7 @@ func Parse(args []string) (Config, error) {
 		fmt.Fprintf(os.Stderr, "Usage: pgdu [flags]\n\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nWith no -h, pgdu connects via the local Unix socket (same as psql).\n")
-		fmt.Fprintf(os.Stderr, "Password: takes PGPASSWORD env var or ~/.pgpass automatically.\n")
+		fmt.Fprintf(os.Stderr, "Password: pgdu reads PGPASSWORD; ~/.pgpass is consulted by libpq at connect time.\n")
 	}
 
 	if err := fs.Parse(args); err != nil {
@@ -113,6 +113,24 @@ func kvQuote(v string) string {
 	escaped := strings.ReplaceAll(v, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `'`, `\'`)
 	return "'" + escaped + "'"
+}
+
+// Redacted returns a Config with any password material blanked out. Use this
+// when logging or otherwise surfacing the config so credentials don't leak
+// into stderr or telemetry.
+func (c Config) Redacted() Config {
+	if c.Password != "" {
+		c.Password = "<redacted>"
+	}
+	if c.DSN != "" {
+		if u, err := url.Parse(c.DSN); err == nil && u.User != nil {
+			if _, hasPW := u.User.Password(); hasPW {
+				u.User = url.UserPassword(u.User.Username(), "redacted")
+				c.DSN = u.String()
+			}
+		}
+	}
+	return c
 }
 
 // Target returns a human-friendly connection target for the header bar.

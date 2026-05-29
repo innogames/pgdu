@@ -1,13 +1,11 @@
 package tui
 
 import (
-	"context"
 	"fmt"
-	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -52,7 +50,79 @@ const (
 	sortBySize sortMode = iota
 	sortByName
 	sortByHitRatio
+	sortByRows
 )
+
+// defaultDesc is the natural direction for each sort column: bigger-first for
+// numeric "more is more" columns, alphabetical for name, ascending for hit
+// ratio so the worst-cached tables bubble to the top.
+func (sm sortMode) defaultDesc() bool {
+	switch sm {
+	case sortBySize, sortByRows:
+		return true
+	case sortByName, sortByHitRatio:
+		return false
+	}
+	return false
+}
+
+// name is the short column label used in the status row and column headers.
+func (sm sortMode) name() string {
+	switch sm {
+	case sortBySize:
+		return "size"
+	case sortByRows:
+		return "~rows"
+	case sortByHitRatio:
+		return "hit"
+	default:
+		return "name"
+	}
+}
+
+// label is name plus an arrow indicating the current sort direction.
+func (sm sortMode) label(desc bool) string {
+	arrow := "↑"
+	if desc {
+		arrow = "↓"
+	}
+	return sm.name() + arrow
+}
+
+// less returns true when item a should come before item b *ignoring* the
+// direction flag — applySort applies direction by flipping the result.
+// Items missing the comparator's payload (no rows estimate, no hit ratio)
+// sort below items that have one, so "unknown" stays a distinct bucket from
+// "small".
+func (sm sortMode) less(a, b item) bool {
+	switch sm {
+	case sortBySize:
+		return a.size < b.size
+	case sortByRows:
+		ai, oka := itemRows(a)
+		bi, okb := itemRows(b)
+		if oka != okb {
+			return okb
+		}
+		if !oka {
+			return false
+		}
+		return ai < bi
+	case sortByHitRatio:
+		ai, oka := itemHitRatio(a)
+		bi, okb := itemHitRatio(b)
+		if oka != okb {
+			return okb
+		}
+		if !oka {
+			return false
+		}
+		return ai < bi
+	case sortByName:
+		return false
+	}
+	return false
+}
 
 // item is the row data the renderer consumes; concrete payload is in `data`.
 type item struct {
@@ -67,33 +137,93 @@ type item struct {
 	// Optional heap/index/toast breakdown for the tables level. When any are
 	// non-zero, the bar is rendered as three coloured segments.
 	heap, idx, toast int64
+
+	// rows is the estimated row count; only meaningful when hasRows is true
+	// (the tables level). Rendered as its own column on those rows.
+	rows    int64
+	hasRows bool
 }
 
 type screen struct {
-	level   level
-	title   string
-	items   []item
-	cursor  int
-	offset  int
-	sort    sortMode
-	loaded  bool
-	loading bool
-	err     error
+	level    level
+	title    string
+	items    []item
+	cursor   int
+	offset   int
+	sort     sortMode
+	sortDesc bool
+	loaded   bool
+	loading  bool
+	err      error
 
 	// Which top-level tool this screen belongs to. Inherited from the
 	// parent screen when drilling in.
 	tool tool
 
-	// Context for loading & subsequent drills.
-	db        string
-	schema    string
-	tableName string
-	tableOID  uint32
-	table     pg.Table
+	// Context for loading & subsequent drills. db/schema are populated from
+	// levelSchemas onward; table (and via it Name/OID) only at levelParts and
+	// levelColumns.
+	db     string
+	schema string
+	table  pg.Table
 
 	// Populated on the levelBufferTables screen alongside the row data.
 	bufferSummary    *pg.BufferCacheSummary
 	bufferSummaryErr error
+
+	// bloatScanning is true while a FillBloat command for this parts screen
+	// is in flight. The bloat fetch is one-shot (all parts in one call), so
+	// the progress display is "scanning…" / "ready" rather than incremental.
+	bloatScanning bool
+
+	// extPrompt, when set, asks the user whether to install a Postgres
+	// extension. Blocking prompts hide the list (the screen is unusable
+	// without the extension); non-blocking prompts render as a soft hint
+	// above the list (the screen works without it but would do more if
+	// the extension were present).
+	extPrompt *extPrompt
+	// installing is true while a CREATE EXTENSION request is in flight.
+	installing bool
+
+	// filter is the active fuzzy-match query against item names. Empty
+	// means "no filter — show everything". filterFocused routes keypresses
+	// into the filter input (typing edits the query) instead of the list
+	// (typing triggers shortcuts).
+	filter        string
+	filterFocused bool
+
+	// pendingReindex holds the index name the user pressed ENTER on (parts
+	// level, index row with bloat > 5%). Pressing `y` confirms and runs
+	// REINDEX INDEX CONCURRENTLY; any other key clears it.
+	pendingReindex string
+	// reindexing is the index currently being rebuilt (empty when idle).
+	reindexing string
+	// reindexErr is the last REINDEX failure, shown until the next attempt.
+	reindexErr error
+}
+
+// reindexBloatThreshold is the bloat % above which the parts view offers an
+// inline REINDEX CONCURRENTLY action on an index row.
+const reindexBloatThreshold = 0.05
+
+// Extension names referenced by the TUI. Kept here so prompt text and the
+// command that runs CREATE EXTENSION stay in sync if either is renamed.
+const (
+	extBufferCache = "pg_buffercache"
+	extPgStatTuple = "pgstattuple"
+
+	extPromptReasonBufferCache = "shared_buffers view requires the pg_buffercache extension"
+	extPromptReasonPgStatTuple = "exact bloat measurements are available with pgstattuple"
+)
+
+// extPrompt is the per-screen "install this extension?" affordance.
+type extPrompt struct {
+	name        string // "pg_buffercache", "pgstattuple"
+	db          string
+	installable bool
+	reason      string // human-readable explanation of why pgdu wants it
+	blocking    bool   // when true, the screen content is replaced by the prompt
+	err         error  // populated when a previous install attempt failed
 }
 
 type Model struct {
@@ -123,9 +253,10 @@ func NewModel(client *pg.Client) *Model {
 		target:     client.Target(),
 	}
 	m.stack = []*screen{{
-		level: levelTools,
-		title: "tools",
-		sort:  sortByName,
+		level:    levelTools,
+		title:    "tools",
+		sort:     sortByName,
+		sortDesc: sortByName.defaultDesc(),
 	}}
 	return m
 }
@@ -142,624 +273,7 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(m.spinner.Tick, m.loadCurrent())
 }
 
-// --- messages ---
-
-type databasesLoadedMsg struct {
-	dbs []pg.Database
-	err error
-}
-type schemasLoadedMsg struct {
-	db      string
-	schemas []pg.Schema
-	err     error
-}
-type tablesLoadedMsg struct {
-	db, schema string
-	tables     []pg.Table
-	err        error
-}
-type partsLoadedMsg struct {
-	table pg.Table
-	parts []pg.Part
-	err   error
-}
-type bloatFilledMsg struct {
-	table pg.Table
-	parts []pg.Part
-	err   error
-}
-type bufferStatsLoadedMsg struct {
-	db, schema string
-	stats      []pg.TableBufferStat
-	err        error
-}
-type bufferSummaryLoadedMsg struct {
-	db      string
-	summary pg.BufferCacheSummary
-	err     error
-}
-type columnsLoadedMsg struct {
-	tableOID uint32
-	columns  []pg.Column
-	err      error
-}
-
-// --- commands ---
-
-func (m *Model) loadCurrent() tea.Cmd {
-	s := m.top()
-	switch s.level {
-	case levelTools:
-		s.items = toolItems()
-		s.loading = false
-		s.loaded = true
-		return nil
-	}
-	s.loading = true
-	s.loaded = false
-	switch s.level {
-	case levelDatabases:
-		return m.loadDatabasesCmd()
-	case levelSchemas:
-		return m.loadSchemasCmd(s.db)
-	case levelTables:
-		return m.loadTablesCmd(s.db, s.schema)
-	case levelBufferTables:
-		s.bufferSummary = nil
-		s.bufferSummaryErr = nil
-		return tea.Batch(
-			m.loadBufferStatsCmd(s.db, s.schema),
-			m.loadBufferSummaryCmd(s.db),
-		)
-	case levelParts:
-		return m.loadPartsCmd(s.table)
-	case levelColumns:
-		return m.loadColumnsCmd(s.table)
-	}
-	return nil
-}
-
-func (m *Model) loadDatabasesCmd() tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		dbs, err := m.client.ListDatabases(ctx)
-		return databasesLoadedMsg{dbs: dbs, err: err}
-	}
-}
-
-func (m *Model) loadSchemasCmd(db string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		ss, err := m.client.ListSchemas(ctx, db)
-		return schemasLoadedMsg{db: db, schemas: ss, err: err}
-	}
-}
-
-func (m *Model) loadTablesCmd(db, schema string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		ts, err := m.client.ListTables(ctx, db, schema)
-		return tablesLoadedMsg{db: db, schema: schema, tables: ts, err: err}
-	}
-}
-
-func (m *Model) loadPartsCmd(t pg.Table) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		parts, err := m.client.TableParts(ctx, t)
-		return partsLoadedMsg{table: t, parts: parts, err: err}
-	}
-}
-
-func (m *Model) fillBloatCmd(t pg.Table, parts []pg.Part) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		err := m.client.FillBloat(ctx, t, parts)
-		return bloatFilledMsg{table: t, parts: parts, err: err}
-	}
-}
-
-func (m *Model) loadColumnsCmd(t pg.Table) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		cols, err := m.client.ListColumns(ctx, t)
-		return columnsLoadedMsg{tableOID: t.OID, columns: cols, err: err}
-	}
-}
-
-func (m *Model) loadBufferStatsCmd(db, schema string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		stats, err := m.client.TableBufferStats(ctx, db, schema)
-		return bufferStatsLoadedMsg{db: db, schema: schema, stats: stats, err: err}
-	}
-}
-
-func (m *Model) loadBufferSummaryCmd(db string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		sum, err := m.client.BufferCacheSummary(ctx, db)
-		return bufferSummaryLoadedMsg{db: db, summary: sum, err: err}
-	}
-}
-
-// --- Update ---
-
-func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
-		m.help.Width = msg.Width
-
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
-
-	case databasesLoadedMsg:
-		s := m.findLevel(levelDatabases)
-		if s == nil {
-			return m, nil
-		}
-		s.loading = false
-		s.loaded = true
-		s.err = msg.err
-		s.items = s.items[:0]
-		for _, d := range msg.dbs {
-			s.items = append(s.items, item{name: d.Name, size: d.SizeBytes, hasChildren: true, data: d})
-		}
-		m.applySort(s)
-
-	case schemasLoadedMsg:
-		s := m.findLevel(levelSchemas)
-		if s == nil || s.db != msg.db {
-			return m, nil
-		}
-		s.loading = false
-		s.loaded = true
-		s.err = msg.err
-		s.items = s.items[:0]
-		for _, sc := range msg.schemas {
-			detail := fmt.Sprintf("%d tables", sc.TableCount)
-			s.items = append(s.items, item{name: sc.Name, size: sc.SizeBytes, hasChildren: true, detail: detail, data: sc})
-		}
-		m.applySort(s)
-
-	case tablesLoadedMsg:
-		s := m.findLevel(levelTables)
-		if s == nil || s.db != msg.db || s.schema != msg.schema {
-			return m, nil
-		}
-		s.loading = false
-		s.loaded = true
-		s.err = msg.err
-		s.items = s.items[:0]
-		for _, t := range msg.tables {
-			detail := fmt.Sprintf("heap %s · idx %s · toast %s · ~%s rows",
-				humanize.Bytes(t.HeapBytes), humanize.Bytes(t.IndexesBytes),
-				humanize.Bytes(t.ToastBytes), formatRows(t.EstRows))
-			s.items = append(s.items, item{
-				name: t.Name, size: t.TotalBytes, hasChildren: true,
-				detail: detail, data: t,
-				heap: t.HeapBytes, idx: t.IndexesBytes, toast: t.ToastBytes,
-			})
-		}
-		m.applySort(s)
-
-	case partsLoadedMsg:
-		s := m.findLevel(levelParts)
-		if s == nil || s.tableOID != msg.table.OID {
-			return m, nil
-		}
-		s.loading = false
-		s.loaded = true
-		s.err = msg.err
-		s.items = s.items[:0]
-		for _, p := range msg.parts {
-			s.items = append(s.items, partToItem(p))
-		}
-		m.applySort(s)
-		if m.fetchBloat && msg.err == nil {
-			return m, m.fillBloatCmd(msg.table, msg.parts)
-		}
-
-	case bufferStatsLoadedMsg:
-		s := m.findLevel(levelBufferTables)
-		if s == nil || s.db != msg.db || s.schema != msg.schema {
-			return m, nil
-		}
-		s.loading = false
-		s.loaded = true
-		s.err = msg.err
-		s.items = s.items[:0]
-		for _, st := range msg.stats {
-			s.items = append(s.items, bufferStatToItem(st))
-		}
-		m.applySort(s)
-
-	case bufferSummaryLoadedMsg:
-		s := m.findLevel(levelBufferTables)
-		if s == nil || s.db != msg.db {
-			return m, nil
-		}
-		if msg.err != nil {
-			s.bufferSummaryErr = msg.err
-			s.bufferSummary = nil
-		} else {
-			sum := msg.summary
-			s.bufferSummary = &sum
-			s.bufferSummaryErr = nil
-		}
-
-	case columnsLoadedMsg:
-		s := m.findLevel(levelColumns)
-		if s == nil || s.tableOID != msg.tableOID {
-			return m, nil
-		}
-		s.loading = false
-		s.loaded = true
-		s.err = msg.err
-		s.items = s.items[:0]
-		for _, col := range msg.columns {
-			s.items = append(s.items, columnToItem(col))
-		}
-		m.applySort(s)
-
-	case bloatFilledMsg:
-		s := m.findLevel(levelParts)
-		if s == nil || s.tableOID != msg.table.OID {
-			return m, nil
-		}
-		if msg.err != nil {
-			s.err = msg.err
-			return m, nil
-		}
-		// applySort reorders s.items after partsLoadedMsg, so indexing by the
-		// original msg.parts position is wrong. Match by name (heap/toast and
-		// each index name are unique within a table).
-		byName := make(map[string]pg.Part, len(msg.parts))
-		for _, p := range msg.parts {
-			byName[p.Name] = p
-		}
-		for i := range s.items {
-			if p, ok := byName[s.items[i].name]; ok {
-				s.items[i].bloat = p.WastedBytes
-				s.items[i].hasBloat = p.HasBloat
-			}
-		}
-		m.applySort(s)
-
-	case tea.KeyMsg:
-		return m.handleKey(msg)
-	}
-
-	return m, nil
-}
-
-func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	s := m.top()
-	switch {
-	case key.Matches(msg, m.keys.Quit):
-		return m, tea.Quit
-	case key.Matches(msg, m.keys.Help):
-		m.help.ShowAll = !m.help.ShowAll
-	case key.Matches(msg, m.keys.Down):
-		if s.cursor < len(s.items)-1 {
-			s.cursor++
-		}
-	case key.Matches(msg, m.keys.Up):
-		if s.cursor > 0 {
-			s.cursor--
-		}
-	case key.Matches(msg, m.keys.Top):
-		s.cursor = 0
-	case key.Matches(msg, m.keys.Bottom):
-		s.cursor = len(s.items) - 1
-		if s.cursor < 0 {
-			s.cursor = 0
-		}
-	case key.Matches(msg, m.keys.SortSize):
-		s.sort = sortBySize
-		m.applySort(s)
-	case key.Matches(msg, m.keys.SortName):
-		s.sort = sortByName
-		m.applySort(s)
-	case key.Matches(msg, m.keys.SortHitRatio):
-		if s.level == levelBufferTables {
-			s.sort = sortByHitRatio
-			m.applySort(s)
-		}
-	case key.Matches(msg, m.keys.Refresh):
-		return m, m.loadCurrent()
-	case key.Matches(msg, m.keys.ToggleBloat):
-		m.fetchBloat = !m.fetchBloat
-	case key.Matches(msg, m.keys.Back):
-		if len(m.stack) > 1 {
-			m.stack = m.stack[:len(m.stack)-1]
-		}
-	case key.Matches(msg, m.keys.Enter):
-		return m, m.drillIn()
-	}
-	return m, nil
-}
-
-func (m *Model) drillIn() tea.Cmd {
-	s := m.top()
-	if !s.loaded || len(s.items) == 0 {
-		return nil
-	}
-	cur := s.items[s.cursor]
-	switch s.level {
-	case levelTools:
-		t := cur.data.(tool)
-		next := &screen{level: levelDatabases, title: "databases", tool: t, sort: sortBySize}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
-	case levelDatabases:
-		d := cur.data.(pg.Database)
-		next := &screen{level: levelSchemas, title: "schemas", tool: s.tool, db: d.Name, sort: sortBySize}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
-	case levelSchemas:
-		sc := cur.data.(pg.Schema)
-		var next *screen
-		switch s.tool {
-		case toolBuffers:
-			next = &screen{level: levelBufferTables, title: "buffers", tool: s.tool, db: sc.DB, schema: sc.Name, sort: sortBySize}
-		default:
-			next = &screen{level: levelTables, title: "tables", tool: s.tool, db: sc.DB, schema: sc.Name, sort: sortBySize}
-		}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
-	case levelTables:
-		t := cur.data.(pg.Table)
-		next := &screen{
-			level: levelParts, title: "parts", tool: s.tool,
-			db: t.DB, schema: t.Schema, tableName: t.Name, tableOID: t.OID,
-			table: t, sort: sortBySize,
-		}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
-	case levelParts:
-		// Only the heap row drills further — into per-column space estimates.
-		// Toast and index rows have no meaningful sub-breakdown.
-		p, ok := cur.data.(pg.Part)
-		if !ok || p.Kind != pg.PartHeap {
-			return nil
-		}
-		next := &screen{
-			level: levelColumns, title: "columns", tool: s.tool,
-			db: s.db, schema: s.schema, tableName: s.tableName, tableOID: s.tableOID,
-			table: s.table, sort: sortBySize,
-		}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
-	}
-	return nil
-}
-
-// --- View ---
-
-func (m *Model) View() string {
-	if m.width == 0 {
-		return ""
-	}
-	s := m.top()
-
-	var b strings.Builder
-	b.WriteString(m.renderHeader())
-	b.WriteString("\n")
-
-	contentHeight := m.height - 4 // header + blank + help
-	if contentHeight < 3 {
-		contentHeight = 3
-	}
-
-	if s.level == levelBufferTables && (s.bufferSummary != nil || s.bufferSummaryErr != nil) {
-		b.WriteString(m.renderBufferSummary(s))
-		b.WriteString("\n")
-		contentHeight--
-	}
-
-	switch {
-	case s.loading || !s.loaded:
-		b.WriteString(fmt.Sprintf("  %s loading %s…\n", m.spinner.View(), s.title))
-		for i := 1; i < contentHeight; i++ {
-			b.WriteString("\n")
-		}
-	case s.err != nil:
-		b.WriteString(styleErr.Render("  error: "+s.err.Error()) + "\n")
-		for i := 1; i < contentHeight; i++ {
-			b.WriteString("\n")
-		}
-	case len(s.items) == 0:
-		b.WriteString("  (no items)\n")
-		for i := 1; i < contentHeight; i++ {
-			b.WriteString("\n")
-		}
-	default:
-		switch s.level {
-		case levelTools:
-			b.WriteString(m.renderToolPicker(s, contentHeight))
-		case levelBufferTables:
-			b.WriteString(m.renderBufferList(s, contentHeight))
-		default:
-			b.WriteString(m.renderList(s, contentHeight))
-		}
-	}
-
-	b.WriteString("\n")
-	b.WriteString(styleHelp.Render(m.help.View(m.keys)))
-	return b.String()
-}
-
-func (m *Model) renderHeader() string {
-	s := m.top()
-	mode := m.bloatBadge()
-	left := styleHeader.Render(" pgdu ") + " " + styleMuted.Render(m.target) + " " + mode
-	crumbs := m.breadcrumb()
-	return left + "    " + crumbs + "\n" + styleMuted.Render(strings.Repeat("─", maxInt(m.width-1, 1))) + "\n" +
-		fmt.Sprintf("  sort: %s  ·  %d items  ·  level: %s", sortLabel(s.sort), len(s.items), levelLabel(s.level))
-}
-
-func (m *Model) bloatBadge() string {
-	// Bloat is only meaningful on the disk tool; suppress the badge elsewhere
-	// to keep the header clean.
-	top := m.top()
-	if top.level == levelTools || top.tool != toolDisk {
-		return ""
-	}
-	if !m.fetchBloat {
-		return styleMuted.Render("[bloat off]")
-	}
-	return styleBadge.Render("[bloat on]")
-}
-
-func (m *Model) breadcrumb() string {
-	parts := []string{"server"}
-	for _, sc := range m.stack {
-		switch sc.level {
-		case levelTools:
-		case levelDatabases:
-			parts = append(parts, sc.tool.Name())
-		case levelSchemas:
-			parts = append(parts, sc.db)
-		case levelTables, levelBufferTables:
-			parts = append(parts, sc.schema)
-		case levelParts:
-			parts = append(parts, sc.tableName)
-		case levelColumns:
-			parts = append(parts, "heap")
-		}
-	}
-	out := make([]string, len(parts))
-	for i, p := range parts {
-		if i == len(parts)-1 {
-			out[i] = styleCrumbActive.Render(p)
-		} else {
-			out[i] = styleBreadcrumb.Render(p)
-		}
-	}
-	return strings.Join(out, styleBreadcrumb.Render(" ▸ "))
-}
-
-func (m *Model) renderToolPicker(s *screen, height int) string {
-	var b strings.Builder
-	for i, it := range s.items {
-		cursor := "  "
-		name := it.name
-		if i == s.cursor {
-			cursor = styleSelected.Render("▶ ")
-			name = styleSelected.Render(name)
-		}
-		childMark := "  "
-		if it.hasChildren {
-			childMark = styleMuted.Render("+ ")
-		}
-		b.WriteString(cursor)
-		b.WriteString(childMark)
-		b.WriteString(padRight(name, 20))
-		b.WriteString("  ")
-		b.WriteString(styleMuted.Render(it.detail))
-		b.WriteString("\n")
-	}
-	for i := len(s.items); i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-// renderBufferSummary draws a single-line shared_buffers occupancy bar
-// segmented into "this db", "other dbs", and "free". The bar width matches the
-// per-row size bars so the eye lines them up.
-func (m *Model) renderBufferSummary(s *screen) string {
-	if s.bufferSummaryErr != nil {
-		return "  " + styleMuted.Render("shared_buffers: ") +
-			styleErr.Render(s.bufferSummaryErr.Error())
-	}
-	sum := s.bufferSummary
-	if sum == nil || sum.TotalBytes <= 0 {
-		return "  " + styleMuted.Render("shared_buffers: unavailable")
-	}
-	bar := renderBufferBar(sum.ThisDBBytes, sum.OtherDBBytes, sum.TotalBytes, m.barWidth(s))
-	usedPct := float64(sum.ThisDBBytes+sum.OtherDBBytes) * 100 / float64(sum.TotalBytes)
-	label := styleMuted.Render("shared_buffers")
-	stats := fmt.Sprintf(
-		"%.1f%% used  ·  this db %s  ·  other %s  ·  free %s  ·  total %s",
-		usedPct,
-		humanize.Bytes(sum.ThisDBBytes),
-		humanize.Bytes(sum.OtherDBBytes),
-		humanize.Bytes(sum.FreeBytes()),
-		humanize.Bytes(sum.TotalBytes),
-	)
-	return "  " + label + "  " + bar + "  " + styleMuted.Render(stats)
-}
-
-func (m *Model) renderList(s *screen, height int) string {
-	var max int64
-	for _, it := range s.items {
-		if it.size > max {
-			max = it.size
-		}
-	}
-	// Maintain viewport so cursor is visible.
-	if s.cursor < s.offset {
-		s.offset = s.cursor
-	}
-	if s.cursor >= s.offset+height {
-		s.offset = s.cursor - height + 1
-	}
-	end := s.offset + height
-	if end > len(s.items) {
-		end = len(s.items)
-	}
-	barW := m.barWidth(s)
-	var b strings.Builder
-	for i := s.offset; i < end; i++ {
-		it := s.items[i]
-		b.WriteString(renderRow(row{
-			size: it.size, bloat: it.bloat, hasBloat: it.hasBloat, hasChildren: it.hasChildren, maxSize: max,
-			barW: barW,
-			heap: it.heap, idx: it.idx, toast: it.toast,
-			name: it.name, detail: it.detail, selected: i == s.cursor,
-		}))
-		b.WriteString("\n")
-	}
-	// Pad to fixed height so help line stays put.
-	for i := end - s.offset; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-// barWidth picks the size-bar width for the current screen. We grow it with
-// the terminal so wide windows aren't dominated by trailing whitespace, but
-// cap it so very wide terminals don't turn the bar into ASCII art at the
-// expense of the actual numeric columns.
-func (m *Model) barWidth(s *screen) int {
-	// Reserve space for the cursor, padding, numeric columns and the
-	// name/detail. The buffer view has the most numeric columns; reserve
-	// enough for it so the same width works everywhere.
-	const reserve = 70
-	w := m.width - reserve
-	if w < barWidthMin {
-		return barWidthMin
-	}
-	if w > 80 {
-		return 80
-	}
-	return w
-}
-
-// --- helpers ---
+// --- screen-stack helpers ---
 
 func (m *Model) top() *screen { return m.stack[len(m.stack)-1] }
 
@@ -772,57 +286,30 @@ func (m *Model) findLevel(l level) *screen {
 	return nil
 }
 
-func (m *Model) applySort(s *screen) {
-	switch s.sort {
-	case sortBySize:
-		sort.SliceStable(s.items, func(i, j int) bool {
-			if s.items[i].size != s.items[j].size {
-				return s.items[i].size > s.items[j].size
-			}
-			return s.items[i].name < s.items[j].name
-		})
-	case sortByName:
-		sort.SliceStable(s.items, func(i, j int) bool { return s.items[i].name < s.items[j].name })
-	case sortByHitRatio:
-		// Ascending so the worst hit ratios bubble to the top — those are the
-		// tables you actually want to look at. Rows without recorded I/O (-1)
-		// sink to the bottom since their ratio is unknown.
-		sort.SliceStable(s.items, func(i, j int) bool {
-			ri, oki := itemHitRatio(s.items[i])
-			rj, okj := itemHitRatio(s.items[j])
-			if oki != okj {
-				return oki
-			}
-			if !oki {
-				return s.items[i].name < s.items[j].name
-			}
-			if ri != rj {
-				return ri < rj
-			}
-			return s.items[i].name < s.items[j].name
-		})
-	}
-	if s.cursor >= len(s.items) {
-		s.cursor = len(s.items) - 1
-	}
-	if s.cursor < 0 {
-		s.cursor = 0
-	}
+// --- item builders (db rows → tui rows) ---
+
+func schemaDetail(sc pg.Schema) string {
+	return fmt.Sprintf("%d tables", sc.TableCount)
 }
 
-// itemHitRatio extracts the hit ratio from an item's payload when it carries
-// buffer-cache stats. The second return is false when the item has no such
-// payload, or when the table has no recorded I/O (HitRatio == -1).
-func itemHitRatio(it item) (float64, bool) {
-	st, ok := it.data.(pg.TableBufferStat)
-	if !ok {
-		return 0, false
+func tableToItem(t pg.Table) item {
+	// Tables with a tiny TOAST relation (empty or a handful of out-of-line
+	// values) clutter the detail line with a near-zero figure. Hide TOAST
+	// below 1 MiB — the colored bar segment is already 0-width at that scale.
+	const toastShowThreshold = 1 << 20
+	parts := []string{
+		"heap " + humanize.Bytes(t.HeapBytes),
+		"idx " + humanize.Bytes(t.IndexesBytes),
 	}
-	r := st.HitRatio()
-	if r < 0 {
-		return 0, false
+	if t.ToastBytes >= toastShowThreshold {
+		parts = append(parts, "toast "+humanize.Bytes(t.ToastBytes))
 	}
-	return r, true
+	return item{
+		name: t.Name, size: t.TotalBytes, hasChildren: true,
+		detail: strings.Join(parts, " · "), data: t,
+		heap: t.HeapBytes, idx: t.IndexesBytes, toast: t.ToastBytes,
+		rows: t.EstRows, hasRows: true,
+	}
 }
 
 func bufferStatToItem(s pg.TableBufferStat) item {
@@ -841,9 +328,14 @@ func columnToItem(col pg.Column) item {
 		nullPart = fmt.Sprintf(" · %.0f%% null", col.NullFrac*100)
 	}
 	toastMark := ""
-	if col.Toastable {
-		// 🍞 flags columns whose values may live in TOAST: extended/external
-		// storage and a TOAST relation exists on the table.
+	// 🍞 flags columns whose values are likely actually in TOAST. Capability
+	// (extended/external storage on a table with a TOAST relation) isn't enough:
+	// PostgreSQL only externalizes values that push the row past
+	// TOAST_TUPLE_THRESHOLD (~2 KB). avg_width here is pg_column_size-derived,
+	// so a column averaging at/above that threshold is almost certainly being
+	// compressed and/or externalized.
+	const toastAvgWidthThreshold = 2048
+	if col.Toastable && col.AvgWidth >= toastAvgWidthThreshold {
 		toastMark = "🍞 "
 	}
 	detail := fmt.Sprintf("%s%s · avg %s%s", toastMark, col.Type, humanize.Bytes(int64(col.AvgWidth)), nullPart)
@@ -859,9 +351,12 @@ func partToItem(p pg.Part) item {
 	detail := ""
 	switch p.Kind {
 	case pg.PartHeap:
-		detail = "table heap"
+		detail = heapDetail(p.HeapStats)
 	case pg.PartToast:
 		detail = "TOAST storage"
+		if p.ToastName != "" {
+			detail += " · " + p.ToastName
+		}
 	case pg.PartIndex:
 		var tags []string
 		if p.IsPrimary {
@@ -884,15 +379,95 @@ func partToItem(p pg.Part) item {
 	}
 }
 
-func sortLabel(s sortMode) string {
-	switch s {
-	case sortBySize:
-		return "size↓"
-	case sortByHitRatio:
-		return "hit↑"
+// heapDetail builds the inline status string shown on the heap row at the
+// parts level: dead-tuple % and "last vacuum" age. Falls back to "table heap"
+// when stats aren't available (e.g. matviews or stats never collected).
+func heapDetail(h *pg.HeapStats) string {
+	if h == nil {
+		return "table heap"
 	}
-	return "name"
+	parts := []string{"heap"}
+	if frac := h.DeadFrac(); frac >= 0 && h.NDead > 0 {
+		parts = append(parts, fmt.Sprintf("%s dead (%.0f%%)", formatRows(h.NDead), frac*100))
+	}
+	if last := h.LastVacuumed(); last != nil {
+		parts = append(parts, "vac "+relativeAge(time.Since(*last)))
+	} else if h.NLive+h.NDead > 0 {
+		parts = append(parts, "never vacuumed")
+	}
+	if last := h.LastAnalyzed(); last != nil {
+		parts = append(parts, "ana "+relativeAge(time.Since(*last)))
+	}
+	return strings.Join(parts, " · ")
 }
+
+// relativeAge formats a duration as a short human-readable age suffix such as
+// "3h ago" or "12d ago". Negative durations (clock skew) read as "0s ago".
+func relativeAge(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+	return fmt.Sprintf("%dmo ago", int(d.Hours()/(24*30)))
+}
+
+// positionLabel reports the cursor's position within the list, e.g.
+// "12/438". Returns "0 items" for empty lists so the status line never
+// shows the misleading "0/0". When a filter is active, the visible count
+// is shown alongside the total ("12/45 of 438") so the user can tell at a
+// glance how many rows were hidden.
+func positionLabel(s *screen) string {
+	total := len(s.items)
+	if total == 0 {
+		return "0 items"
+	}
+	vis := s.visibleLen()
+	if vis == 0 {
+		return fmt.Sprintf("0/0 of %d", total)
+	}
+	if s.filter != "" {
+		return fmt.Sprintf("%d/%d of %d", s.cursor+1, vis, total)
+	}
+	return fmt.Sprintf("%d/%d", s.cursor+1, vis)
+}
+
+// bloatScanLabel returns a short status indicator for the bloat fetch on
+// the parts level. FillBloat is a single round trip that covers every
+// part, so the states are "scanning…" (in flight) or "ready" (done) —
+// any partial scanned count comes from individual rows whose bloat could
+// not be measured (e.g. unsupported index access methods).
+func bloatScanLabel(s *screen) string {
+	if s.level != levelParts || len(s.items) == 0 {
+		return ""
+	}
+	if s.bloatScanning {
+		return "bloat: scanning…"
+	}
+	scanned := 0
+	for _, it := range s.items {
+		if it.hasBloat {
+			scanned++
+		}
+	}
+	if scanned == 0 {
+		return ""
+	}
+	if scanned == len(s.items) {
+		return "bloat: ready"
+	}
+	return fmt.Sprintf("bloat: %d/%d scanned", scanned, len(s.items))
+}
+
+// --- formatting helpers ---
 
 func levelLabel(l level) string {
 	switch l {

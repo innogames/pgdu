@@ -1,4 +1,4 @@
-.PHONY: build deb clean
+.PHONY: build deb clean lint test
 
 NAME    := pgdu
 VERSION := 0.1.0
@@ -15,6 +15,13 @@ deb: build
 	printf 'Package: %s\nVersion: %s\nArchitecture: %s\nMaintainer: Matthias Dötsch <matthias.doetsch@innogames.com>\nSection: database\nPriority: optional\nDescription: PostgreSQL table and index disk usage explorer\n' \
 		$(NAME) $(VERSION) $(ARCH) > debian-pkg/DEBIAN/control
 	dpkg-deb --build --root-owner-group debian-pkg $(DEB)
+
+lint:
+	golangci-lint run --fix
+	go fix ./...
+
+test:
+	go test ./...
 
 clean:
 	rm -rf $(NAME) debian-pkg $(NAME)_*.deb

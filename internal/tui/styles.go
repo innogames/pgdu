@@ -32,5 +32,22 @@ var (
 	// so the colour palette doesn't bloom; index and toast get distinct hues.
 	styleHeapSeg  = styleBar
 	styleIndexSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("114")) // soft green
-	styleToastSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("141")) // light purple
+	styleToastSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("231")) // white
 )
+
+// percentStyle picks a colour for a "higher is better" percentage value:
+// green near 100, cyan in the healthy band, yellow as a warning, red below.
+// Used for hit ratio, cached %, and shared_buffers occupancy so the eye
+// can grade values without reading the digits.
+func percentStyle(pct float64) lipgloss.Style {
+	switch {
+	case pct >= 99:
+		return lipgloss.NewStyle().Foreground(colorOK)
+	case pct >= 90:
+		return lipgloss.NewStyle().Foreground(colorBar)
+	case pct >= 70:
+		return lipgloss.NewStyle().Foreground(colorAccent)
+	default:
+		return lipgloss.NewStyle().Foreground(colorBloat)
+	}
+}

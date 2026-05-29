@@ -1,0 +1,28 @@
+stages:
+  - test
+  - build
+
+lint:
+  image: artifacts.innogames.de:5000/golangci/golangci-lint:latest
+  stage: test
+  script:
+    - make lint
+
+test:
+  image: artifacts.innogames.de:5000/golang:latest
+  stage: test
+  script:
+    - go test -race -count=1 ./...
+
+build:
+  image: artifacts.innogames.de:5000/golang:latest
+  stage: build
+  script:
+    - apt-get update && apt-get install -y --no-install-recommends dpkg-dev
+    - make build
+    - make deb
+  artifacts:
+    paths:
+      - pgdu
+      - pgdu_*.deb
+    expire_in: 1 week

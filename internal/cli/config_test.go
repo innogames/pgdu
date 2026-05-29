@@ -8,12 +8,12 @@ import (
 
 func parseKV(s string) map[string]string {
 	out := map[string]string{}
-	for _, tok := range strings.Fields(s) {
-		eq := strings.IndexByte(tok, '=')
-		if eq < 0 {
+	for tok := range strings.FieldsSeq(s) {
+		before, after, ok := strings.Cut(tok, "=")
+		if !ok {
 			continue
 		}
-		k, v := tok[:eq], tok[eq+1:]
+		k, v := before, after
 		v = strings.Trim(v, "'")
 		out[k] = v
 	}

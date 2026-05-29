@@ -48,18 +48,21 @@ func (c *Client) ListColumns(ctx context.Context, t Table) ([]Column, error) {
 func listColumnsFromStats(ctx context.Context, pool *pgxpool.Pool, oid uint32) ([]Column, error) {
 	rows, err := pool.Query(ctx, sqlColumns, oid)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list columns for oid %d: %w", oid, err)
 	}
 	defer rows.Close()
 	var out []Column
 	for rows.Next() {
 		var col Column
 		if err := rows.Scan(&col.Name, &col.Type, &col.AvgWidth, &col.NullFrac, &col.EstBytes, &col.Toastable); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("list columns for oid %d: %w", oid, err)
 		}
 		out = append(out, col)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list columns for oid %d: %w", oid, err)
+	}
+	return out, nil
 }
 
 // refineColumnsBySampling runs one TABLESAMPLE'd query that computes
@@ -100,10 +103,10 @@ func refineColumnsBySampling(ctx context.Context, pool *pgxpool.Pool, t Table, c
 		dest[2+2*i] = &nulls[i]
 	}
 	if err := row.Scan(dest...); err != nil {
-		return err
+		return fmt.Errorf("sample %q.%q: %w", t.Schema, t.Name, err)
 	}
 	if n == 0 {
-		return fmt.Errorf("empty sample")
+		return fmt.Errorf("sample %q.%q: empty result", t.Schema, t.Name)
 	}
 	for i := range cols {
 		nullFrac := float64(nulls[i]) / float64(n)

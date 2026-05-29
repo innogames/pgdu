@@ -3,3 +3,5 @@ vendor
 ./pgdu
 .devcontainer
 .claude
+/pgdu_*.deb
+/pgdu
