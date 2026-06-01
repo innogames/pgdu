@@ -372,7 +372,9 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 		mu("each row is one 8 KiB heap page — the bar shows how that page is packed") + "\n")
 	b.WriteString("    " + sw(styleHeapSeg) + "  " + mu("live      bytes occupied by visible tuples (lp_flags = NORMAL)") + "\n")
 	b.WriteString("    " + sw(styleBloat) + "  " + mu("dead      bytes occupied by tuples awaiting VACUUM (lp_flags = DEAD)") + "\n")
-	b.WriteString("    " + mu("░  free      empty space between pd_lower and pd_upper inside the page") + "\n\n")
+	b.WriteString("    " + mu("░  free      empty space between pd_lower and pd_upper inside the page") + "\n")
+	b.WriteString("    " + mu("         REDIRECT (HOT hop) slots have no tuple bytes so they don't appear in the bar;") + "\n")
+	b.WriteString("    " + mu("         their count shows as the R column in live/R/dead") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" page flag ") + "  " +
 		mu("one glyph per page summarising its tuple-mix state") + "\n")
@@ -745,15 +747,25 @@ func rankBuffersByOID(items []item) map[uint32]int {
 
 func (m *Model) renderList(s *screen, height int) string {
 	vis := s.visibleIndexes()
-	max := maxItemSize(s.items, vis)
-	s.offset, _ = viewportRange(s.cursor, s.offset, height, len(vis))
-	end := min(s.offset+height, len(vis))
+	maxSz := maxItemSize(s.items, vis)
 	barW := m.barWidth(s)
+	rowsH := height
+
 	var b strings.Builder
+	if s.level == levelTables {
+		rowsH = max(height-1, 0)
+		b.WriteString(renderTablesHeader(s, barW))
+		b.WriteString("\n")
+	}
+
+	if rowsH > 0 {
+		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
+	}
+	end := min(s.offset+rowsH, len(vis))
 	for vi := s.offset; vi < end; vi++ {
 		it := s.items[vis[vi]]
 		b.WriteString(renderRow(row{
-			size: it.size, bloat: it.bloat, hasBloat: it.hasBloat, hasChildren: it.hasChildren, maxSize: max,
+			size: it.size, bloat: it.bloat, hasBloat: it.hasBloat, hasChildren: it.hasChildren, maxSize: maxSz,
 			barW: barW,
 			heap: it.heap, idx: it.idx, toast: it.toast,
 			rows: it.rows, hasRows: it.hasRows,
@@ -763,7 +775,7 @@ func (m *Model) renderList(s *screen, height int) string {
 		b.WriteString("\n")
 	}
 	// Pad to fixed height so help line stays put.
-	for i := end - s.offset; i < height; i++ {
+	for i := end - s.offset; i < rowsH; i++ {
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -949,7 +961,7 @@ func barReserve(l level, tl tool) int {
 const (
 	heapPageFlagColW = 1
 	heapPageUsedColW = 10
-	heapPageLPColW   = 12 // "###L ###D"
+	heapPageLPColW   = 12 // "###L ##R ##D"
 	heapPageDeadColW = 7
 	heapPageNameColW = 16
 )
@@ -1063,7 +1075,7 @@ func renderHeapPagesHeader(sort sortMode, sortDesc bool, barW int) string {
 	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
 		padRight("!", heapPageFlagColW) + "  " +
 		padRight(mark("used", sort == sortBySize), heapPageUsedColW) + "  " +
-		padRight("live/dead", heapPageLPColW) + "  " +
+		padRight("live/R/dead", heapPageLPColW) + "  " +
 		padRight(mark("dead%", sort == sortByDeadRatio), heapPageDeadColW) + "  " +
 		mark("page", sort == sortByBlkno)
 	return styleMuted.Render(line)
@@ -1087,7 +1099,7 @@ func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool) stri
 	}
 
 	used := humanize.Bytes(it.size)
-	lpStr := fmt.Sprintf("%3dL %3dD", p.LiveLP, p.DeadLP)
+	lpStr := fmt.Sprintf("%3dL %2dR %2dD", p.LiveLP, p.RedirectLP, p.DeadLP)
 	deadPct := "—"
 	if df := p.DeadFrac(); df >= 0 {
 		deadPct = percentStyle(100 - df*100).Render(fmt.Sprintf("%.0f%%", df*100))

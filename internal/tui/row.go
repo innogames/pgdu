@@ -391,6 +391,43 @@ func renderBufferHeader(sort sortMode, sortDesc bool, barW int) string {
 	return styleMuted.Render(line)
 }
 
+func renderTablesHeader(s *screen, barW int) string {
+	arrow := "↑"
+	if s.sortDesc {
+		arrow = "↓"
+	}
+	mark := func(label string, active bool) string {
+		if active {
+			return label + arrow
+		}
+		return label
+	}
+
+	anyBloat := false
+	for _, it := range s.items {
+		if it.hasBloat {
+			anyBloat = true
+			break
+		}
+	}
+
+	// Indent: cursor (2) + bar slot (barW+2) + "  " gap — mirrors renderRow's
+	// prefix so each label sits directly above its value column.
+	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
+		padRight(mark("size", s.sort == sortBySize), 10) + "  " +
+		padRight(mark("~rows", s.sort == sortByRows), rowsColW) + "  "
+
+	if s.tool == toolPageInspect {
+		line += padRight("pages", pagesColW) + "  "
+	} else if anyBloat {
+		line += padRight("bloat", 12) + "  "
+	}
+	// 2-cell placeholder for the childMark ("+ " / "  ") before the name.
+	line += "  " + mark("table", s.sort == sortByName)
+
+	return styleMuted.Render(line)
+}
+
 func renderBufferRow(it item, st pg.TableBufferStat, maxSize int64, barW int, selected bool, barStyle lipgloss.Style) string {
 	bar := renderSolidBar(it.size, maxSize, barW, barStyle)
 	cursor := "  "

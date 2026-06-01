@@ -349,6 +349,9 @@ func describeTarget(s *screen) (descTarget, bool) {
 		}
 		return descTarget{}, false
 
+	case levelHeapPages, levelHeapTuples, levelTupleRow:
+		return descTarget{table: s.table}, true
+
 	case levelIndexPages, levelIndexTuples:
 		return descTarget{
 			isIndex:   true,
