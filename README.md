@@ -15,6 +15,12 @@ worth reindexing or pruning.
 
 ![Shared buffers](docs/shared_buffer.png)
 
+![Shared buffers](docs/pages.png)
+
+![Shared buffers](docs/tuples.png)
+
+![Shared buffers](docs/pages_index.png)
+
 ## Install
 
 Pre-built `.deb`:

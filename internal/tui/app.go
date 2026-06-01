@@ -26,6 +26,10 @@ const (
 	levelHeapPages
 	levelHeapTuples
 	levelTupleRow
+	levelRelations
+	levelIndexPages
+	levelIndexTuples
+	levelDescribe
 )
 
 // tool identifies which top-level statistic the user is exploring.
@@ -63,6 +67,7 @@ const (
 	sortByDeadRatio
 	sortByFreeSpace
 	sortByLP
+	sortByLevel
 )
 
 // defaultDesc is the natural direction for each sort column: bigger-first for
@@ -72,7 +77,7 @@ func (sm sortMode) defaultDesc() bool {
 	switch sm {
 	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace:
 		return true
-	case sortByName, sortByHitRatio, sortByBlkno, sortByLP:
+	case sortByName, sortByHitRatio, sortByBlkno, sortByLP, sortByLevel:
 		return false
 	}
 	return false
@@ -99,6 +104,8 @@ func (sm sortMode) name() string {
 		return "free"
 	case sortByLP:
 		return "lp"
+	case sortByLevel:
+		return "level"
 	default:
 		return "name"
 	}
@@ -195,6 +202,16 @@ func (sm sortMode) less(a, b item) bool {
 	case sortByLP:
 		ai, oka := itemLP(a)
 		bi, okb := itemLP(b)
+		if oka != okb {
+			return okb
+		}
+		if !oka {
+			return false
+		}
+		return ai < bi
+	case sortByLevel:
+		ai, oka := itemTreeLevel(a)
+		bi, okb := itemTreeLevel(b)
 		if oka != okb {
 			return okb
 		}
@@ -306,6 +323,23 @@ type screen struct {
 	// the SQL bind doesn't have to re-derive it from heapPageBlkno + LP —
 	// the line pointer might be a REDIRECT pointing at a different page.
 	tupleCtid string
+
+	// Index page-inspector state. index identifies which B-tree we're
+	// looking at on levelIndexPages / levelIndexTuples. The window-state
+	// fields (heapWindowStart / heapWindowCount / heapPageCount) are
+	// shared with the heap page-inspector — generic page-array bookkeeping,
+	// not heap-specific. indexPageBlkno records the block the user drilled
+	// into on levelIndexTuples; indexPageType carries that block's
+	// bt_page_stats type ('l'/'r'/'i'/'d') so the per-item loader knows
+	// whether to decode keys against the heap, and the drill handler
+	// knows whether ENTER should open a heap row.
+	index          pg.Relation
+	indexPageBlkno int32
+	indexPageType  string
+
+	// describe holds the loaded \d-style description for levelDescribe screens.
+	// Nil until the async load completes.
+	describe *pg.Description
 }
 
 // reindexBloatThreshold is the bloat % above which the parts view offers an
@@ -451,10 +485,7 @@ func heapPageToItem(p pg.HeapPageStat) item {
 	// Used bytes scale the bar against a fixed BLCKSZ so every row in the
 	// heap-pages view shares the same horizontal scale — the eye can
 	// compare occupancy across pages without re-reading the numbers.
-	used := heapPageBlockSize - int64(p.FreeBytes)
-	if used < 0 {
-		used = 0
-	}
+	used := max(heapPageBlockSize-int64(p.FreeBytes), 0)
 	return item{
 		name: fmt.Sprintf("page #%07d", p.Blkno),
 		size: used,
@@ -487,24 +518,31 @@ func tupleCellToItem(c pg.TupleCell) item {
 	}
 }
 
-// itemBlkno extracts the block number from a heap-page item. Returns
-// (0, false) for non-heap-page items so they sort below pages we can rank.
+// itemBlkno extracts the block number from a heap- or index-page item.
+// Returns (0, false) for items lacking page-summary data so they sort
+// below pages we can rank.
 func itemBlkno(it item) (int64, bool) {
-	p, ok := it.data.(pg.HeapPageStat)
-	if !ok {
-		return 0, false
+	switch p := it.data.(type) {
+	case pg.HeapPageStat:
+		return p.Blkno, true
+	case pg.IndexPageStat:
+		return int64(p.Blkno), true
 	}
-	return p.Blkno, true
+	return 0, false
 }
 
-// itemDeadRatio is DeadLP / (LiveLP + DeadLP) for heap-page items; second
-// return is false for empty pages, so they don't dominate the dead% sort.
+// itemDeadRatio is dead/(live+dead) for heap- or index-page items; second
+// return is false for empty pages so they don't dominate the dead% sort.
 func itemDeadRatio(it item) (float64, bool) {
-	p, ok := it.data.(pg.HeapPageStat)
-	if !ok {
+	var r float64
+	switch p := it.data.(type) {
+	case pg.HeapPageStat:
+		r = p.DeadFrac()
+	case pg.IndexPageStat:
+		r = p.DeadFrac()
+	default:
 		return 0, false
 	}
-	r := p.DeadFrac()
 	if r < 0 {
 		return 0, false
 	}
@@ -512,22 +550,80 @@ func itemDeadRatio(it item) (float64, bool) {
 }
 
 // itemFreeSpace returns the per-page free bytes; second return is false for
-// non-heap-page items.
+// items lacking page-summary data.
 func itemFreeSpace(it item) (int64, bool) {
-	p, ok := it.data.(pg.HeapPageStat)
-	if !ok {
-		return 0, false
+	switch p := it.data.(type) {
+	case pg.HeapPageStat:
+		return int64(p.FreeBytes), true
+	case pg.IndexPageStat:
+		return int64(p.FreeSize), true
 	}
-	return int64(p.FreeBytes), true
+	return 0, false
 }
 
-// itemLP extracts the line-pointer index for heap-tuple items.
+// itemLP extracts the line-pointer index for heap-tuple items, or the
+// itemoffset for index-tuple items (same concept — a per-page slot index).
 func itemLP(it item) (int64, bool) {
-	t, ok := it.data.(pg.HeapTuple)
+	switch t := it.data.(type) {
+	case pg.HeapTuple:
+		return int64(t.LP), true
+	case pg.IndexTuple:
+		return int64(t.ItemOffset), true
+	}
+	return 0, false
+}
+
+// itemTreeLevel returns btpo_level for B-tree page items (0 = leaf).
+// Second return is false for non-index-page items.
+func itemTreeLevel(it item) (int64, bool) {
+	p, ok := it.data.(pg.IndexPageStat)
 	if !ok {
 		return 0, false
 	}
-	return int64(t.LP), true
+	return int64(p.BtpoLevel), true
+}
+
+// relationToItem builds the levelRelations row for one mixed relation entry.
+// hasChildren is always true: both tables and B-tree indexes drill into a
+// page-inspector view. The detail string is left empty — the dedicated
+// renderRelationsList paints the parent name in muted text on index rows
+// without a separate detail column.
+func relationToItem(r pg.Relation) item {
+	pages := max(int64(r.Pages), 0)
+	return item{
+		name:        r.Name,
+		size:        r.SizeBytes,
+		hasChildren: true,
+		data:        r,
+		rows:        r.EstRows,
+		hasRows:     true,
+		pages:       pages,
+		hasPages:    true,
+	}
+}
+
+func indexPageToItem(p pg.IndexPageStat) item {
+	// Used bytes mirror the heap-page item: BLCKSZ minus free. The bar
+	// reads as "how packed is this page" at a uniform scale.
+	used := max(heapPageBlockSize-int64(p.FreeSize), 0)
+	return item{
+		name: fmt.Sprintf("page #%07d", p.Blkno),
+		size: used,
+		data: p,
+	}
+}
+
+func indexTupleToItem(t pg.IndexTuple) item {
+	// hasChildren is set only when a live heap row was projected (Decoded
+	// non-nil) — that's the same gate the drill handler uses, so the "+"
+	// marker tracks what ENTER will actually do. Internal-page downlinks
+	// and entries whose heap row is gone don't drill.
+	return item{
+		name:        fmt.Sprintf("#%04d", t.ItemOffset),
+		size:        int64(t.ItemLen),
+		hasChildren: t.Decoded != nil && t.Ctid != nil,
+		data:        t,
+	}
 }
 
 func bufferStatToItem(s pg.TableBufferStat) item {
@@ -709,6 +805,14 @@ func levelLabel(l level) string {
 		return "heap-tuples"
 	case levelTupleRow:
 		return "tuple-row"
+	case levelRelations:
+		return "relations"
+	case levelIndexPages:
+		return "index-pages"
+	case levelIndexTuples:
+		return "index-tuples"
+	case levelDescribe:
+		return "describe"
 	}
 	return "?"
 }

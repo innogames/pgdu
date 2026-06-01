@@ -85,6 +85,7 @@ func (k PartKind) String() string {
 // one of its indexes. WastedBytes is populated for the kinds we can measure.
 type Part struct {
 	Kind         PartKind
+	OID          uint32 // index relation oid; 0 for heap/toast
 	Name         string // e.g. "heap", "toast", "idx_users_email"
 	SizeBytes    int64
 	WastedBytes  int64 // bloat, when known
@@ -102,6 +103,37 @@ type Part struct {
 	// metadata so users can correlate to pg_class entries.
 	ToastName string
 }
+
+// RelationKind discriminates a row in the page-inspector relation list: heap
+// table vs. B-tree index. Other access methods aren't drillable here so they
+// don't get a kind.
+type RelationKind int
+
+const (
+	RelTable RelationKind = iota
+	RelBTreeIndex
+)
+
+// Relation is one entry in the page-inspector tool's mixed table+index list.
+// Carries everything later screens need (OID for get_raw_page, qualified name
+// for regclass binds, est-rows/pages for the row summary). For RelBTreeIndex
+// rows ParentOID/ParentName name the table the index belongs to so the list
+// stays comprehensible after sort interleaves rows.
+type Relation struct {
+	Kind         RelationKind
+	DB           string
+	Schema       string
+	OID          uint32
+	Name         string
+	SizeBytes    int64
+	EstRows      int64
+	Pages        int32
+	AccessMethod string // "btree" for indexes, "" for tables
+	ParentOID    uint32
+	ParentName   string
+}
+
+func (r Relation) Qualified() string { return r.Schema + "." + r.Name }
 
 // HeapStats summarises the autovacuum-relevant counters for one table's heap.
 // All fields come from pg_stat_all_tables; *time.Time fields are nil when the
@@ -295,10 +327,117 @@ const (
 	HeapOnlyTuple2   = 0x8000
 )
 
+// IndexPageStat is one row of the B-tree page-inspector view: a page
+// summarised by its bt_page_stats output. Type is the single-character
+// page type from pageinspect — 'l' leaf, 'r' root, 'i' internal, 'd'
+// deleted. BtpoLevel is the page's depth in the tree (0 = leaf).
+type IndexPageStat struct {
+	Blkno       int32
+	Type        string
+	LiveItems   int32
+	DeadItems   int32
+	AvgItemSize int32
+	PageSize    int32
+	FreeSize    int32
+	BtpoPrev    int32
+	BtpoNext    int32
+	BtpoLevel   int32
+	BtpoFlags   int32
+}
+
+// DeadFrac returns DeadItems / (LiveItems + DeadItems) in [0,1], or -1 when
+// the page has no items (typically a meta or deleted page).
+func (p IndexPageStat) DeadFrac() float64 {
+	total := p.LiveItems + p.DeadItems
+	if total <= 0 {
+		return -1
+	}
+	return float64(p.DeadItems) / float64(total)
+}
+
+// IndexTuple is one entry on a B-tree page from bt_page_items. On leaf
+// pages Ctid points to the heap row; on internal pages it's a downlink
+// (block,0) referring to a child index page. Data is pageinspect's
+// raw key bytes as a hex string — a fallback when the structured
+// Decoded value isn't available.
+//
+// Decoded is the per-item projection of the index's column expressions
+// from the heap (e.g. "(42,alice)" for a (id,name) index). Populated
+// only on leaf/root pages whose ctid still resolves to a live heap row;
+// nil for internal-page downlinks and entries whose heap tuple is gone
+// (vacuumed away after the page snapshot, or beyond the snapshot's
+// visibility horizon).
+type IndexTuple struct {
+	ItemOffset int32
+	Ctid       *string
+	ItemLen    int32
+	Nulls      *bool
+	Vars       *bool
+	Data       *string
+	Decoded    *string
+}
+
 // TupleCell is one column of a heap row decoded for the row-detail view.
 // Value is nil for SQL NULLs so the renderer can show them distinctly from
 // empty strings or zero values.
 type TupleCell struct {
 	Name  string
 	Value *string
+}
+
+// --- describe types (psql \d-style object description) ---
+
+// DescribeKind discriminates a Description: a table or a single index.
+type DescribeKind int
+
+const (
+	DescribeTable DescribeKind = iota
+	DescribeIndex
+)
+
+// DescribeColumn is one row of a table's column list in the describe view.
+type DescribeColumn struct {
+	Name    string
+	Type    string // format_type output, e.g. "text", "varchar(64)"
+	NotNull bool
+	Default string // pg_get_expr output; "" when there is no default
+}
+
+// DescribeIndexDef is one index entry in the describe-table view.
+type DescribeIndexDef struct {
+	Name      string
+	Def       string // pg_get_indexdef full CREATE INDEX text
+	IsPrimary bool
+	IsUnique  bool
+}
+
+// DescribeConstraint is one row from pg_constraint in the describe-table view.
+type DescribeConstraint struct {
+	Name string
+	Def  string // pg_get_constraintdef output
+}
+
+// Description is the fully-loaded \d-style payload for one object.
+// Kind discriminates which fields are populated: DescribeTable uses
+// Columns/Indexes/Constraints/SizeBytes/EstRows; DescribeIndex uses the
+// Index* fields.
+type Description struct {
+	Kind  DescribeKind
+	OID   uint32 // target relation oid; used to guard the loaded message
+	Title string // qualified object name for the panel header
+
+	// Table describe fields.
+	Columns     []DescribeColumn
+	Indexes     []DescribeIndexDef
+	Constraints []DescribeConstraint
+	SizeBytes   int64
+	EstRows     int64
+
+	// Index describe fields.
+	IndexDef     string // pg_get_indexdef(oid) — full CREATE INDEX statement
+	AccessMethod string // amname, e.g. "btree"
+	IdxUnique    bool
+	IdxPrimary   bool
+	Predicate    string // pg_get_expr(indpred) for partial indexes; "" otherwise
+	ParentTable  string // indrelid::regclass::text
 }

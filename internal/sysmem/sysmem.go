@@ -51,11 +51,11 @@ func Read() Info {
 // "<key>:" prefix and returns it as bytes. /proc/meminfo always reports kB
 // (despite the unit label being lowercase), so we multiply by 1024.
 func parseMeminfoKB(line string) int64 {
-	idx := strings.IndexByte(line, ':')
-	if idx < 0 {
+	_, after, ok := strings.Cut(line, ":")
+	if !ok {
 		return 0
 	}
-	fields := strings.Fields(line[idx+1:])
+	fields := strings.Fields(after)
 	if len(fields) == 0 {
 		return 0
 	}

@@ -53,6 +53,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onHeapTuplesLoaded(msg)
 	case tupleRowLoadedMsg:
 		return m, m.onTupleRowLoaded(msg)
+	case relationsLoadedMsg:
+		return m, m.onRelationsLoaded(msg)
+	case indexPagesLoadedMsg:
+		return m, m.onIndexPagesLoaded(msg)
+	case indexTuplesLoadedMsg:
+		return m, m.onIndexTuplesLoaded(msg)
+	case describeLoadedMsg:
+		return m, m.onDescribeLoaded(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)

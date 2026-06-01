@@ -48,10 +48,9 @@ func (c *Client) TableParts(ctx context.Context, t Table) ([]Part, error) {
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var oid uint32
 		var p Part
 		p.Kind = PartIndex
-		if err := rows.Scan(&oid, &p.Name, &p.SizeBytes, &p.IsPrimary, &p.IsUnique, &p.AccessMethod); err != nil {
+		if err := rows.Scan(&p.OID, &p.Name, &p.SizeBytes, &p.IsPrimary, &p.IsUnique, &p.AccessMethod); err != nil {
 			return nil, fmt.Errorf("list indexes for %q.%q: %w", t.Schema, t.Name, err)
 		}
 		parts = append(parts, p)

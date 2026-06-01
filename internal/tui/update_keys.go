@@ -56,7 +56,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// aren't obvious — use ? to toggle a dedicated reference overlay
 		// instead of expanding the key list. Other levels keep the standard
 		// help-expansion behaviour.
-		if s.level == levelBufferTables || s.level == levelHeapPages || s.level == levelHeapTuples {
+		if s.level == levelBufferTables || s.level == levelHeapPages || s.level == levelHeapTuples ||
+			s.level == levelIndexPages || s.level == levelIndexTuples {
 			m.showInfo = !m.showInfo
 			break
 		}
@@ -72,10 +73,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.cursor--
 		}
 	case key.Matches(msg, m.keys.PageDown):
-		// On levelHeapPages PageDown shifts the load window instead of the
-		// cursor — within a window the cursor moves with j/k. Clamps to the
-		// last full window so we never call get_raw_page past EOF.
-		if s.level == levelHeapPages && s.heapWindowCount > 0 && s.heapPageCount > s.heapWindowStart+s.heapWindowCount {
+		// On levelHeapPages / levelIndexPages PageDown shifts the load
+		// window instead of the cursor — within a window the cursor moves
+		// with j/k. Clamps to the last full window so we never call
+		// get_raw_page past EOF.
+		if (s.level == levelHeapPages || s.level == levelIndexPages) && s.heapWindowCount > 0 && s.heapPageCount > s.heapWindowStart+s.heapWindowCount {
 			s.heapWindowStart += s.heapWindowCount
 			if s.heapWindowStart >= s.heapPageCount {
 				s.heapWindowStart = max32(s.heapPageCount-s.heapWindowCount, 0)
@@ -86,7 +88,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		s.cursor = max(min(s.cursor+m.pageStep(), s.visibleLen()-1), 0)
 	case key.Matches(msg, m.keys.PageUp):
-		if s.level == levelHeapPages && s.heapWindowStart > 0 {
+		if (s.level == levelHeapPages || s.level == levelIndexPages) && s.heapWindowStart > 0 {
 			s.heapWindowStart = max32(s.heapWindowStart-s.heapWindowCount, 0)
 			s.cursor = 0
 			s.offset = 0
@@ -108,6 +110,29 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.fetchBloat = !m.fetchBloat
 	case key.Matches(msg, m.keys.Install):
 		return m, m.triggerInstall(s)
+	case key.Matches(msg, m.keys.Describe):
+		// Inert when already on a describe panel so `d` doesn't stack.
+		if s.level == levelDescribe {
+			break
+		}
+		t, ok := describeTarget(s)
+		if !ok {
+			break
+		}
+		next := &screen{
+			level:   levelDescribe,
+			title:   "describe",
+			tool:    s.tool,
+			db:      s.db,
+			schema:  s.schema,
+			loading: true,
+		}
+		m.stack = append(m.stack, next)
+		if t.isIndex {
+			return m, m.loadDescribeIndexCmd(t.db, t.indexOID, t.indexName)
+		}
+		next.table = t.table
+		return m, m.loadDescribeTableCmd(t.table)
 	case key.Matches(msg, m.keys.Back):
 		// Esc is shared with Back; when an overlay/filter is up, Esc closes
 		// that instead of unwinding the stack. Other Back keys (←/h/
@@ -223,6 +248,117 @@ func (m *Model) handleReindexEnter(s *screen) tea.Cmd {
 	s.pendingReindex = cand
 	s.reindexErr = nil
 	return nil
+}
+
+// descTarget holds the resolved target for a describe action.
+type descTarget struct {
+	isIndex   bool
+	table     pg.Table // when !isIndex
+	db        string   // when isIndex
+	indexOID  uint32   // when isIndex
+	indexName string   // when isIndex
+}
+
+// describeTarget resolves what `d` should describe given the top screen. It
+// reuses the same cursor-resolution guard as drillIn (visibleIndexes bounds
+// check). Returns (descTarget{}, false) when the current level or row is not
+// describable (e.g. tools/databases/schemas, heap/toast rows, non-btree index).
+func describeTarget(s *screen) (descTarget, bool) {
+	// Helper: resolve the item under the cursor (same as drillIn).
+	curItem := func() (item, bool) {
+		vis := s.visibleIndexes()
+		if s.cursor < 0 || s.cursor >= len(vis) {
+			return item{}, false
+		}
+		return s.items[vis[s.cursor]], true
+	}
+
+	switch s.level {
+	case levelTables:
+		it, ok := curItem()
+		if !ok {
+			return descTarget{}, false
+		}
+		t, ok := it.data.(pg.Table)
+		if !ok {
+			return descTarget{}, false
+		}
+		return descTarget{table: t}, true
+
+	case levelBufferTables:
+		it, ok := curItem()
+		if !ok {
+			return descTarget{}, false
+		}
+		st, ok := it.data.(pg.TableBufferStat)
+		if !ok {
+			return descTarget{}, false
+		}
+		// TableBufferStat has no pg.Table field; reconstruct from its own fields.
+		return descTarget{table: pg.Table{
+			DB: st.DB, Schema: st.Schema, Name: st.Name,
+			OID: st.OID, TotalBytes: st.TotalBytes,
+		}}, true
+
+	case levelColumns:
+		// The table being described is always s.table at these levels.
+		return descTarget{table: s.table}, true
+
+	case levelParts:
+		it, ok := curItem()
+		if !ok {
+			return descTarget{}, false
+		}
+		p, ok := it.data.(pg.Part)
+		if !ok {
+			return descTarget{}, false
+		}
+		if p.Kind == pg.PartIndex {
+			return descTarget{
+				isIndex:   true,
+				db:        s.db,
+				indexOID:  p.OID,
+				indexName: p.Name,
+			}, true
+		}
+		// Heap or toast row: describe the table.
+		return descTarget{table: s.table}, true
+
+	case levelRelations:
+		it, ok := curItem()
+		if !ok {
+			return descTarget{}, false
+		}
+		r, ok := it.data.(pg.Relation)
+		if !ok {
+			return descTarget{}, false
+		}
+		switch r.Kind {
+		case pg.RelTable:
+			return descTarget{table: pg.Table{
+				DB: r.DB, Schema: r.Schema, OID: r.OID, Name: r.Name,
+				TotalBytes: r.SizeBytes, EstRows: r.EstRows,
+			}}, true
+		case pg.RelBTreeIndex:
+			return descTarget{
+				isIndex:   true,
+				db:        r.DB,
+				indexOID:  r.OID,
+				indexName: r.Qualified(),
+			}, true
+		}
+		return descTarget{}, false
+
+	case levelIndexPages, levelIndexTuples:
+		return descTarget{
+			isIndex:   true,
+			db:        s.db,
+			indexOID:  s.index.OID,
+			indexName: s.index.Qualified(),
+		}, true
+	}
+
+	return descTarget{}, false
 }
 
 // triggerInstall is a no-op unless the current screen has an extPrompt

@@ -12,6 +12,7 @@ type keyMap struct {
 	Refresh          key.Binding
 	ToggleBloat      key.Binding
 	Install          key.Binding
+	Describe         key.Binding
 	Filter           key.Binding
 	Help             key.Binding
 	Quit             key.Binding
@@ -32,6 +33,7 @@ func defaultKeys() keyMap {
 		Refresh:     key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "refresh")),
 		ToggleBloat: key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "toggle bloat")),
 		Install:     key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "install extension")),
+		Describe:    key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "describe")),
 		Filter:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		Help:        key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
@@ -47,7 +49,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Top, k.Bottom},
 		{k.Enter, k.Back},
 		{k.Filter, k.Sort, k.ReverseSort},
-		{k.Refresh, k.ToggleBloat, k.Install},
+		{k.Refresh, k.ToggleBloat, k.Install, k.Describe},
 		{k.Help, k.Quit},
 	}
 }

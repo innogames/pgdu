@@ -128,6 +128,115 @@ func (c *Client) ListTupleRow(ctx context.Context, t Table, ctid string) ([]Tupl
 	return out, nil
 }
 
+// ListIndexPages returns up to `count` per-page summaries of a B-tree index
+// starting at `start`. Block 0 is the index meta page; bt_page_stats errors
+// on it, so the SQL clamps the window to start at 1 internally — callers
+// can pass start=0 without surprising failure.
+func (c *Client) ListIndexPages(ctx context.Context, r Relation, start, count int32) ([]IndexPageStat, error) {
+	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
+		return nil, err
+	}
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return nil, err
+	}
+	regclass := quoteIdent(r.Schema) + "." + quoteIdent(r.Name)
+
+	// Same EOF-clamp story as ListHeapPages: pg_class.relpages can lag the
+	// real file, so we read pg_relation_size via sqlRelPages for the cap.
+	// Empty indexes (no pages, or only the meta page) return an empty list
+	// without issuing the per-page query.
+	var relpages int32
+	if err := pool.QueryRow(ctx, sqlRelPages, r.OID).Scan(&relpages); err != nil {
+		return nil, fmt.Errorf("relpages for %q: %w", r.Qualified(), err)
+	}
+	if relpages <= 1 || start >= relpages {
+		return nil, nil
+	}
+	if start+count > relpages {
+		count = relpages - start
+	}
+
+	rows, err := pool.Query(ctx, sqlIndexPagesSummary, regclass, start, count)
+	if err != nil {
+		return nil, fmt.Errorf("list index pages in %q: %w", r.Qualified(), err)
+	}
+	defer rows.Close()
+	var out []IndexPageStat
+	for rows.Next() {
+		var p IndexPageStat
+		if err := rows.Scan(
+			&p.Blkno, &p.Type,
+			&p.LiveItems, &p.DeadItems,
+			&p.AvgItemSize, &p.PageSize, &p.FreeSize,
+			&p.BtpoPrev, &p.BtpoNext, &p.BtpoLevel, &p.BtpoFlags,
+		); err != nil {
+			return nil, fmt.Errorf("list index pages in %q: %w", r.Qualified(), err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list index pages in %q: %w", r.Qualified(), err)
+	}
+	return out, nil
+}
+
+// ListIndexTuples returns the items on one B-tree page via bt_page_items.
+// Caller already saw the page in ListIndexPages and passes its type
+// ('l'/'r'/'i'/'d'); a missing block here surfaces as a pageinspect
+// error from the server.
+//
+// For leaf and (single-page) root pages whose items point at heap rows,
+// each row also gets a Decoded column projected from the parent table —
+// the user sees the actual key value (e.g. "(42,alice)") instead of a
+// hex blob. Internal-page downlinks and DEAD/empty entries return
+// Decoded = nil; the renderer falls back to the raw hex `data`.
+func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, pageType string) ([]IndexTuple, error) {
+	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
+		return nil, err
+	}
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return nil, err
+	}
+	regclass := quoteIdent(r.Schema) + "." + quoteIdent(r.Name)
+
+	sql := sqlIndexTuples
+	// Only leaf and root pages carry heap ctids worth decoding; internal
+	// pages store downlinks (child block addresses) that would either
+	// miss the heap entirely or — worse — match an unrelated row by
+	// coincidence. Skip the heap join in those cases. A single-page
+	// index is type 'r' (root) and is also effectively a leaf.
+	if (pageType == "l" || pageType == "r") && r.ParentOID != 0 && r.ParentName != "" {
+		var exprs string
+		// Fetching the expression list per call avoids a stale cache when
+		// the index is redefined under us. It's a one-shot pg_index lookup
+		// — cheap next to the per-row heap fetches below.
+		if err := pool.QueryRow(ctx, sqlIndexExprList, r.OID).Scan(&exprs); err == nil && exprs != "" {
+			parent := quoteIdent(r.Schema) + "." + quoteIdent(r.ParentName)
+			sql = fmt.Sprintf(sqlIndexTuplesDecoded, exprs, parent)
+		}
+	}
+
+	rows, err := pool.Query(ctx, sql, regclass, blkno)
+	if err != nil {
+		return nil, fmt.Errorf("list index tuples in %q page %d: %w", r.Qualified(), blkno, err)
+	}
+	defer rows.Close()
+	var out []IndexTuple
+	for rows.Next() {
+		var it IndexTuple
+		if err := rows.Scan(&it.ItemOffset, &it.Ctid, &it.ItemLen, &it.Nulls, &it.Vars, &it.Data, &it.Decoded); err != nil {
+			return nil, fmt.Errorf("list index tuples in %q page %d: %w", r.Qualified(), blkno, err)
+		}
+		out = append(out, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list index tuples in %q page %d: %w", r.Qualified(), blkno, err)
+	}
+	return out, nil
+}
+
 // ListHeapTuples returns the line-pointer array for one heap page. The page
 // must exist (caller already saw it in ListHeapPages); a missing block here
 // surfaces as a pageinspect error from the server.

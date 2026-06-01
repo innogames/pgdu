@@ -87,6 +87,31 @@ type tupleRowLoadedMsg struct {
 	cells    []pg.TupleCell
 	err      error
 }
+type relationsLoadedMsg struct {
+	db, schema string
+	rels       []pg.Relation
+	err        error
+}
+type indexPagesLoadedMsg struct {
+	indexOID   uint32
+	start      int32
+	count      int32
+	pages      []pg.IndexPageStat
+	totalPages int32
+	err        error
+}
+type indexTuplesLoadedMsg struct {
+	indexOID uint32
+	blkno    int32
+	pageType string
+	tuples   []pg.IndexTuple
+	err      error
+}
+type describeLoadedMsg struct {
+	oid  uint32
+	desc *pg.Description
+	err  error
+}
 
 // --- commands ---
 
@@ -208,6 +233,47 @@ func (m *Model) loadTupleRowCmd(t pg.Table, ctid string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		cells, err := m.client.ListTupleRow(ctx, t, ctid)
 		return tupleRowLoadedMsg{tableOID: t.OID, ctid: ctid, cells: cells, err: err}
+	})
+}
+
+func (m *Model) loadRelationsCmd(db, schema string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		rs, err := m.client.ListRelations(ctx, db, schema)
+		return relationsLoadedMsg{db: db, schema: schema, rels: rs, err: err}
+	})
+}
+
+func (m *Model) loadIndexPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		pages, err := m.client.ListIndexPages(ctx, r, start, count)
+		if err != nil {
+			return indexPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
+		}
+		// RelPages errors are non-fatal: render the page list and accept "?"
+		// for the totals, same approach as the heap-pages Cmd.
+		rp, _ := m.client.RelPages(ctx, pg.Table{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
+		return indexPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp}
+	})
+}
+
+func (m *Model) loadIndexTuplesCmd(r pg.Relation, blkno int32, pageType string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		tuples, err := m.client.ListIndexTuples(ctx, r, blkno, pageType)
+		return indexTuplesLoadedMsg{indexOID: r.OID, blkno: blkno, pageType: pageType, tuples: tuples, err: err}
+	})
+}
+
+func (m *Model) loadDescribeTableCmd(t pg.Table) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		d, err := m.client.DescribeTable(ctx, t)
+		return describeLoadedMsg{oid: t.OID, desc: d, err: err}
+	})
+}
+
+func (m *Model) loadDescribeIndexCmd(db string, oid uint32, name string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		d, err := m.client.DescribeIndex(ctx, db, oid, name)
+		return describeLoadedMsg{oid: oid, desc: d, err: err}
 	})
 }
 

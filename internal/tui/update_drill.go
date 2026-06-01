@@ -33,6 +33,8 @@ func (m *Model) drillIn() tea.Cmd {
 		switch s.tool {
 		case toolBuffers:
 			next = &screen{level: levelBufferTables, title: "buffers", tool: s.tool, db: sc.DB, schema: sc.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
+		case toolPageInspect:
+			next = &screen{level: levelRelations, title: "relations", tool: s.tool, db: sc.DB, schema: sc.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 		default:
 			next = &screen{level: levelTables, title: "tables", tool: s.tool, db: sc.DB, schema: sc.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 		}
@@ -96,6 +98,75 @@ func (m *Model) drillIn() tea.Cmd {
 			level: levelTupleRow, title: "row", tool: s.tool,
 			db: s.db, schema: s.schema, table: s.table,
 			tupleCtid: *ht.Ctid,
+			sort:      sortByName, sortDesc: false,
+		}
+		m.stack = append(m.stack, next)
+		return m.loadCurrent()
+	case levelRelations:
+		r, ok := cur.data.(pg.Relation)
+		if !ok {
+			return nil
+		}
+		switch r.Kind {
+		case pg.RelTable:
+			// Build the heap context the heap-pages flow expects. relpages
+			// is filled in by loadHeapPagesCmd, so the EstRows here is
+			// purely cosmetic for downstream views — fine to carry over.
+			t := pg.Table{
+				DB: r.DB, Schema: r.Schema, OID: r.OID, Name: r.Name,
+				HeapBytes: r.SizeBytes, EstRows: r.EstRows,
+			}
+			next := &screen{
+				level: levelHeapPages, title: "heap pages", tool: s.tool,
+				db: t.DB, schema: t.Schema, table: t,
+				heapWindowStart: 0, heapWindowCount: heapWindowDefault,
+				sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
+			}
+			m.stack = append(m.stack, next)
+			return m.loadCurrent()
+		case pg.RelBTreeIndex:
+			next := &screen{
+				level: levelIndexPages, title: "index pages", tool: s.tool,
+				db: r.DB, schema: r.Schema, index: r,
+				heapWindowStart: 0, heapWindowCount: heapWindowDefault,
+				sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
+			}
+			m.stack = append(m.stack, next)
+			return m.loadCurrent()
+		}
+		return nil
+	case levelIndexPages:
+		p, ok := cur.data.(pg.IndexPageStat)
+		if !ok {
+			return nil
+		}
+		next := &screen{
+			level: levelIndexTuples, title: "index tuples", tool: s.tool,
+			db: s.db, schema: s.schema, index: s.index,
+			indexPageBlkno: p.Blkno,
+			indexPageType:  p.Type,
+			sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
+		}
+		m.stack = append(m.stack, next)
+		return m.loadCurrent()
+	case levelIndexTuples:
+		t, ok := cur.data.(pg.IndexTuple)
+		if !ok || t.Ctid == nil || t.Decoded == nil {
+			// Only drillable when a live heap row was projected. Internal
+			// pages and vacuumed entries land here too; both have nothing
+			// to show in the per-column row view.
+			return nil
+		}
+		// The parent's schema matches the index's by Postgres rule — indexes
+		// live in the same namespace as their table.
+		parent := pg.Table{
+			DB: s.db, Schema: s.schema,
+			OID: s.index.ParentOID, Name: s.index.ParentName,
+		}
+		next := &screen{
+			level: levelTupleRow, title: "row", tool: s.tool,
+			db: s.db, schema: s.schema, table: parent,
+			tupleCtid: *t.Ctid,
 			sort:      sortByName, sortDesc: false,
 		}
 		m.stack = append(m.stack, next)
@@ -169,6 +240,28 @@ func (m *Model) loadCurrent() tea.Cmd {
 		return m.loadHeapTuplesCmd(s.table, s.heapPageBlkno)
 	case levelTupleRow:
 		return m.loadTupleRowCmd(s.table, s.tupleCtid)
+	case levelRelations:
+		return m.loadRelationsCmd(s.db, s.schema)
+	case levelIndexPages:
+		return m.loadIndexPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount)
+	case levelIndexTuples:
+		return m.loadIndexTuplesCmd(s.index, s.indexPageBlkno, s.indexPageType)
+	case levelDescribe:
+		// Re-issue the right loader on Refresh. On first push s.describe is nil
+		// so we identify the target from s.table (table describe) or s.index
+		// (index describe — s.table.OID is 0 for index targets).
+		if s.describe != nil {
+			switch s.describe.Kind {
+			case pg.DescribeIndex:
+				return m.loadDescribeIndexCmd(s.db, s.describe.OID, s.describe.Title)
+			default:
+				return m.loadDescribeTableCmd(s.table)
+			}
+		}
+		// First load: derive from screen context set during push.
+		if s.table.OID != 0 {
+			return m.loadDescribeTableCmd(s.table)
+		}
 	}
 	return nil
 }

@@ -61,18 +61,23 @@ func itemCachedRatio(it item) (float64, bool) {
 	return float64(st.BufferedBytes) / float64(st.TotalBytes), true
 }
 
-// itemRows extracts the row-count estimate from a table item. Second return is
-// false for any item whose payload isn't a pg.Table, or when EstRows is
-// negative (planner stats unavailable).
+// itemRows extracts the row-count estimate from a table or relation item.
+// Second return is false for items lacking row estimates and for negative
+// EstRows (planner stats unavailable).
 func itemRows(it item) (int64, bool) {
-	t, ok := it.data.(pg.Table)
-	if !ok {
-		return 0, false
+	switch t := it.data.(type) {
+	case pg.Table:
+		if t.EstRows < 0 {
+			return 0, false
+		}
+		return t.EstRows, true
+	case pg.Relation:
+		if t.EstRows < 0 {
+			return 0, false
+		}
+		return t.EstRows, true
 	}
-	if t.EstRows < 0 {
-		return 0, false
-	}
-	return t.EstRows, true
+	return 0, false
 }
 
 // validSorts declares which sort modes are meaningful at each level. Keys
@@ -94,6 +99,12 @@ func validSorts(l level) []sortMode {
 		return []sortMode{sortByLP, sortBySize}
 	case levelTupleRow:
 		return []sortMode{sortByName}
+	case levelRelations:
+		return []sortMode{sortBySize, sortByRows, sortByName}
+	case levelIndexPages:
+		return []sortMode{sortByBlkno, sortByLevel, sortByDeadRatio, sortByFreeSpace}
+	case levelIndexTuples:
+		return []sortMode{sortByLP, sortBySize}
 	default:
 		return []sortMode{sortBySize, sortByName}
 	}

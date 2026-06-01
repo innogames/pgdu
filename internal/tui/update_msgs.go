@@ -287,6 +287,96 @@ func (m *Model) onExtInstalled(msg extInstalledMsg) tea.Cmd {
 	return nil
 }
 
+func (m *Model) onRelationsLoaded(msg relationsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelRelations)
+	if s == nil || s.db != msg.db || s.schema != msg.schema {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, r := range msg.rels {
+		s.items = append(s.items, relationToItem(r))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onIndexPagesLoaded(msg indexPagesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexPages)
+	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		s.err = nil
+		s.extPrompt = &extPrompt{
+			name:        ext.Extension,
+			db:          ext.DB,
+			installable: ext.Installable,
+			reason:      extPromptReasonPageInspect,
+			blocking:    true,
+		}
+		s.items = s.items[:0]
+		return nil
+	}
+	s.err = msg.err
+	s.heapPageCount = msg.totalPages
+	s.items = s.items[:0]
+	for _, p := range msg.pages {
+		s.items = append(s.items, indexPageToItem(p))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onIndexTuplesLoaded(msg indexTuplesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexTuples)
+	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno || s.indexPageType != msg.pageType {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		s.err = nil
+		s.extPrompt = &extPrompt{
+			name:        ext.Extension,
+			db:          ext.DB,
+			installable: ext.Installable,
+			reason:      extPromptReasonPageInspect,
+			blocking:    true,
+		}
+		s.items = s.items[:0]
+		return nil
+	}
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, t := range msg.tuples {
+		s.items = append(s.items, indexTupleToItem(t))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onDescribeLoaded(msg describeLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelDescribe)
+	if s == nil {
+		return nil
+	}
+	// Guard against stale messages: accept when this is the first load
+	// (s.describe == nil) or when the OID matches a refresh.
+	if s.describe != nil && s.describe.OID != msg.oid {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	s.err = msg.err
+	s.describe = msg.desc
+	return nil
+}
+
 func (m *Model) onReindexDone(msg reindexDoneMsg) tea.Cmd {
 	s := m.findLevel(levelParts)
 	if s == nil || s.table.OID != msg.tableOID {

@@ -279,6 +279,127 @@ WITH r AS (
 SELECT key, value FROM r, json_each_text(r.j)
 `
 
+// sqlRelations returns every heap-style table and every B-tree index whose
+// parent lives in the named schema, mixed into one list and ordered by
+// pg_relation_size. The page-inspector tool consumes it instead of sqlTables
+// so the user sees tables and their indexes side by side, ranked by on-disk
+// size — exposing the indexes that are bigger than the heap they index.
+//
+// Only B-tree indexes are listed: hash/gist/gin/brin are filtered out because
+// the index-page drill below relies on bt_page_stats / bt_page_items, neither
+// of which works on other access methods.
+//
+// Tables come from relkind IN ('r','m','p'); indexes from relkind = 'i' plus
+// am.amname = 'btree' AND the parent's namespace matching the schema (so an
+// index whose parent lives in another schema doesn't leak in via a global
+// search). For tables ParentOID is 0; for indexes it's pg_index.indrelid.
+const sqlRelations = `
+SELECT c.oid,
+       c.relname,
+       c.relkind::text                                        AS kind,
+       COALESCE(am.amname, '')                                AS access_method,
+       pg_relation_size(c.oid)                                AS size_bytes,
+       GREATEST(c.reltuples, 0)::bigint                       AS est_rows,
+       c.relpages::int                                        AS pages,
+       COALESCE(idx.indrelid, 0)::oid                         AS parent_oid,
+       COALESCE(pc.relname, '')                               AS parent_name
+FROM   pg_class c
+JOIN   pg_namespace n ON n.oid = c.relnamespace
+LEFT   JOIN pg_am am ON am.oid = c.relam
+LEFT   JOIN pg_index idx ON idx.indexrelid = c.oid
+LEFT   JOIN pg_class pc ON pc.oid = idx.indrelid
+LEFT   JOIN pg_namespace pn ON pn.oid = pc.relnamespace
+WHERE  (
+         (c.relkind IN ('r','m','p') AND n.nspname = $1)
+         OR
+         (c.relkind = 'i' AND am.amname = 'btree' AND pn.nspname = $1)
+       )
+ORDER  BY size_bytes DESC
+`
+
+// sqlIndexPagesSummary mirrors sqlHeapPagesSummary but for B-tree pages.
+// bt_page_stats fails on the meta page (always block 0) so the window is
+// shifted to skip it whenever it would be included — without this the
+// pageinspect call would bubble up "block is a meta page" and abort the
+// whole load.
+//
+// $1 is the index regclass-castable text; $2 the window start (in pages);
+// $3 the requested count. The CASE on $2 picks max($2,1) so a request that
+// starts at 0 silently skips the meta page.
+const sqlIndexPagesSummary = `
+SELECT s.blkno::int,
+       s.type::text,
+       s.live_items::int,
+       s.dead_items::int,
+       s.avg_item_size::int,
+       s.page_size::int,
+       s.free_size::int,
+       s.btpo_prev::int,
+       s.btpo_next::int,
+       s.btpo_level::int,
+       s.btpo_flags::int
+FROM   generate_series(
+         GREATEST($2::int, 1),
+         $2::int + $3::int - 1
+       ) AS g(blkno),
+       LATERAL bt_page_stats($1, g.blkno) s
+ORDER  BY s.blkno
+`
+
+// sqlIndexTuples returns the items on one B-tree page. data here is the
+// raw key bytes as a hex text (no per-column decoding — pageinspect can't
+// know the indexed types). Used as the fallback path on internal/deleted
+// pages where sqlIndexTuplesDecoded doesn't apply.
+const sqlIndexTuples = `
+SELECT itemoffset::int,
+       ctid::text,
+       itemlen::int,
+       nulls,
+       vars,
+       data,
+       NULL::text AS decoded
+FROM   bt_page_items($1, $2::int)
+ORDER  BY itemoffset
+`
+
+// sqlIndexExprList returns the index's column expressions concatenated as
+// a single SQL expression list, e.g. "a, b, lower(c)". Built from
+// pg_get_indexdef on each indexed attribute number (1..indnatts). The
+// result is interpolated into sqlIndexTuplesDecoded so the per-row
+// subquery can project the decoded key value from the heap.
+const sqlIndexExprList = `
+SELECT COALESCE(string_agg(pg_get_indexdef($1::oid, k::int, false),
+                           ', ' ORDER BY k), '')
+FROM   generate_series(
+         1,
+         (SELECT indnatts FROM pg_index WHERE indexrelid = $1::oid)
+       ) AS k
+`
+
+// sqlIndexTuplesDecoded mirrors sqlIndexTuples but adds a per-item
+// scalar-subquery projecting the index's columns from the heap row. The
+// subquery yields NULL when the ctid doesn't resolve to a live row
+// (vacuumed, beyond MVCC horizon, or — on internal pages — a downlink
+// rather than a heap address). Callers fall back to the raw hex `data`
+// when decoded is NULL.
+//
+// %s 1 is the index expression list (built by sqlIndexExprList, e.g.
+// "a, b, lower(c)"); %s 2 is the parent table's quoted regclass. Both
+// substitutions come from quoteIdent and pg_get_indexdef output — safe
+// from injection. $1 is the index regclass-castable text; $2 the block
+// number.
+const sqlIndexTuplesDecoded = `
+SELECT i.itemoffset::int,
+       i.ctid::text,
+       i.itemlen::int,
+       i.nulls,
+       i.vars,
+       i.data,
+       (SELECT (%s)::text FROM %s WHERE ctid = i.ctid::tid) AS decoded
+FROM   bt_page_items($1, $2::int) i
+ORDER  BY i.itemoffset
+`
+
 // sqlRelPages reports the current heap block count by dividing the file
 // size by block size. pg_class.relpages is ANALYZE-driven and can lag the
 // real file (zero after TRUNCATE, stale after bulk inserts), which makes it
@@ -339,4 +460,60 @@ LEFT   JOIN buffered b ON b.tab_oid = c.oid
 LEFT   JOIN pg_statio_user_tables s ON s.relid = c.oid
 WHERE  n.nspname = $1 AND c.relkind IN ('r','m','p')
 ORDER  BY buffered_bytes DESC, c.relname
+`
+
+// --- describe queries (psql \d-style) ---
+
+// sqlDescribeColumns lists a table's live columns in declaration order with
+// NOT NULL and the column default expression. $1 = table oid. PG 12+.
+const sqlDescribeColumns = `
+SELECT a.attname,
+       format_type(a.atttypid, a.atttypmod)               AS type_name,
+       a.attnotnull,
+       COALESCE(pg_get_expr(d.adbin, d.adrelid), '')       AS default_expr
+FROM   pg_attribute a
+LEFT   JOIN pg_attrdef d
+       ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+WHERE  a.attrelid = $1
+  AND  a.attnum   > 0
+  AND  NOT a.attisdropped
+ORDER  BY a.attnum
+`
+
+// sqlDescribeIndexes lists a table's indexes with their full CREATE INDEX
+// definitions. Ordered primary-first then alphabetically. $1 = table oid.
+const sqlDescribeIndexes = `
+SELECT i.relname,
+       pg_get_indexdef(idx.indexrelid) AS def,
+       idx.indisprimary,
+       idx.indisunique
+FROM   pg_index idx
+JOIN   pg_class i ON i.oid = idx.indexrelid
+WHERE  idx.indrelid = $1
+ORDER  BY idx.indisprimary DESC, i.relname
+`
+
+// sqlDescribeConstraints lists a table's constraints (PK, FK, unique, check)
+// rendered by pg_get_constraintdef. $1 = table oid.
+const sqlDescribeConstraints = `
+SELECT conname,
+       pg_get_constraintdef(oid, true) AS def
+FROM   pg_constraint
+WHERE  conrelid = $1
+ORDER  BY contype, conname
+`
+
+// sqlDescribeIndex returns the definition and metadata for a single index.
+// indpred is COALESCE'd to ” so it's never NULL. $1 = index oid. PG 12+.
+const sqlDescribeIndex = `
+SELECT pg_get_indexdef(c.oid)                                AS def,
+       am.amname                                             AS access_method,
+       idx.indisunique,
+       idx.indisprimary,
+       COALESCE(pg_get_expr(idx.indpred, idx.indrelid), '')  AS predicate,
+       idx.indrelid::regclass::text                          AS parent_table
+FROM   pg_index idx
+JOIN   pg_class c  ON c.oid = idx.indexrelid
+JOIN   pg_am am    ON am.oid = c.relam
+WHERE  idx.indexrelid = $1
 `
