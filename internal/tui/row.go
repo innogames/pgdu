@@ -33,6 +33,10 @@ type row struct {
 	// rows is the estimated row count; only rendered when hasRows is true.
 	rows    int64
 	hasRows bool
+
+	// pages is the heap page count; only rendered when hasPages is true.
+	pages    int64
+	hasPages bool
 }
 
 // barWidthMin is the fallback bar width when the terminal is too narrow for
@@ -77,17 +81,24 @@ func renderRow(r row) string {
 	if r.hasRows {
 		rowsStr = styleMuted.Render(padRight("~"+formatRows(r.rows), rowsColW)) + "  "
 	}
+	pagesStr := ""
+	if r.hasPages {
+		pagesStr = styleMuted.Render(padRight(formatRows(r.pages)+"p", pagesColW)) + "  "
+	}
 	childMark := "  "
 	if r.hasChildren {
 		childMark = styleMuted.Render("+ ")
 	}
-	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + rowsStr + bloatStr + childMark + name + detail
+	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + rowsStr + pagesStr + bloatStr + childMark + name + detail
 }
 
 // rowsColW is the padded width of the ~rows column on the tables level.
 // formatRows produces at most "999.9M"/"999.9G" (6 chars) + the "~" prefix,
 // so 7 fits every realistic value with one space of slack.
 const rowsColW = 7
+
+// pagesColW matches rowsColW: formatRows output (max 6 chars) + a "p" suffix.
+const pagesColW = 7
 
 // barSegment is one coloured run inside a bar. cells must be >= 0; paintBar
 // will clip if the segments together exceed the bar width.
@@ -170,6 +181,38 @@ func renderSegmentedBar(heap, idx, toast, max int64, width int) string {
 		barSegment{cells: h, style: styleHeapSeg},
 		barSegment{cells: i, style: styleIndexSeg},
 		barSegment{cells: t, style: styleToastSeg},
+	)
+}
+
+// renderHeapPageBar paints one heap page as live | dead | free, scaled to a
+// fixed BLCKSZ so the bar reads as "how packed is this page?" rather than
+// "how packed compared to the biggest sibling?". The dead segment uses
+// styleBloat for semantic parity with the parts view's bloat overlay.
+func renderHeapPageBar(live, dead int64, width int) string {
+	const blockSize int64 = 8192
+	bytesToCells := func(b int64) int {
+		if b <= 0 {
+			return 0
+		}
+		c := int(float64(width) * float64(b) / float64(blockSize))
+		if c < 0 {
+			return 0
+		}
+		if c > width {
+			return width
+		}
+		return c
+	}
+	l := bytesToCells(live)
+	d := bytesToCells(dead)
+	if l+d > width {
+		// Rounding can push us one cell over; trim the dead segment last
+		// since live is the dominant visual.
+		d = max0(width - l)
+	}
+	return paintBar(width,
+		barSegment{cells: l, style: styleHeapSeg},
+		barSegment{cells: d, style: styleBloat},
 	)
 }
 

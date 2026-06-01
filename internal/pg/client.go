@@ -23,6 +23,9 @@ type Client struct {
 
 	// True once pg_buffercache is known to be installed in a given database.
 	bufCacheReady map[string]bool
+
+	// True once pageinspect is known to be installed in a given database.
+	pageInspectReady map[string]bool
 }
 
 type BloatMode int
@@ -35,10 +38,11 @@ const (
 
 func New(cfg cli.Config) *Client {
 	return &Client{
-		cfg:           cfg,
-		pools:         map[string]*pgxpool.Pool{},
-		bloatProbed:   map[string]BloatMode{},
-		bufCacheReady: map[string]bool{},
+		cfg:              cfg,
+		pools:            map[string]*pgxpool.Pool{},
+		bloatProbed:      map[string]BloatMode{},
+		bufCacheReady:    map[string]bool{},
+		pageInspectReady: map[string]bool{},
 	}
 }
 

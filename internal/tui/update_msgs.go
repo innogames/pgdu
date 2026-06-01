@@ -48,7 +48,7 @@ func (m *Model) onTablesLoaded(msg tablesLoadedMsg) tea.Cmd {
 	s.err = msg.err
 	s.items = s.items[:0]
 	for _, t := range msg.tables {
-		s.items = append(s.items, tableToItem(t))
+		s.items = append(s.items, tableToItem(t, s.tool))
 	}
 	m.applySort(s)
 	return nil
@@ -168,21 +168,98 @@ func (m *Model) onBloatFilled(msg bloatFilledMsg) tea.Cmd {
 }
 
 func (m *Model) onExtStatus(msg extStatusMsg) tea.Cmd {
-	s := m.findLevel(levelParts)
-	if s == nil || s.db != msg.db || msg.ext != extPgStatTuple {
-		return nil
-	}
-	if msg.err == nil && msg.status.Available && !msg.status.Installed {
-		// Only offer when the extension is reachable. If it's not in
-		// pg_available_extensions there's nothing the user can do here.
-		s.extPrompt = &extPrompt{
-			name:        msg.ext,
-			db:          msg.db,
-			installable: true,
-			reason:      extPromptReasonPgStatTuple,
-			blocking:    false,
+	// Dispatched by (level, ext): each consumer surfaces its own prompt or
+	// flips its own ready flag. Anything not listed here is ignored, since
+	// the same probe Cmd may run from multiple screens.
+	switch msg.ext {
+	case extPgStatTuple:
+		s := m.findLevel(levelParts)
+		if s == nil || s.db != msg.db {
+			return nil
+		}
+		if msg.err == nil && msg.status.Available && !msg.status.Installed {
+			s.extPrompt = &extPrompt{
+				name:        msg.ext,
+				db:          msg.db,
+				installable: true,
+				reason:      extPromptReasonPgStatTuple,
+				blocking:    false,
+			}
 		}
 	}
+	return nil
+}
+
+func (m *Model) onHeapPagesLoaded(msg heapPagesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelHeapPages)
+	if s == nil || s.table.OID != msg.table.OID || s.heapWindowStart != msg.start {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		s.err = nil
+		s.extPrompt = &extPrompt{
+			name:        ext.Extension,
+			db:          ext.DB,
+			installable: ext.Installable,
+			reason:      extPromptReasonPageInspect,
+			blocking:    true,
+		}
+		s.items = s.items[:0]
+		return nil
+	}
+	s.err = msg.err
+	s.heapPageCount = msg.totalPages
+	s.items = s.items[:0]
+	for _, p := range msg.pages {
+		s.items = append(s.items, heapPageToItem(p))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onTupleRowLoaded(msg tupleRowLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelTupleRow)
+	if s == nil || s.table.OID != msg.tableOID || s.tupleCtid != msg.ctid {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, c := range msg.cells {
+		s.items = append(s.items, tupleCellToItem(c))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onHeapTuplesLoaded(msg heapTuplesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelHeapTuples)
+	if s == nil || s.table.OID != msg.tableOID || s.heapPageBlkno != msg.blkno {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		s.err = nil
+		s.extPrompt = &extPrompt{
+			name:        ext.Extension,
+			db:          ext.DB,
+			installable: ext.Installable,
+			reason:      extPromptReasonPageInspect,
+			blocking:    true,
+		}
+		s.items = s.items[:0]
+		return nil
+	}
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, t := range msg.tuples {
+		s.items = append(s.items, heapTupleToItem(t))
+	}
+	m.applySort(s)
 	return nil
 }
 

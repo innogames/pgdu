@@ -47,6 +47,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onExtInstalled(msg)
 	case reindexDoneMsg:
 		return m, m.onReindexDone(msg)
+	case heapPagesLoadedMsg:
+		return m, m.onHeapPagesLoaded(msg)
+	case heapTuplesLoadedMsg:
+		return m, m.onHeapTuplesLoaded(msg)
+	case tupleRowLoadedMsg:
+		return m, m.onTupleRowLoaded(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)

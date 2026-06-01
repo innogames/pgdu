@@ -40,10 +40,63 @@ func (m *Model) drillIn() tea.Cmd {
 		return m.loadCurrent()
 	case levelTables:
 		t := cur.data.(pg.Table)
+		var next *screen
+		switch s.tool {
+		case toolPageInspect:
+			next = &screen{
+				level: levelHeapPages, title: "heap pages", tool: s.tool,
+				db: t.DB, schema: t.Schema, table: t,
+				heapWindowStart: 0, heapWindowCount: heapWindowDefault,
+				sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
+			}
+		default:
+			next = &screen{
+				level: levelParts, title: "parts", tool: s.tool,
+				db: t.DB, schema: t.Schema, table: t,
+				sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
+			}
+		}
+		m.stack = append(m.stack, next)
+		return m.loadCurrent()
+	case levelHeapPages:
+		p, ok := cur.data.(pg.HeapPageStat)
+		if !ok {
+			return nil
+		}
 		next := &screen{
-			level: levelParts, title: "parts", tool: s.tool,
-			db: t.DB, schema: t.Schema, table: t,
-			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
+			level: levelHeapTuples, title: "tuples", tool: s.tool,
+			db: s.db, schema: s.schema, table: s.table,
+			heapPageBlkno: int32(p.Blkno),
+			sort:          sortByLP, sortDesc: sortByLP.defaultDesc(),
+		}
+		m.stack = append(m.stack, next)
+		return m.loadCurrent()
+	case levelHeapTuples:
+		ht, ok := cur.data.(pg.HeapTuple)
+		if !ok {
+			return nil
+		}
+		// REDIRECT hops within the same page: lp_off carries the target's
+		// OffsetNumber, so jump the cursor to that lp instead of drilling.
+		// Lets the user walk a HOT chain by repeatedly pressing Enter.
+		if ht.LPFlags == pg.LPRedirect {
+			for vi, idx := range vis {
+				target, ok := s.items[idx].data.(pg.HeapTuple)
+				if ok && target.LP == ht.LPOff {
+					s.cursor = vi
+					break
+				}
+			}
+			return nil
+		}
+		if ht.LPFlags != pg.LPNormal || ht.Ctid == nil {
+			return nil
+		}
+		next := &screen{
+			level: levelTupleRow, title: "row", tool: s.tool,
+			db: s.db, schema: s.schema, table: s.table,
+			tupleCtid: *ht.Ctid,
+			sort:      sortByName, sortDesc: false,
 		}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
@@ -110,6 +163,18 @@ func (m *Model) loadCurrent() tea.Cmd {
 		)
 	case levelColumns:
 		return m.loadColumnsCmd(s.table)
+	case levelHeapPages:
+		return m.loadHeapPagesCmd(s.table, s.heapWindowStart, s.heapWindowCount)
+	case levelHeapTuples:
+		return m.loadHeapTuplesCmd(s.table, s.heapPageBlkno)
+	case levelTupleRow:
+		return m.loadTupleRowCmd(s.table, s.tupleCtid)
 	}
 	return nil
 }
+
+// heapWindowDefault is the number of heap pages loaded per page-inspector
+// window. 2 000 pages is ~16 MiB of raw_page reads — fast on a warm cache
+// and small enough that the resulting item list still scrolls comfortably.
+// PgUp/PgDn slides the window in heapWindowDefault-sized steps.
+const heapWindowDefault int32 = 2000

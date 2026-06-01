@@ -45,6 +45,9 @@ func (c *Client) CreateExtension(ctx context.Context, db, ext string) error {
 	if ext == "pg_buffercache" {
 		c.bufCacheReady[db] = true
 	}
+	if ext == "pageinspect" {
+		c.pageInspectReady[db] = true
+	}
 	if ext == "pgstattuple" {
 		// Force ProbeBloat to re-evaluate on next call.
 		delete(c.bloatProbed, db)

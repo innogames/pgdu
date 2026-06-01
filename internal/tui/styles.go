@@ -41,6 +41,18 @@ var (
 	styleIndexSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("114")) // soft green
 	styleToastSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("231")) // white
 
+	// Page-inspector colours. Distinct from the bar segment colours above so
+	// the H/T flag glyphs read as overlays, not part of the page-fill bar.
+	styleHeapHot      = lipgloss.NewStyle().Foreground(lipgloss.Color("213")) // magenta
+	styleHeapToastTag = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // toast yellow
+
+	// LP-flag dot colours for the per-tuple view. NORMAL/REDIRECT/DEAD/UNUSED
+	// pair with the four lp_flags values from itemid.h.
+	styleLPNormal   = lipgloss.NewStyle().Foreground(colorOK)
+	styleLPRedirect = lipgloss.NewStyle().Foreground(colorAccent)
+	styleLPDead     = lipgloss.NewStyle().Foreground(colorBloat)
+	styleLPUnused   = lipgloss.NewStyle().Foreground(colorMuted)
+
 	// bufferSlicePalette is the set of distinct foreground colours used to
 	// paint per-table slices in the shared_buffers occupancy bar and the
 	// matching row bars in the list. Capped at 10 — tables ranked beyond

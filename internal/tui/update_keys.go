@@ -7,6 +7,13 @@ import (
 	"pgdu/internal/pg"
 )
 
+func max32(a, b int32) int32 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // pageStep is the cursor jump distance for PageUp/PageDown. Roughly the
 // visible row count: terminal height minus header (3 lines), the inter-block
 // blank, and the help row. Always at least 1 so a one-row jump still happens
@@ -49,7 +56,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// aren't obvious — use ? to toggle a dedicated reference overlay
 		// instead of expanding the key list. Other levels keep the standard
 		// help-expansion behaviour.
-		if s.level == levelBufferTables {
+		if s.level == levelBufferTables || s.level == levelHeapPages || s.level == levelHeapTuples {
 			m.showInfo = !m.showInfo
 			break
 		}
@@ -65,8 +72,26 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.cursor--
 		}
 	case key.Matches(msg, m.keys.PageDown):
+		// On levelHeapPages PageDown shifts the load window instead of the
+		// cursor — within a window the cursor moves with j/k. Clamps to the
+		// last full window so we never call get_raw_page past EOF.
+		if s.level == levelHeapPages && s.heapWindowCount > 0 && s.heapPageCount > s.heapWindowStart+s.heapWindowCount {
+			s.heapWindowStart += s.heapWindowCount
+			if s.heapWindowStart >= s.heapPageCount {
+				s.heapWindowStart = max32(s.heapPageCount-s.heapWindowCount, 0)
+			}
+			s.cursor = 0
+			s.offset = 0
+			return m, m.loadCurrent()
+		}
 		s.cursor = max(min(s.cursor+m.pageStep(), s.visibleLen()-1), 0)
 	case key.Matches(msg, m.keys.PageUp):
+		if s.level == levelHeapPages && s.heapWindowStart > 0 {
+			s.heapWindowStart = max32(s.heapWindowStart-s.heapWindowCount, 0)
+			s.cursor = 0
+			s.offset = 0
+			return m, m.loadCurrent()
+		}
 		s.cursor = max(s.cursor-m.pageStep(), 0)
 	case key.Matches(msg, m.keys.Top):
 		s.cursor = 0

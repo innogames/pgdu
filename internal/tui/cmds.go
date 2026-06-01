@@ -67,6 +67,26 @@ type reindexDoneMsg struct {
 	indexName string
 	err       error
 }
+type heapPagesLoadedMsg struct {
+	table      pg.Table
+	start      int32
+	count      int32
+	pages      []pg.HeapPageStat
+	totalPages int32
+	err        error
+}
+type heapTuplesLoadedMsg struct {
+	tableOID uint32
+	blkno    int32
+	tuples   []pg.HeapTuple
+	err      error
+}
+type tupleRowLoadedMsg struct {
+	tableOID uint32
+	ctid     string
+	cells    []pg.TupleCell
+	err      error
+}
 
 // --- commands ---
 
@@ -160,6 +180,34 @@ func (m *Model) installExtensionCmd(db, ext string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		err := m.client.CreateExtension(ctx, db, ext)
 		return extInstalledMsg{db: db, ext: ext, err: err}
+	})
+}
+
+func (m *Model) loadHeapPagesCmd(t pg.Table, start, count int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		pages, err := m.client.ListHeapPages(ctx, t, start, count)
+		if err != nil {
+			return heapPagesLoadedMsg{table: t, start: start, count: count, err: err}
+		}
+		// RelPages failure is non-fatal: the page list still renders, only the
+		// "pages N–M / total" status snippet shows ?/?? — much better than
+		// dropping the whole load on a transient pg_class read error.
+		rp, _ := m.client.RelPages(ctx, t)
+		return heapPagesLoadedMsg{table: t, start: start, count: count, pages: pages, totalPages: rp}
+	})
+}
+
+func (m *Model) loadHeapTuplesCmd(t pg.Table, blkno int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		tuples, err := m.client.ListHeapTuples(ctx, t, blkno)
+		return heapTuplesLoadedMsg{tableOID: t.OID, blkno: blkno, tuples: tuples, err: err}
+	})
+}
+
+func (m *Model) loadTupleRowCmd(t pg.Table, ctid string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		cells, err := m.client.ListTupleRow(ctx, t, ctid)
+		return tupleRowLoadedMsg{tableOID: t.OID, ctid: ctid, cells: cells, err: err}
 	})
 }
 

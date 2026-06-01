@@ -27,7 +27,7 @@ func Read() Info {
 	if err != nil {
 		return Info{}
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var info Info
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {

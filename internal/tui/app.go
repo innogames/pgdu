@@ -23,6 +23,9 @@ const (
 	levelParts
 	levelBufferTables
 	levelColumns
+	levelHeapPages
+	levelHeapTuples
+	levelTupleRow
 )
 
 // tool identifies which top-level statistic the user is exploring.
@@ -32,6 +35,7 @@ type tool int
 const (
 	toolDisk tool = iota
 	toolBuffers
+	toolPageInspect
 )
 
 func (t tool) Name() string {
@@ -40,6 +44,8 @@ func (t tool) Name() string {
 		return "disk"
 	case toolBuffers:
 		return "buffers"
+	case toolPageInspect:
+		return "pageinspect"
 	}
 	return "?"
 }
@@ -53,6 +59,10 @@ const (
 	sortByCached
 	sortByTotal
 	sortByRows
+	sortByBlkno
+	sortByDeadRatio
+	sortByFreeSpace
+	sortByLP
 )
 
 // defaultDesc is the natural direction for each sort column: bigger-first for
@@ -60,9 +70,9 @@ const (
 // ratio so the worst-cached tables bubble to the top.
 func (sm sortMode) defaultDesc() bool {
 	switch sm {
-	case sortBySize, sortByRows, sortByCached, sortByTotal:
+	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace:
 		return true
-	case sortByName, sortByHitRatio:
+	case sortByName, sortByHitRatio, sortByBlkno, sortByLP:
 		return false
 	}
 	return false
@@ -81,6 +91,14 @@ func (sm sortMode) name() string {
 		return "cached"
 	case sortByTotal:
 		return "total"
+	case sortByBlkno:
+		return "blkno"
+	case sortByDeadRatio:
+		return "dead%"
+	case sortByFreeSpace:
+		return "free"
+	case sortByLP:
+		return "lp"
 	default:
 		return "name"
 	}
@@ -144,6 +162,46 @@ func (sm sortMode) less(a, b item) bool {
 			return false
 		}
 		return ai < bi
+	case sortByBlkno:
+		ai, oka := itemBlkno(a)
+		bi, okb := itemBlkno(b)
+		if oka != okb {
+			return okb
+		}
+		if !oka {
+			return false
+		}
+		return ai < bi
+	case sortByDeadRatio:
+		ai, oka := itemDeadRatio(a)
+		bi, okb := itemDeadRatio(b)
+		if oka != okb {
+			return okb
+		}
+		if !oka {
+			return false
+		}
+		return ai < bi
+	case sortByFreeSpace:
+		ai, oka := itemFreeSpace(a)
+		bi, okb := itemFreeSpace(b)
+		if oka != okb {
+			return okb
+		}
+		if !oka {
+			return false
+		}
+		return ai < bi
+	case sortByLP:
+		ai, oka := itemLP(a)
+		bi, okb := itemLP(b)
+		if oka != okb {
+			return okb
+		}
+		if !oka {
+			return false
+		}
+		return ai < bi
 	case sortByName:
 		return false
 	}
@@ -168,6 +226,12 @@ type item struct {
 	// (the tables level). Rendered as its own column on those rows.
 	rows    int64
 	hasRows bool
+
+	// pages is the heap page count (BLCKSZ blocks). Rendered as its own
+	// column on the page-inspector tables level so the user can see, before
+	// drilling in, how big a window pg_buffercache-style scans will produce.
+	pages    int64
+	hasPages bool
 }
 
 type screen struct {
@@ -226,6 +290,22 @@ type screen struct {
 	reindexing string
 	// reindexErr is the last REINDEX failure, shown until the next attempt.
 	reindexErr error
+
+	// Page-inspector state. levelHeapPages renders a window of the heap's
+	// page array; PgUp/PgDn moves the window in heapWindowCount-sized
+	// steps. heapPageCount comes from pg_class.relpages and clamps the
+	// upper bound — required since get_raw_page errors past EOF.
+	heapWindowStart int32
+	heapWindowCount int32
+	heapPageCount   int32
+
+	// levelHeapTuples: which page we drilled into.
+	heapPageBlkno int32
+
+	// levelTupleRow: the ctid we're showing. Carries (block,offset) text so
+	// the SQL bind doesn't have to re-derive it from heapPageBlkno + LP —
+	// the line pointer might be a REDIRECT pointing at a different page.
+	tupleCtid string
 }
 
 // reindexBloatThreshold is the bloat % above which the parts view offers an
@@ -237,9 +317,11 @@ const reindexBloatThreshold = 0.05
 const (
 	extBufferCache = "pg_buffercache"
 	extPgStatTuple = "pgstattuple"
+	extPageInspect = "pageinspect"
 
 	extPromptReasonBufferCache = "shared_buffers view requires the pg_buffercache extension"
 	extPromptReasonPgStatTuple = "exact bloat measurements are available with pgstattuple"
+	extPromptReasonPageInspect = "Page inspector requires the pageinspect extension"
 )
 
 // extPrompt is the per-screen "install this extension?" affordance.
@@ -296,6 +378,7 @@ func toolItems() []item {
 	return []item{
 		{name: "Disk usage", detail: "browse tables by total relation size on disk", hasChildren: true, data: toolDisk},
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
+		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 	}
 }
 
@@ -322,7 +405,24 @@ func schemaDetail(sc pg.Schema) string {
 	return fmt.Sprintf("%d tables", sc.TableCount)
 }
 
-func tableToItem(t pg.Table) item {
+func tableToItem(t pg.Table, tl tool) item {
+	// In the page-inspector flow only the heap is browsable — indexes and
+	// toast aren't reachable through this drill path. Sizing the row by
+	// total-relation-size (and showing the heap/idx/toast breakdown) would
+	// suggest otherwise, so we show heap-only stats and surface the page
+	// count instead — that's the figure the user actually navigates next.
+	if tl == toolPageInspect {
+		pages := t.HeapBytes / heapPageBlockSize
+		if t.HeapBytes%heapPageBlockSize != 0 {
+			pages++
+		}
+		return item{
+			name: t.Name, size: t.HeapBytes, hasChildren: true,
+			data: t,
+			rows: t.EstRows, hasRows: true,
+			pages: pages, hasPages: true,
+		}
+	}
 	// Tables with a tiny TOAST relation (empty or a handful of out-of-line
 	// values) clutter the detail line with a near-zero figure. Hide TOAST
 	// below 1 MiB — the colored bar segment is already 0-width at that scale.
@@ -340,6 +440,94 @@ func tableToItem(t pg.Table) item {
 		heap: t.HeapBytes, idx: t.IndexesBytes, toast: t.ToastBytes,
 		rows: t.EstRows, hasRows: true,
 	}
+}
+
+// heapPageBlockSize is the standard PostgreSQL page size. pgdu doesn't talk
+// to clusters with non-default BLCKSZ; if it ever needs to, this becomes a
+// per-connection setting read from current_setting('block_size').
+const heapPageBlockSize int64 = 8192
+
+func heapPageToItem(p pg.HeapPageStat) item {
+	// Used bytes scale the bar against a fixed BLCKSZ so every row in the
+	// heap-pages view shares the same horizontal scale — the eye can
+	// compare occupancy across pages without re-reading the numbers.
+	used := heapPageBlockSize - int64(p.FreeBytes)
+	if used < 0 {
+		used = 0
+	}
+	return item{
+		name: fmt.Sprintf("page #%07d", p.Blkno),
+		size: used,
+		data: p,
+	}
+}
+
+func heapTupleToItem(t pg.HeapTuple) item {
+	// hasChildren is set only for NORMAL line pointers — DEAD/UNUSED have
+	// no row to fetch, and REDIRECT points at a target on (potentially)
+	// another page that we'd need to chase, which the row-detail view
+	// doesn't currently do.
+	return item{
+		name:        fmt.Sprintf("#%04d", t.LP),
+		size:        int64(t.LPLen),
+		hasChildren: t.LPFlags == pg.LPNormal && t.Ctid != nil,
+		data:        t,
+	}
+}
+
+func tupleCellToItem(c pg.TupleCell) item {
+	v := "NULL"
+	if c.Value != nil {
+		v = *c.Value
+	}
+	return item{
+		name:   c.Name,
+		detail: v,
+		data:   c,
+	}
+}
+
+// itemBlkno extracts the block number from a heap-page item. Returns
+// (0, false) for non-heap-page items so they sort below pages we can rank.
+func itemBlkno(it item) (int64, bool) {
+	p, ok := it.data.(pg.HeapPageStat)
+	if !ok {
+		return 0, false
+	}
+	return p.Blkno, true
+}
+
+// itemDeadRatio is DeadLP / (LiveLP + DeadLP) for heap-page items; second
+// return is false for empty pages, so they don't dominate the dead% sort.
+func itemDeadRatio(it item) (float64, bool) {
+	p, ok := it.data.(pg.HeapPageStat)
+	if !ok {
+		return 0, false
+	}
+	r := p.DeadFrac()
+	if r < 0 {
+		return 0, false
+	}
+	return r, true
+}
+
+// itemFreeSpace returns the per-page free bytes; second return is false for
+// non-heap-page items.
+func itemFreeSpace(it item) (int64, bool) {
+	p, ok := it.data.(pg.HeapPageStat)
+	if !ok {
+		return 0, false
+	}
+	return int64(p.FreeBytes), true
+}
+
+// itemLP extracts the line-pointer index for heap-tuple items.
+func itemLP(it item) (int64, bool) {
+	t, ok := it.data.(pg.HeapTuple)
+	if !ok {
+		return 0, false
+	}
+	return int64(t.LP), true
 }
 
 func bufferStatToItem(s pg.TableBufferStat) item {
@@ -515,6 +703,12 @@ func levelLabel(l level) string {
 		return "parts"
 	case levelColumns:
 		return "columns"
+	case levelHeapPages:
+		return "heap-pages"
+	case levelHeapTuples:
+		return "heap-tuples"
+	case levelTupleRow:
+		return "tuple-row"
 	}
 	return "?"
 }

@@ -200,6 +200,94 @@ SELECT
 FROM pg_buffercache
 `
 
+// --- page inspector ---
+
+// sqlHeapPagesSummary aggregates per-page heap stats across a window of
+// blocks. One get_raw_page call per page is unavoidable; the LATERAL-style
+// LEFT JOIN over heap_page_items lets us read the LP array once per page and
+// derive every counter we care about in a single pass. The hot/external
+// filters mirror access/htup_details.h: HEAP_HOT_UPDATED is bit 0x4000 of
+// t_infomask2, HEAP_HASEXTERNAL is bit 0x0004 of t_infomask.
+const sqlHeapPagesSummary = `
+WITH pages AS (
+  SELECT g.blkno, get_raw_page($1, 'main', g.blkno) AS raw
+  FROM   generate_series($2::int, $2::int + $3::int - 1) AS g(blkno)
+),
+hdr AS (
+  SELECT p.blkno, (page_header(p.raw)).*
+  FROM   pages p
+),
+items AS (
+  SELECT p.blkno,
+         COUNT(*) FILTER (WHERE i.lp_flags = 1)                              AS live_lp,
+         COUNT(*) FILTER (WHERE i.lp_flags = 2)                              AS redirect_lp,
+         COUNT(*) FILTER (WHERE i.lp_flags = 3)                              AS dead_lp,
+         COUNT(*) FILTER (WHERE i.lp_flags = 0)                              AS unused_lp,
+         COALESCE(SUM(i.lp_len) FILTER (WHERE i.lp_flags = 1), 0)::bigint    AS live_bytes,
+         COALESCE(SUM(i.lp_len) FILTER (WHERE i.lp_flags = 3), 0)::bigint    AS dead_bytes,
+         COUNT(*) FILTER (WHERE (i.t_infomask2 & 16384) <> 0)                AS hot_updated,
+         COUNT(*) FILTER (WHERE (i.t_infomask  & 4) <> 0)                    AS has_external
+  FROM   pages p
+  LEFT   JOIN heap_page_items(p.raw) i ON true
+  GROUP  BY p.blkno
+)
+SELECT  h.blkno::bigint,
+        h.lsn::text,
+        h.lower::int, h.upper::int, h.special::int, h.pagesize::int, h.flags::int,
+        (h.upper - h.lower)::int                                              AS free_bytes,
+        COALESCE(it.live_lp, 0)::int,
+        COALESCE(it.redirect_lp, 0)::int,
+        COALESCE(it.dead_lp, 0)::int,
+        COALESCE(it.unused_lp, 0)::int,
+        COALESCE(it.live_bytes, 0)::bigint,
+        COALESCE(it.dead_bytes, 0)::bigint,
+        COALESCE(it.hot_updated, 0)::int,
+        COALESCE(it.has_external, 0)::int
+FROM    hdr h
+LEFT    JOIN items it ON it.blkno = h.blkno
+ORDER   BY h.blkno
+`
+
+// sqlHeapTuples returns the line-pointer array for one page in t_ctid order.
+// t_xmin / t_xmax / t_oid / t_bits / t_data are NULL for unused or redirect
+// line pointers — the caller scans into pointer targets so a NULL doesn't
+// abort the row.
+const sqlHeapTuples = `
+SELECT lp::int, lp_off::int, lp_flags::int, lp_len::int,
+       t_xmin, t_xmax, t_field3, t_ctid::text,
+       COALESCE(t_infomask2, 0)::int, COALESCE(t_infomask, 0)::int, t_hoff::int,
+       t_bits, t_oid, t_data
+FROM   heap_page_items(get_raw_page($1, 'main', $2::int))
+ORDER  BY lp
+`
+
+// sqlTupleRow fetches one heap row by ctid and explodes it into (column,
+// value) pairs preserving declared column order. json_each_text emits keys
+// in the order they appear in the json object, and row_to_json walks
+// pg_attribute in attnum order — together that gives a faithful
+// "SELECT * FROM t" column ordering without us having to read pg_attribute
+// ourselves. NULL values surface as SQL NULL in `v` so the renderer can
+// show them distinctly from an empty string.
+//
+// $1 is the table reference as a regclass-castable text (e.g. "s"."t");
+// $2 is the ctid text "(blk,off)" — both are bind parameters, so no
+// identifier-injection risk.
+const sqlTupleRow = `
+WITH r AS (
+  SELECT row_to_json(t) AS j FROM %s t WHERE ctid = $1::tid
+)
+SELECT key, value FROM r, json_each_text(r.j)
+`
+
+// sqlRelPages reports the current heap block count by dividing the file
+// size by block size. pg_class.relpages is ANALYZE-driven and can lag the
+// real file (zero after TRUNCATE, stale after bulk inserts), which makes it
+// useless as an EOF clamp for get_raw_page; pg_relation_size just stat()s
+// the file and is always accurate.
+const sqlRelPages = `
+SELECT (pg_relation_size($1) / current_setting('block_size')::int)::int
+`
+
 // sqlBufferStats reports per-table shared-buffer footprint and cumulative I/O
 // counters for one schema. Buffer footprint sums the heap, toast and every
 // index for the table, so the "biggest cache hog" answer matches the user's
