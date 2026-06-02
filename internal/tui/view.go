@@ -85,8 +85,10 @@ func (m *Model) View() string {
 		for i := 1; i < contentHeight; i++ {
 			b.WriteString("\n")
 		}
-	case len(s.items) == 0 && s.level != levelDescribe:
+	case len(s.items) == 0 && s.level != levelDescribe && s.level != levelDiagnosticResult:
 		// levelDescribe never populates items — it renders from s.describe.
+		// levelDiagnosticResult with 0 items means the query returned no rows,
+		// which is valid; fall through to the renderer which shows "(no rows)".
 		b.WriteString("  (no items)\n")
 		for i := 1; i < contentHeight; i++ {
 			b.WriteString("\n")
@@ -111,6 +113,10 @@ func (m *Model) View() string {
 			b.WriteString(m.renderIndexTuplesList(s, contentHeight))
 		case levelDescribe:
 			b.WriteString(m.renderDescribe(s, contentHeight))
+		case levelDiagnostics:
+			b.WriteString(m.renderDiagnosticList(s, contentHeight))
+		case levelDiagnosticResult:
+			b.WriteString(m.renderDiagResult(s, contentHeight))
 		default:
 			b.WriteString(m.renderList(s, contentHeight))
 		}
@@ -192,10 +198,23 @@ func (m *Model) renderHeader() string {
 // cursor position (e.g. "12/438"), current level, and a bloat-scan
 // progress indicator on the parts level.
 func (m *Model) renderStatus(s *screen) string {
+	sortLabel := s.sort.label(s.sortDesc)
+	if s.diagCols != nil && s.diagSortCol < len(s.diagCols) {
+		// Generic diagnostic-table: show the active column name and direction
+		// instead of the sortMode label (which is meaningless here).
+		arrow := "↑"
+		if s.sortDesc {
+			arrow = "↓"
+		}
+		sortLabel = s.diagCols[s.diagSortCol].Name + arrow
+	}
 	parts := []string{
-		"sort: " + s.sort.label(s.sortDesc),
+		"sort: " + sortLabel,
 		positionLabel(s),
 		"level: " + levelLabel(s.level),
+	}
+	if s.level == levelDiagnosticResult && s.diag != nil {
+		parts = append(parts, "query: "+s.diag.Title)
 	}
 	if bs := bloatScanLabel(s); bs != "" {
 		parts = append(parts, bs)
@@ -249,6 +268,12 @@ func (m *Model) breadcrumb() string {
 			parts = append(parts, sc.index.Name)
 		case levelIndexTuples:
 			parts = append(parts, fmt.Sprintf("page #%d", sc.indexPageBlkno))
+		case levelDiagnostics:
+			parts = append(parts, "tools")
+		case levelDiagnosticResult:
+			if sc.diag != nil {
+				parts = append(parts, sc.diag.Title)
+			}
 		}
 	}
 	out := make([]string, len(parts))
@@ -1864,4 +1889,310 @@ func tupleInfomaskBadges(infomask, infomask2 int32) string {
 		badge("HEAP_ONLY", styleHeapHot)
 	}
 	return strings.Join(parts, "")
+}
+
+// ── Diagnostics tool renderers ────────────────────────────────────────────────
+
+// renderDiagnosticList renders the flat list of available diagnostic queries at
+// levelDiagnostics. Layout: cursor | [category] | title | muted description.
+func (m *Model) renderDiagnosticList(s *screen, height int) string {
+	vis := s.visibleIndexes()
+	rowsH := height
+	if rowsH > 0 {
+		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
+	}
+	end := min(s.offset+rowsH, len(vis))
+
+	var b strings.Builder
+	for vi := s.offset; vi < end; vi++ {
+		it := s.items[vis[vi]]
+		selected := vi == s.cursor
+		cursor := "  "
+		name := it.name
+		if selected {
+			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
+			name = styleSelected.Render(name)
+		}
+		detail := ""
+		if it.detail != "" {
+			detail = "  " + styleMuted.Render(it.detail)
+		}
+		b.WriteString(cursor + name + detail + "\n")
+	}
+	for i := end - s.offset; i < rowsH; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// diagColWidth is the maximum per-column display width in the result table.
+// Wide values (long SQL definitions, grants) are truncated with "…" so the
+// row fits in the terminal.
+const diagColWidth = 36
+
+// renderDiagResult renders the result table for a selected diagnostic query.
+// It computes per-column widths, renders a header with the active sort marked
+// by an arrow, and optionally renders a bar for the headline column.
+func (m *Model) renderDiagResult(s *screen, height int) string {
+	var b strings.Builder
+
+	if s.diagCols == nil || !s.loaded {
+		// Still loading (shouldn't normally reach here — View guards it).
+		for i := 0; i < height; i++ {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+
+	if len(s.items) == 0 {
+		b.WriteString("  " + styleMuted.Render("(no rows)") + "\n")
+		for i := 1; i < height; i++ {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+
+	cols := s.diagCols
+	nCols := len(cols)
+	barCol := s.diagBarCol
+
+	// Determine bar column type up front — needed in the colW computation below.
+	barIsPercent := barCol >= 0 && barCol < nCols && cols[barCol].Kind == pg.DiagPercent
+	barIsBytes := barCol >= 0 && barCol < nCols && cols[barCol].Kind == pg.DiagBytes
+
+	// Compute per-column display widths from the header and all visible rows,
+	// capped at diagColWidth so wide text columns don't dominate the layout.
+	// The bar column's width applies to the number that sits after the bar,
+	// not the bar itself.
+	colW := make([]int, nCols)
+	for i, c := range cols {
+		colW[i] = lipgloss.Width(c.Name)
+	}
+	for _, it := range s.items {
+		row, ok := it.data.([]pg.DiagCell)
+		if !ok {
+			continue
+		}
+		for i, cell := range row {
+			if i >= nCols {
+				break
+			}
+			display := cell.Display
+			// For bytes bar columns, humanize.Bytes is displayed instead.
+			if i == barCol && barIsBytes && cell.HasNum {
+				display = humanize.Bytes(int64(cell.Num))
+			}
+			w := lipgloss.Width(display)
+			if w > colW[i] {
+				colW[i] = w
+			}
+			if colW[i] > diagColWidth {
+				colW[i] = diagColWidth
+			}
+		}
+	}
+
+	// Bar width: whatever remains after fixed columns (capped).
+	// Reserve: 2 (cursor) + sum(colW + 2 gutter) for all cols + 2 (bar brackets) for bar col.
+	// The bar col contributes both barW+brackets and colW[barCol]+gutter, but we
+	// solve for barW so we subtract colW[barCol]+gutter separately.
+	fixedW := 2 // cursor
+	for i, w := range colW {
+		fixedW += w + colGutter
+		if i == barCol {
+			fixedW += colBrackets // additional [  ] around the bar itself
+		}
+	}
+	barW := m.width - fixedW
+	if barW < barWidthMin {
+		barW = barWidthMin
+	}
+	if barW > barWidthMax {
+		barW = barWidthMax
+	}
+
+	// Collect bar column numeric max across all items for scaling.
+	var barMax float64
+	if barCol >= 0 {
+		for _, it := range s.items {
+			row, ok := it.data.([]pg.DiagCell)
+			if !ok || barCol >= len(row) {
+				continue
+			}
+			if row[barCol].HasNum && row[barCol].Num > barMax {
+				barMax = row[barCol].Num
+			}
+		}
+	}
+
+	// ── header ──────────────────────────────────────────────────────────────
+	arrow := "↑"
+	if s.sortDesc {
+		arrow = "↓"
+	}
+	mark := func(label string, colIdx int) string {
+		if colIdx == s.diagSortCol {
+			return label + arrow
+		}
+		return label
+	}
+
+	var hdr strings.Builder
+	hdr.WriteString(strings.Repeat(" ", 2)) // cursor placeholder
+	for i, c := range cols {
+		if i == barCol {
+			// Bar area: [barW chars] + gutter + number column (colW[i]).
+			hdr.WriteString(strings.Repeat(" ", barW+colBrackets+colGutter))
+			hdr.WriteString(padRight(mark(c.Name, i), colW[i]))
+			hdr.WriteString(strings.Repeat(" ", colGutter))
+			continue
+		}
+		hdr.WriteString(padRight(mark(c.Name, i), colW[i]))
+		hdr.WriteString(strings.Repeat(" ", colGutter))
+	}
+	b.WriteString(styleMuted.Render(hdr.String()) + "\n")
+
+	// ── rows ────────────────────────────────────────────────────────────────
+	vis := s.visibleIndexes()
+	rowsH := height - 1 // header consumes one line
+	if rowsH < 0 {
+		rowsH = 0
+	}
+	if rowsH > 0 {
+		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
+	}
+	end := min(s.offset+rowsH, len(vis))
+
+	for vi := s.offset; vi < end; vi++ {
+		it := s.items[vis[vi]]
+		row, ok := it.data.([]pg.DiagCell)
+		selected := vi == s.cursor
+
+		cursor := "  "
+		if selected {
+			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
+		}
+
+		var line strings.Builder
+		line.WriteString(cursor)
+
+		if !ok {
+			line.WriteString("\n")
+			b.WriteString(line.String())
+			continue
+		}
+
+		for i := 0; i < nCols; i++ {
+			var cell pg.DiagCell
+			if i < len(row) {
+				cell = row[i]
+			}
+
+			if i == barCol {
+				// Render bar + number.
+				var barStr string
+				if cell.HasNum {
+					scaleMax := barMax
+					if barIsPercent {
+						scaleMax = 100
+					}
+					if scaleMax <= 0 {
+						scaleMax = 1
+					}
+					filled := int(float64(barW) * cell.Num / scaleMax)
+					if filled > barW {
+						filled = barW
+					}
+					if filled < 0 {
+						filled = 0
+					}
+					style := styleBar
+					if barIsPercent {
+						style = percentStyle(cell.Num)
+					}
+					barStr = paintBar(barW, barSegment{cells: filled, style: style})
+				} else {
+					barStr = paintBar(barW) // empty bar for null cells
+				}
+
+				numStr := cell.Display
+				if barIsBytes && cell.HasNum {
+					numStr = humanize.Bytes(int64(cell.Num))
+				}
+				if selected {
+					numStr = styleSelected.Render(numStr)
+				}
+				line.WriteString(barStr)
+				line.WriteString(strings.Repeat(" ", colGutter))
+				line.WriteString(padRight(numStr, colW[i]))
+				line.WriteString(strings.Repeat(" ", colGutter))
+				continue
+			}
+
+			display := truncateDiagCell(cell.Display, colW[i])
+			isNumeric := cell.HasNum || (i < nCols && (cols[i].Kind == pg.DiagInt ||
+				cols[i].Kind == pg.DiagFloat || cols[i].Kind == pg.DiagPercent || cols[i].Kind == pg.DiagBytes))
+
+			var rendered string
+			if isNumeric {
+				rendered = padLeft(display, colW[i])
+			} else {
+				rendered = padRight(display, colW[i])
+			}
+			if selected {
+				rendered = styleSelected.Render(rendered)
+			}
+			line.WriteString(rendered)
+			line.WriteString(strings.Repeat(" ", colGutter))
+		}
+
+		// Truncate line to terminal width so wide result tables don't wrap.
+		lineStr := line.String()
+		if m.width > 4 && lipgloss.Width(lineStr) > m.width {
+			lineStr = truncateToWidth(lineStr, m.width)
+		}
+		b.WriteString(lineStr + "\n")
+	}
+
+	// Pad to height with blank lines so help stays pinned.
+	for i := end - s.offset; i < rowsH; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// truncateDiagCell clips a cell value to maxW cells, appending "…" when the
+// value is wider than the cap.
+func truncateDiagCell(s string, maxW int) string {
+	if lipgloss.Width(s) <= maxW {
+		return s
+	}
+	r := []rune(s)
+	for len(r) > 0 && lipgloss.Width(string(r))+1 > maxW {
+		r = r[:len(r)-1]
+	}
+	return string(r) + "…"
+}
+
+// padLeft right-aligns s in a field of width n (like padRight but for numbers).
+func padLeft(s string, n int) string {
+	w := lipgloss.Width(s)
+	if w >= n {
+		return s
+	}
+	return strings.Repeat(" ", n-w) + s
+}
+
+// truncateToWidth clips a rendered string to at most width terminal cells.
+// Strips trailing partial-width characters and appends "…" so the result
+// never exceeds width.
+func truncateToWidth(s string, width int) string {
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	r := []rune(s)
+	for len(r) > 0 && lipgloss.Width(string(r))+1 > width {
+		r = r[:len(r)-1]
+	}
+	return string(r) + "…"
 }

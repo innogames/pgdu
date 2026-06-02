@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
@@ -390,4 +392,42 @@ func (m *Model) onReindexDone(msg reindexDoneMsg) tea.Cmd {
 	s.reindexErr = nil
 	// Refresh: the index has been rebuilt, so size and bloat have changed.
 	return m.loadCurrent()
+}
+
+func (m *Model) onDiagnosticLoaded(msg diagnosticLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelDiagnosticResult)
+	if s == nil || s.diag == nil || s.diag.Key != msg.key {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	s.err = msg.err
+	s.items = s.items[:0]
+	if msg.err != nil || msg.result == nil {
+		return nil
+	}
+	s.diagCols = msg.result.Columns
+	s.diagBarCol = msg.result.BarCol
+	// Default sort: headline bar column (biggest first) if present, else col 0.
+	if s.diagBarCol >= 0 {
+		s.diagSortCol = s.diagBarCol
+		s.sortDesc = true
+	} else {
+		s.diagSortCol = 0
+		s.sortDesc = false
+	}
+	// Convert each result row to an item. item.name is the space-joined cell
+	// display so the existing fuzzy filter can match any column value.
+	for _, row := range msg.result.Rows {
+		parts := make([]string, len(row))
+		for i, cell := range row {
+			parts[i] = cell.Display
+		}
+		s.items = append(s.items, item{
+			name: strings.Join(parts, " "),
+			data: row, // []pg.DiagCell
+		})
+	}
+	m.applySort(s)
+	return nil
 }

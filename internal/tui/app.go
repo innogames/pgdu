@@ -30,6 +30,8 @@ const (
 	levelIndexPages
 	levelIndexTuples
 	levelDescribe
+	levelDiagnostics      // flat list of diagnostic queries (toolTools)
+	levelDiagnosticResult // result table for a selected diagnostic query
 )
 
 // tool identifies which top-level statistic the user is exploring.
@@ -40,6 +42,7 @@ const (
 	toolDisk tool = iota
 	toolBuffers
 	toolPageInspect
+	toolTools // diagnostic SQL query runner
 )
 
 func (t tool) Name() string {
@@ -50,6 +53,8 @@ func (t tool) Name() string {
 		return "buffers"
 	case toolPageInspect:
 		return "pageinspect"
+	case toolTools:
+		return "tools"
 	}
 	return "?"
 }
@@ -340,6 +345,15 @@ type screen struct {
 	// describe holds the loaded \d-style description for levelDescribe screens.
 	// Nil until the async load completes.
 	describe *pg.Description
+
+	// Diagnostic-runner state (levelDiagnostics / levelDiagnosticResult).
+	// diag is the selected query; diagCols is non-nil once the result is
+	// loaded and switches the sort/render path to the generic table model.
+	// diagSortCol is the index of the currently active sort column.
+	diag        *pg.Diagnostic
+	diagCols    []pg.DiagColumn
+	diagBarCol  int // headline bar column index, or -1
+	diagSortCol int // active sort column index for the generic table
 }
 
 // reindexBloatThreshold is the bloat % above which the parts view offers an
@@ -413,7 +427,24 @@ func toolItems() []item {
 		{name: "Disk usage", detail: "browse tables by total relation size on disk", hasChildren: true, data: toolDisk},
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
+		{name: "Tools", detail: "run diagnostic queries — index / table / vacuum / server health", hasChildren: true, data: toolTools},
 	}
+}
+
+// diagnosticItems builds the static list of available diagnostic queries shown
+// at levelDiagnostics. Each item carries the Diagnostic value as its .data so
+// drillIn can type-assert it and push a result screen.
+func diagnosticItems() []item {
+	items := make([]item, len(pg.Diagnostics))
+	for i, d := range pg.Diagnostics {
+		items[i] = item{
+			name:        d.Title,
+			detail:      "[" + d.Category + "]  " + d.Description,
+			hasChildren: true,
+			data:        d,
+		}
+	}
+	return items
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -813,6 +844,10 @@ func levelLabel(l level) string {
 		return "index-tuples"
 	case levelDescribe:
 		return "describe"
+	case levelDiagnostics:
+		return "diagnostics"
+	case levelDiagnosticResult:
+		return "diag-result"
 	}
 	return "?"
 }

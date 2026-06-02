@@ -8,7 +8,44 @@ import (
 
 // applySort orders s.items by s.sort/s.sortDesc, using Name as a stable
 // tiebreaker so reversing direction doesn't shuffle equal rows arbitrarily.
+// For levelDiagnosticResult screens (diagCols != nil) it uses the generic
+// column comparator instead of the sortMode-based one.
 func (m *Model) applySort(s *screen) {
+	if s.diagCols != nil {
+		// Generic diagnostic-table sort: compare by diagSortCol, numeric rows
+		// before text rows (HasNum=false sinks below rows with a value), then
+		// fall back to the first-column Display as a tiebreaker.
+		col := s.diagSortCol
+		sort.SliceStable(s.items, func(i, j int) bool {
+			ri, _ := s.items[i].data.([]pg.DiagCell)
+			rj, _ := s.items[j].data.([]pg.DiagCell)
+			var ci, cj pg.DiagCell
+			if col < len(ri) {
+				ci = ri[col]
+			}
+			if col < len(rj) {
+				cj = rj[col]
+			}
+			// Rows without a numeric value always sort last regardless of
+			// direction so nulls/missing data never pollute the top.
+			if ci.HasNum != cj.HasNum {
+				return ci.HasNum // row with a value always comes first
+			}
+			var less bool
+			if ci.HasNum {
+				less = ci.Num < cj.Num
+			} else {
+				less = ci.Display < cj.Display
+			}
+			if s.sortDesc {
+				return !less
+			}
+			return less
+		})
+		s.clampCursor()
+		return
+	}
+
 	less := s.sort.less
 	sort.SliceStable(s.items, func(i, j int) bool {
 		if less(s.items[i], s.items[j]) {
@@ -87,7 +124,7 @@ func itemRows(it item) (int64, bool) {
 // the default sort for a freshly opened screen.
 func validSorts(l level) []sortMode {
 	switch l {
-	case levelTools:
+	case levelTools, levelDiagnostics:
 		return []sortMode{sortByName}
 	case levelTables:
 		return []sortMode{sortBySize, sortByRows, sortByName}
@@ -112,8 +149,26 @@ func validSorts(l level) []sortMode {
 
 // cycleSort advances s.sort to the next entry in validSorts(s.level) and
 // resets the direction to that column's natural default. Single-entry sort
-// lists (e.g. levelTools) become a no-op.
+// lists (e.g. levelTools) become a no-op. For levelDiagnosticResult the
+// generic column set is cycled instead of sortMode.
 func (m *Model) cycleSort(s *screen) {
+	if s.diagCols != nil {
+		if len(s.diagCols) < 2 {
+			return
+		}
+		s.diagSortCol = (s.diagSortCol + 1) % len(s.diagCols)
+		// Numeric columns default to descending (biggest first);
+		// text columns default to ascending (alphabetical).
+		switch s.diagCols[s.diagSortCol].Kind {
+		case pg.DiagInt, pg.DiagFloat, pg.DiagPercent, pg.DiagBytes:
+			s.sortDesc = true
+		default:
+			s.sortDesc = false
+		}
+		m.applySort(s)
+		return
+	}
+
 	opts := validSorts(s.level)
 	if len(opts) < 2 {
 		return

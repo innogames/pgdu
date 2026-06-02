@@ -112,6 +112,11 @@ type describeLoadedMsg struct {
 	desc *pg.Description
 	err  error
 }
+type diagnosticLoadedMsg struct {
+	key    string // Diagnostic.Key for stale-message rejection
+	result *pg.DiagResult
+	err    error
+}
 
 // --- commands ---
 
@@ -284,4 +289,11 @@ func (m *Model) reindexIndexCmd(t pg.Table, indexName string) tea.Cmd {
 		err := m.client.ReindexIndex(context.Background(), t, indexName)
 		return reindexDoneMsg{tableOID: t.OID, indexName: indexName, err: err}
 	}
+}
+
+func (m *Model) loadDiagnosticCmd(d pg.Diagnostic, db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		result, err := m.client.RunDiagnostic(ctx, db, d)
+		return diagnosticLoadedMsg{key: d.Key, result: result, err: err}
+	})
 }

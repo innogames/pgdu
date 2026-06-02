@@ -19,7 +19,25 @@ func (m *Model) drillIn() tea.Cmd {
 	switch s.level {
 	case levelTools:
 		t := cur.data.(tool)
+		if t == toolTools {
+			// toolTools goes directly to the flat diagnostic-query list, not
+			// through a database picker — all queries run against the default DB.
+			next := &screen{level: levelDiagnostics, title: "tools", tool: toolTools, sort: sortByName, sortDesc: sortByName.defaultDesc()}
+			m.stack = append(m.stack, next)
+			return m.loadCurrent()
+		}
 		next := &screen{level: levelDatabases, title: "databases", tool: t, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
+		m.stack = append(m.stack, next)
+		return m.loadCurrent()
+	case levelDiagnostics:
+		d := cur.data.(pg.Diagnostic)
+		next := &screen{
+			level:      levelDiagnosticResult,
+			title:      d.Title,
+			tool:       toolTools,
+			diag:       &d,
+			diagBarCol: -1,
+		}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
 	case levelDatabases:
@@ -200,6 +218,11 @@ func (m *Model) loadCurrent() tea.Cmd {
 		s.loading = false
 		s.loaded = true
 		return nil
+	case levelDiagnostics:
+		s.items = diagnosticItems()
+		s.loading = false
+		s.loaded = true
+		return nil
 	}
 	s.loading = true
 	s.loaded = false
@@ -261,6 +284,13 @@ func (m *Model) loadCurrent() tea.Cmd {
 		// First load: derive from screen context set during push.
 		if s.table.OID != 0 {
 			return m.loadDescribeTableCmd(s.table)
+		}
+	case levelDiagnosticResult:
+		if s.diag != nil {
+			// Reset generic-table state so a Refresh shows a clean load.
+			s.diagCols = nil
+			s.diagBarCol = -1
+			return m.loadDiagnosticCmd(*s.diag, s.db)
 		}
 	}
 	return nil
