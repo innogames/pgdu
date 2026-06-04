@@ -402,6 +402,14 @@ func (m *Model) renderWALInfo(height int) string {
 	b.WriteString("  " + styleSelected.Render("WAL inspector reference") + mu("  ·  press ") +
 		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
 
+	b.WriteString("  " + styleHeader.Render(" what WAL is ") + "  " +
+		mu("the write-ahead log — Postgres's durability & replication journal") + "\n")
+	b.WriteString("    " + mu("Every change is appended here first, before the data files are touched — that is what makes") + "\n")
+	b.WriteString("    " + mu("crash recovery, point-in-time recovery and replication possible. On disk it is a stream of") + "\n")
+	b.WriteString("    " + mu("16 MB segment files under pg_wal/; a record's byte address in that stream is its LSN (the") + "\n")
+	b.WriteString("    " + mu("hi/lo number shown throughout this tool). WAL is reclaimed once it is no longer needed for") + "\n")
+	b.WriteString("    " + mu("recovery or a replica/slot — runaway pg_wal growth usually means a stuck slot or archiver.") + "\n\n")
+
 	b.WriteString("  " + styleHeader.Render(" this view ") + "  " +
 		mu("write-ahead-log bytes generated in the recent window, grouped by resource manager") + "\n")
 	b.WriteString("    " + mu("Each row is one rmgr — the subsystem that wrote the record (Heap, Btree, Transaction,") + "\n")
@@ -501,7 +509,20 @@ func (m *Model) renderWALBlocksInfo(height int) string {
 	b.WriteString("  " + styleHeader.Render(" the bar & fpi ") + "  " +
 		styleBarAlt.Render("▇") + mu(" full-page-image bytes for this block (empty = the record logged only the change)") + "\n")
 	b.WriteString("    " + padRight("data", 12) + mu("block_data_length — bytes of per-block change data (tuple, offsets, …)") + "\n")
-	b.WriteString("    " + padRight("fpi-info", 12) + mu("flags on the page image, e.g. APPLY (replayed) / hole-compressed") + "\n\n")
+	b.WriteString("    " + padRight("fpi-info", 12) + mu("flags on the page image, e.g. APPLY (replayed) / HAS_HOLE / COMPRESS_*") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" fpi vs data ") + "  " +
+		mu("a change is logged one of three ways — which is why data is so often 0") + "\n")
+	b.WriteString("    " + padRight("image", 12) +
+		mu("first touch of an existing page after a checkpoint copies the whole 8 KiB page") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 12) +
+		mu("into WAL (fpi set); the per-block data is then redundant, so data is 0") + "\n")
+	b.WriteString("    " + padRight("new page", 12) +
+		mu("a page created here (e.g. the right half of a B-tree split) is logged as data") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 12) +
+		mu("with no image — redo reconstructs the page from those bytes") + "\n")
+	b.WriteString("    " + padRight("delta", 12) +
+		mu("a small in-place edit (a link repointed, a flag set) logs just the change, no fpi") + "\n\n")
 
 	b.WriteString("  " + mu("A record with several block refs touched several pages atomically (e.g. an index split,") + "\n")
 	b.WriteString("  " + mu("or a heap update that also stamps the visibility map). This is a leaf view — no further drill.") + "\n")
