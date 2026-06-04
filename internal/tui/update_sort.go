@@ -142,6 +142,12 @@ func validSorts(l level) []sortMode {
 		return []sortMode{sortByBlkno, sortByLevel, sortByDeadRatio, sortByFreeSpace}
 	case levelIndexTuples:
 		return []sortMode{sortByLP, sortBySize}
+	case levelWAL:
+		return []sortMode{sortBySize, sortByCount, sortByFPI, sortByName}
+	case levelWALRecords:
+		return []sortMode{sortBySize, sortByFPI, sortByName}
+	case levelWALBlocks:
+		return []sortMode{sortBySize, sortByName}
 	default:
 		return []sortMode{sortBySize, sortByName}
 	}

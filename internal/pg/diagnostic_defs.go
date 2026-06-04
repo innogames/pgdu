@@ -7,7 +7,7 @@ package pg
 type Diagnostic struct {
 	Key         string // stable identifier (matches the psql-helper filename stem)
 	Title       string // short display name shown in the list
-	Category    string // "index" | "table" | "vacuum" | "server"
+	Category    string // "index" | "table" | "vacuum" | "activity" | "wal" | "server"
 	Description string // one-line explanation shown as detail in the list
 	SQL         string // the query to run (no parameters)
 	Bar         string // headline column name rendered as a bar, or ""
@@ -26,19 +26,22 @@ var Diagnostics = []Diagnostic{
 		SQL:         sqlDiagBloatIndex,
 		Bar:         "bloat_pct",
 	},
-	{
-		Key:         "index_show_all",
-		Title:       "All indexes",
-		Category:    "index",
-		Description: "every index in the public schema with scan counts and size",
-		SQL:         sqlDiagIndexShowAll,
-		Bar:         "number_of_scans",
-	},
+	// "All indexes" was merged into "Index sizes" below (which now also carries
+	// scan counts and the unique flag, across all schemas), so it is no longer a
+	// separate entry. Kept commented for reference rather than deleted.
+	// {
+	// 	Key:         "index_show_all",
+	// 	Title:       "All indexes",
+	// 	Category:    "index",
+	// 	Description: "every index in the public schema with scan counts and size",
+	// 	SQL:         sqlDiagIndexShowAll,
+	// 	Bar:         "number_of_scans",
+	// },
 	{
 		Key:         "index_show_definitions",
 		Title:       "Index definitions",
 		Category:    "index",
-		Description: "CREATE INDEX statement for every index in the public schema",
+		Description: "CREATE INDEX statement for every index in every user schema",
 		SQL:         sqlDiagIndexShowDefinitions,
 		Bar:         "",
 	},
@@ -60,29 +63,32 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "index_show_size",
-		Title:       "Index sizes",
+		Title:       "Indexes",
 		Category:    "index",
-		Description: "all indexes sorted by size with estimated row count and column list",
+		Description: "every index sorted by size, with scan count, unique flag and column list",
 		SQL:         sqlDiagIndexShowSize,
-		Bar:         "estimated_entries",
+		Bar:         "index_size_bytes",
 	},
 	{
 		Key:         "index_show_unused",
 		Title:       "Unused indexes",
 		Category:    "index",
-		Description: "indexes in public schema with 0 scans, ordered by size (candidates for removal)",
+		Description: "indexes with 0 scans across all user schemas, ordered by size (candidates for removal)",
 		SQL:         sqlDiagIndexShowUnused,
-		Bar:         "idx_scan",
+		Bar:         "index_size_bytes",
 	},
 	// ── table ─────────────────────────────────────────────────────────────
-	{
-		Key:         "bloat_all",
-		Title:       "Table + index bloat (approx)",
-		Category:    "table",
-		Description: "estimated table and index bloat using pg_stats (no extensions required)",
-		SQL:         sqlDiagBloatAll,
-		Bar:         "wastedbytes",
-	},
+	// "Table + index bloat (approx)" overlapped the more precise bloat_table and
+	// bloat_index entries (and the main Disk tool's per-part bloat), so it is no
+	// longer registered. Kept commented for reference rather than deleted.
+	// {
+	// 	Key:         "bloat_all",
+	// 	Title:       "Table + index bloat (approx)",
+	// 	Category:    "table",
+	// 	Description: "estimated table and index bloat using pg_stats (no extensions required)",
+	// 	SQL:         sqlDiagBloatAll,
+	// 	Bar:         "wastedbytes",
+	// },
 	{
 		Key:         "bloat_table",
 		Title:       "Table bloat (detailed)",
@@ -121,7 +127,7 @@ var Diagnostics = []Diagnostic{
 		Category:    "table",
 		Description: "total, index, toast and heap sizes rolled up across partition trees",
 		SQL:         sqlDiagTableShowSize,
-		Bar:         "est_row_count",
+		Bar:         "total_bytes",
 	},
 	{
 		Key:         "toast_show_size",
@@ -129,7 +135,7 @@ var Diagnostics = []Diagnostic{
 		Category:    "table",
 		Description: "TOAST tables with their owning table, toastable columns, and live/dead tuple counts",
 		SQL:         sqlDiagToastShowSize,
-		Bar:         "dead_tuples",
+		Bar:         "size_bytes",
 	},
 	// ── vacuum ────────────────────────────────────────────────────────────
 	{
@@ -154,7 +160,41 @@ var Diagnostics = []Diagnostic{
 		Category:    "vacuum",
 		Description: "last vacuum/analyze timestamps, dead tuple counts and autovacuum threshold per table",
 		SQL:         sqlDiagVacuumStats,
-		Bar:         "",
+		Bar:         "dead_tuples",
+	},
+	// ── activity ──────────────────────────────────────────────────────────
+	{
+		Key:         "activity_running",
+		Title:       "Running queries",
+		Category:    "activity",
+		Description: "non-idle backends with state, wait event and how long the statement has run",
+		SQL:         sqlDiagActivityRunning,
+		Bar:         "duration_secs",
+	},
+	{
+		Key:         "connections",
+		Title:       "Connections",
+		Category:    "activity",
+		Description: "connection count per database and state (active, idle, idle in transaction, …)",
+		SQL:         sqlDiagConnections,
+		Bar:         "connections",
+	},
+	// ── wal ───────────────────────────────────────────────────────────────
+	{
+		Key:         "wal_files",
+		Title:       "WAL files",
+		Category:    "wal",
+		Description: "WAL segment files on disk by modification time (needs superuser or pg_monitor)",
+		SQL:         sqlDiagWalFiles,
+		Bar:         "size_bytes",
+	},
+	{
+		Key:         "wal_activity",
+		Title:       "WAL activity",
+		Category:    "wal",
+		Description: "cluster-wide WAL generation counters from pg_stat_wal (PostgreSQL 14+)",
+		SQL:         sqlDiagWalActivity,
+		Bar:         "wal_bytes",
 	},
 	// ── server ────────────────────────────────────────────────────────────
 	{
@@ -163,7 +203,15 @@ var Diagnostics = []Diagnostic{
 		Category:    "server",
 		Description: "size of every database the current user can connect to",
 		SQL:         sqlDiagDatabaseShowSize,
-		Bar:         "",
+		Bar:         "size_bytes",
+	},
+	{
+		Key:         "database_stats",
+		Title:       "Database stats",
+		Category:    "server",
+		Description: "per-database commits, rollbacks, cache hit ratio, deadlocks and temp-file usage",
+		SQL:         sqlDiagDatabaseStats,
+		Bar:         "hit_pct",
 	},
 	{
 		Key:         "foreignkeys_show_all",
@@ -187,7 +235,15 @@ var Diagnostics = []Diagnostic{
 		Category:    "server",
 		Description: "all replication slots with WAL retention, status and activity",
 		SQL:         sqlDiagReplicationSlots,
-		Bar:         "",
+		Bar:         "retained_wal_bytes",
+	},
+	{
+		Key:         "sequences",
+		Title:       "Sequence usage",
+		Category:    "server",
+		Description: "how much of each sequence's range is consumed (last_value needs SELECT/USAGE)",
+		SQL:         sqlDiagSequences,
+		Bar:         "consumed_pct",
 	},
 	{
 		Key:         "settings_show_pending",

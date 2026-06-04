@@ -237,6 +237,22 @@ func (m *Model) onTupleRowLoaded(msg tupleRowLoadedMsg) tea.Cmd {
 	return nil
 }
 
+func (m *Model) onToastValueLoaded(msg toastValueLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelTupleRow)
+	if s == nil || s.table.OID != msg.tableOID || s.toastChunkID != msg.chunkID {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, c := range msg.cells {
+		s.items = append(s.items, tupleCellToItem(c))
+	}
+	m.applySort(s)
+	return nil
+}
+
 func (m *Model) onHeapTuplesLoaded(msg heapTuplesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelHeapTuples)
 	if s == nil || s.table.OID != msg.tableOID || s.heapPageBlkno != msg.blkno {
@@ -376,6 +392,120 @@ func (m *Model) onDescribeLoaded(msg describeLoadedMsg) tea.Cmd {
 	s.loaded = true
 	s.err = msg.err
 	s.describe = msg.desc
+	return nil
+}
+
+func (m *Model) onWALOverviewLoaded(msg walOverviewLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelWAL)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		s.err = nil
+		s.extPrompt = &extPrompt{
+			name:        ext.Extension,
+			db:          ext.DB,
+			installable: ext.Installable,
+			reason:      extPromptReasonWALInspect,
+			blocking:    true,
+		}
+		s.items = s.items[:0]
+		return nil
+	}
+	s.err = msg.err
+	s.walStart = msg.start
+	s.walEnd = msg.end
+	s.items = s.items[:0]
+	for _, st := range msg.stats {
+		s.items = append(s.items, walRmgrToItem(st))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onWALSummaryLoaded(msg walSummaryLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelWAL)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	// Summary failure is non-fatal: the header sources (pg_ls_waldir /
+	// pg_stat_wal) need a monitoring role the user may lack even when the
+	// pg_walinspect rmgr list works. A missing-extension error here is
+	// already covered by onWALOverviewLoaded's blocking prompt, so swallow it.
+	if asMissingExt(msg.err) != nil {
+		return nil
+	}
+	if msg.err != nil {
+		s.walSummaryErr = msg.err
+		s.walSummary = nil
+		return nil
+	}
+	sum := msg.summary
+	sum.StartLSN = s.walStart
+	sum.EndLSN = s.walEnd
+	sum.WindowBytes = walWindowBytes
+	s.walSummary = &sum
+	s.walSummaryErr = nil
+	return nil
+}
+
+func (m *Model) onWALRecordsLoaded(msg walRecordsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelWALRecords)
+	if s == nil || s.db != msg.db || s.walRmgr != msg.rmgr {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		s.err = nil
+		s.extPrompt = &extPrompt{
+			name:        ext.Extension,
+			db:          ext.DB,
+			installable: ext.Installable,
+			reason:      extPromptReasonWALInspect,
+			blocking:    true,
+		}
+		s.items = s.items[:0]
+		s.walRecTypeStats = nil
+		return nil
+	}
+	s.err = msg.err
+	s.walRecTypeStats = msg.typeStats
+	s.items = s.items[:0]
+	for _, r := range msg.records {
+		s.items = append(s.items, walRecordToItem(r))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onWALBlocksLoaded(msg walBlocksLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelWALBlocks)
+	if s == nil || s.db != msg.db || s.walRecLSN != msg.recLSN {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		s.err = nil
+		s.extPrompt = &extPrompt{
+			name:        ext.Extension,
+			db:          ext.DB,
+			installable: ext.Installable,
+			reason:      extPromptReasonWALInspect,
+			blocking:    true,
+		}
+		s.items = s.items[:0]
+		return nil
+	}
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, b := range msg.blocks {
+		s.items = append(s.items, walBlockToItem(b))
+	}
+	m.applySort(s)
 	return nil
 }
 

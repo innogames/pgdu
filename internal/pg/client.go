@@ -26,6 +26,9 @@ type Client struct {
 
 	// True once pageinspect is known to be installed in a given database.
 	pageInspectReady map[string]bool
+
+	// True once pg_walinspect is known to be installed in a given database.
+	walInspectReady map[string]bool
 }
 
 type BloatMode int
@@ -43,6 +46,7 @@ func New(cfg cli.Config) *Client {
 		bloatProbed:      map[string]BloatMode{},
 		bufCacheReady:    map[string]bool{},
 		pageInspectReady: map[string]bool{},
+		walInspectReady:  map[string]bool{},
 	}
 }
 

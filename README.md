@@ -64,6 +64,22 @@ Honors the usual libpq environment: `PGHOST`, `PGPORT`, `PGUSER`,
 | `?`            | help                  |
 | `q`            | quit                  |
 
+## Sample data
+
+To try pgdu against a database with varied relations — heap-heavy and
+index-heavy tables, several index types (btree, partial, GIN trigram, GIN
+jsonb), out-of-line TOAST columns, and some bloat — load
+[`docs/sample-data.sql`](docs/sample-data.sql):
+
+```sh
+createdb pgdu_test
+psql -d pgdu_test -f docs/sample-data.sql
+pgdu -d pgdu_test
+```
+
+It creates `app`, `analytics`, and `archive` schemas (~430 MB total) and is
+safe to re-run — each table is dropped and rebuilt.
+
 ## Requirements
 
 - PostgreSQL 12+

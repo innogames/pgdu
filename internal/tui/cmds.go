@@ -87,6 +87,12 @@ type tupleRowLoadedMsg struct {
 	cells    []pg.TupleCell
 	err      error
 }
+type toastValueLoadedMsg struct {
+	tableOID uint32
+	chunkID  uint32
+	cells    []pg.TupleCell
+	err      error
+}
 type relationsLoadedMsg struct {
 	db, schema string
 	rels       []pg.Relation
@@ -115,6 +121,31 @@ type describeLoadedMsg struct {
 type diagnosticLoadedMsg struct {
 	key    string // Diagnostic.Key for stale-message rejection
 	result *pg.DiagResult
+	err    error
+}
+type walOverviewLoadedMsg struct {
+	db    string
+	start string // resolved window start LSN
+	end   string // resolved window end LSN
+	stats []pg.WALRmgrStat
+	err   error
+}
+type walSummaryLoadedMsg struct {
+	db      string
+	summary pg.WALSummary
+	err     error
+}
+type walRecordsLoadedMsg struct {
+	db        string
+	rmgr      string
+	records   []pg.WALRecord
+	typeStats []pg.WALRmgrStat // per-record-type breakdown for the summary table
+	err       error
+}
+type walBlocksLoadedMsg struct {
+	db     string
+	recLSN string
+	blocks []pg.WALBlockRef
 	err    error
 }
 
@@ -241,6 +272,13 @@ func (m *Model) loadTupleRowCmd(t pg.Table, ctid string) tea.Cmd {
 	})
 }
 
+func (m *Model) loadToastValueCmd(t pg.Table, chunkID uint32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		cells, err := m.client.ReadToastValue(ctx, t, chunkID)
+		return toastValueLoadedMsg{tableOID: t.OID, chunkID: chunkID, cells: cells, err: err}
+	})
+}
+
 func (m *Model) loadRelationsCmd(db, schema string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		rs, err := m.client.ListRelations(ctx, db, schema)
@@ -295,5 +333,49 @@ func (m *Model) loadDiagnosticCmd(d pg.Diagnostic, db string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		result, err := m.client.RunDiagnostic(ctx, db, d)
 		return diagnosticLoadedMsg{key: d.Key, result: result, err: err}
+	})
+}
+
+// walWindowBytes is how much recent WAL the inspector analyses by default:
+// one 16 MiB segment up to the current write head. Big enough to be
+// interesting, small enough that pg_get_wal_stats / _records_info stay snappy
+// under the 30 s query cap on a busy server.
+const walWindowBytes int64 = 16 << 20
+
+func (m *Model) loadWALOverviewCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		start, end, err := m.client.WALWindow(ctx, db, walWindowBytes)
+		if err != nil {
+			return walOverviewLoadedMsg{db: db, err: err}
+		}
+		stats, err := m.client.WALRmgrStats(ctx, db, start, end)
+		return walOverviewLoadedMsg{db: db, start: start, end: end, stats: stats, err: err}
+	})
+}
+
+func (m *Model) loadWALSummaryCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		sum, err := m.client.WALOverview(ctx, db)
+		return walSummaryLoadedMsg{db: db, summary: sum, err: err}
+	})
+}
+
+func (m *Model) loadWALRecordsCmd(db, start, end, rmgr string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		recs, err := m.client.WALRecords(ctx, db, start, end, rmgr)
+		if err != nil {
+			return walRecordsLoadedMsg{db: db, rmgr: rmgr, err: err}
+		}
+		// Best-effort: the per-type summary is decoration over the record
+		// list, so a failure here shouldn't drop the whole load.
+		stats, _ := m.client.WALRecordTypeStats(ctx, db, start, end, rmgr)
+		return walRecordsLoadedMsg{db: db, rmgr: rmgr, records: recs, typeStats: stats}
+	})
+}
+
+func (m *Model) loadWALBlocksCmd(db, recLSN, recEnd string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		blocks, err := m.client.WALBlocks(ctx, db, recLSN, recEnd)
+		return walBlocksLoadedMsg{db: db, recLSN: recLSN, blocks: blocks, err: err}
 	})
 }

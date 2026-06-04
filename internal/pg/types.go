@@ -2,6 +2,7 @@ package pg
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -105,20 +106,24 @@ type Part struct {
 }
 
 // RelationKind discriminates a row in the page-inspector relation list: heap
-// table vs. B-tree index. Other access methods aren't drillable here so they
-// don't get a kind.
+// table vs. B-tree index vs. TOAST heap. Other access methods aren't drillable
+// here so they don't get a kind.
 type RelationKind int
 
 const (
 	RelTable RelationKind = iota
 	RelBTreeIndex
+	// RelToast is a TOAST storage heap (relkind 't'). Its heap pages drill the
+	// same way as RelTable; the line-pointer list additionally decodes
+	// chunk_id/chunk_seq for each live chunk.
+	RelToast
 )
 
-// Relation is one entry in the page-inspector tool's mixed table+index list.
-// Carries everything later screens need (OID for get_raw_page, qualified name
-// for regclass binds, est-rows/pages for the row summary). For RelBTreeIndex
-// rows ParentOID/ParentName name the table the index belongs to so the list
-// stays comprehensible after sort interleaves rows.
+// Relation is one entry in the page-inspector tool's mixed table+index+toast
+// list. Carries everything later screens need (OID for get_raw_page, qualified
+// name for regclass binds, est-rows/pages for the row summary). For
+// RelBTreeIndex and RelToast rows, ParentOID/ParentName name the owning table
+// so the list stays comprehensible after sort interleaves rows.
 type Relation struct {
 	Kind         RelationKind
 	DB           string
@@ -276,6 +281,9 @@ func (p HeapPageStat) DeadFrac() float64 {
 // HeapTuple is one entry in the line-pointer array of a heap page. Pointer
 // fields (Xmin/Xmax/Oid/Bits/Data) are nil when pageinspect reports NULL —
 // chiefly for LP_UNUSED and LP_REDIRECT line pointers.
+// ChunkID/ChunkSeq are non-nil only for TOAST tables (schema = "pg_toast"),
+// and only when the line pointer holds a live chunk row — DEAD/UNUSED/REDIRECT
+// entries yield nil here too.
 type HeapTuple struct {
 	LP        int32
 	LPOff     int32
@@ -291,6 +299,8 @@ type HeapTuple struct {
 	Bits      *string
 	Oid       *uint32
 	Data      []byte
+	ChunkID   *uint32 // TOAST only: chunk_id of this chunk row
+	ChunkSeq  *int32  // TOAST only: chunk_seq within its chunk_id
 }
 
 // Line-pointer flag values from src/include/storage/itemid.h.
@@ -383,6 +393,133 @@ type IndexTuple struct {
 type TupleCell struct {
 	Name  string
 	Value *string
+}
+
+// --- WAL inspector types (toolWAL) ---
+
+// WALSummary is the header snapshot for the WAL inspector overview: the
+// current write position, the segment file it lands in, wal_level, the
+// pg_wal directory's file count and size, and the cluster-wide pg_stat_wal
+// generation counters. StartLSN/EndLSN/WindowBytes describe the LSN window
+// the rmgr breakdown below was computed over. All built-in sources, so it
+// renders even without pg_walinspect — but a privilege error on pg_ls_waldir
+// / pg_stat_wal is treated as non-fatal by the caller (summary "unavailable").
+type WALSummary struct {
+	InsertLSN    string
+	FlushLSN     string
+	CurrentFile  string
+	WalLevel     string
+	SegmentFiles int64
+	SegmentBytes int64
+	StatRecords  int64
+	StatFPI      int64
+	StatBytes    int64
+
+	// Window the rmgr stats were computed over (resolved by sqlWALWindow).
+	StartLSN    string
+	EndLSN      string
+	WindowBytes int64
+}
+
+// WALRmgrStat is one resource-manager row of the WAL overview: how many
+// records that manager wrote in the window and how those bytes split between
+// record data and full-page images (FPI). CombinedSize = RecordSize + FPISize.
+type WALRmgrStat struct {
+	Name         string
+	Count        int64
+	RecordSize   int64
+	FPISize      int64
+	CombinedSize int64
+}
+
+// WALRecord is one entry from pg_get_wal_records_info: a single WAL record's
+// position, owning xid, type, byte breakdown and human-readable description.
+// LSN/xid fields are kept as text (pg_lsn/xid have no pgx codec; cast ::text
+// in SQL). Xid is "0" for non-transactional records (checkpoints, etc.).
+type WALRecord struct {
+	StartLSN       string
+	EndLSN         string
+	PrevLSN        string
+	Xid            string
+	Rmgr           string
+	RecordType     string
+	RecordLength   int32
+	MainDataLength int32
+	FPILength      int32
+	Description    string
+	BlockRef       string
+}
+
+// CombinedSize is record bytes plus full-page-image bytes — what the bar in
+// the records view scales against.
+func (r WALRecord) CombinedSize() int64 { return int64(r.RecordLength) + int64(r.FPILength) }
+
+// WALBlockRef is one block reference of a record, from pg_get_wal_block_info
+// (PostgreSQL 16+). It ties the record back to a concrete relation block:
+// (RelDatabase, RelFileNode, ForkNumber, BlockNumber). FPILength > 0 means
+// this record carried a full-page image of the block — the dominant source
+// of WAL write amplification.
+type WALBlockRef struct {
+	BlockID         int32
+	RelTablespace   uint32
+	RelDatabase     uint32
+	RelFileNode     uint32
+	ForkNumber      int32
+	BlockNumber     int64
+	Rmgr            string
+	RecordType      string
+	BlockDataLength int32
+	FPILength       int32
+	// FPIInfo is the text[] of full-page-image flag names (e.g. {APPLY},
+	// {APPLY,COMPRESSED}); nil when this block carried no page image.
+	FPIInfo     []string
+	Description string
+	// RelName is the relation this block belongs to, resolved from
+	// relfilenode via pg_filenode_relation. Empty when the relation is in
+	// another database or has been dropped (relfilenode no longer maps).
+	RelName string
+}
+
+// HeapTID best-effort-extracts the tuple id (block, offset) this block
+// reference touched. The block number is RelBlockNumber; the offset is parsed
+// from the record description, which for heap records reads like
+// "off 15 flags 0x00". Only meaningful on the main fork — index/fsm/vm forks
+// have no heap tuple — so it returns ("", false) elsewhere or when the
+// description carries no "off N". Multi-block records repeat one description,
+// so the offset is the record's primary tuple, not necessarily this block's.
+func (b WALBlockRef) HeapTID() (string, bool) {
+	if b.ForkNumber != 0 {
+		return "", false
+	}
+	const marker = "off "
+	i := strings.Index(b.Description, marker)
+	if i < 0 {
+		return "", false
+	}
+	rest := b.Description[i+len(marker):]
+	j := 0
+	for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+		j++
+	}
+	if j == 0 {
+		return "", false
+	}
+	return fmt.Sprintf("(%d,%s)", b.BlockNumber, rest[:j]), true
+}
+
+// ForkName maps relforknumber to its short fork name (main/fsm/vm/init).
+func (b WALBlockRef) ForkName() string {
+	switch b.ForkNumber {
+	case 0:
+		return "main"
+	case 1:
+		return "fsm"
+	case 2:
+		return "vm"
+	case 3:
+		return "init"
+	}
+	return fmt.Sprintf("fork%d", b.ForkNumber)
 }
 
 // --- describe types (psql \d-style object description) ---

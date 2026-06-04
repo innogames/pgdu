@@ -261,6 +261,29 @@ FROM   heap_page_items(get_raw_page($1, 'main', $2::int))
 ORDER  BY lp
 `
 
+// sqlToastTuples mirrors sqlHeapTuples for TOAST heap pages, adding
+// chunk_id/chunk_seq columns joined from the underlying TOAST relation so the
+// line-pointer list can display which chunk object and sequence number each live
+// row represents without the caller having to parse t_data bytes.
+//
+// The join uses the physical ctid built from the block number ($2) and the
+// line-pointer number (lp) as the tid — this matches the live row exactly and
+// yields NULL for dead/unused/redirect LPs.
+//
+// %s is the quoted toast regclass, e.g. `"pg_toast"."pg_toast_16431"`. $1 is
+// the same regclass as text for get_raw_page; $2 is the block number.
+const sqlToastTuples = `
+SELECT hpi.lp::int, hpi.lp_off::int, hpi.lp_flags::int, hpi.lp_len::int,
+       hpi.t_xmin, hpi.t_xmax, hpi.t_field3, hpi.t_ctid::text,
+       COALESCE(hpi.t_infomask2, 0)::int, COALESCE(hpi.t_infomask, 0)::int, hpi.t_hoff::int,
+       hpi.t_bits, hpi.t_oid, hpi.t_data,
+       tc.chunk_id::oid, tc.chunk_seq::int
+FROM   heap_page_items(get_raw_page($1, 'main', $2::int)) hpi
+LEFT   JOIN %s tc
+         ON tc.ctid = ('(' || $2::text || ',' || hpi.lp::text || ')')::tid
+ORDER  BY hpi.lp
+`
+
 // sqlTupleRow fetches one heap row by ctid and explodes it into (column,
 // value) pairs preserving declared column order. json_each_text emits keys
 // in the order they appear in the json object, and row_to_json walks
@@ -279,40 +302,71 @@ WITH r AS (
 SELECT key, value FROM r, json_each_text(r.j)
 `
 
-// sqlRelations returns every heap-style table and every B-tree index whose
-// parent lives in the named schema, mixed into one list and ordered by
-// pg_relation_size. The page-inspector tool consumes it instead of sqlTables
-// so the user sees tables and their indexes side by side, ranked by on-disk
-// size — exposing the indexes that are bigger than the heap they index.
+// sqlToastTupleRow replaces sqlTupleRow for TOAST heap tables. TOAST relations
+// (relkind 't') don't have a composite type registered in pg_type, so
+// row_to_json raises "does not have a composite type". Since every TOAST table
+// has the same three fixed columns (chunk_id, chunk_seq, chunk_data) we can
+// select them explicitly. chunk_data is rendered as its hex-encoded bytea text
+// representation so it's safely truncatable by the value renderer.
+//
+// An absent ctid yields zero rows from the CTE; ListTupleRow treats that as
+// "row gone" and returns an empty slice — same behaviour as sqlTupleRow.
+// %s is the quoted toast regclass; $1 is the ctid text.
+const sqlToastTupleRow = `
+WITH r AS (SELECT chunk_id, chunk_seq, chunk_data FROM %s WHERE ctid = $1::tid)
+SELECT col, val FROM (
+  SELECT 1 AS o, 'chunk_id'::text  AS col, chunk_id::text   AS val FROM r
+  UNION ALL
+  SELECT 2,      'chunk_seq',              chunk_seq::text   FROM r
+  UNION ALL
+  SELECT 3,      'chunk_data',             chunk_data::text  FROM r
+) s ORDER BY o
+`
+
+// sqlRelations returns every heap-style table, every B-tree index, and every
+// TOAST heap whose owning table lives in the named schema, mixed into one list
+// and ordered by pg_relation_size. The page-inspector tool consumes it instead
+// of sqlTables so the user sees tables, their indexes, and their TOAST storage
+// side by side, ranked by on-disk size.
 //
 // Only B-tree indexes are listed: hash/gist/gin/brin are filtered out because
-// the index-page drill below relies on bt_page_stats / bt_page_items, neither
-// of which works on other access methods.
+// the index-page drill relies on bt_page_stats / bt_page_items, neither of
+// which works on other access methods.
 //
-// Tables come from relkind IN ('r','m','p'); indexes from relkind = 'i' plus
-// am.amname = 'btree' AND the parent's namespace matching the schema (so an
-// index whose parent lives in another schema doesn't leak in via a global
-// search). For tables ParentOID is 0; for indexes it's pg_index.indrelid.
+// Three arms in the WHERE:
+//   - Tables:  relkind IN ('r','m','p') AND namespace = $1
+//   - Indexes: relkind = 'i' AND btree AND parent namespace = $1
+//   - TOAST:   relkind = 't' AND owner's namespace = $1
+//
+// For tables ParentOID is 0; for indexes it's pg_index.indrelid; for TOAST it's
+// the OID of the owning table (via oc.reltoastrelid = c.oid). The schema column
+// reflects c's actual namespace (pg_toast for TOAST relations), so callers can
+// distinguish the storage location from the user's schema.
 const sqlRelations = `
 SELECT c.oid,
        c.relname,
-       c.relkind::text                                        AS kind,
-       COALESCE(am.amname, '')                                AS access_method,
-       pg_relation_size(c.oid)                                AS size_bytes,
-       GREATEST(c.reltuples, 0)::bigint                       AS est_rows,
-       c.relpages::int                                        AS pages,
-       COALESCE(idx.indrelid, 0)::oid                         AS parent_oid,
-       COALESCE(pc.relname, '')                               AS parent_name
+       c.relkind::text                                             AS kind,
+       COALESCE(am.amname, '')                                     AS access_method,
+       pg_relation_size(c.oid)                                     AS size_bytes,
+       GREATEST(c.reltuples, 0)::bigint                            AS est_rows,
+       c.relpages::int                                             AS pages,
+       COALESCE(idx.indrelid, oc.oid, 0)::oid                      AS parent_oid,
+       COALESCE(pc.relname, oc.relname, '')                        AS parent_name,
+       n.nspname                                                   AS schema
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 LEFT   JOIN pg_am am ON am.oid = c.relam
 LEFT   JOIN pg_index idx ON idx.indexrelid = c.oid
 LEFT   JOIN pg_class pc ON pc.oid = idx.indrelid
 LEFT   JOIN pg_namespace pn ON pn.oid = pc.relnamespace
+LEFT   JOIN pg_class oc ON oc.reltoastrelid = c.oid
+LEFT   JOIN pg_namespace onsp ON onsp.oid = oc.relnamespace
 WHERE  (
          (c.relkind IN ('r','m','p') AND n.nspname = $1)
          OR
          (c.relkind = 'i' AND am.amname = 'btree' AND pn.nspname = $1)
+         OR
+         (c.relkind = 't' AND onsp.nspname = $1)
        )
 ORDER  BY size_bytes DESC
 `
@@ -398,6 +452,16 @@ SELECT i.itemoffset::int,
        (SELECT (%s)::text FROM %s WHERE ctid = i.ctid::tid) AS decoded
 FROM   bt_page_items($1, $2::int) i
 ORDER  BY i.itemoffset
+`
+
+// sqlToastValueChunks returns all chunks for one out-of-line value in a TOAST
+// table, ordered by chunk_seq so the caller can concatenate them in order.
+// %s is the quoted toast regclass; $1 is the chunk_id OID.
+const sqlToastValueChunks = `
+SELECT chunk_seq::int, chunk_data
+FROM   %s
+WHERE  chunk_id = $1
+ORDER  BY chunk_seq
 `
 
 // sqlRelPages reports the current heap block count by dividing the file
@@ -578,10 +642,10 @@ SELECT
     table_schema,
     table_name,
     est_row_count,
-    pg_size_pretty(total_bytes) AS total,
-    pg_size_pretty(index_bytes) AS index,
-    pg_size_pretty(toast_bytes) AS toast,
-    pg_size_pretty(table_bytes) AS table
+    total_bytes,
+    index_bytes,
+    toast_bytes,
+    table_bytes
 FROM (
     SELECT *, total_bytes - index_bytes - COALESCE(toast_bytes, 0) AS table_bytes
     FROM (
@@ -614,7 +678,7 @@ ORDER BY total_bytes DESC
 const sqlDiagToastShowSize = `
 SELECT
     t.relname AS toast_table_name,
-    pg_size_pretty(pg_table_size(t.oid)) AS total_size,
+    pg_table_size(t.oid) AS size_bytes,
     m.relname AS main_table_name,
     array_agg(att.attname) AS column_names,
     COALESCE(s.n_live_tup, 0) AS live_tuples,
@@ -636,60 +700,75 @@ ORDER BY pg_table_size(t.oid) DESC
 
 const sqlDiagIndexShowUnused = `
 SELECT
-    c2.relname AS table_name,
-    indexrelname AS index_name,
-    pg_size_pretty(pg_relation_size(i.indexrelid)) AS index_size,
+    i.schemaname AS schema,
+    i.relname AS table_name,
+    i.indexrelname AS index_name,
+    pg_relation_size(i.indexrelid) AS index_size_bytes,
     i.idx_scan,
     t.n_live_tup AS estimated_rows_covered
 FROM pg_catalog.pg_stat_user_indexes i
-JOIN pg_catalog.pg_class c1 ON i.indexrelid = c1.oid
-JOIN pg_catalog.pg_class c2 ON i.relid = c2.oid
-JOIN pg_catalog.pg_stat_user_tables t ON i.relid = t.relid
-WHERE i.schemaname = 'public'
+JOIN pg_catalog.pg_stat_user_tables t ON t.relid = i.relid
+WHERE i.schemaname NOT IN ('pg_catalog','information_schema')
+  AND i.schemaname NOT LIKE 'pg\_toast%'
   AND t.n_live_tup >= 100
 ORDER BY i.idx_scan ASC, pg_relation_size(i.indexrelid) DESC
 `
 
+// sqlDiagIndexShowSize is the single "Indexes" listing. It folds in the scan
+// counters and unique flag that the old separate index_show_all query carried,
+// and covers every user schema (not just public).
 const sqlDiagIndexShowSize = `
 SELECT
-    t.relname AS tablename,
-    i.relname AS indexname,
-    pg_size_pretty(pg_relation_size(i.oid)) AS index_size,
-    ROUND(t.reltuples) AS estimated_entries,
-    string_agg(a.attname, ', ') AS index_columns
+    n.nspname AS schema,
+    t.relname AS table,
+    i.relname AS index,
+    pg_relation_size(i.oid) AS index_size_bytes,
+    COALESCE(psai.idx_scan, 0) AS scans,
+    COALESCE(psai.idx_tup_read, 0) AS tuples_read,
+    CASE WHEN ix.indisunique THEN 'Y' ELSE 'N' END AS unique,
+    string_agg(a.attname, ', ' ORDER BY a.attnum) AS columns
 FROM pg_index AS ix
 JOIN pg_class AS t ON t.oid = ix.indrelid
 JOIN pg_class AS i ON i.oid = ix.indexrelid
-JOIN pg_attribute AS a ON a.attnum = ANY(ix.indkey) AND a.attrelid = t.oid
-GROUP BY t.relname, i.relname, i.oid, t.reltuples
+JOIN pg_namespace AS n ON n.oid = t.relnamespace
+LEFT JOIN pg_attribute AS a ON a.attnum = ANY(ix.indkey) AND a.attrelid = t.oid
+LEFT JOIN pg_stat_all_indexes AS psai ON psai.indexrelid = i.oid
+WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname NOT LIKE 'pg\_toast%'
+GROUP BY n.nspname, t.relname, i.relname, i.oid, ix.indisunique, psai.idx_scan, psai.idx_tup_read
 ORDER BY pg_relation_size(i.oid) DESC
 `
 
-const sqlDiagIndexShowAll = `
-SELECT
-    t.tablename,
-    indexname,
-    c.reltuples AS num_rows,
-    pg_size_pretty(pg_relation_size(quote_ident(t.tablename)::text)) AS table_size,
-    pg_size_pretty(pg_relation_size(quote_ident(indexrelname)::text)) AS index_size,
-    CASE WHEN indisunique THEN 'Y' ELSE 'N' END AS unique,
-    idx_scan AS number_of_scans,
-    idx_tup_read AS tuples_read,
-    idx_tup_fetch AS tuples_fetched
-FROM pg_tables t
-LEFT OUTER JOIN pg_class c ON t.tablename = c.relname
-LEFT OUTER JOIN (
-    SELECT c.relname AS ctablename, ipg.relname AS indexname,
-           x.indnatts AS number_of_columns, idx_scan, idx_tup_read, idx_tup_fetch,
-           indexrelname, indisunique
-    FROM pg_index x
-    JOIN pg_class c ON c.oid = x.indrelid
-    JOIN pg_class ipg ON ipg.oid = x.indexrelid
-    JOIN pg_stat_all_indexes psai ON x.indexrelid = psai.indexrelid AND psai.schemaname = 'public'
-) AS foo ON t.tablename = foo.ctablename
-WHERE t.schemaname = 'public'
-ORDER BY 1, 2
-`
+// sqlDiagIndexShowAll was the old per-index listing (public schema only). Its
+// useful columns (scan count, tuples read, unique flag) were folded into
+// sqlDiagIndexShowSize, so it is no longer registered. Kept commented for
+// reference rather than deleted.
+//
+// const sqlDiagIndexShowAll = `
+// SELECT
+//     t.tablename,
+//     indexname,
+//     c.reltuples AS num_rows,
+//     pg_size_pretty(pg_relation_size(quote_ident(t.tablename)::text)) AS table_size,
+//     pg_size_pretty(pg_relation_size(quote_ident(indexrelname)::text)) AS index_size,
+//     CASE WHEN indisunique THEN 'Y' ELSE 'N' END AS unique,
+//     idx_scan AS number_of_scans,
+//     idx_tup_read AS tuples_read,
+//     idx_tup_fetch AS tuples_fetched
+// FROM pg_tables t
+// LEFT OUTER JOIN pg_class c ON t.tablename = c.relname
+// LEFT OUTER JOIN (
+//     SELECT c.relname AS ctablename, ipg.relname AS indexname,
+//            x.indnatts AS number_of_columns, idx_scan, idx_tup_read, idx_tup_fetch,
+//            indexrelname, indisunique
+//     FROM pg_index x
+//     JOIN pg_class c ON c.oid = x.indrelid
+//     JOIN pg_class ipg ON ipg.oid = x.indexrelid
+//     JOIN pg_stat_all_indexes psai ON x.indexrelid = psai.indexrelid AND psai.schemaname = 'public'
+// ) AS foo ON t.tablename = foo.ctablename
+// WHERE t.schemaname = 'public'
+// ORDER BY 1, 2
+// `
 
 const sqlDiagIndexShowInvalid = `
 SELECT
@@ -728,63 +807,11 @@ ORDER BY sum(pg_relation_size(idx)) DESC
 `
 
 const sqlDiagIndexShowDefinitions = `
-SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public'
-`
-
-const sqlDiagBloatAll = `
-SELECT
-    current_database() AS database,
-    schemaname,
-    tablename,
-    ROUND((CASE WHEN otta = 0 THEN 0.0 ELSE sml.relpages::FLOAT / otta END)::NUMERIC, 1) AS tbloat,
-    CASE WHEN relpages < otta THEN 0 ELSE bs * (sml.relpages - otta)::BIGINT END AS wastedbytes,
-    iname,
-    ROUND((CASE WHEN iotta = 0 OR ipages = 0 THEN 0.0 ELSE ipages::FLOAT / iotta END)::NUMERIC, 1) AS ibloat,
-    CASE WHEN ipages < iotta THEN 0 ELSE bs * (ipages - iotta) END AS wastedibytes
-FROM (
-    SELECT
-        schemaname, tablename, cc.reltuples, cc.relpages, bs,
-        CEIL((cc.reltuples * ((datahdr + ma -
-            (CASE WHEN datahdr % ma = 0 THEN ma ELSE datahdr % ma END)) + nullhdr2 + 4)) / (bs - 20::FLOAT)) AS otta,
-        COALESCE(c2.relname, '?') AS iname,
-        COALESCE(c2.reltuples, 0) AS ituples,
-        COALESCE(c2.relpages, 0) AS ipages,
-        COALESCE(CEIL((c2.reltuples * (datahdr - 12)) / (bs - 20::FLOAT)), 0) AS iotta
-    FROM (
-        SELECT
-            ma, bs, schemaname, tablename,
-            (datawidth + (hdr + ma - (CASE WHEN hdr % ma = 0 THEN ma ELSE hdr % ma END)))::NUMERIC AS datahdr,
-            (maxfracsum * (nullhdr + ma - (CASE WHEN nullhdr % ma = 0 THEN ma ELSE nullhdr % ma END))) AS nullhdr2
-        FROM (
-            SELECT
-                schemaname, tablename, hdr, ma, bs,
-                SUM((1 - null_frac) * avg_width) AS datawidth,
-                MAX(null_frac) AS maxfracsum,
-                hdr + (
-                    SELECT 1 + COUNT(*) / 8
-                    FROM pg_stats s2
-                    WHERE null_frac <> 0
-                      AND s2.schemaname = s.schemaname
-                      AND s2.tablename = s.tablename
-                ) AS nullhdr
-            FROM pg_stats s, (
-                SELECT
-                    (SELECT current_setting('block_size')::NUMERIC) AS bs,
-                    CASE WHEN SUBSTRING(v, 12, 3) IN ('8.0', '8.1', '8.2') THEN 27 ELSE 23 END AS hdr,
-                    CASE WHEN v ~ 'mingw32' THEN 8 ELSE 4 END AS ma
-                FROM (SELECT version() AS v) AS foo
-            ) AS constants
-            GROUP BY 1, 2, 3, 4, 5
-        ) AS foo
-    ) AS rs
-    JOIN pg_class cc ON cc.relname = rs.tablename
-    JOIN pg_namespace nn ON cc.relnamespace = nn.oid
-        AND nn.nspname = rs.schemaname
-        AND nn.nspname <> 'information_schema'
-    LEFT JOIN pg_index i ON indrelid = cc.oid
-    LEFT JOIN pg_class c2 ON c2.oid = i.indexrelid
-) AS sml
-ORDER BY wastedbytes DESC
+SELECT schemaname AS schema, tablename AS table, indexname AS index, indexdef
+FROM pg_indexes
+WHERE schemaname NOT IN ('pg_catalog','information_schema')
+  AND schemaname NOT LIKE 'pg\_toast%'
+ORDER BY schemaname, tablename, indexname
 `
 
 const sqlDiagBloatIndex = `
@@ -973,7 +1000,7 @@ SELECT
     to_char(PSUT.last_analyze, 'YYYY-MM-DD HH24:MI') AS last_analyze,
     to_char(PSUT.last_autoanalyze, 'YYYY-MM-DD HH24:MI') AS last_autoanalyze,
     to_char(C.reltuples, '9G999G999G999') AS n_tup,
-    to_char(PSUT.n_dead_tup, '9G999G999G999') AS dead_tup,
+    PSUT.n_dead_tup AS dead_tuples,
     to_char(
         coalesce(RS.rel_av_vac_threshold, current_setting('autovacuum_vacuum_threshold')::BIGINT)
         + coalesce(RS.rel_av_vac_scale_factor, current_setting('autovacuum_vacuum_scale_factor')::NUMERIC)
@@ -998,7 +1025,9 @@ SELECT
     p.phase,
     p.heap_blks_total,
     p.heap_blks_scanned,
-    p.dead_tuple_bytes,
+    -- dead_tuple_bytes was added in PostgreSQL 17; read via jsonb so it is NULL
+    -- (rendered "—") on older servers rather than failing the whole query.
+    (to_jsonb(p) ->> 'dead_tuple_bytes')::bigint AS dead_tuple_bytes,
     CASE
         WHEN p.heap_blks_total > 0
         THEN ROUND(100.0 * p.heap_blks_scanned / p.heap_blks_total, 2)
@@ -1029,9 +1058,15 @@ SELECT
     round(100.0 * p.heap_blks_scanned / NULLIF(p.heap_blks_total, 0), 1) AS scanned_pct,
     round(100.0 * p.heap_blks_vacuumed / NULLIF(p.heap_blks_total, 0), 1) AS vacuumed_pct,
     p.index_vacuum_count,
-    round(100.0 * p.num_dead_item_ids / NULLIF(p.max_dead_item_ids, 0), 1) AS dead_pct
+    -- The dead-item-id counters were renamed in PostgreSQL 17
+    -- (num/max_dead_tuples → num/max_dead_item_ids). Read them through jsonb so
+    -- a missing key yields NULL instead of erroring on older servers.
+    round(100.0
+          * COALESCE((jp.j ->> 'num_dead_item_ids')::numeric, (jp.j ->> 'num_dead_tuples')::numeric)
+          / NULLIF(COALESCE((jp.j ->> 'max_dead_item_ids')::numeric, (jp.j ->> 'max_dead_tuples')::numeric), 0), 1) AS dead_pct
 FROM pg_stat_progress_vacuum p
 JOIN pg_stat_activity a USING (pid)
+CROSS JOIN LATERAL (SELECT to_jsonb(p) AS j) jp
 ORDER BY now() - a.xact_start DESC
 `
 
@@ -1045,21 +1080,22 @@ SELECT
     s.wal_status,
     s.restart_lsn,
     s.confirmed_flush_lsn,
-    pg_size_pretty(
-        pg_wal_lsn_diff(
-            CASE WHEN pg_is_in_recovery()
-                THEN pg_last_wal_receive_lsn()
-                ELSE pg_current_wal_lsn()
-            END,
-            s.restart_lsn
-        )
-    ) AS retained_wal,
+    pg_wal_lsn_diff(
+        CASE WHEN pg_is_in_recovery()
+            THEN pg_last_wal_receive_lsn()
+            ELSE pg_current_wal_lsn()
+        END,
+        s.restart_lsn
+    ) AS retained_wal_bytes,
     pg_size_pretty(s.safe_wal_size) AS safe_wal_size,
-    s.conflicting,
-    s.invalidation_reason,
-    date_trunc('second', NOW() - s.inactive_since) AS inactive_for
+    -- conflicting/invalidation_reason arrived in PG16 and inactive_since in PG17;
+    -- read via jsonb so older servers return NULL instead of erroring.
+    (js.j ->> 'conflicting')::boolean AS conflicting,
+    js.j ->> 'invalidation_reason' AS invalidation_reason,
+    date_trunc('second', NOW() - (js.j ->> 'inactive_since')::timestamptz) AS inactive_for
 FROM pg_replication_slots s
 LEFT JOIN pg_stat_replication r ON r.pid = s.active_pid
+CROSS JOIN LATERAL (SELECT to_jsonb(s) AS j) js
 ORDER BY s.slot_type, s.slot_name
 `
 
@@ -1093,15 +1129,11 @@ SELECT
     d.datname AS name,
     pg_catalog.pg_get_userbyid(d.datdba) AS owner,
     CASE WHEN pg_catalog.has_database_privilege(d.datname, 'CONNECT')
-        THEN pg_catalog.pg_size_pretty(pg_catalog.pg_database_size(d.datname))
-        ELSE 'No Access'
-    END AS size
-FROM pg_catalog.pg_database d
-ORDER BY
-    CASE WHEN pg_catalog.has_database_privilege(d.datname, 'CONNECT')
         THEN pg_catalog.pg_database_size(d.datname)
         ELSE NULL
-    END DESC NULLS LAST
+    END AS size_bytes
+FROM pg_catalog.pg_database d
+ORDER BY size_bytes DESC NULLS LAST
 `
 
 const sqlDiagForeignkeysShowAll = `
@@ -1186,4 +1218,216 @@ JOIN rol grantor ON grantor.oid = acl_base.grantor_oid
 JOIN rol grantee ON grantee.oid = acl_base.grantee_oid
 WHERE acl_base.grantor_oid <> acl_base.grantee_oid
 ORDER BY acl_base.object_schema, acl_base.object_type, acl_base.object_name
+`
+
+// sqlDiagActivityRunning lists non-idle backends ordered by how long the current
+// statement has been running. Excludes this connection's own backend.
+const sqlDiagActivityRunning = `
+SELECT
+    pid,
+    usename,
+    application_name,
+    state,
+    EXTRACT(epoch FROM now() - query_start)::int AS duration_secs,
+    wait_event_type,
+    wait_event,
+    left(regexp_replace(query, '\s+', ' ', 'g'), 120) AS query
+FROM pg_stat_activity
+WHERE state IS NOT NULL
+  AND state <> 'idle'
+  AND pid <> pg_backend_pid()
+ORDER BY now() - query_start DESC NULLS LAST
+`
+
+// sqlDiagConnections aggregates pg_stat_activity into a per-database, per-state
+// connection count — a quick read on pool saturation and idle-in-transaction.
+const sqlDiagConnections = `
+SELECT
+    coalesce(datname, '(none)') AS database,
+    coalesce(state, '(none)') AS state,
+    count(*) AS connections,
+    coalesce(max(EXTRACT(epoch FROM now() - state_change))::int, 0) AS max_state_age_secs
+FROM pg_stat_activity
+GROUP BY datname, state
+ORDER BY count(*) DESC
+`
+
+// sqlDiagWalFiles lists the WAL segment files on disk. pg_ls_waldir() requires
+// superuser or membership in pg_monitor.
+const sqlDiagWalFiles = `
+SELECT
+    name,
+    size AS size_bytes,
+    modification
+FROM pg_ls_waldir()
+ORDER BY modification DESC
+`
+
+// sqlDiagWalActivity reports cluster-wide WAL generation counters. pg_stat_wal
+// requires PostgreSQL 14 or newer.
+const sqlDiagWalActivity = `
+SELECT
+    wal_records,
+    wal_fpi,
+    wal_bytes,
+    wal_buffers_full,
+    stats_reset
+FROM pg_stat_wal
+`
+
+// sqlDiagDatabaseStats reports per-database commit/rollback, cache hit ratio,
+// deadlocks and temp-file usage from pg_stat_database.
+const sqlDiagDatabaseStats = `
+SELECT
+    datname AS database,
+    numbackends AS backends,
+    xact_commit AS commits,
+    xact_rollback AS rollbacks,
+    round(100.0 * blks_hit / NULLIF(blks_hit + blks_read, 0), 2) AS hit_pct,
+    deadlocks,
+    temp_files,
+    temp_bytes
+FROM pg_stat_database
+WHERE datname IS NOT NULL
+ORDER BY xact_commit + xact_rollback DESC
+`
+
+// sqlDiagSequences reports how much of each sequence's range has been consumed.
+// last_value is null without SELECT/USAGE on the sequence, leaving consumed_pct
+// null for those rows.
+const sqlDiagSequences = `
+SELECT
+    schemaname AS schema,
+    sequencename AS sequence,
+    last_value,
+    max_value,
+    round(100.0 * last_value / NULLIF(max_value, 0), 2) AS consumed_pct
+FROM pg_sequences
+ORDER BY consumed_pct DESC NULLS LAST
+`
+
+// --- WAL inspector (toolWAL) ---
+
+// sqlWALWindow resolves the [start, end] LSN window the WAL inspector
+// analyses: end is the current write position, start is `end − $1 bytes`
+// clamped at the very start of the WAL so the subtraction never underflows
+// the pg_lsn range. Both are returned as text so pgx scans them as plain
+// strings (pg_lsn has no registered pgx codec). $1 is the window size in
+// bytes. A brand-new cluster with less than $1 of WAL yields start='0/0',
+// which pg_get_wal_stats rejects as "not available" — acceptable since any
+// server old enough to have pg_walinspect installed has long passed that.
+const sqlWALWindow = `
+SELECT (CASE
+          WHEN (cur - '0/0'::pg_lsn) > $1::numeric THEN cur - $1::numeric
+          ELSE '0/0'::pg_lsn
+        END)::text AS start_lsn,
+       cur::text AS end_lsn
+FROM   (SELECT pg_current_wal_lsn() AS cur) q
+`
+
+// sqlWALSummary is the header block: current insert/flush position, the
+// segment file the write head sits in, wal_level, the count and on-disk size
+// of segment files in pg_wal, and the cluster-wide pg_stat_wal counters.
+// Uses only built-in functions (no pg_walinspect) so the header renders even
+// when the extension is absent — but pg_ls_waldir / pg_stat_wal still require
+// a sufficiently-privileged role, so the caller treats a failure as non-fatal.
+const sqlWALSummary = `
+SELECT pg_current_wal_insert_lsn()::text                       AS insert_lsn,
+       pg_current_wal_lsn()::text                              AS flush_lsn,
+       pg_walfile_name(pg_current_wal_lsn())                   AS current_file,
+       current_setting('wal_level')                            AS wal_level,
+       (SELECT count(*) FROM pg_ls_waldir())                   AS seg_files,
+       (SELECT COALESCE(sum(size), 0)::bigint FROM pg_ls_waldir()) AS seg_bytes,
+       w.wal_records,
+       w.wal_fpi,
+       w.wal_bytes::bigint                                     AS wal_bytes
+FROM   pg_stat_wal w
+`
+
+// sqlWALRmgrStats aggregates the window by resource manager: count, the bytes
+// spent on record data vs. full-page images, and their sum. Ordered biggest
+// combined-size first; callers may resort. $1/$2 are start/end LSN.
+// NOTE: pg_get_wal_stats names its first output column
+// "resource_manager/record_type" (a literal slash) — the same column doubles
+// as the record-type label when per_record=true. It must be double-quoted.
+const sqlWALRmgrStats = `
+SELECT "resource_manager/record_type" AS resource_manager,
+       count,
+       record_size,
+       fpi_size,
+       combined_size
+FROM   pg_get_wal_stats($1::pg_lsn, $2::pg_lsn, false)
+WHERE  count > 0
+ORDER  BY combined_size DESC
+`
+
+// sqlWALRecordTypeStats is the same pg_get_wal_stats source as
+// sqlWALRmgrStats but with per_record=true, so the byte/count breakdown is
+// per record-type instead of per resource-manager. The first column then
+// reads "Rmgr/RecordType" (e.g. "Heap/INSERT"); $3 filters to one rmgr by
+// its "<rmgr>/" prefix. Powers the summary table above the records list.
+const sqlWALRecordTypeStats = `
+SELECT "resource_manager/record_type" AS record_type,
+       count,
+       record_size,
+       fpi_size,
+       combined_size
+FROM   pg_get_wal_stats($1::pg_lsn, $2::pg_lsn, true)
+WHERE  count > 0
+  AND  "resource_manager/record_type" LIKE $3 || '/%'
+ORDER  BY combined_size DESC
+`
+
+// sqlWALRecords lists individual records in the window for one resource
+// manager, in LSN (chronological) order. $1/$2 are start/end LSN, $3 the
+// resource_manager name to filter on.
+const sqlWALRecords = `
+SELECT start_lsn::text,
+       end_lsn::text,
+       prev_lsn::text,
+       xid::text,
+       resource_manager,
+       record_type,
+       record_length,
+       main_data_length,
+       fpi_length,
+       COALESCE(description, ''),
+       COALESCE(block_ref, '')
+FROM   pg_get_wal_records_info($1::pg_lsn, $2::pg_lsn)
+WHERE  resource_manager = $3
+ORDER  BY start_lsn
+`
+
+// sqlWALBlocks lists the block references of a single record spanning
+// [$1, $2) — the record's own start and end LSN. The range must include the
+// record (a zero-width [start, start) range matches nothing), so the caller
+// passes the record's end_lsn as the upper bound. show_data=false skips the
+// raw block/FPI bytes — pgdu only needs the lengths and the FPI flag.
+// Requires PostgreSQL 16+ (the function did not exist in 15).
+// block_id and relforknumber are smallint; cast to int so they scan into
+// int32 regardless of pgx's int2 widening rules. block_fpi_info is text[]
+// (a list of flag names) and arrives as a Go []string — NULL becomes nil, so
+// no COALESCE (and an array can't be COALESCEd with a text literal anyway).
+// The trailing pg_filenode_relation resolves the relfilenode back to a
+// relation name: it is NULL (→ ”) when the relation lives in another
+// database or has been dropped, in which case the caller falls back to the
+// numeric relfilenode. RelidByRelfilenumber normalises the WAL's tablespace
+// OID to pg_class's 0-for-default form internally, so passing reltablespace
+// straight through is correct.
+const sqlWALBlocks = `
+SELECT block_id::int,
+       reltablespace,
+       reldatabase,
+       relfilenode,
+       relforknumber::int,
+       relblocknumber,
+       resource_manager,
+       record_type,
+       block_data_length,
+       block_fpi_length,
+       block_fpi_info,
+       COALESCE(description, ''),
+       COALESCE(pg_filenode_relation(reltablespace, relfilenode)::text, '')
+FROM   pg_get_wal_block_info($1::pg_lsn, $2::pg_lsn, false)
+ORDER  BY block_id
 `

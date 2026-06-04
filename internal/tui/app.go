@@ -32,6 +32,9 @@ const (
 	levelDescribe
 	levelDiagnostics      // flat list of diagnostic queries (toolTools)
 	levelDiagnosticResult // result table for a selected diagnostic query
+	levelWAL              // WAL inspector overview: per-resource-manager stats
+	levelWALRecords       // individual WAL records for one resource manager
+	levelWALBlocks        // block references of one WAL record
 )
 
 // tool identifies which top-level statistic the user is exploring.
@@ -43,6 +46,7 @@ const (
 	toolBuffers
 	toolPageInspect
 	toolTools // diagnostic SQL query runner
+	toolWAL   // write-ahead-log inspector
 )
 
 func (t tool) Name() string {
@@ -55,6 +59,8 @@ func (t tool) Name() string {
 		return "pageinspect"
 	case toolTools:
 		return "tools"
+	case toolWAL:
+		return "wal"
 	}
 	return "?"
 }
@@ -73,6 +79,8 @@ const (
 	sortByFreeSpace
 	sortByLP
 	sortByLevel
+	sortByCount // WAL: record count per resource manager
+	sortByFPI   // WAL: full-page-image bytes
 )
 
 // defaultDesc is the natural direction for each sort column: bigger-first for
@@ -80,7 +88,7 @@ const (
 // ratio so the worst-cached tables bubble to the top.
 func (sm sortMode) defaultDesc() bool {
 	switch sm {
-	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace:
+	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI:
 		return true
 	case sortByName, sortByHitRatio, sortByBlkno, sortByLP, sortByLevel:
 		return false
@@ -111,6 +119,10 @@ func (sm sortMode) name() string {
 		return "lp"
 	case sortByLevel:
 		return "level"
+	case sortByCount:
+		return "count"
+	case sortByFPI:
+		return "fpi"
 	default:
 		return "name"
 	}
@@ -224,6 +236,26 @@ func (sm sortMode) less(a, b item) bool {
 			return false
 		}
 		return ai < bi
+	case sortByCount:
+		ai, oka := itemWALCount(a)
+		bi, okb := itemWALCount(b)
+		if oka != okb {
+			return okb
+		}
+		if !oka {
+			return false
+		}
+		return ai < bi
+	case sortByFPI:
+		ai, oka := itemWALFPI(a)
+		bi, okb := itemWALFPI(b)
+		if oka != okb {
+			return okb
+		}
+		if !oka {
+			return false
+		}
+		return ai < bi
 	case sortByName:
 		return false
 	}
@@ -328,6 +360,10 @@ type screen struct {
 	// the SQL bind doesn't have to re-derive it from heapPageBlkno + LP —
 	// the line pointer might be a REDIRECT pointing at a different page.
 	tupleCtid string
+	// toastChunkID, when non-zero on a levelTupleRow screen, means we are
+	// displaying the fully-assembled TOAST value for this chunk_id rather
+	// than a single-row ctid projection. Mutually exclusive with tupleCtid.
+	toastChunkID uint32
 
 	// Index page-inspector state. index identifies which B-tree we're
 	// looking at on levelIndexPages / levelIndexTuples. The window-state
@@ -345,6 +381,26 @@ type screen struct {
 	// describe holds the loaded \d-style description for levelDescribe screens.
 	// Nil until the async load completes.
 	describe *pg.Description
+
+	// WAL-inspector state. walSummary is the header snapshot rendered above
+	// the rmgr list on levelWAL (nil until loaded; walSummaryErr non-nil when
+	// the privilege-gated header sources failed but the list still works).
+	// walStart/walEnd are the resolved LSN window the overview was computed
+	// over; they're carried down to levelWALRecords so every level analyses
+	// the same window. walRmgr names the resource manager whose records a
+	// levelWALRecords screen lists; walRecLSN is the start LSN of the record
+	// a levelWALBlocks screen drilled into.
+	walSummary    *pg.WALSummary
+	walSummaryErr error
+	walStart      string
+	walEnd        string
+	walRmgr       string
+	walRecLSN     string // start LSN of the drilled-into record
+	walRecEnd     string // its end LSN — the upper bound for pg_get_wal_block_info
+	// walRecTypeStats is the per-record-type byte/count breakdown rendered as
+	// a summary table above the levelWALRecords list. Populated alongside the
+	// record rows; nil/empty until loaded.
+	walRecTypeStats []pg.WALRmgrStat
 
 	// Diagnostic-runner state (levelDiagnostics / levelDiagnosticResult).
 	// diag is the selected query; diagCols is non-nil once the result is
@@ -366,10 +422,12 @@ const (
 	extBufferCache = "pg_buffercache"
 	extPgStatTuple = "pgstattuple"
 	extPageInspect = "pageinspect"
+	extWALInspect  = "pg_walinspect"
 
 	extPromptReasonBufferCache = "shared_buffers view requires the pg_buffercache extension"
 	extPromptReasonPgStatTuple = "exact bloat measurements are available with pgstattuple"
 	extPromptReasonPageInspect = "Page inspector requires the pageinspect extension"
+	extPromptReasonWALInspect  = "WAL inspector requires the pg_walinspect extension (and a superuser / pg_read_server_files role to read WAL)"
 )
 
 // extPrompt is the per-screen "install this extension?" affordance.
@@ -427,7 +485,8 @@ func toolItems() []item {
 		{name: "Disk usage", detail: "browse tables by total relation size on disk", hasChildren: true, data: toolDisk},
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
-		{name: "Tools", detail: "run diagnostic queries — index / table / vacuum / server health", hasChildren: true, data: toolTools},
+		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},
+		{name: "Tools", detail: "run diagnostic queries — index / table / vacuum / activity / wal / server health", hasChildren: true, data: toolTools},
 	}
 }
 
@@ -657,6 +716,71 @@ func indexTupleToItem(t pg.IndexTuple) item {
 	}
 }
 
+// walRmgrToItem builds one levelWAL row from a resource-manager stat. size is
+// the combined byte total (record data + FPI) so the shared bar scales the
+// rmgr against its siblings; the FPI split and counts render as their own
+// columns / bar segment in renderWALList.
+func walRmgrToItem(s pg.WALRmgrStat) item {
+	return item{
+		name:        s.Name,
+		size:        s.CombinedSize,
+		hasChildren: s.Count > 0,
+		data:        s,
+	}
+}
+
+// walRecordToItem builds one levelWALRecords row. size is the combined byte
+// total (record_length + fpi_length). hasChildren is always true: every
+// record can be drilled into for its block references (the list may turn out
+// empty on PG 15 where pg_get_wal_block_info is absent — surfaced then).
+func walRecordToItem(r pg.WALRecord) item {
+	return item{
+		name:        r.RecordType,
+		size:        r.CombinedSize(),
+		detail:      r.Description,
+		hasChildren: true,
+		data:        r,
+	}
+}
+
+// walBlockToItem builds one levelWALBlocks row. size is the FPI length — the
+// bar reads as "how much full-page-image write amplification did this block
+// reference cost". Block refs are leaves (no further drill).
+func walBlockToItem(b pg.WALBlockRef) item {
+	// Prefer the resolved relation name; fall back to the raw relfilenode when
+	// the relation lives in another database or has been dropped.
+	target := fmt.Sprintf("%d", b.RelFileNode)
+	if b.RelName != "" {
+		target = b.RelName
+	}
+	return item{
+		name: fmt.Sprintf("rel %s/%s blk %d", target, b.ForkName(), b.BlockNumber),
+		size: int64(b.FPILength),
+		data: b,
+	}
+}
+
+// itemWALCount / itemWALFPI extract the record count and FPI bytes from a
+// levelWAL rmgr-stat item. Second return is false for items without that
+// payload so they sort below rows we can rank.
+func itemWALCount(it item) (int64, bool) {
+	s, ok := it.data.(pg.WALRmgrStat)
+	if !ok {
+		return 0, false
+	}
+	return s.Count, true
+}
+
+func itemWALFPI(it item) (int64, bool) {
+	switch v := it.data.(type) {
+	case pg.WALRmgrStat:
+		return v.FPISize, true
+	case pg.WALRecord:
+		return int64(v.FPILength), true
+	}
+	return 0, false
+}
+
 func bufferStatToItem(s pg.TableBufferStat) item {
 	// detail is left empty: the per-row figures (table size, cached %, hit %)
 	// are rendered as their own columns in renderBufferList.
@@ -848,6 +972,12 @@ func levelLabel(l level) string {
 		return "diagnostics"
 	case levelDiagnosticResult:
 		return "diag-result"
+	case levelWAL:
+		return "wal"
+	case levelWALRecords:
+		return "wal-records"
+	case levelWALBlocks:
+		return "wal-blocks"
 	}
 	return "?"
 }

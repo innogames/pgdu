@@ -3,6 +3,8 @@ package pg
 import (
 	"context"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // EnsurePageInspect makes sure pageinspect is installed in db. Mirrors
@@ -108,7 +110,13 @@ func (c *Client) ListTupleRow(ctx context.Context, t Table, ctid string) ([]Tupl
 		return nil, err
 	}
 	regclass := quoteIdent(t.Schema) + "." + quoteIdent(t.Name)
-	sql := fmt.Sprintf(sqlTupleRow, regclass)
+	tmpl := sqlTupleRow
+	if t.Schema == "pg_toast" {
+		// TOAST tables lack a composite type so row_to_json fails; use the
+		// fixed-column query instead.
+		tmpl = sqlToastTupleRow
+	}
+	sql := fmt.Sprintf(tmpl, regclass)
 	rows, err := pool.Query(ctx, sql, ctid)
 	if err != nil {
 		return nil, fmt.Errorf("read tuple in %q ctid %s: %w", t.Qualified(), ctid, err)
@@ -126,6 +134,65 @@ func (c *Client) ListTupleRow(ctx context.Context, t Table, ctid string) ([]Tupl
 		return nil, fmt.Errorf("read tuple in %q ctid %s: %w", t.Qualified(), ctid, err)
 	}
 	return out, nil
+}
+
+// ReadToastValue fetches all chunks for one out-of-line value from a TOAST
+// table, assembles them in chunk_seq order, and returns a small slice of
+// TupleCell rows suitable for the row-detail view:
+//
+//	chunk_id   – the OID of the out-of-line value
+//	chunks     – number of chunks stored on disk
+//	total_bytes – assembled size in bytes
+//	data       – hex-encoded assembled bytes (truncated at 2 048 bytes)
+func (c *Client) ReadToastValue(ctx context.Context, t Table, chunkID uint32) ([]TupleCell, error) {
+	pool, err := c.PoolFor(ctx, t.DB)
+	if err != nil {
+		return nil, err
+	}
+	regclass := quoteIdent(t.Schema) + "." + quoteIdent(t.Name)
+	sql := fmt.Sprintf(sqlToastValueChunks, regclass)
+	rows, err := pool.Query(ctx, sql, chunkID)
+	if err != nil {
+		return nil, fmt.Errorf("read toast value in %q chunk %d: %w", t.Qualified(), chunkID, err)
+	}
+	defer rows.Close()
+
+	type chunk struct {
+		seq  int32
+		data []byte
+	}
+	var chunks []chunk
+	for rows.Next() {
+		var ch chunk
+		if err := rows.Scan(&ch.seq, &ch.data); err != nil {
+			return nil, fmt.Errorf("read toast value in %q chunk %d: %w", t.Qualified(), chunkID, err)
+		}
+		chunks = append(chunks, ch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read toast value in %q chunk %d: %w", t.Qualified(), chunkID, err)
+	}
+
+	var assembled []byte
+	for _, ch := range chunks {
+		assembled = append(assembled, ch.data...)
+	}
+
+	const maxHexBytes = 2048
+	var hexData string
+	if len(assembled) <= maxHexBytes {
+		hexData = fmt.Sprintf(`\x%x`, assembled)
+	} else {
+		hexData = fmt.Sprintf(`\x%x…`, assembled[:maxHexBytes])
+	}
+
+	str := func(s string) *string { return &s }
+	return []TupleCell{
+		{Name: "chunk_id", Value: str(fmt.Sprintf("%d", chunkID))},
+		{Name: "chunks", Value: str(fmt.Sprintf("%d", len(chunks)))},
+		{Name: "total_bytes", Value: str(fmt.Sprintf("%d", len(assembled)))},
+		{Name: "data", Value: str(hexData)},
+	}, nil
 }
 
 // ListIndexPages returns up to `count` per-page summaries of a B-tree index
@@ -240,6 +307,10 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 // ListHeapTuples returns the line-pointer array for one heap page. The page
 // must exist (caller already saw it in ListHeapPages); a missing block here
 // surfaces as a pageinspect error from the server.
+//
+// For TOAST tables (t.Schema == "pg_toast") the query also joins back into the
+// toast relation to project chunk_id/chunk_seq per live row; each HeapTuple's
+// ChunkID/ChunkSeq fields are populated only in that case.
 func (c *Client) ListHeapTuples(ctx context.Context, t Table, blkno int32) ([]HeapTuple, error) {
 	if err := c.EnsurePageInspect(ctx, t.DB); err != nil {
 		return nil, err
@@ -249,21 +320,42 @@ func (c *Client) ListHeapTuples(ctx context.Context, t Table, blkno int32) ([]He
 		return nil, err
 	}
 	regclass := quoteIdent(t.Schema) + "." + quoteIdent(t.Name)
-	rows, err := pool.Query(ctx, sqlHeapTuples, regclass, blkno)
-	if err != nil {
-		return nil, fmt.Errorf("list heap tuples in %q page %d: %w", t.Qualified(), blkno, err)
+
+	isToast := t.Schema == "pg_toast"
+	var rows pgx.Rows
+	var queryErr error
+	if isToast {
+		sql := fmt.Sprintf(sqlToastTuples, regclass)
+		rows, queryErr = pool.Query(ctx, sql, regclass, blkno)
+	} else {
+		rows, queryErr = pool.Query(ctx, sqlHeapTuples, regclass, blkno)
+	}
+	if queryErr != nil {
+		return nil, fmt.Errorf("list heap tuples in %q page %d: %w", t.Qualified(), blkno, queryErr)
 	}
 	defer rows.Close()
 	var out []HeapTuple
 	for rows.Next() {
 		var h HeapTuple
-		if err := rows.Scan(
-			&h.LP, &h.LPOff, &h.LPFlags, &h.LPLen,
-			&h.Xmin, &h.Xmax, &h.Field3, &h.Ctid,
-			&h.Infomask2, &h.Infomask, &h.Hoff,
-			&h.Bits, &h.Oid, &h.Data,
-		); err != nil {
-			return nil, fmt.Errorf("list heap tuples in %q page %d: %w", t.Qualified(), blkno, err)
+		if isToast {
+			if err := rows.Scan(
+				&h.LP, &h.LPOff, &h.LPFlags, &h.LPLen,
+				&h.Xmin, &h.Xmax, &h.Field3, &h.Ctid,
+				&h.Infomask2, &h.Infomask, &h.Hoff,
+				&h.Bits, &h.Oid, &h.Data,
+				&h.ChunkID, &h.ChunkSeq,
+			); err != nil {
+				return nil, fmt.Errorf("list heap tuples in %q page %d: %w", t.Qualified(), blkno, err)
+			}
+		} else {
+			if err := rows.Scan(
+				&h.LP, &h.LPOff, &h.LPFlags, &h.LPLen,
+				&h.Xmin, &h.Xmax, &h.Field3, &h.Ctid,
+				&h.Infomask2, &h.Infomask, &h.Hoff,
+				&h.Bits, &h.Oid, &h.Data,
+			); err != nil {
+				return nil, fmt.Errorf("list heap tuples in %q page %d: %w", t.Qualified(), blkno, err)
+			}
 		}
 		out = append(out, h)
 	}

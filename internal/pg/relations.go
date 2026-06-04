@@ -21,18 +21,21 @@ func (c *Client) ListRelations(ctx context.Context, db, schema string) ([]Relati
 	defer rows.Close()
 	var out []Relation
 	for rows.Next() {
-		r := Relation{DB: db, Schema: schema}
+		r := Relation{DB: db}
 		var kind string
 		if err := rows.Scan(
 			&r.OID, &r.Name, &kind, &r.AccessMethod,
 			&r.SizeBytes, &r.EstRows, &r.Pages,
-			&r.ParentOID, &r.ParentName,
+			&r.ParentOID, &r.ParentName, &r.Schema,
 		); err != nil {
 			return nil, fmt.Errorf("list relations in %q.%q: %w", db, schema, err)
 		}
-		if kind == "i" {
+		switch kind {
+		case "i":
 			r.Kind = RelBTreeIndex
-		} else {
+		case "t":
+			r.Kind = RelToast
+		default:
 			r.Kind = RelTable
 		}
 		out = append(out, r)

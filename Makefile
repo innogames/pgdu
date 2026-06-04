@@ -1,4 +1,4 @@
-.PHONY: build deb clean lint test
+.PHONY: build run deb clean lint test
 
 NAME    := pgdu
 VERSION := 0.1.0
@@ -7,6 +7,9 @@ DEB     := $(NAME)_$(VERSION)_$(ARCH).deb
 
 build:
 	go build -trimpath -ldflags="-s -w" -o $(NAME) .
+
+run:
+	go run . $(ARGS)
 
 deb: build
 	rm -rf debian-pkg

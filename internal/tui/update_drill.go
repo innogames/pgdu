@@ -26,6 +26,14 @@ func (m *Model) drillIn() tea.Cmd {
 			m.stack = append(m.stack, next)
 			return m.loadCurrent()
 		}
+		if t == toolWAL {
+			// WAL is cluster-wide, so it skips the database picker too. The
+			// concrete default DB is pinned on the screen (not "") so the
+			// extension-install prompt can name a real database.
+			next := &screen{level: levelWAL, title: "wal", tool: toolWAL, db: m.client.DefaultDB(), sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
+			m.stack = append(m.stack, next)
+			return m.loadCurrent()
+		}
 		next := &screen{level: levelDatabases, title: "databases", tool: t, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
@@ -112,6 +120,18 @@ func (m *Model) drillIn() tea.Cmd {
 		if ht.LPFlags != pg.LPNormal || ht.Ctid == nil {
 			return nil
 		}
+		// TOAST chunk rows: reassemble the full value from all chunks for this
+		// chunk_id instead of showing one chunk's raw bytes.
+		if ht.ChunkID != nil {
+			next := &screen{
+				level: levelTupleRow, title: "toast value", tool: s.tool,
+				db: s.db, schema: s.schema, table: s.table,
+				toastChunkID: *ht.ChunkID,
+				sort:         sortByName, sortDesc: false,
+			}
+			m.stack = append(m.stack, next)
+			return m.loadCurrent()
+		}
 		next := &screen{
 			level: levelTupleRow, title: "row", tool: s.tool,
 			db: s.db, schema: s.schema, table: s.table,
@@ -126,16 +146,22 @@ func (m *Model) drillIn() tea.Cmd {
 			return nil
 		}
 		switch r.Kind {
-		case pg.RelTable:
+		case pg.RelTable, pg.RelToast:
 			// Build the heap context the heap-pages flow expects. relpages
 			// is filled in by loadHeapPagesCmd, so the EstRows here is
 			// purely cosmetic for downstream views — fine to carry over.
+			// For RelToast, Schema is "pg_toast" so the loaders use the
+			// correct namespace when building the regclass.
 			t := pg.Table{
 				DB: r.DB, Schema: r.Schema, OID: r.OID, Name: r.Name,
 				HeapBytes: r.SizeBytes, EstRows: r.EstRows,
 			}
+			title := "heap pages"
+			if r.Kind == pg.RelToast {
+				title = "toast pages"
+			}
 			next := &screen{
-				level: levelHeapPages, title: "heap pages", tool: s.tool,
+				level: levelHeapPages, title: title, tool: s.tool,
 				db: t.DB, schema: t.Schema, table: t,
 				heapWindowStart: 0, heapWindowCount: heapWindowDefault,
 				sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
@@ -186,6 +212,30 @@ func (m *Model) drillIn() tea.Cmd {
 			db: s.db, schema: s.schema, table: parent,
 			tupleCtid: *t.Ctid,
 			sort:      sortByName, sortDesc: false,
+		}
+		m.stack = append(m.stack, next)
+		return m.loadCurrent()
+	case levelWAL:
+		st, ok := cur.data.(pg.WALRmgrStat)
+		if !ok || st.Count == 0 {
+			return nil
+		}
+		next := &screen{
+			level: levelWALRecords, title: "wal records", tool: s.tool,
+			db: s.db, walRmgr: st.Name, walStart: s.walStart, walEnd: s.walEnd,
+			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
+		}
+		m.stack = append(m.stack, next)
+		return m.loadCurrent()
+	case levelWALRecords:
+		r, ok := cur.data.(pg.WALRecord)
+		if !ok {
+			return nil
+		}
+		next := &screen{
+			level: levelWALBlocks, title: "wal blocks", tool: s.tool,
+			db: s.db, walRmgr: s.walRmgr, walRecLSN: r.StartLSN, walRecEnd: r.EndLSN,
+			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
 		}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
@@ -262,6 +312,9 @@ func (m *Model) loadCurrent() tea.Cmd {
 	case levelHeapTuples:
 		return m.loadHeapTuplesCmd(s.table, s.heapPageBlkno)
 	case levelTupleRow:
+		if s.toastChunkID != 0 {
+			return m.loadToastValueCmd(s.table, s.toastChunkID)
+		}
 		return m.loadTupleRowCmd(s.table, s.tupleCtid)
 	case levelRelations:
 		return m.loadRelationsCmd(s.db, s.schema)
@@ -292,6 +345,20 @@ func (m *Model) loadCurrent() tea.Cmd {
 			s.diagBarCol = -1
 			return m.loadDiagnosticCmd(*s.diag, s.db)
 		}
+	case levelWAL:
+		// Clear the header cache so a Refresh re-resolves the window and
+		// re-reads the snapshot against the now-current write position.
+		s.walSummary = nil
+		s.walSummaryErr = nil
+		return tea.Batch(
+			m.loadWALOverviewCmd(s.db),
+			m.loadWALSummaryCmd(s.db),
+		)
+	case levelWALRecords:
+		s.walRecTypeStats = nil
+		return m.loadWALRecordsCmd(s.db, s.walStart, s.walEnd, s.walRmgr)
+	case levelWALBlocks:
+		return m.loadWALBlocksCmd(s.db, s.walRecLSN, s.walRecEnd)
 	}
 	return nil
 }

@@ -57,7 +57,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// instead of expanding the key list. Other levels keep the standard
 		// help-expansion behaviour.
 		if s.level == levelBufferTables || s.level == levelHeapPages || s.level == levelHeapTuples ||
-			s.level == levelIndexPages || s.level == levelIndexTuples {
+			s.level == levelIndexPages || s.level == levelIndexTuples ||
+			s.level == levelWAL || s.level == levelWALRecords || s.level == levelWALBlocks {
 			m.showInfo = !m.showInfo
 			break
 		}
@@ -334,7 +335,7 @@ func describeTarget(s *screen) (descTarget, bool) {
 			return descTarget{}, false
 		}
 		switch r.Kind {
-		case pg.RelTable:
+		case pg.RelTable, pg.RelToast:
 			return descTarget{table: pg.Table{
 				DB: r.DB, Schema: r.Schema, OID: r.OID, Name: r.Name,
 				TotalBytes: r.SizeBytes, EstRows: r.EstRows,

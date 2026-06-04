@@ -153,6 +153,12 @@ func formatDiagValue(v any, hint DiagColumnKind) DiagCell {
 		return DiagCell{Display: diagFormatFloat(t), Num: t, HasNum: true}
 
 	case string:
+		// Several diagnostic queries pre-format sizes with pg_size_pretty for
+		// display. Parse the magnitude back out so the column sorts by bytes
+		// instead of by the leading digits of the string ("97 MB" vs "9832 kB").
+		if n, ok := parseSizePretty(t); ok {
+			return DiagCell{Display: t, Num: n, HasNum: true}
+		}
 		return DiagCell{Display: t}
 
 	case []byte:
@@ -217,6 +223,38 @@ func formatDiagValue(v any, hint DiagColumnKind) DiagCell {
 	default:
 		return DiagCell{Display: fmt.Sprintf("%v", v)}
 	}
+}
+
+// sizePrettyUnits maps the unit suffixes emitted by PostgreSQL's
+// pg_size_pretty() to their byte multipliers. pg_size_pretty is 1024-based, so
+// these mirror the server's own thresholds.
+var sizePrettyUnits = map[string]float64{
+	"bytes": 1,
+	"kB":    1 << 10,
+	"MB":    1 << 20,
+	"GB":    1 << 30,
+	"TB":    1 << 40,
+	"PB":    1 << 50,
+}
+
+// parseSizePretty parses a string in the exact "<number> <unit>" form produced
+// by pg_size_pretty() (e.g. "9832 kB", "97 MB", "0 bytes") into a byte count.
+// The match is deliberately strict — number, single space, known unit — so a
+// genuine text column is never mistaken for a size and given a bogus sort key.
+func parseSizePretty(s string) (float64, bool) {
+	num, unit, ok := strings.Cut(s, " ")
+	if !ok {
+		return 0, false
+	}
+	mult, ok := sizePrettyUnits[unit]
+	if !ok {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(num, 64)
+	if err != nil {
+		return 0, false
+	}
+	return f * mult, true
 }
 
 // diagFormatFloat renders f with up to 2 decimal places, stripping trailing

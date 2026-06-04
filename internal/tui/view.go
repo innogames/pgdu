@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"pgdu/internal/humanize"
 	"pgdu/internal/pg"
@@ -32,6 +33,22 @@ func (m *Model) View() string {
 		b.WriteString(summary)
 		b.WriteString("\n")
 		contentHeight -= strings.Count(summary, "\n") + 1
+	}
+
+	if s.level == levelWAL && (s.extPrompt == nil || !s.extPrompt.blocking) &&
+		(s.walSummary != nil || s.walSummaryErr != nil) {
+		summary := m.renderWALSummary(s)
+		b.WriteString(summary)
+		b.WriteString("\n")
+		contentHeight -= strings.Count(summary, "\n") + 1
+	}
+
+	if s.level == levelWALRecords && (s.extPrompt == nil || !s.extPrompt.blocking) &&
+		len(s.walRecTypeStats) > 0 {
+		stats := m.renderWALRecTypeStats(s)
+		b.WriteString(stats)
+		b.WriteString("\n")
+		contentHeight -= strings.Count(stats, "\n") + 1
 	}
 
 	// Non-blocking prompts (hints) render above the list and consume one
@@ -73,6 +90,12 @@ func (m *Model) View() string {
 		b.WriteString(m.renderIndexPagesInfo(contentHeight))
 	case m.showInfo && s.level == levelIndexTuples:
 		b.WriteString(m.renderIndexTuplesInfo(contentHeight))
+	case m.showInfo && s.level == levelWAL:
+		b.WriteString(m.renderWALInfo(contentHeight))
+	case m.showInfo && s.level == levelWALRecords:
+		b.WriteString(m.renderWALRecordsInfo(contentHeight))
+	case m.showInfo && s.level == levelWALBlocks:
+		b.WriteString(m.renderWALBlocksInfo(contentHeight))
 	case s.extPrompt != nil && s.extPrompt.blocking:
 		b.WriteString(m.renderExtPrompt(s, contentHeight))
 	case s.loading || !s.loaded:
@@ -117,6 +140,12 @@ func (m *Model) View() string {
 			b.WriteString(m.renderDiagnosticList(s, contentHeight))
 		case levelDiagnosticResult:
 			b.WriteString(m.renderDiagResult(s, contentHeight))
+		case levelWAL:
+			b.WriteString(m.renderWALList(s, contentHeight))
+		case levelWALRecords:
+			b.WriteString(m.renderWALRecordsList(s, contentHeight))
+		case levelWALBlocks:
+			b.WriteString(m.renderWALBlocksList(s, contentHeight))
 		default:
 			b.WriteString(m.renderList(s, contentHeight))
 		}
@@ -165,11 +194,18 @@ func renderLegend(s *screen) string {
 			styleLPUnused.Render("●") + " " + styleMuted.Render("unused")
 	case levelRelations:
 		return "  " + swatch(styleHeapSeg, "table") + sep +
-			swatch(styleIndexSeg, "btree index")
+			swatch(styleIndexSeg, "btree index") + sep +
+			swatch(styleToastSeg, "toast")
 	case levelIndexPages:
 		return "  " + swatch(styleIndexSeg, "live") + sep +
 			swatch(styleBloat, "dead") + sep +
 			styleMuted.Render("░ free")
+	case levelWAL, levelWALRecords:
+		return "  " + swatch(styleBar, "record bytes") + sep +
+			swatch(styleBarAlt, "FPI bytes (full-page images)")
+	case levelWALBlocks:
+		return "  " + swatch(styleBarAlt, "FPI bytes") + sep +
+			styleMuted.Render("░ no full-page image")
 	case levelIndexTuples:
 		// Three kinds of bt_page_items rows the user will run into on a
 		// modern leaf page: regular entries (pointing at a heap row, so
@@ -225,7 +261,24 @@ func (m *Model) renderStatus(s *screen) string {
 	if pw := heapPageWindowLabel(s); pw != "" {
 		parts = append(parts, pw)
 	}
+	if wl := walStatusLabel(s); wl != "" {
+		parts = append(parts, wl)
+	}
 	return strings.Join(parts, "  ·  ")
+}
+
+// walStatusLabel keeps the WAL context (resource manager, record LSN, window)
+// on the status row where the summary header isn't shown — i.e. on the
+// records and block-refs levels the breadcrumb gets long, so the rmgr and
+// LSN window stay visible here.
+func walStatusLabel(s *screen) string {
+	switch s.level {
+	case levelWALRecords:
+		return "rmgr: " + s.walRmgr + "  ·  window: " + shortLSN(s.walStart) + "–" + shortLSN(s.walEnd)
+	case levelWALBlocks:
+		return "rmgr: " + s.walRmgr + "  ·  record: " + s.walRecLSN
+	}
+	return ""
 }
 
 func (m *Model) bloatBadge() string {
@@ -261,7 +314,11 @@ func (m *Model) breadcrumb() string {
 		case levelHeapTuples:
 			parts = append(parts, fmt.Sprintf("page #%d", sc.heapPageBlkno))
 		case levelTupleRow:
-			parts = append(parts, "row "+sc.tupleCtid)
+			if sc.toastChunkID != 0 {
+				parts = append(parts, fmt.Sprintf("chunk %d", sc.toastChunkID))
+			} else {
+				parts = append(parts, "row "+sc.tupleCtid)
+			}
 		case levelRelations:
 			parts = append(parts, sc.schema)
 		case levelIndexPages:
@@ -274,6 +331,12 @@ func (m *Model) breadcrumb() string {
 			if sc.diag != nil {
 				parts = append(parts, sc.diag.Title)
 			}
+		case levelWAL:
+			parts = append(parts, "wal")
+		case levelWALRecords:
+			parts = append(parts, sc.walRmgr)
+		case levelWALBlocks:
+			parts = append(parts, "rec "+shortLSN(sc.walRecLSN))
 		}
 	}
 	out := make([]string, len(parts))
@@ -977,6 +1040,20 @@ func barReserve(l level, tl tool) int {
 	case levelDescribe:
 		// Plain-text panel — no bar drawn, so no space needs reserving.
 		return 0
+	case levelWAL:
+		// cursor + bar(brackets) + combined + record + fpi + count + mark + name
+		return colCursor + colBrackets + walColCombined + colGutter +
+			walColRecord + colGutter + walColFPI + colGutter +
+			walColCount + colGutter + colMark + colName
+	case levelWALRecords:
+		// cursor + bar(brackets) + size + fpi + lsn + mark + name + description
+		return colCursor + colBrackets + walRecSizeColW + colGutter +
+			walRecFPIColW + colGutter + walRecLSNColW + colGutter +
+			colMark + colName + colDetail
+	case levelWALBlocks:
+		// cursor + bar(brackets) + fpi + data + name + detail
+		return colCursor + colBrackets + walBlkFPIColW + colGutter +
+			walBlkDataColW + colGutter + colName + colDetail
 	}
 	return colCursor + colBrackets + colSize + colMark + colName
 }
@@ -1223,13 +1300,19 @@ func renderHeapTupleHeadline(t pg.HeapTuple, selected bool) string {
 		ctid = fmt.Sprintf("→ #%04d", t.LPOff)
 	}
 	badges := tupleInfomaskBadges(t.Infomask, t.Infomask2)
+	chunkInfo := ""
+	if t.ChunkID != nil && t.ChunkSeq != nil {
+		// TOAST chunk: append muted chunk_id / seq so the user can identify
+		// which chunk object this row belongs to without drilling in.
+		chunkInfo = "  " + styleMuted.Render(fmt.Sprintf("chunk %d  seq %d", *t.ChunkID, *t.ChunkSeq))
+	}
 	return cursor + idx + "  " +
 		dot + " " + padRight(flagName, tupleFlagColW) + "  " +
 		padRight(fmt.Sprintf("%d", t.LPLen), tupleLenColW) + "  " +
 		padRight(xmin, tupleXidColW) + "  " +
 		padRight(xmax, tupleXidColW) + "  " +
 		padRight(ctid, tupleCtidColW) + "  " +
-		badges
+		badges + chunkInfo
 }
 
 func renderHeapTupleExpand(t pg.HeapTuple) []string {
@@ -1366,7 +1449,7 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 	if d == nil {
 		// Should not happen: the loading guard in View fires before this,
 		// but defend anyway.
-		for i := 0; i < height; i++ {
+		for range height {
 			b.WriteString("\n")
 		}
 		return b.String()
@@ -1481,32 +1564,61 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 }
 
 // renderRelationsList draws the page-inspector tool's flat list of heap
-// tables and B-tree indexes — mixed, sorted by the active sort mode. Bar
-// is solid per row, coloured by relation kind (cyan = table, green =
-// index). Each row carries its own size + est rows + page count columns;
-// index rows additionally show a muted "→ parent_table" tail.
+// tables, B-tree indexes, and TOAST heaps — mixed, sorted by the active sort
+// mode. Bar is solid per row, coloured by relation kind (cyan = table, green =
+// index, white = toast). Each row carries its own size + est rows + page count
+// columns; index and toast rows additionally show a muted "→ parent_table" tail.
 func (m *Model) renderRelationsList(s *screen, height int) string {
 	vis := s.visibleIndexes()
-	max := maxItemSize(s.items, vis)
-	s.offset, _ = viewportRange(s.cursor, s.offset, height, len(vis))
-	end := min(s.offset+height, len(vis))
+	maxSize := maxItemSize(s.items, vis)
+	rowsH := max(height-1, 0)
+	if rowsH > 0 {
+		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
+	}
+	end := min(s.offset+rowsH, len(vis))
 	barW := m.barWidth(s)
 
 	var b strings.Builder
+	b.WriteString(renderRelationsHeader(s.sort, s.sortDesc, barW))
+	b.WriteString("\n")
 	for vi := s.offset; vi < end; vi++ {
 		it := s.items[vis[vi]]
 		r, _ := it.data.(pg.Relation)
 		style := styleHeapSeg
-		if r.Kind == pg.RelBTreeIndex {
+		switch r.Kind {
+		case pg.RelBTreeIndex:
 			style = styleIndexSeg
+		case pg.RelToast:
+			style = styleToastSeg
 		}
-		b.WriteString(renderRelationRow(it, r, max, barW, vi == s.cursor, style))
+		b.WriteString(renderRelationRow(it, r, maxSize, barW, vi == s.cursor, style))
 		b.WriteString("\n")
 	}
-	for i := end - s.offset; i < height; i++ {
+	for i := end - s.offset; i < rowsH; i++ {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+func renderRelationsHeader(sort sortMode, sortDesc bool, barW int) string {
+	arrow := "↑"
+	if sortDesc {
+		arrow = "↓"
+	}
+	mark := func(label string, active bool) string {
+		if active {
+			return label + arrow
+		}
+		return label
+	}
+	// Offset matches the row: cursor(2) + bar+brackets(barW+2) + sep(2).
+	line := strings.Repeat(" ", colCursor) + strings.Repeat(" ", barW+colBrackets) + "  " +
+		padRight(mark("size", sort == sortBySize), 10) + "  " +
+		padRight(mark("~rows", sort == sortByRows), rowsColW) + "  " +
+		padRight("pages", pagesColW) + "  " +
+		"  " + // child mark column ("+ ")
+		mark("name", sort == sortByName)
+	return styleMuted.Render(line)
 }
 
 func renderRelationRow(it item, r pg.Relation, maxSize int64, barW int, selected bool, style lipgloss.Style) string {
@@ -1524,7 +1636,7 @@ func renderRelationRow(it item, r pg.Relation, maxSize int64, barW int, selected
 	pagesStr := styleMuted.Render(padRight(formatRows(it.pages)+"p", pagesColW)) + "  "
 	childMark := styleMuted.Render("+ ")
 	parent := ""
-	if r.Kind == pg.RelBTreeIndex && r.ParentName != "" {
+	if r.ParentName != "" {
 		parent = "  " + styleMuted.Render("→ "+r.ParentName)
 	}
 	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + rowsStr + pagesStr + childMark + name + parent
@@ -1756,10 +1868,15 @@ func renderIndexTupleRow(t pg.IndexTuple, pageType string, keyW int, selected bo
 	// `data` is still useful when the heap join missed (pivot/posting/dead
 	// entries) so we fall back to it, dimmed to signal "raw bytes, not a
 	// decoded value".
+	deadTag := styleBloat.Render("dead") + " "
 	var key string
 	switch {
 	case t.Decoded != nil:
 		key = truncateValue(t.Decoded, keyW)
+	case t.Data != nil && kind == idxTupleNormal:
+		// Normal leaf entry whose ctid didn't resolve to a live heap row:
+		// the row was deleted/updated since the last VACUUM.
+		key = deadTag + styleMuted.Render(truncateValue(t.Data, keyW-5))
 	case t.Data != nil:
 		key = styleMuted.Render(truncateValue(t.Data, keyW))
 	default:
@@ -1938,7 +2055,7 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 
 	if s.diagCols == nil || !s.loaded {
 		// Still loading (shouldn't normally reach here — View guards it).
-		for i := 0; i < height; i++ {
+		for range height {
 			b.WriteString("\n")
 		}
 		return b.String()
@@ -1978,8 +2095,7 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 				break
 			}
 			display := cell.Display
-			// For bytes bar columns, humanize.Bytes is displayed instead.
-			if i == barCol && barIsBytes && cell.HasNum {
+			if cell.HasNum && i < nCols && cols[i].Kind == pg.DiagBytes {
 				display = humanize.Bytes(int64(cell.Num))
 			}
 			w := lipgloss.Width(display)
@@ -2003,13 +2119,7 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			fixedW += colBrackets // additional [  ] around the bar itself
 		}
 	}
-	barW := m.width - fixedW
-	if barW < barWidthMin {
-		barW = barWidthMin
-	}
-	if barW > barWidthMax {
-		barW = barWidthMax
-	}
+	barW := min(max(m.width-fixedW, barWidthMin), barWidthMax)
 
 	// Collect bar column numeric max across all items for scaling.
 	var barMax float64
@@ -2054,10 +2164,9 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 
 	// ── rows ────────────────────────────────────────────────────────────────
 	vis := s.visibleIndexes()
-	rowsH := height - 1 // header consumes one line
-	if rowsH < 0 {
-		rowsH = 0
-	}
+	rowsH := max(
+		// header consumes one line
+		height-1, 0)
 	if rowsH > 0 {
 		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
 	}
@@ -2082,7 +2191,7 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			continue
 		}
 
-		for i := 0; i < nCols; i++ {
+		for i := range nCols {
 			var cell pg.DiagCell
 			if i < len(row) {
 				cell = row[i]
@@ -2099,13 +2208,7 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 					if scaleMax <= 0 {
 						scaleMax = 1
 					}
-					filled := int(float64(barW) * cell.Num / scaleMax)
-					if filled > barW {
-						filled = barW
-					}
-					if filled < 0 {
-						filled = 0
-					}
+					filled := max(min(int(float64(barW)*cell.Num/scaleMax), barW), 0)
 					style := styleBar
 					if barIsPercent {
 						style = percentStyle(cell.Num)
@@ -2129,7 +2232,11 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 				continue
 			}
 
-			display := truncateDiagCell(cell.Display, colW[i])
+			raw := cell.Display
+			if cell.HasNum && i < nCols && cols[i].Kind == pg.DiagBytes {
+				raw = humanize.Bytes(int64(cell.Num))
+			}
+			display := truncateDiagCell(raw, colW[i])
 			isNumeric := cell.HasNum || (i < nCols && (cols[i].Kind == pg.DiagInt ||
 				cols[i].Kind == pg.DiagFloat || cols[i].Kind == pg.DiagPercent || cols[i].Kind == pg.DiagBytes))
 
@@ -2183,16 +2290,16 @@ func padLeft(s string, n int) string {
 	return strings.Repeat(" ", n-w) + s
 }
 
-// truncateToWidth clips a rendered string to at most width terminal cells.
-// Strips trailing partial-width characters and appends "…" so the result
-// never exceeds width.
+// truncateToWidth clips a rendered (ANSI-styled) line to at most width
+// terminal cells. It must be ANSI-aware: the input contains escape sequences
+// from styled cells and coloured bars, and a naive rune-based cut can sever the
+// trailing reset of the last styled segment — leaving a style "open" that then
+// bleeds into the start of the following lines (the cursor highlight smearing
+// across rows). ansi.Truncate never breaks an escape sequence; the appended
+// reset guarantees no style survives past the cut regardless of where it lands.
 func truncateToWidth(s string, width int) string {
 	if lipgloss.Width(s) <= width {
 		return s
 	}
-	r := []rune(s)
-	for len(r) > 0 && lipgloss.Width(string(r))+1 > width {
-		r = r[:len(r)-1]
-	}
-	return string(r) + "…"
+	return ansi.Truncate(s, width, "…") + "\x1b[0m"
 }

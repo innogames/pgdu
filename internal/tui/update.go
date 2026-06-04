@@ -53,6 +53,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onHeapTuplesLoaded(msg)
 	case tupleRowLoadedMsg:
 		return m, m.onTupleRowLoaded(msg)
+	case toastValueLoadedMsg:
+		return m, m.onToastValueLoaded(msg)
 	case relationsLoadedMsg:
 		return m, m.onRelationsLoaded(msg)
 	case indexPagesLoadedMsg:
@@ -63,6 +65,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onDescribeLoaded(msg)
 	case diagnosticLoadedMsg:
 		return m, m.onDiagnosticLoaded(msg)
+	case walOverviewLoadedMsg:
+		return m, m.onWALOverviewLoaded(msg)
+	case walSummaryLoadedMsg:
+		return m, m.onWALSummaryLoaded(msg)
+	case walRecordsLoadedMsg:
+		return m, m.onWALRecordsLoaded(msg)
+	case walBlocksLoadedMsg:
+		return m, m.onWALBlocksLoaded(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
