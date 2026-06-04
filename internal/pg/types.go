@@ -475,9 +475,18 @@ type WALBlockRef struct {
 	FPIInfo     []string
 	Description string
 	// RelName is the relation this block belongs to, resolved from
-	// relfilenode via pg_filenode_relation. Empty when the relation is in
-	// another database or has been dropped (relfilenode no longer maps).
+	// relfilenode via pg_filenode_relation. For a TOAST relation this is the
+	// owning table's name, not the pg_toast.pg_toast_<oid> internal name.
+	// Empty when the relation is in another database or has been dropped
+	// (relfilenode no longer maps).
 	RelName string
+	// IsToast reports that the block belongs to a TOAST relation; RelName then
+	// names the owning table and the UI tags the row with "(toast)".
+	IsToast bool
+	// DBName is reldatabase resolved against pg_database. Empty for shared
+	// relations (reldatabase 0) or an unknown OID, in which case the UI falls
+	// back to the numeric database OID.
+	DBName string
 }
 
 // HeapTID best-effort-extracts the tuple id (block, offset) this block

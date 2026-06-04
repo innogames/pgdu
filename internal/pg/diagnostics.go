@@ -41,6 +41,7 @@ type DiagResult struct {
 	Columns []DiagColumn
 	Rows    [][]DiagCell
 	BarCol  int // index of the headline column rendered as a bar, or -1
+	SortCol int // index of the default (descending) sort column, or -1
 }
 
 // RunDiagnostic executes d.SQL against db (or the default database when db is
@@ -79,6 +80,19 @@ func (c *Client) RunDiagnostic(ctx context.Context, db string, d Diagnostic) (*D
 		}
 	}
 
+	// Resolve the default sort column. Falls back to the bar column when unset.
+	sortCol := -1
+	if d.Sort != "" {
+		for i, c := range cols {
+			if c.Name == d.Sort {
+				sortCol = i
+				break
+			}
+		}
+	} else {
+		sortCol = barCol
+	}
+
 	var resultRows [][]DiagCell
 	for rows.Next() {
 		vals, err := rows.Values()
@@ -105,7 +119,7 @@ func (c *Client) RunDiagnostic(ctx context.Context, db string, d Diagnostic) (*D
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("run diagnostic %q: %w", d.Key, err)
 	}
-	return &DiagResult{Columns: cols, Rows: resultRows, BarCol: barCol}, nil
+	return &DiagResult{Columns: cols, Rows: resultRows, BarCol: barCol, SortCol: sortCol}, nil
 }
 
 // colKindFromName derives a column kind from naming conventions so the

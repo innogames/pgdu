@@ -538,9 +538,9 @@ func (m *Model) onDiagnosticLoaded(msg diagnosticLoadedMsg) tea.Cmd {
 	}
 	s.diagCols = msg.result.Columns
 	s.diagBarCol = msg.result.BarCol
-	// Default sort: headline bar column (biggest first) if present, else col 0.
-	if s.diagBarCol >= 0 {
-		s.diagSortCol = s.diagBarCol
+	// Default sort: the result's SortCol (biggest first) if present, else col 0.
+	if msg.result.SortCol >= 0 {
+		s.diagSortCol = msg.result.SortCol
 		s.sortDesc = true
 	} else {
 		s.diagSortCol = 0

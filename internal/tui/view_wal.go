@@ -371,7 +371,11 @@ func renderWALBlockRow(it item, blk pg.WALBlockRef, maxSize int64, barW int, sel
 	if selected {
 		name = styleSelected.Render(name)
 	}
-	tail := []string{fmt.Sprintf("db %d", blk.RelDatabase)}
+	dbLabel := fmt.Sprintf("db %d", blk.RelDatabase)
+	if blk.DBName != "" {
+		dbLabel = "db " + blk.DBName
+	}
+	tail := []string{dbLabel}
 	if tid, ok := blk.HeapTID(); ok {
 		tail = append(tail, "tid "+tid)
 	}

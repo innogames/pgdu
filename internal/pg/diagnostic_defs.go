@@ -11,6 +11,7 @@ type Diagnostic struct {
 	Description string // one-line explanation shown as detail in the list
 	SQL         string // the query to run (no parameters)
 	Bar         string // headline column name rendered as a bar, or ""
+	Sort        string // default sort column name (descending); "" falls back to Bar, then column 0 ascending
 }
 
 // Diagnostics is the ordered registry of all built-in diagnostic queries.
@@ -169,7 +170,8 @@ var Diagnostics = []Diagnostic{
 		Category:    "activity",
 		Description: "non-idle backends with state, wait event and how long the statement has run",
 		SQL:         sqlDiagActivityRunning,
-		Bar:         "duration_secs",
+		Bar:         "",
+		Sort:        "duration_ms",
 	},
 	{
 		Key:         "connections",

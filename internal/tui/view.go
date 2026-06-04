@@ -252,6 +252,9 @@ func (m *Model) renderStatus(s *screen) string {
 	if s.level == levelDiagnosticResult && s.diag != nil {
 		parts = append(parts, "query: "+s.diag.Title)
 	}
+	if (s.level == levelParts || s.level == levelColumns) && s.table.Name != "" {
+		parts = append(parts, "table: "+s.table.Name)
+	}
 	if bs := bloatScanLabel(s); bs != "" {
 		parts = append(parts, bs)
 	}
@@ -2082,8 +2085,10 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 	// The bar column's width applies to the number that sits after the bar,
 	// not the bar itself.
 	colW := make([]int, nCols)
+	naturalW := make([]int, nCols) // uncapped width, used to grow the last column
 	for i, c := range cols {
 		colW[i] = lipgloss.Width(c.Name)
+		naturalW[i] = colW[i]
 	}
 	for _, it := range s.items {
 		row, ok := it.data.([]pg.DiagCell)
@@ -2099,12 +2104,29 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 				display = humanize.Bytes(int64(cell.Num))
 			}
 			w := lipgloss.Width(display)
+			if w > naturalW[i] {
+				naturalW[i] = w
+			}
 			if w > colW[i] {
 				colW[i] = w
 			}
 			if colW[i] > diagColWidth {
 				colW[i] = diagColWidth
 			}
+		}
+	}
+
+	// With no bar column, the bar's horizontal budget is unused, so let the last
+	// column grow past diagColWidth into the remaining terminal width — this is
+	// where wide text (queries, definitions, grants) would otherwise be clipped.
+	if barCol < 0 && nCols > 0 {
+		used := 2 // cursor
+		for _, w := range colW {
+			used += w + colGutter
+		}
+		last := nCols - 1
+		if remaining := m.width - used; remaining > 0 {
+			colW[last] = min(naturalW[last], colW[last]+remaining)
 		}
 	}
 

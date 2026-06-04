@@ -753,6 +753,9 @@ func walBlockToItem(b pg.WALBlockRef) item {
 	if b.RelName != "" {
 		target = b.RelName
 	}
+	if b.IsToast {
+		target += " (toast)"
+	}
 	return item{
 		name: fmt.Sprintf("rel %s/%s blk %d", target, b.ForkName(), b.BlockNumber),
 		size: int64(b.FPILength),

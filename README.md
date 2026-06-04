@@ -7,19 +7,39 @@ Drill from databases into schemas, tables, partitions, indexes and
 columns; sort by size, bloat, or buffer hit ratio; spot the relations
 worth reindexing or pruning.
 
+### Disk usage
+
+Drill from tables into a single relation and down to its columns.
+
 ![Tables view](docs/tables.png)
 
 ![Table detail](docs/table.png)
 
 ![Columns view](docs/columns.png)
 
+### Shared buffers
+
+Inspect what's occupying `shared_buffers` — per relation, per page, and per tuple.
+
 ![Shared buffers](docs/shared_buffer.png)
 
-![Shared buffers](docs/pages.png)
+![Heap pages](docs/pages.png)
 
-![Shared buffers](docs/tuples.png)
+![Index pages](docs/pages_index.png)
 
-![Shared buffers](docs/pages_index.png)
+![Tuples](docs/tuples.png)
+
+### Diagnostics
+
+Built-in diagnostic queries for live activity, WAL, and index health.
+
+![Running queries](docs/running_querries.png)
+
+![WAL inspector](docs/wal_inspector.png)
+
+![Index sizes](docs/tool_index_size.png)
+
+![Index bloat](docs/tool_index_bloat.png)
 
 ## Install
 

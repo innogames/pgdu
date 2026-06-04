@@ -1226,12 +1226,12 @@ const sqlDiagActivityRunning = `
 SELECT
     pid,
     usename,
-    application_name,
+    coalesce(host(client_addr), 'local') AS client_addr,
     state,
-    EXTRACT(epoch FROM now() - query_start)::int AS duration_secs,
+    (EXTRACT(epoch FROM now() - query_start) * 1000)::bigint AS duration_ms,
     wait_event_type,
     wait_event,
-    left(regexp_replace(query, '\s+', ' ', 'g'), 120) AS query
+    left(regexp_replace(query, '\s+', ' ', 'g'), 300) AS query
 FROM pg_stat_activity
 WHERE state IS NOT NULL
   AND state <> 'idle'
@@ -1408,12 +1408,17 @@ ORDER  BY start_lsn
 // int32 regardless of pgx's int2 widening rules. block_fpi_info is text[]
 // (a list of flag names) and arrives as a Go []string — NULL becomes nil, so
 // no COALESCE (and an array can't be COALESCEd with a text literal anyway).
-// The trailing pg_filenode_relation resolves the relfilenode back to a
-// relation name: it is NULL (→ ”) when the relation lives in another
+// The lateral resolves the relfilenode back to a relation name via
+// pg_filenode_relation: NULL (→ ”) when the relation lives in another
 // database or has been dropped, in which case the caller falls back to the
-// numeric relfilenode. RelidByRelfilenumber normalises the WAL's tablespace
+// numeric relfilenode. pg_filenode_relation normalises the WAL's tablespace
 // OID to pg_class's 0-for-default form internally, so passing reltablespace
-// straight through is correct.
+// straight through is correct. When the resolved relation is a TOAST table we
+// hop to its owning table (pg_class.reltoastrelid) and report that name plus an
+// is_toast flag, so the row shows the user-facing table rather than the opaque
+// pg_toast.pg_toast_<oid>. reldatabase is resolved to a datname against the
+// shared pg_database catalog (” for OID 0 / shared relations → numeric
+// fallback).
 const sqlWALBlocks = `
 SELECT block_id::int,
        reltablespace,
@@ -1427,7 +1432,20 @@ SELECT block_id::int,
        block_fpi_length,
        block_fpi_info,
        COALESCE(description, ''),
-       COALESCE(pg_filenode_relation(reltablespace, relfilenode)::text, '')
-FROM   pg_get_wal_block_info($1::pg_lsn, $2::pg_lsn, false)
+       COALESCE(r.relname, ''),
+       COALESCE(r.is_toast, false),
+       COALESCE((SELECT datname FROM pg_database WHERE oid = b.reldatabase), '')
+FROM   pg_get_wal_block_info($1::pg_lsn, $2::pg_lsn, false) AS b
+LEFT   JOIN LATERAL (
+         SELECT
+           CASE WHEN owner.oid IS NOT NULL
+                THEN owner.oid::regclass::text
+                ELSE f.relid::text
+           END AS relname,
+           owner.oid IS NOT NULL AS is_toast
+         FROM   (SELECT pg_filenode_relation(b.reltablespace, b.relfilenode) AS relid) f
+         LEFT   JOIN pg_class owner ON owner.reltoastrelid = f.relid::oid
+         WHERE  f.relid IS NOT NULL
+       ) r ON true
 ORDER  BY block_id
 `

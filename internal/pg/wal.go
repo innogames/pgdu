@@ -183,6 +183,7 @@ func (c *Client) WALBlocks(ctx context.Context, db, start, end string) ([]WALBlo
 			&b.BlockID, &b.RelTablespace, &b.RelDatabase, &b.RelFileNode,
 			&b.ForkNumber, &b.BlockNumber, &b.Rmgr, &b.RecordType,
 			&b.BlockDataLength, &b.FPILength, &b.FPIInfo, &b.Description, &b.RelName,
+			&b.IsToast, &b.DBName,
 		); err != nil {
 			return nil, fmt.Errorf("wal block info at %s in %q: %w", start, db, err)
 		}
