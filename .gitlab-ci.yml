@@ -24,7 +24,6 @@ build:
   stage: build
   script:
     - apt-get update && apt-get install -y --no-install-recommends dpkg-dev
-    - make build
     - make deb VERSION=0.1.0.$CI_JOB_ID
   artifacts:
     paths:

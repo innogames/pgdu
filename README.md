@@ -33,7 +33,7 @@ Inspect what's occupying `shared_buffers` — per relation, per page, and per tu
 
 Built-in diagnostic queries for live activity, WAL, and index health.
 
-![Running queries](docs/running_querries.png)
+![Running queries](docs/tool_running_querries.png)
 
 ![WAL inspector](docs/wal_inspector.png)
 
