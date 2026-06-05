@@ -34,6 +34,9 @@ func (m *Model) drillIn() tea.Cmd {
 			m.stack = append(m.stack, next)
 			return m.loadCurrent()
 		}
+		// toolQueries falls through to the database picker like the disk/buffers
+		// tools: pg_stat_statements is read from whichever database you pick
+		// (its dbid filter scopes the snapshot to that connection's database).
 		next := &screen{level: levelDatabases, title: "databases", tool: t, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
@@ -50,6 +53,13 @@ func (m *Model) drillIn() tea.Cmd {
 		return m.loadCurrent()
 	case levelDatabases:
 		d := cur.data.(pg.Database)
+		if s.tool == toolQueries {
+			// Queries has no schema/table hierarchy — drill straight to the
+			// top-queries table for the chosen database.
+			next := &screen{level: levelStatements, title: "queries", tool: toolQueries, db: d.Name}
+			m.stack = append(m.stack, next)
+			return m.loadCurrent()
+		}
 		next := &screen{level: levelSchemas, title: "schemas", tool: s.tool, db: d.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
@@ -239,6 +249,24 @@ func (m *Model) drillIn() tea.Cmd {
 		}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
+	case levelStatements:
+		// Resolve the row's queryid back to its full window-delta QueryStat.
+		var qs *pg.QueryStat
+		for i := range s.statRows {
+			if s.statRows[i].QueryID == cur.statQueryID {
+				qs = &s.statRows[i]
+				break
+			}
+		}
+		if qs == nil {
+			return nil
+		}
+		next := &screen{
+			level: levelStatementDetail, title: "query", tool: s.tool,
+			db: s.db, statDetail: qs, statWindowExecMs: s.statWindowExecMs,
+		}
+		m.stack = append(m.stack, next)
+		return m.loadCurrent()
 	case levelParts:
 		// Only the heap row drills further — into per-column space estimates.
 		// Toast and index rows have no meaningful sub-breakdown.
@@ -272,6 +300,27 @@ func (m *Model) loadCurrent() tea.Cmd {
 		s.items = diagnosticItems()
 		s.loading = false
 		s.loaded = true
+		return nil
+	case levelStatementDetail:
+		// The detail panel renders synchronously from s.statDetail (set when we
+		// drilled in); only the sample call is fetched async. Handled here —
+		// before the generic loading path below — so the metrics show
+		// immediately instead of behind a spinner.
+		s.loading = false
+		s.loaded = true
+		if s.statDetail != nil && pg.ExplainableQuery(s.statDetail.Query) {
+			// Infer the sample call and run the generic-plan EXPLAIN up front so
+			// the plan is on screen without an extra keystroke; ANALYZE stays
+			// opt-in (Enter) because it executes the query.
+			s.statExplaining = true
+			s.statExplain = ""
+			s.statExplainErr = nil
+			s.statExplainAnalyze = false
+			return tea.Batch(
+				m.loadStatementSampleCmd(s.db, s.statDetail.Query),
+				m.loadStatementExplainCmd(s.db, s.statDetail.Query),
+			)
+		}
 		return nil
 	}
 	s.loading = true
@@ -359,6 +408,16 @@ func (m *Model) loadCurrent() tea.Cmd {
 		return m.loadWALRecordsCmd(s.db, s.walStart, s.walEnd, s.walRmgr)
 	case levelWALBlocks:
 		return m.loadWALBlocksCmd(s.db, s.walRecLSN, s.walRecEnd)
+	case levelStatements:
+		// Kick a snapshot and, unless one is already running, start the
+		// self-rescheduling refresh tick. The first snapshot becomes the
+		// window baseline (see onStatementsLoaded).
+		cmds := []tea.Cmd{m.loadStatementsCmd(s.db)}
+		if !m.statTicking {
+			m.statTicking = true
+			cmds = append(cmds, statementsTick())
+		}
+		return tea.Batch(cmds...)
 	}
 	return nil
 }

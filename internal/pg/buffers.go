@@ -51,6 +51,9 @@ func (c *Client) CreateExtension(ctx context.Context, db, ext string) error {
 	if ext == "pg_walinspect" {
 		c.walInspectReady[db] = true
 	}
+	if ext == "pg_stat_statements" {
+		c.statStatementsReady[db] = true
+	}
 	if ext == "pgstattuple" {
 		// Force ProbeBloat to re-evaluate on next call.
 		delete(c.bloatProbed, db)

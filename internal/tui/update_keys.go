@@ -58,7 +58,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// help-expansion behaviour.
 		if s.level == levelBufferTables || s.level == levelHeapPages || s.level == levelHeapTuples ||
 			s.level == levelIndexPages || s.level == levelIndexTuples ||
-			s.level == levelWAL || s.level == levelWALRecords || s.level == levelWALBlocks {
+			s.level == levelWAL || s.level == levelWALRecords || s.level == levelWALBlocks ||
+			s.level == levelStatements || s.level == levelStatementDetail {
 			m.showInfo = !m.showInfo
 			break
 		}
@@ -111,6 +112,23 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.fetchBloat = !m.fetchBloat
 	case key.Matches(msg, m.keys.Install):
 		return m, m.triggerInstall(s)
+	case key.Matches(msg, m.keys.Rebaseline):
+		// Restart the top-queries window: clear the baseline so the next
+		// snapshot becomes the new "since" point.
+		if s.level == levelStatements {
+			s.statBaseline = nil
+			return m, m.loadCurrent()
+		}
+	case key.Matches(msg, m.keys.Explain):
+		// Run EXPLAIN (GENERIC_PLAN) for the query in the detail view, on demand.
+		if s.level == levelStatementDetail && s.statDetail != nil && !s.statExplaining &&
+			pg.ExplainableQuery(s.statDetail.Query) {
+			s.statExplaining = true
+			s.statExplain = ""
+			s.statExplainErr = nil
+			s.statExplainAnalyze = false
+			return m, m.loadStatementExplainCmd(s.db, s.statDetail.Query)
+		}
 	case key.Matches(msg, m.keys.Describe):
 		// Inert when already on a describe panel so `d` doesn't stack.
 		if s.level == levelDescribe {
@@ -155,6 +173,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Enter):
 		if cmd := m.handleReindexEnter(s); cmd != nil {
 			return m, cmd
+		}
+		if s.level == levelStatementDetail {
+			// The detail view doesn't drill further; Enter (not l/→) confirms an
+			// EXPLAIN ANALYZE run on read-only queries.
+			if msg.Type == tea.KeyEnter {
+				return m, m.handleStatementAnalyze(s)
+			}
+			return m, nil
 		}
 		if s.level == levelParts && reindexCandidate(s) != "" {
 			// First ENTER on a bloated index row → request confirmation;
@@ -249,6 +275,25 @@ func (m *Model) handleReindexEnter(s *screen) tea.Cmd {
 	s.pendingReindex = cand
 	s.reindexErr = nil
 	return nil
+}
+
+// handleStatementAnalyze runs EXPLAIN (ANALYZE, VERBOSE, BUFFERS) for the
+// detail view's query. ANALYZE executes the query for real, so it's gated to
+// read-only SELECT shapes (ReadOnlyQuery) and needs the sample call — the
+// query with synthesized literals filling its $n — to be ready. Returns nil
+// (a no-op) when any of those don't hold.
+func (m *Model) handleStatementAnalyze(s *screen) tea.Cmd {
+	if s.statDetail == nil || s.statExplaining {
+		return nil
+	}
+	if !pg.ReadOnlyQuery(s.statDetail.Query) || s.statSampleCall == "" {
+		return nil
+	}
+	s.statExplaining = true
+	s.statExplain = ""
+	s.statExplainErr = nil
+	s.statExplainAnalyze = true
+	return m.loadStatementExplainAnalyzeCmd(s.db, s.statDetail.Query, s.statSampleCall)
 }
 
 // descTarget holds the resolved target for a describe action.

@@ -148,6 +148,30 @@ type walBlocksLoadedMsg struct {
 	blocks []pg.WALBlockRef
 	err    error
 }
+type statementsLoadedMsg struct {
+	db            string
+	stats         []pg.QueryStat // raw cumulative snapshot; diffed against the baseline
+	trackPlanning bool           // whether plan time is being collected
+	err           error
+}
+
+// statementsTickMsg drives the self-rescheduling refresh of the top-queries
+// table so it behaves as a live "since you opened it" monitor.
+type statementsTickMsg struct{}
+
+type statementSampleLoadedMsg struct {
+	db     string
+	query  string // matches screen.statDetail.Query for stale-message rejection
+	sample string
+	err    error
+}
+type statementExplainLoadedMsg struct {
+	db      string
+	query   string // matches screen.statDetail.Query for stale-message rejection
+	plan    string
+	err     error
+	analyze bool // plan came from EXPLAIN ANALYZE rather than the generic plan
+}
 
 // --- commands ---
 
@@ -377,5 +401,54 @@ func (m *Model) loadWALBlocksCmd(db, recLSN, recEnd string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		blocks, err := m.client.WALBlocks(ctx, db, recLSN, recEnd)
 		return walBlocksLoadedMsg{db: db, recLSN: recLSN, blocks: blocks, err: err}
+	})
+}
+
+func (m *Model) loadStatementsCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		stats, err := m.client.StatementSnapshot(ctx, db)
+		if err != nil {
+			return statementsLoadedMsg{db: db, err: err}
+		}
+		tp, _ := m.client.TrackPlanning(ctx, db) // best-effort column decoration
+		return statementsLoadedMsg{db: db, stats: stats, trackPlanning: tp}
+	})
+}
+
+// statementsRefreshInterval is how often the top-queries window re-samples the
+// counters. 2 s is responsive enough to watch load build without hammering the
+// server with snapshot queries.
+const statementsRefreshInterval = 2 * time.Second
+
+func statementsTick() tea.Cmd {
+	return tea.Tick(statementsRefreshInterval, func(time.Time) tea.Msg {
+		return statementsTickMsg{}
+	})
+}
+
+func (m *Model) loadStatementSampleCmd(db, queryText string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		params, err := m.client.InferParams(ctx, db, queryText)
+		if err != nil {
+			return statementSampleLoadedMsg{db: db, query: queryText, err: err}
+		}
+		return statementSampleLoadedMsg{db: db, query: queryText, sample: pg.BuildSampleCall(queryText, params)}
+	})
+}
+
+func (m *Model) loadStatementExplainCmd(db, queryText string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		plan, err := m.client.ExplainGeneric(ctx, db, queryText)
+		return statementExplainLoadedMsg{db: db, query: queryText, plan: plan, err: err}
+	})
+}
+
+// loadStatementExplainAnalyzeCmd runs EXPLAIN ANALYZE on sampleCall (a fully
+// literal query). matchQuery is the normalized query text used only to reject
+// stale messages — sampleCall is what actually executes.
+func (m *Model) loadStatementExplainAnalyzeCmd(db, matchQuery, sampleCall string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		plan, err := m.client.ExplainAnalyze(ctx, db, sampleCall)
+		return statementExplainLoadedMsg{db: db, query: matchQuery, plan: plan, err: err, analyze: true}
 	})
 }

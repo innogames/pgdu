@@ -51,6 +51,13 @@ func (m *Model) View() string {
 		contentHeight -= strings.Count(stats, "\n") + 1
 	}
 
+	if s.level == levelStatements && (s.extPrompt == nil || !s.extPrompt.blocking) {
+		hdr := m.renderStatementsHeader(s)
+		b.WriteString(hdr)
+		b.WriteString("\n")
+		contentHeight -= strings.Count(hdr, "\n") + 1
+	}
+
 	// Non-blocking prompts (hints) render above the list and consume one
 	// line of the content area. Blocking prompts take over the whole
 	// content area in the switch below.
@@ -96,10 +103,12 @@ func (m *Model) View() string {
 		b.WriteString(m.renderWALRecordsInfo(contentHeight))
 	case m.showInfo && s.level == levelWALBlocks:
 		b.WriteString(m.renderWALBlocksInfo(contentHeight))
+	case m.showInfo && (s.level == levelStatements || s.level == levelStatementDetail):
+		b.WriteString(m.renderStatementsInfo(contentHeight))
 	case s.extPrompt != nil && s.extPrompt.blocking:
 		b.WriteString(m.renderExtPrompt(s, contentHeight))
 	case s.loading || !s.loaded:
-		b.WriteString(fmt.Sprintf("  %s loading %s…\n", m.spinner.View(), s.title))
+		fmt.Fprintf(&b, "  %s loading %s…\n", m.spinner.View(), s.title)
 		for i := 1; i < contentHeight; i++ {
 			b.WriteString("\n")
 		}
@@ -108,10 +117,14 @@ func (m *Model) View() string {
 		for i := 1; i < contentHeight; i++ {
 			b.WriteString("\n")
 		}
-	case len(s.items) == 0 && s.level != levelDescribe && s.level != levelDiagnosticResult:
+	case len(s.items) == 0 && s.level != levelDescribe && s.level != levelDiagnosticResult &&
+		s.level != levelStatements && s.level != levelStatementDetail:
 		// levelDescribe never populates items — it renders from s.describe.
 		// levelDiagnosticResult with 0 items means the query returned no rows,
 		// which is valid; fall through to the renderer which shows "(no rows)".
+		// levelStatements (empty = no activity in the window yet) and
+		// levelStatementDetail (renders from s.statDetail) are likewise valid
+		// with no items.
 		b.WriteString("  (no items)\n")
 		for i := 1; i < contentHeight; i++ {
 			b.WriteString("\n")
@@ -146,6 +159,11 @@ func (m *Model) View() string {
 			b.WriteString(m.renderWALRecordsList(s, contentHeight))
 		case levelWALBlocks:
 			b.WriteString(m.renderWALBlocksList(s, contentHeight))
+		case levelStatements:
+			// The top-queries table is a generic diagnostic-style table.
+			b.WriteString(m.renderDiagResult(s, contentHeight))
+		case levelStatementDetail:
+			b.WriteString(m.renderStatementDetail(s, contentHeight))
 		default:
 			b.WriteString(m.renderList(s, contentHeight))
 		}
@@ -340,6 +358,14 @@ func (m *Model) breadcrumb() string {
 			parts = append(parts, sc.walRmgr)
 		case levelWALBlocks:
 			parts = append(parts, "rec "+shortLSN(sc.walRecLSN))
+		case levelStatements:
+			// The parent databases level already shows "queries" (the tool
+			// name); show the chosen database here instead of repeating it.
+			parts = append(parts, sc.db)
+		case levelStatementDetail:
+			if sc.statDetail != nil {
+				parts = append(parts, fmt.Sprintf("query %d", sc.statDetail.QueryID))
+			}
 		}
 	}
 	out := make([]string, len(parts))
@@ -2259,8 +2285,17 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 				raw = humanize.Bytes(int64(cell.Num))
 			}
 			display := truncateDiagCell(raw, colW[i])
+			graded := i < nCols && cols[i].Kind == pg.DiagPercentGraded
 			isNumeric := cell.HasNum || (i < nCols && (cols[i].Kind == pg.DiagInt ||
-				cols[i].Kind == pg.DiagFloat || cols[i].Kind == pg.DiagPercent || cols[i].Kind == pg.DiagBytes))
+				cols[i].Kind == pg.DiagFloat || cols[i].Kind == pg.DiagPercent ||
+				cols[i].Kind == pg.DiagBytes || graded))
+
+			// Grade "higher is better" percent cells green→red so the eye can
+			// triage hit ratios without reading digits. Skipped on the selected
+			// row, which renders in the selection style like every other cell.
+			if graded && cell.HasNum && !selected {
+				display = gradedPercentStyle(cell.Num).Render(display)
+			}
 
 			var rendered string
 			if isNumeric {

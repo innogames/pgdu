@@ -16,11 +16,12 @@ import (
 type DiagColumnKind int
 
 const (
-	DiagText    DiagColumnKind = iota // text: left-aligned, no bar
-	DiagInt                           // integer count: right-aligned, bar if it is the headline col
-	DiagFloat                         // floating-point number: right-aligned
-	DiagPercent                       // 0–100 %: bar scaled 0–100, coloured by percentStyle
-	DiagBytes                         // byte count: rendered via humanize.Bytes when it is the bar col
+	DiagText          DiagColumnKind = iota // text: left-aligned, no bar
+	DiagInt                                 // integer count: right-aligned, bar if it is the headline col
+	DiagFloat                               // floating-point number: right-aligned
+	DiagPercent                             // 0–100 %: bar scaled 0–100, coloured by percentStyle when it is the bar col
+	DiagBytes                               // byte count: rendered via humanize.Bytes when it is the bar col
+	DiagPercentGraded                       // 0–100 % where higher is better: cell text graded green→red (e.g. cache hit ratio)
 )
 
 // DiagColumn describes one column of a diagnostic result set.

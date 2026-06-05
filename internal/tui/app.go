@@ -35,6 +35,8 @@ const (
 	levelWAL              // WAL inspector overview: per-resource-manager stats
 	levelWALRecords       // individual WAL records for one resource manager
 	levelWALBlocks        // block references of one WAL record
+	levelStatements       // pg_stat_statements top-queries table (toolQueries)
+	levelStatementDetail  // single query: metrics, sample call, EXPLAIN
 )
 
 // tool identifies which top-level statistic the user is exploring.
@@ -45,8 +47,9 @@ const (
 	toolDisk tool = iota
 	toolBuffers
 	toolPageInspect
-	toolTools // diagnostic SQL query runner
-	toolWAL   // write-ahead-log inspector
+	toolTools   // diagnostic SQL query runner
+	toolWAL     // write-ahead-log inspector
+	toolQueries // pg_stat_statements top-queries (powa-style)
 )
 
 func (t tool) Name() string {
@@ -61,6 +64,8 @@ func (t tool) Name() string {
 		return "tools"
 	case toolWAL:
 		return "wal"
+	case toolQueries:
+		return "queries"
 	}
 	return "?"
 }
@@ -286,6 +291,11 @@ type item struct {
 	// drilling in, how big a window pg_buffercache-style scans will produce.
 	pages    int64
 	hasPages bool
+
+	// statQueryID carries the pg_stat_statements queryid on levelStatements
+	// rows (whose .data is []pg.DiagCell for the generic table renderer) so a
+	// drill can look the full QueryStat back up from screen.statRows.
+	statQueryID int64
 }
 
 type screen struct {
@@ -410,6 +420,36 @@ type screen struct {
 	diagCols    []pg.DiagColumn
 	diagBarCol  int // headline bar column index, or -1
 	diagSortCol int // active sort column index for the generic table
+
+	// Top-queries state (levelStatements). statBaseline is the snapshot taken
+	// when the tool was entered (or last re-baselined); every refresh diffs
+	// the live counters against it so the table shows the window "since you
+	// opened it" — pg_stat_statements has no time axis of its own. statRows is
+	// the current set of window deltas (used to resolve a drilled-into row back
+	// to its full QueryStat). statWindowExecMs is the summed exec time across
+	// the window, the denominator for the %time column. statBaselineAt /
+	// statSampledAt drive the window-status header.
+	statBaseline      map[int64]pg.QueryStat
+	statRows          []pg.QueryStat
+	statWindowExecMs  float64
+	statBaselineAt    time.Time
+	statSampledAt     time.Time
+	statTrackPlanning bool // pg_stat_statements.track_planning — gates the plan_ms column
+
+	// Query-detail state (levelStatementDetail). statDetail is the window-delta
+	// QueryStat for the drilled-into query; statSampleCall is the synthesized
+	// example call (or "" with statSampleErr set when params couldn't be
+	// inferred); statExplain holds the EXPLAIN output, run automatically on
+	// entry (generic plan) and re-runnable via x, or replaced by EXPLAIN
+	// ANALYZE on Enter. statExplainAnalyze flags which of the two the current
+	// statExplain text is.
+	statDetail         *pg.QueryStat
+	statSampleCall     string
+	statSampleErr      error
+	statExplain        string
+	statExplainErr     error
+	statExplaining     bool
+	statExplainAnalyze bool
 }
 
 // reindexBloatThreshold is the bloat % above which the parts view offers an
@@ -419,15 +459,17 @@ const reindexBloatThreshold = 0.05
 // Extension names referenced by the TUI. Kept here so prompt text and the
 // command that runs CREATE EXTENSION stay in sync if either is renamed.
 const (
-	extBufferCache = "pg_buffercache"
-	extPgStatTuple = "pgstattuple"
-	extPageInspect = "pageinspect"
-	extWALInspect  = "pg_walinspect"
+	extBufferCache    = "pg_buffercache"
+	extPgStatTuple    = "pgstattuple"
+	extPageInspect    = "pageinspect"
+	extWALInspect     = "pg_walinspect"
+	extStatStatements = "pg_stat_statements"
 
-	extPromptReasonBufferCache = "shared_buffers view requires the pg_buffercache extension"
-	extPromptReasonPgStatTuple = "exact bloat measurements are available with pgstattuple"
-	extPromptReasonPageInspect = "Page inspector requires the pageinspect extension"
-	extPromptReasonWALInspect  = "WAL inspector requires the pg_walinspect extension (and a superuser / pg_read_server_files role to read WAL)"
+	extPromptReasonBufferCache    = "shared_buffers view requires the pg_buffercache extension"
+	extPromptReasonPgStatTuple    = "exact bloat measurements are available with pgstattuple"
+	extPromptReasonPageInspect    = "Page inspector requires the pageinspect extension"
+	extPromptReasonWALInspect     = "WAL inspector requires the pg_walinspect extension (and a superuser / pg_read_server_files role to read WAL)"
+	extPromptReasonStatStatements = "Top queries requires the pg_stat_statements extension (also needs it in shared_preload_libraries + a restart to collect)"
 )
 
 // extPrompt is the per-screen "install this extension?" affordance.
@@ -455,6 +497,11 @@ type Model struct {
 	// showInfo toggles the buffer-tables info overlay (? key) — a static
 	// explainer for the server-memory and shared_buffers bars.
 	showInfo bool
+
+	// statTicking is true while a self-rescheduling refresh tick is running for
+	// the top-queries tool, so re-entering levelStatements doesn't spawn a
+	// second tick loop.
+	statTicking bool
 
 	target string // host:port for header
 }
@@ -486,6 +533,7 @@ func toolItems() []item {
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},
+		{name: "Top queries", detail: "powa-style top queries from pg_stat_statements — calls, time, I/O; EXPLAIN and sample params on Enter", hasChildren: true, data: toolQueries},
 		{name: "Tools", detail: "run diagnostic queries — index / table / vacuum / activity / wal / server health", hasChildren: true, data: toolTools},
 	}
 }
@@ -981,6 +1029,10 @@ func levelLabel(l level) string {
 		return "wal-records"
 	case levelWALBlocks:
 		return "wal-blocks"
+	case levelStatements:
+		return "queries"
+	case levelStatementDetail:
+		return "query-detail"
 	}
 	return "?"
 }

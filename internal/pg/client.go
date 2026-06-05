@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"pgdu/internal/cli"
@@ -29,6 +30,15 @@ type Client struct {
 
 	// True once pg_walinspect is known to be installed in a given database.
 	walInspectReady map[string]bool
+
+	// True once pg_stat_statements is known to be installed in a given database.
+	statStatementsReady map[string]bool
+
+	// Cached pg_stat_statements.track_planning per database (it only changes on
+	// a config reload, so one read per session is enough — and avoids the
+	// per-refresh query showing up as noise on unprivileged connections).
+	trackPlanning      map[string]bool
+	trackPlanningKnown map[string]bool
 }
 
 type BloatMode int
@@ -41,12 +51,15 @@ const (
 
 func New(cfg cli.Config) *Client {
 	return &Client{
-		cfg:              cfg,
-		pools:            map[string]*pgxpool.Pool{},
-		bloatProbed:      map[string]BloatMode{},
-		bufCacheReady:    map[string]bool{},
-		pageInspectReady: map[string]bool{},
-		walInspectReady:  map[string]bool{},
+		cfg:                 cfg,
+		pools:               map[string]*pgxpool.Pool{},
+		bloatProbed:         map[string]BloatMode{},
+		bufCacheReady:       map[string]bool{},
+		pageInspectReady:    map[string]bool{},
+		walInspectReady:     map[string]bool{},
+		statStatementsReady: map[string]bool{},
+		trackPlanning:       map[string]bool{},
+		trackPlanningKnown:  map[string]bool{},
 	}
 }
 
@@ -67,6 +80,15 @@ func (c *Client) PoolFor(ctx context.Context, db string) (*pgxpool.Pool, error) 
 	}
 	pcfg.MaxConns = 4
 	pcfg.MinConns = 0
+	// Make pgdu invisible to pg_stat_statements: without this, pgdu's own
+	// polling (the 2 s snapshot) and EXPLAIN queries get recorded and show up
+	// in — and pollute — its own Top-queries tool. The GUC is superuser-only,
+	// so this is best-effort; the snapshot query also filters pgdu's footprints
+	// out as a fallback for unprivileged connections.
+	pcfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, _ = conn.Exec(ctx, "SET pg_stat_statements.track = 'none'")
+		return nil
+	}
 	p, err := pgxpool.NewWithConfig(ctx, pcfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect %q: %w", db, err)

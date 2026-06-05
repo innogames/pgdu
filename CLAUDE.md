@@ -1,7 +1,8 @@
 # pgdu
 
-ncdu-style TUI for browsing PostgreSQL disk usage and shared_buffers occupancy.
+ncdu-style TUI for browsing PostgreSQL disk usage and shared_buffers occupancy and other diagnostic data.
 Go 1.26, Bubble Tea, pgx/v5. Single binary, no daemon.
+Postgres 17+18+newwer must be supported query wise.
 
 ## Layout
 

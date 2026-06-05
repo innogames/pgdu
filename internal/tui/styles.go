@@ -95,3 +95,19 @@ func percentStyle(pct float64) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(colorBloat)
 	}
 }
+
+// gradedPercentStyle grades a "higher is better" percentage with tighter
+// thresholds than percentStyle, for metrics where only near-perfect is good —
+// e.g. the buffer-cache hit ratio: ≥99.5 green, ≥95 cyan, ≥80 yellow, <80 red.
+func gradedPercentStyle(pct float64) lipgloss.Style {
+	switch {
+	case pct >= 99.5:
+		return lipgloss.NewStyle().Foreground(colorOK)
+	case pct >= 95:
+		return lipgloss.NewStyle().Foreground(colorBar)
+	case pct >= 80:
+		return lipgloss.NewStyle().Foreground(colorAccent)
+	default:
+		return lipgloss.NewStyle().Foreground(colorBloat)
+	}
+}

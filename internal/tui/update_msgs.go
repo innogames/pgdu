@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -559,5 +560,101 @@ func (m *Model) onDiagnosticLoaded(msg diagnosticLoadedMsg) tea.Cmd {
 		})
 	}
 	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelStatements)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		s.err = nil
+		s.extPrompt = &extPrompt{
+			name:        ext.Extension,
+			db:          ext.DB,
+			installable: ext.Installable,
+			reason:      extPromptReasonStatStatements,
+			blocking:    true,
+		}
+		s.items = s.items[:0]
+		s.diagCols = nil
+		return nil
+	}
+	s.err = msg.err
+	if msg.err != nil {
+		return nil
+	}
+	s.statSampledAt = time.Now()
+	s.statTrackPlanning = msg.trackPlanning
+
+	// First snapshot becomes the baseline: the window opens here, so there are
+	// no deltas to show yet — the table fills in as queries run.
+	if s.statBaseline == nil {
+		s.statBaseline = make(map[int64]pg.QueryStat, len(msg.stats))
+		for _, q := range msg.stats {
+			s.statBaseline[q.QueryID] = q
+		}
+		s.statBaselineAt = s.statSampledAt
+		s.statRows = nil
+		s.items = s.items[:0]
+		s.statWindowExecMs = 0
+		s.diagCols = statementColumns(s.statTrackPlanning)
+		s.diagBarCol = -1
+		s.diagSortCol = colStmtTotalMs
+		s.sortDesc = true
+		return nil
+	}
+
+	s.statRows = pg.DiffStatements(s.statBaseline, msg.stats)
+	items, windowMs := buildStatementItems(s.statRows, s.statTrackPlanning)
+	s.statWindowExecMs = windowMs
+	s.diagCols = statementColumns(s.statTrackPlanning)
+	s.diagBarCol = -1
+	s.items = items
+	// Preserve the user's chosen sort column/direction across refreshes (set on
+	// the first/baseline load); applySort re-orders to match.
+	m.applySort(s)
+	return nil
+}
+
+// onStatementsTick keeps the live window fresh. It re-samples only while the
+// top-queries table is on top, but keeps rescheduling while the user is in its
+// detail view too, so the window resumes updating when they return. When the
+// user leaves the tool entirely the loop stops (statTicking flips false) until
+// loadCurrent restarts it on re-entry.
+func (m *Model) onStatementsTick() tea.Cmd {
+	top := m.top()
+	if top.level != levelStatements && top.level != levelStatementDetail {
+		m.statTicking = false
+		return nil
+	}
+	if top.level == levelStatements {
+		return tea.Batch(m.loadStatementsCmd(top.db), statementsTick())
+	}
+	return statementsTick()
+}
+
+func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelStatementDetail)
+	if s == nil || s.statDetail == nil || s.statDetail.Query != msg.query {
+		return nil
+	}
+	s.statSampleCall = msg.sample
+	s.statSampleErr = msg.err
+	return nil
+}
+
+func (m *Model) onStatementExplainLoaded(msg statementExplainLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelStatementDetail)
+	if s == nil || s.statDetail == nil || s.statDetail.Query != msg.query {
+		return nil
+	}
+	s.statExplaining = false
+	s.statExplain = msg.plan
+	s.statExplainErr = msg.err
+	s.statExplainAnalyze = msg.analyze
 	return nil
 }
