@@ -119,3 +119,29 @@ func (c *Client) Close() {
 // DefaultDB is the initial database the user pointed pgdu at.
 func (c *Client) DefaultDB() string { return c.cfg.Database }
 func (c *Client) Target() string    { return c.cfg.Target() }
+
+// ensureExtension verifies that ext is installed in db, caching a positive
+// result in ready so the probe runs at most once per database. A missing
+// extension is reported as *MissingExtensionError so the TUI can offer an
+// interactive install instead of failing with an opaque error. Auto-running
+// CREATE EXTENSION here would silently mask permission problems, so we don't.
+func (c *Client) ensureExtension(ctx context.Context, db, ext string, ready map[string]bool) error {
+	c.mu.Lock()
+	if ready[db] {
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+
+	st, err := c.ProbeExtension(ctx, db, ext)
+	if err != nil {
+		return err
+	}
+	if !st.Installed {
+		return &MissingExtensionError{Extension: ext, DB: db, Installable: st.Available}
+	}
+	c.mu.Lock()
+	ready[db] = true
+	c.mu.Unlock()
+	return nil
+}

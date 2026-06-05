@@ -97,3 +97,20 @@ func asMissingExt(err error) *pg.MissingExtensionError {
 	}
 	return nil
 }
+
+// setExtensionPrompt replaces a screen's list with a blocking "install this
+// extension?" prompt built from a MissingExtensionError, clearing the raw
+// error so the load handler shows the affordance instead of an opaque message.
+// Returns nil so handlers can `return setExtensionPrompt(...)` in one line.
+func setExtensionPrompt(s *screen, ext *pg.MissingExtensionError, reason string) tea.Cmd {
+	s.err = nil
+	s.extPrompt = &extPrompt{
+		name:        ext.Extension,
+		db:          ext.DB,
+		installable: ext.Installable,
+		reason:      reason,
+		blocking:    true,
+	}
+	s.items = s.items[:0]
+	return nil
+}

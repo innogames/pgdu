@@ -3,6 +3,8 @@ package pg
 import (
 	"context"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // ListSchemas returns user-visible schemas in db, with total size and the
@@ -12,21 +14,10 @@ func (c *Client) ListSchemas(ctx context.Context, db string) ([]Schema, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := pool.Query(ctx, sqlSchemas)
-	if err != nil {
-		return nil, fmt.Errorf("list schemas in %q: %w", db, err)
-	}
-	defer rows.Close()
-	var out []Schema
-	for rows.Next() {
-		s := Schema{DB: db}
-		if err := rows.Scan(&s.Name, &s.SizeBytes, &s.TableCount); err != nil {
-			return nil, fmt.Errorf("list schemas in %q: %w", db, err)
-		}
-		out = append(out, s)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list schemas in %q: %w", db, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("list schemas in %q", db), sqlSchemas, nil,
+		func(row pgx.CollectableRow) (Schema, error) {
+			s := Schema{DB: db}
+			err := row.Scan(&s.Name, &s.SizeBytes, &s.TableCount)
+			return s, err
+		})
 }

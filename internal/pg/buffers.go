@@ -3,6 +3,8 @@ package pg
 import (
 	"context"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // ExtensionStatus reports whether ext is installed in db, and (if not)
@@ -42,17 +44,15 @@ func (c *Client) CreateExtension(ctx context.Context, db, ext string) error {
 		return fmt.Errorf("create extension %s: %w", ext, err)
 	}
 	c.mu.Lock()
-	if ext == "pg_buffercache" {
-		c.bufCacheReady[db] = true
-	}
-	if ext == "pageinspect" {
-		c.pageInspectReady[db] = true
-	}
-	if ext == "pg_walinspect" {
-		c.walInspectReady[db] = true
-	}
-	if ext == "pg_stat_statements" {
-		c.statStatementsReady[db] = true
+	// Mark the just-installed extension ready so the matching Ensure* skips its
+	// probe; ready maps mirror the ones ensureExtension caches into.
+	if ready := map[string]map[string]bool{
+		"pg_buffercache":     c.bufCacheReady,
+		"pageinspect":        c.pageInspectReady,
+		"pg_walinspect":      c.walInspectReady,
+		"pg_stat_statements": c.statStatementsReady,
+	}[ext]; ready != nil {
+		ready[db] = true
 	}
 	if ext == "pgstattuple" {
 		// Force ProbeBloat to re-evaluate on next call.
@@ -69,24 +69,7 @@ func (c *Client) CreateExtension(ctx context.Context, db, ext string) error {
 // permission problems and surprised people who didn't realise pgdu was
 // taking that liberty.
 func (c *Client) EnsureBufferCache(ctx context.Context, db string) error {
-	c.mu.Lock()
-	if c.bufCacheReady[db] {
-		c.mu.Unlock()
-		return nil
-	}
-	c.mu.Unlock()
-
-	st, err := c.ProbeExtension(ctx, db, "pg_buffercache")
-	if err != nil {
-		return err
-	}
-	if !st.Installed {
-		return &MissingExtensionError{Extension: "pg_buffercache", DB: db, Installable: st.Available}
-	}
-	c.mu.Lock()
-	c.bufCacheReady[db] = true
-	c.mu.Unlock()
-	return nil
+	return c.ensureExtension(ctx, db, "pg_buffercache", c.bufCacheReady)
 }
 
 // TableBufferStats lists per-table shared-buffer footprint and cumulative
@@ -100,23 +83,12 @@ func (c *Client) TableBufferStats(ctx context.Context, db, schema string) ([]Tab
 	if err != nil {
 		return nil, err
 	}
-	rows, err := pool.Query(ctx, sqlBufferStats, schema)
-	if err != nil {
-		return nil, fmt.Errorf("table buffer stats in %q.%q: %w", db, schema, err)
-	}
-	defer rows.Close()
-	var out []TableBufferStat
-	for rows.Next() {
-		s := TableBufferStat{DB: db, Schema: schema}
-		if err := rows.Scan(&s.OID, &s.Schema, &s.Name, &s.BufferedBytes, &s.TotalBytes, &s.Hits, &s.Reads); err != nil {
-			return nil, fmt.Errorf("table buffer stats in %q.%q: %w", db, schema, err)
-		}
-		out = append(out, s)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("table buffer stats in %q.%q: %w", db, schema, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("table buffer stats in %q.%q", db, schema), sqlBufferStats, []any{schema},
+		func(row pgx.CollectableRow) (TableBufferStat, error) {
+			s := TableBufferStat{DB: db, Schema: schema}
+			err := row.Scan(&s.OID, &s.Schema, &s.Name, &s.BufferedBytes, &s.TotalBytes, &s.Hits, &s.Reads)
+			return s, err
+		})
 }
 
 // BufferCacheSummary returns the cluster-wide shared_buffers occupancy split

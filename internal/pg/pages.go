@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // EnsurePageInspect makes sure pageinspect is installed in db. Mirrors
@@ -12,24 +13,7 @@ import (
 // missing so the TUI can offer an interactive install instead of failing
 // with an opaque error.
 func (c *Client) EnsurePageInspect(ctx context.Context, db string) error {
-	c.mu.Lock()
-	if c.pageInspectReady[db] {
-		c.mu.Unlock()
-		return nil
-	}
-	c.mu.Unlock()
-
-	st, err := c.ProbeExtension(ctx, db, "pageinspect")
-	if err != nil {
-		return err
-	}
-	if !st.Installed {
-		return &MissingExtensionError{Extension: "pageinspect", DB: db, Installable: st.Available}
-	}
-	c.mu.Lock()
-	c.pageInspectReady[db] = true
-	c.mu.Unlock()
-	return nil
+	return c.ensureExtension(ctx, db, "pageinspect", c.pageInspectReady)
 }
 
 // RelPages returns pg_class.relpages for a table — used to clamp the
@@ -48,6 +32,27 @@ func (c *Client) RelPages(ctx context.Context, t Table) (int32, error) {
 	return n, nil
 }
 
+// clampPageWindow caps the half-open window [start, start+count) to the
+// relation's real page count, since get_raw_page / bt_page_stats error hard
+// past EOF. relpages comes from sqlRelPages (pg_class — ANALYZE-accurate, no
+// exclusive lock). ok is false when the window is entirely past EOF or the
+// relation has fewer than minPages browsable pages (1 for a heap; 2 for an
+// index, whose block 0 is the un-listable meta page). On ok the adjusted count
+// is returned.
+func (c *Client) clampPageWindow(ctx context.Context, pool *pgxpool.Pool, oid uint32, qualified string, start, count, minPages int32) (int32, bool, error) {
+	var relpages int32
+	if err := pool.QueryRow(ctx, sqlRelPages, oid).Scan(&relpages); err != nil {
+		return 0, false, fmt.Errorf("relpages for %q: %w", qualified, err)
+	}
+	if relpages < minPages || start >= relpages {
+		return 0, false, nil
+	}
+	if start+count > relpages {
+		count = relpages - start
+	}
+	return count, true, nil
+}
+
 // ListHeapPages returns up to `count` per-page summaries starting at `start`.
 func (c *Client) ListHeapPages(ctx context.Context, t Table, start, count int32) ([]HeapPageStat, error) {
 	if err := c.EnsurePageInspect(ctx, t.DB); err != nil {
@@ -57,22 +62,14 @@ func (c *Client) ListHeapPages(ctx context.Context, t Table, start, count int32)
 	if err != nil {
 		return nil, err
 	}
-	regclass := quoteIdent(t.Schema) + "." + quoteIdent(t.Name)
+	regclass := qualifiedIdent(t.Schema, t.Name)
 
-	// Clamp the window to the real relation size — get_raw_page errors hard
-	// when asked for a block past EOF, and pg_class.relpages is the cheap
-	// source of truth. relpages can be 0 (empty heap, or a partitioned-root
-	// with no storage of its own), in which case we return an empty list
-	// without issuing the page query at all.
-	var relpages int32
-	if err := pool.QueryRow(ctx, sqlRelPages, t.OID).Scan(&relpages); err != nil {
-		return nil, fmt.Errorf("relpages for %q: %w", t.Qualified(), err)
+	count, ok, err := c.clampPageWindow(ctx, pool, t.OID, t.Qualified(), start, count, 1)
+	if err != nil {
+		return nil, err
 	}
-	if relpages <= 0 || start >= relpages {
+	if !ok {
 		return nil, nil
-	}
-	if start+count > relpages {
-		count = relpages - start
 	}
 
 	rows, err := pool.Query(ctx, sqlHeapPagesSummary, regclass, start, count)
@@ -109,7 +106,7 @@ func (c *Client) ListTupleRow(ctx context.Context, t Table, ctid string) ([]Tupl
 	if err != nil {
 		return nil, err
 	}
-	regclass := quoteIdent(t.Schema) + "." + quoteIdent(t.Name)
+	regclass := qualifiedIdent(t.Schema, t.Name)
 	tmpl := sqlTupleRow
 	if t.Schema == "pg_toast" {
 		// TOAST tables lack a composite type so row_to_json fails; use the
@@ -149,7 +146,7 @@ func (c *Client) ReadToastValue(ctx context.Context, t Table, chunkID uint32) ([
 	if err != nil {
 		return nil, err
 	}
-	regclass := quoteIdent(t.Schema) + "." + quoteIdent(t.Name)
+	regclass := qualifiedIdent(t.Schema, t.Name)
 	sql := fmt.Sprintf(sqlToastValueChunks, regclass)
 	rows, err := pool.Query(ctx, sql, chunkID)
 	if err != nil {
@@ -207,21 +204,16 @@ func (c *Client) ListIndexPages(ctx context.Context, r Relation, start, count in
 	if err != nil {
 		return nil, err
 	}
-	regclass := quoteIdent(r.Schema) + "." + quoteIdent(r.Name)
+	regclass := qualifiedIdent(r.Schema, r.Name)
 
-	// Same EOF-clamp story as ListHeapPages: pg_class.relpages can lag the
-	// real file, so we read pg_relation_size via sqlRelPages for the cap.
-	// Empty indexes (no pages, or only the meta page) return an empty list
-	// without issuing the per-page query.
-	var relpages int32
-	if err := pool.QueryRow(ctx, sqlRelPages, r.OID).Scan(&relpages); err != nil {
-		return nil, fmt.Errorf("relpages for %q: %w", r.Qualified(), err)
+	// minPages=2: an index's block 0 is the meta page, which bt_page_stats
+	// can't summarise, so a one-page index has nothing browsable.
+	count, ok, err := c.clampPageWindow(ctx, pool, r.OID, r.Qualified(), start, count, 2)
+	if err != nil {
+		return nil, err
 	}
-	if relpages <= 1 || start >= relpages {
+	if !ok {
 		return nil, nil
-	}
-	if start+count > relpages {
-		count = relpages - start
 	}
 
 	rows, err := pool.Query(ctx, sqlIndexPagesSummary, regclass, start, count)
@@ -266,7 +258,7 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 	if err != nil {
 		return nil, err
 	}
-	regclass := quoteIdent(r.Schema) + "." + quoteIdent(r.Name)
+	regclass := qualifiedIdent(r.Schema, r.Name)
 
 	sql := sqlIndexTuples
 	// Only leaf and root pages carry heap ctids worth decoding; internal
@@ -280,7 +272,7 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 		// the index is redefined under us. It's a one-shot pg_index lookup
 		// — cheap next to the per-row heap fetches below.
 		if err := pool.QueryRow(ctx, sqlIndexExprList, r.OID).Scan(&exprs); err == nil && exprs != "" {
-			parent := quoteIdent(r.Schema) + "." + quoteIdent(r.ParentName)
+			parent := qualifiedIdent(r.Schema, r.ParentName)
 			sql = fmt.Sprintf(sqlIndexTuplesDecoded, exprs, parent)
 		}
 	}
@@ -319,7 +311,7 @@ func (c *Client) ListHeapTuples(ctx context.Context, t Table, blkno int32) ([]He
 	if err != nil {
 		return nil, err
 	}
-	regclass := quoteIdent(t.Schema) + "." + quoteIdent(t.Name)
+	regclass := qualifiedIdent(t.Schema, t.Name)
 
 	isToast := t.Schema == "pg_toast"
 	var rows pgx.Rows

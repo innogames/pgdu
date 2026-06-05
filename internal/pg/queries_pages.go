@@ -1,0 +1,274 @@
+package pg
+
+// --- page inspector ---
+
+// sqlHeapPagesSummary aggregates per-page heap stats across a window of
+// blocks. One get_raw_page call per page is unavoidable; the LATERAL-style
+// LEFT JOIN over heap_page_items lets us read the LP array once per page and
+// derive every counter we care about in a single pass. The hot/external
+// filters mirror access/htup_details.h: HEAP_HOT_UPDATED is bit 0x4000 of
+// t_infomask2, HEAP_HASEXTERNAL is bit 0x0004 of t_infomask.
+const sqlHeapPagesSummary = `
+WITH pages AS (
+  SELECT g.blkno, get_raw_page($1, 'main', g.blkno) AS raw
+  FROM   generate_series($2::int, $2::int + $3::int - 1) AS g(blkno)
+),
+hdr AS (
+  SELECT p.blkno, (page_header(p.raw)).*
+  FROM   pages p
+),
+items AS (
+  SELECT p.blkno,
+         COUNT(*) FILTER (WHERE i.lp_flags = 1)                              AS live_lp,
+         COUNT(*) FILTER (WHERE i.lp_flags = 2)                              AS redirect_lp,
+         COUNT(*) FILTER (WHERE i.lp_flags = 3)                              AS dead_lp,
+         COUNT(*) FILTER (WHERE i.lp_flags = 0)                              AS unused_lp,
+         COALESCE(SUM(i.lp_len) FILTER (WHERE i.lp_flags = 1), 0)::bigint    AS live_bytes,
+         COALESCE(SUM(i.lp_len) FILTER (WHERE i.lp_flags = 3), 0)::bigint    AS dead_bytes,
+         COUNT(*) FILTER (WHERE (i.t_infomask2 & 16384) <> 0)                AS hot_updated,
+         COUNT(*) FILTER (WHERE (i.t_infomask  & 4) <> 0)                    AS has_external
+  FROM   pages p
+  LEFT   JOIN heap_page_items(p.raw) i ON true
+  GROUP  BY p.blkno
+)
+SELECT  h.blkno::bigint,
+        h.lsn::text,
+        h.lower::int, h.upper::int, h.special::int, h.pagesize::int, h.flags::int,
+        (h.upper - h.lower)::int                                              AS free_bytes,
+        COALESCE(it.live_lp, 0)::int,
+        COALESCE(it.redirect_lp, 0)::int,
+        COALESCE(it.dead_lp, 0)::int,
+        COALESCE(it.unused_lp, 0)::int,
+        COALESCE(it.live_bytes, 0)::bigint,
+        COALESCE(it.dead_bytes, 0)::bigint,
+        COALESCE(it.hot_updated, 0)::int,
+        COALESCE(it.has_external, 0)::int
+FROM    hdr h
+LEFT    JOIN items it ON it.blkno = h.blkno
+ORDER   BY h.blkno
+`
+
+// sqlHeapTuples returns the line-pointer array for one page in t_ctid order.
+// t_xmin / t_xmax / t_oid / t_bits / t_data are NULL for unused or redirect
+// line pointers — the caller scans into pointer targets so a NULL doesn't
+// abort the row.
+const sqlHeapTuples = `
+SELECT lp::int, lp_off::int, lp_flags::int, lp_len::int,
+       t_xmin, t_xmax, t_field3, t_ctid::text,
+       COALESCE(t_infomask2, 0)::int, COALESCE(t_infomask, 0)::int, t_hoff::int,
+       t_bits, t_oid, t_data
+FROM   heap_page_items(get_raw_page($1, 'main', $2::int))
+ORDER  BY lp
+`
+
+// sqlToastTuples mirrors sqlHeapTuples for TOAST heap pages, adding
+// chunk_id/chunk_seq columns joined from the underlying TOAST relation so the
+// line-pointer list can display which chunk object and sequence number each live
+// row represents without the caller having to parse t_data bytes.
+//
+// The join uses the physical ctid built from the block number ($2) and the
+// line-pointer number (lp) as the tid — this matches the live row exactly and
+// yields NULL for dead/unused/redirect LPs.
+//
+// %s is the quoted toast regclass, e.g. `"pg_toast"."pg_toast_16431"`. $1 is
+// the same regclass as text for get_raw_page; $2 is the block number.
+const sqlToastTuples = `
+SELECT hpi.lp::int, hpi.lp_off::int, hpi.lp_flags::int, hpi.lp_len::int,
+       hpi.t_xmin, hpi.t_xmax, hpi.t_field3, hpi.t_ctid::text,
+       COALESCE(hpi.t_infomask2, 0)::int, COALESCE(hpi.t_infomask, 0)::int, hpi.t_hoff::int,
+       hpi.t_bits, hpi.t_oid, hpi.t_data,
+       tc.chunk_id::oid, tc.chunk_seq::int
+FROM   heap_page_items(get_raw_page($1, 'main', $2::int)) hpi
+LEFT   JOIN %s tc
+         ON tc.ctid = ('(' || $2::text || ',' || hpi.lp::text || ')')::tid
+ORDER  BY hpi.lp
+`
+
+// sqlTupleRow fetches one heap row by ctid and explodes it into (column,
+// value) pairs preserving declared column order. json_each_text emits keys
+// in the order they appear in the json object, and row_to_json walks
+// pg_attribute in attnum order — together that gives a faithful
+// "SELECT * FROM t" column ordering without us having to read pg_attribute
+// ourselves. NULL values surface as SQL NULL in `v` so the renderer can
+// show them distinctly from an empty string.
+//
+// $1 is the table reference as a regclass-castable text (e.g. "s"."t");
+// $2 is the ctid text "(blk,off)" — both are bind parameters, so no
+// identifier-injection risk.
+const sqlTupleRow = `
+WITH r AS (
+  SELECT row_to_json(t) AS j FROM %s t WHERE ctid = $1::tid
+)
+SELECT key, value FROM r, json_each_text(r.j)
+`
+
+// sqlToastTupleRow replaces sqlTupleRow for TOAST heap tables. TOAST relations
+// (relkind 't') don't have a composite type registered in pg_type, so
+// row_to_json raises "does not have a composite type". Since every TOAST table
+// has the same three fixed columns (chunk_id, chunk_seq, chunk_data) we can
+// select them explicitly. chunk_data is rendered as its hex-encoded bytea text
+// representation so it's safely truncatable by the value renderer.
+//
+// An absent ctid yields zero rows from the CTE; ListTupleRow treats that as
+// "row gone" and returns an empty slice — same behaviour as sqlTupleRow.
+// %s is the quoted toast regclass; $1 is the ctid text.
+const sqlToastTupleRow = `
+WITH r AS (SELECT chunk_id, chunk_seq, chunk_data FROM %s WHERE ctid = $1::tid)
+SELECT col, val FROM (
+  SELECT 1 AS o, 'chunk_id'::text  AS col, chunk_id::text   AS val FROM r
+  UNION ALL
+  SELECT 2,      'chunk_seq',              chunk_seq::text   FROM r
+  UNION ALL
+  SELECT 3,      'chunk_data',             chunk_data::text  FROM r
+) s ORDER BY o
+`
+
+// sqlRelations returns every heap-style table, every B-tree index, and every
+// TOAST heap whose owning table lives in the named schema, mixed into one list
+// and ordered by pg_relation_size. The page-inspector tool consumes it instead
+// of sqlTables so the user sees tables, their indexes, and their TOAST storage
+// side by side, ranked by on-disk size.
+//
+// Only B-tree indexes are listed: hash/gist/gin/brin are filtered out because
+// the index-page drill relies on bt_page_stats / bt_page_items, neither of
+// which works on other access methods.
+//
+// Three arms in the WHERE:
+//   - Tables:  relkind IN ('r','m','p') AND namespace = $1
+//   - Indexes: relkind = 'i' AND btree AND parent namespace = $1
+//   - TOAST:   relkind = 't' AND owner's namespace = $1
+//
+// For tables ParentOID is 0; for indexes it's pg_index.indrelid; for TOAST it's
+// the OID of the owning table (via oc.reltoastrelid = c.oid). The schema column
+// reflects c's actual namespace (pg_toast for TOAST relations), so callers can
+// distinguish the storage location from the user's schema.
+const sqlRelations = `
+SELECT c.oid,
+       c.relname,
+       c.relkind::text                                             AS kind,
+       COALESCE(am.amname, '')                                     AS access_method,
+       pg_relation_size(c.oid)                                     AS size_bytes,
+       GREATEST(c.reltuples, 0)::bigint                            AS est_rows,
+       c.relpages::int                                             AS pages,
+       COALESCE(idx.indrelid, oc.oid, 0)::oid                      AS parent_oid,
+       COALESCE(pc.relname, oc.relname, '')                        AS parent_name,
+       n.nspname                                                   AS schema
+FROM   pg_class c
+JOIN   pg_namespace n ON n.oid = c.relnamespace
+LEFT   JOIN pg_am am ON am.oid = c.relam
+LEFT   JOIN pg_index idx ON idx.indexrelid = c.oid
+LEFT   JOIN pg_class pc ON pc.oid = idx.indrelid
+LEFT   JOIN pg_namespace pn ON pn.oid = pc.relnamespace
+LEFT   JOIN pg_class oc ON oc.reltoastrelid = c.oid
+LEFT   JOIN pg_namespace onsp ON onsp.oid = oc.relnamespace
+WHERE  (
+         (c.relkind IN ('r','m','p') AND n.nspname = $1)
+         OR
+         (c.relkind = 'i' AND am.amname = 'btree' AND pn.nspname = $1)
+         OR
+         (c.relkind = 't' AND onsp.nspname = $1)
+       )
+ORDER  BY size_bytes DESC
+`
+
+// sqlIndexPagesSummary mirrors sqlHeapPagesSummary but for B-tree pages.
+// bt_page_stats fails on the meta page (always block 0) so the window is
+// shifted to skip it whenever it would be included — without this the
+// pageinspect call would bubble up "block is a meta page" and abort the
+// whole load.
+//
+// $1 is the index regclass-castable text; $2 the window start (in pages);
+// $3 the requested count. The CASE on $2 picks max($2,1) so a request that
+// starts at 0 silently skips the meta page.
+const sqlIndexPagesSummary = `
+SELECT s.blkno::int,
+       s.type::text,
+       s.live_items::int,
+       s.dead_items::int,
+       s.avg_item_size::int,
+       s.page_size::int,
+       s.free_size::int,
+       s.btpo_prev::int,
+       s.btpo_next::int,
+       s.btpo_level::int,
+       s.btpo_flags::int
+FROM   generate_series(
+         GREATEST($2::int, 1),
+         $2::int + $3::int - 1
+       ) AS g(blkno),
+       LATERAL bt_page_stats($1, g.blkno) s
+ORDER  BY s.blkno
+`
+
+// sqlIndexTuples returns the items on one B-tree page. data here is the
+// raw key bytes as a hex text (no per-column decoding — pageinspect can't
+// know the indexed types). Used as the fallback path on internal/deleted
+// pages where sqlIndexTuplesDecoded doesn't apply.
+const sqlIndexTuples = `
+SELECT itemoffset::int,
+       ctid::text,
+       itemlen::int,
+       nulls,
+       vars,
+       data,
+       NULL::text AS decoded
+FROM   bt_page_items($1, $2::int)
+ORDER  BY itemoffset
+`
+
+// sqlIndexExprList returns the index's column expressions concatenated as
+// a single SQL expression list, e.g. "a, b, lower(c)". Built from
+// pg_get_indexdef on each indexed attribute number (1..indnatts). The
+// result is interpolated into sqlIndexTuplesDecoded so the per-row
+// subquery can project the decoded key value from the heap.
+const sqlIndexExprList = `
+SELECT COALESCE(string_agg(pg_get_indexdef($1::oid, k::int, false),
+                           ', ' ORDER BY k), '')
+FROM   generate_series(
+         1,
+         (SELECT indnatts FROM pg_index WHERE indexrelid = $1::oid)
+       ) AS k
+`
+
+// sqlIndexTuplesDecoded mirrors sqlIndexTuples but adds a per-item
+// scalar-subquery projecting the index's columns from the heap row. The
+// subquery yields NULL when the ctid doesn't resolve to a live row
+// (vacuumed, beyond MVCC horizon, or — on internal pages — a downlink
+// rather than a heap address). Callers fall back to the raw hex `data`
+// when decoded is NULL.
+//
+// %s 1 is the index expression list (built by sqlIndexExprList, e.g.
+// "a, b, lower(c)"); %s 2 is the parent table's quoted regclass. Both
+// substitutions come from quoteIdent and pg_get_indexdef output — safe
+// from injection. $1 is the index regclass-castable text; $2 the block
+// number.
+const sqlIndexTuplesDecoded = `
+SELECT i.itemoffset::int,
+       i.ctid::text,
+       i.itemlen::int,
+       i.nulls,
+       i.vars,
+       i.data,
+       (SELECT (%s)::text FROM %s WHERE ctid = i.ctid::tid) AS decoded
+FROM   bt_page_items($1, $2::int) i
+ORDER  BY i.itemoffset
+`
+
+// sqlToastValueChunks returns all chunks for one out-of-line value in a TOAST
+// table, ordered by chunk_seq so the caller can concatenate them in order.
+// %s is the quoted toast regclass; $1 is the chunk_id OID.
+const sqlToastValueChunks = `
+SELECT chunk_seq::int, chunk_data
+FROM   %s
+WHERE  chunk_id = $1
+ORDER  BY chunk_seq
+`
+
+// sqlRelPages reports the current heap block count by dividing the file
+// size by block size. pg_class.relpages is ANALYZE-driven and can lag the
+// real file (zero after TRUNCATE, stale after bulk inserts), which makes it
+// useless as an EOF clamp for get_raw_page; pg_relation_size just stat()s
+// the file and is always accurate.
+const sqlRelPages = `
+SELECT (pg_relation_size($1) / current_setting('block_size')::int)::int
+`

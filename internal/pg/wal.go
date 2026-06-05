@@ -3,6 +3,8 @@ package pg
 import (
 	"context"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // EnsureWALInspect makes sure pg_walinspect is installed in db. Mirrors
@@ -11,24 +13,7 @@ import (
 // superuser or pg_read_server_files at execution time — that surfaces later
 // as an ordinary permission error from the query itself, not here.
 func (c *Client) EnsureWALInspect(ctx context.Context, db string) error {
-	c.mu.Lock()
-	if c.walInspectReady[db] {
-		c.mu.Unlock()
-		return nil
-	}
-	c.mu.Unlock()
-
-	st, err := c.ProbeExtension(ctx, db, "pg_walinspect")
-	if err != nil {
-		return err
-	}
-	if !st.Installed {
-		return &MissingExtensionError{Extension: "pg_walinspect", DB: db, Installable: st.Available}
-	}
-	c.mu.Lock()
-	c.walInspectReady[db] = true
-	c.mu.Unlock()
-	return nil
+	return c.ensureExtension(ctx, db, "pg_walinspect", c.walInspectReady)
 }
 
 // WALWindow resolves the [start, end] LSN window the inspector analyses: the
@@ -75,23 +60,12 @@ func (c *Client) WALRmgrStats(ctx context.Context, db, start, end string) ([]WAL
 	if err != nil {
 		return nil, err
 	}
-	rows, err := pool.Query(ctx, sqlWALRmgrStats, start, end)
-	if err != nil {
-		return nil, fmt.Errorf("wal rmgr stats in %q: %w", db, err)
-	}
-	defer rows.Close()
-	var out []WALRmgrStat
-	for rows.Next() {
-		var r WALRmgrStat
-		if err := rows.Scan(&r.Name, &r.Count, &r.RecordSize, &r.FPISize, &r.CombinedSize); err != nil {
-			return nil, fmt.Errorf("wal rmgr stats in %q: %w", db, err)
-		}
-		out = append(out, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("wal rmgr stats in %q: %w", db, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("wal rmgr stats in %q", db), sqlWALRmgrStats, []any{start, end},
+		func(row pgx.CollectableRow) (WALRmgrStat, error) {
+			var r WALRmgrStat
+			err := row.Scan(&r.Name, &r.Count, &r.RecordSize, &r.FPISize, &r.CombinedSize)
+			return r, err
+		})
 }
 
 // WALRecordTypeStats returns the per-record-type byte/count breakdown for one
@@ -106,23 +80,12 @@ func (c *Client) WALRecordTypeStats(ctx context.Context, db, start, end, rmgr st
 	if err != nil {
 		return nil, err
 	}
-	rows, err := pool.Query(ctx, sqlWALRecordTypeStats, start, end, rmgr)
-	if err != nil {
-		return nil, fmt.Errorf("wal record-type stats in %q: %w", db, err)
-	}
-	defer rows.Close()
-	var out []WALRmgrStat
-	for rows.Next() {
-		var r WALRmgrStat
-		if err := rows.Scan(&r.Name, &r.Count, &r.RecordSize, &r.FPISize, &r.CombinedSize); err != nil {
-			return nil, fmt.Errorf("wal record-type stats in %q: %w", db, err)
-		}
-		out = append(out, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("wal record-type stats in %q: %w", db, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("wal record-type stats in %q", db), sqlWALRecordTypeStats, []any{start, end, rmgr},
+		func(row pgx.CollectableRow) (WALRmgrStat, error) {
+			var r WALRmgrStat
+			err := row.Scan(&r.Name, &r.Count, &r.RecordSize, &r.FPISize, &r.CombinedSize)
+			return r, err
+		})
 }
 
 // WALRecords lists the individual records of one resource manager within the
@@ -135,28 +98,17 @@ func (c *Client) WALRecords(ctx context.Context, db, start, end, rmgr string) ([
 	if err != nil {
 		return nil, err
 	}
-	rows, err := pool.Query(ctx, sqlWALRecords, start, end, rmgr)
-	if err != nil {
-		return nil, fmt.Errorf("wal records in %q: %w", db, err)
-	}
-	defer rows.Close()
-	var out []WALRecord
-	for rows.Next() {
-		var r WALRecord
-		if err := rows.Scan(
-			&r.StartLSN, &r.EndLSN, &r.PrevLSN, &r.Xid,
-			&r.Rmgr, &r.RecordType,
-			&r.RecordLength, &r.MainDataLength, &r.FPILength,
-			&r.Description, &r.BlockRef,
-		); err != nil {
-			return nil, fmt.Errorf("wal records in %q: %w", db, err)
-		}
-		out = append(out, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("wal records in %q: %w", db, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("wal records in %q", db), sqlWALRecords, []any{start, end, rmgr},
+		func(row pgx.CollectableRow) (WALRecord, error) {
+			var r WALRecord
+			err := row.Scan(
+				&r.StartLSN, &r.EndLSN, &r.PrevLSN, &r.Xid,
+				&r.Rmgr, &r.RecordType,
+				&r.RecordLength, &r.MainDataLength, &r.FPILength,
+				&r.Description, &r.BlockRef,
+			)
+			return r, err
+		})
 }
 
 // WALBlocks lists the block references of the single record spanning
@@ -171,26 +123,15 @@ func (c *Client) WALBlocks(ctx context.Context, db, start, end string) ([]WALBlo
 	if err != nil {
 		return nil, err
 	}
-	rows, err := pool.Query(ctx, sqlWALBlocks, start, end)
-	if err != nil {
-		return nil, fmt.Errorf("wal block info at %s in %q: %w", start, db, err)
-	}
-	defer rows.Close()
-	var out []WALBlockRef
-	for rows.Next() {
-		var b WALBlockRef
-		if err := rows.Scan(
-			&b.BlockID, &b.RelTablespace, &b.RelDatabase, &b.RelFileNode,
-			&b.ForkNumber, &b.BlockNumber, &b.Rmgr, &b.RecordType,
-			&b.BlockDataLength, &b.FPILength, &b.FPIInfo, &b.Description, &b.RelName,
-			&b.IsToast, &b.DBName,
-		); err != nil {
-			return nil, fmt.Errorf("wal block info at %s in %q: %w", start, db, err)
-		}
-		out = append(out, b)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("wal block info at %s in %q: %w", start, db, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("wal block info at %s in %q", start, db), sqlWALBlocks, []any{start, end},
+		func(row pgx.CollectableRow) (WALBlockRef, error) {
+			var b WALBlockRef
+			err := row.Scan(
+				&b.BlockID, &b.RelTablespace, &b.RelDatabase, &b.RelFileNode,
+				&b.ForkNumber, &b.BlockNumber, &b.Rmgr, &b.RecordType,
+				&b.BlockDataLength, &b.FPILength, &b.FPIInfo, &b.Description, &b.RelName,
+				&b.IsToast, &b.DBName,
+			)
+			return b, err
+		})
 }

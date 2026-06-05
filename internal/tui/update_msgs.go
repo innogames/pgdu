@@ -86,16 +86,7 @@ func (m *Model) onBufferStatsLoaded(msg bufferStatsLoadedMsg) tea.Cmd {
 	s.loaded = true
 	if ext := asMissingExt(msg.err); ext != nil {
 		// Promote to a blocking install prompt instead of an opaque error.
-		s.err = nil
-		s.extPrompt = &extPrompt{
-			name:        ext.Extension,
-			db:          ext.DB,
-			installable: ext.Installable,
-			reason:      extPromptReasonBufferCache,
-			blocking:    true,
-		}
-		s.items = s.items[:0]
-		return nil
+		return setExtensionPrompt(s, ext, extPromptReasonBufferCache)
 	}
 	s.err = msg.err
 	s.items = s.items[:0]
@@ -201,16 +192,7 @@ func (m *Model) onHeapPagesLoaded(msg heapPagesLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	if ext := asMissingExt(msg.err); ext != nil {
-		s.err = nil
-		s.extPrompt = &extPrompt{
-			name:        ext.Extension,
-			db:          ext.DB,
-			installable: ext.Installable,
-			reason:      extPromptReasonPageInspect,
-			blocking:    true,
-		}
-		s.items = s.items[:0]
-		return nil
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
 	}
 	s.err = msg.err
 	s.heapPageCount = msg.totalPages
@@ -262,16 +244,7 @@ func (m *Model) onHeapTuplesLoaded(msg heapTuplesLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	if ext := asMissingExt(msg.err); ext != nil {
-		s.err = nil
-		s.extPrompt = &extPrompt{
-			name:        ext.Extension,
-			db:          ext.DB,
-			installable: ext.Installable,
-			reason:      extPromptReasonPageInspect,
-			blocking:    true,
-		}
-		s.items = s.items[:0]
-		return nil
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
 	}
 	s.err = msg.err
 	s.items = s.items[:0]
@@ -330,16 +303,7 @@ func (m *Model) onIndexPagesLoaded(msg indexPagesLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	if ext := asMissingExt(msg.err); ext != nil {
-		s.err = nil
-		s.extPrompt = &extPrompt{
-			name:        ext.Extension,
-			db:          ext.DB,
-			installable: ext.Installable,
-			reason:      extPromptReasonPageInspect,
-			blocking:    true,
-		}
-		s.items = s.items[:0]
-		return nil
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
 	}
 	s.err = msg.err
 	s.heapPageCount = msg.totalPages
@@ -359,16 +323,7 @@ func (m *Model) onIndexTuplesLoaded(msg indexTuplesLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	if ext := asMissingExt(msg.err); ext != nil {
-		s.err = nil
-		s.extPrompt = &extPrompt{
-			name:        ext.Extension,
-			db:          ext.DB,
-			installable: ext.Installable,
-			reason:      extPromptReasonPageInspect,
-			blocking:    true,
-		}
-		s.items = s.items[:0]
-		return nil
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
 	}
 	s.err = msg.err
 	s.items = s.items[:0]
@@ -404,16 +359,7 @@ func (m *Model) onWALOverviewLoaded(msg walOverviewLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	if ext := asMissingExt(msg.err); ext != nil {
-		s.err = nil
-		s.extPrompt = &extPrompt{
-			name:        ext.Extension,
-			db:          ext.DB,
-			installable: ext.Installable,
-			reason:      extPromptReasonWALInspect,
-			blocking:    true,
-		}
-		s.items = s.items[:0]
-		return nil
+		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
 	}
 	s.err = msg.err
 	s.walStart = msg.start
@@ -460,17 +406,8 @@ func (m *Model) onWALRecordsLoaded(msg walRecordsLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	if ext := asMissingExt(msg.err); ext != nil {
-		s.err = nil
-		s.extPrompt = &extPrompt{
-			name:        ext.Extension,
-			db:          ext.DB,
-			installable: ext.Installable,
-			reason:      extPromptReasonWALInspect,
-			blocking:    true,
-		}
-		s.items = s.items[:0]
 		s.walRecTypeStats = nil
-		return nil
+		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
 	}
 	s.err = msg.err
 	s.walRecTypeStats = msg.typeStats
@@ -490,16 +427,7 @@ func (m *Model) onWALBlocksLoaded(msg walBlocksLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	if ext := asMissingExt(msg.err); ext != nil {
-		s.err = nil
-		s.extPrompt = &extPrompt{
-			name:        ext.Extension,
-			db:          ext.DB,
-			installable: ext.Installable,
-			reason:      extPromptReasonWALInspect,
-			blocking:    true,
-		}
-		s.items = s.items[:0]
-		return nil
+		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
 	}
 	s.err = msg.err
 	s.items = s.items[:0]
@@ -571,17 +499,8 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	if ext := asMissingExt(msg.err); ext != nil {
-		s.err = nil
-		s.extPrompt = &extPrompt{
-			name:        ext.Extension,
-			db:          ext.DB,
-			installable: ext.Installable,
-			reason:      extPromptReasonStatStatements,
-			blocking:    true,
-		}
-		s.items = s.items[:0]
 		s.diagCols = nil
-		return nil
+		return setExtensionPrompt(s, ext, extPromptReasonStatStatements)
 	}
 	s.err = msg.err
 	if msg.err != nil {

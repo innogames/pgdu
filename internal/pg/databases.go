@@ -2,7 +2,8 @@ package pg
 
 import (
 	"context"
-	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // ListDatabases returns every database visible to the connecting role, with
@@ -13,21 +14,10 @@ func (c *Client) ListDatabases(ctx context.Context) ([]Database, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := pool.Query(ctx, sqlDatabases)
-	if err != nil {
-		return nil, fmt.Errorf("list databases: %w", err)
-	}
-	defer rows.Close()
-	var out []Database
-	for rows.Next() {
-		var d Database
-		if err := rows.Scan(&d.Name, &d.SizeBytes); err != nil {
-			return nil, fmt.Errorf("list databases: %w", err)
-		}
-		out = append(out, d)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list databases: %w", err)
-	}
-	return out, nil
+	return collect(ctx, pool, "list databases", sqlDatabases, nil,
+		func(row pgx.CollectableRow) (Database, error) {
+			var d Database
+			err := row.Scan(&d.Name, &d.SizeBytes)
+			return d, err
+		})
 }

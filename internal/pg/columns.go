@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -46,23 +47,12 @@ func (c *Client) ListColumns(ctx context.Context, t Table) ([]Column, error) {
 }
 
 func listColumnsFromStats(ctx context.Context, pool *pgxpool.Pool, oid uint32) ([]Column, error) {
-	rows, err := pool.Query(ctx, sqlColumns, oid)
-	if err != nil {
-		return nil, fmt.Errorf("list columns for oid %d: %w", oid, err)
-	}
-	defer rows.Close()
-	var out []Column
-	for rows.Next() {
-		var col Column
-		if err := rows.Scan(&col.Name, &col.Type, &col.AvgWidth, &col.NullFrac, &col.EstBytes, &col.Toastable); err != nil {
-			return nil, fmt.Errorf("list columns for oid %d: %w", oid, err)
-		}
-		out = append(out, col)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list columns for oid %d: %w", oid, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("list columns for oid %d", oid), sqlColumns, []any{oid},
+		func(row pgx.CollectableRow) (Column, error) {
+			var col Column
+			err := row.Scan(&col.Name, &col.Type, &col.AvgWidth, &col.NullFrac, &col.EstBytes, &col.Toastable)
+			return col, err
+		})
 }
 
 // refineColumnsBySampling runs one TABLESAMPLE'd query that computes
@@ -123,4 +113,11 @@ func refineColumnsBySampling(ctx context.Context, pool *pgxpool.Pool, t Table, c
 
 func quoteIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// qualifiedIdent builds a quoted "schema"."name" regclass reference. Both
+// identifiers come from the catalog (never user input); quoting still guards
+// against names with embedded dots or quotes.
+func qualifiedIdent(schema, name string) string {
+	return quoteIdent(schema) + "." + quoteIdent(name)
 }

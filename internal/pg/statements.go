@@ -14,24 +14,7 @@ import (
 // needs a server restart); when it isn't, the snapshot query surfaces that as
 // an ordinary error.
 func (c *Client) EnsureStatements(ctx context.Context, db string) error {
-	c.mu.Lock()
-	if c.statStatementsReady[db] {
-		c.mu.Unlock()
-		return nil
-	}
-	c.mu.Unlock()
-
-	st, err := c.ProbeExtension(ctx, db, "pg_stat_statements")
-	if err != nil {
-		return err
-	}
-	if !st.Installed {
-		return &MissingExtensionError{Extension: "pg_stat_statements", DB: db, Installable: st.Available}
-	}
-	c.mu.Lock()
-	c.statStatementsReady[db] = true
-	c.mu.Unlock()
-	return nil
+	return c.ensureExtension(ctx, db, "pg_stat_statements", c.statStatementsReady)
 }
 
 // StatementSnapshot reads the current (cumulative-since-reset) pg_stat_statements
