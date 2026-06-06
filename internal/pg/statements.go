@@ -17,6 +17,43 @@ func (c *Client) EnsureStatements(ctx context.Context, db string) error {
 	return c.ensureExtension(ctx, db, "pg_stat_statements", c.statStatementsReady)
 }
 
+// EnsureQualstats makes sure pg_qualstats is installed in db. Like
+// EnsureStatements it returns *MissingExtensionError when missing; callers in
+// the Top-queries view treat that as "no real parameters available" and fall
+// back to synthesized literals rather than surfacing it as a failure. Note
+// pg_qualstats only records data when its library is in
+// shared_preload_libraries (a server restart), which CREATE EXTENSION alone
+// can't arrange — so pgdu detects and uses it but does not offer to install it.
+func (c *Client) EnsureQualstats(ctx context.Context, db string) error {
+	return c.ensureExtension(ctx, db, "pg_qualstats", c.qualstatsReady)
+}
+
+// QualstatsPreloaded reports whether pg_qualstats is listed in
+// shared_preload_libraries. That's the precondition for it to actually collect
+// quals once it's CREATE EXTENSION'd: without the preload, creating the
+// extension makes its views exist but they stay empty until a server restart
+// loads the library. pgdu therefore only offers a one-key install when this is
+// true (a plain CREATE EXTENSION is then enough); otherwise it stays in
+// detect-only mode and falls back to synthesized literals.
+func (c *Client) QualstatsPreloaded(ctx context.Context, db string) (bool, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	var spl string
+	if err := pool.QueryRow(ctx,
+		"SELECT COALESCE(current_setting('shared_preload_libraries', true), '')",
+	).Scan(&spl); err != nil {
+		return false, fmt.Errorf("read shared_preload_libraries in %q: %w", db, err)
+	}
+	for _, lib := range strings.Split(spl, ",") {
+		if strings.TrimSpace(lib) == "pg_qualstats" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // StatementSnapshot reads the current (cumulative-since-reset) pg_stat_statements
 // counters for db. Callers diff two snapshots to build a window (DiffStatements).
 func (c *Client) StatementSnapshot(ctx context.Context, db string) ([]QueryStat, error) {
@@ -27,7 +64,11 @@ func (c *Client) StatementSnapshot(ctx context.Context, db string) ([]QueryStat,
 	if err != nil {
 		return nil, err
 	}
-	rows, err := pool.Query(ctx, sqlStatements)
+	major, minor, err := c.statementsVersion(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := pool.Query(ctx, statementsQuery(major, minor))
 	if err != nil {
 		return nil, fmt.Errorf("read pg_stat_statements in %q: %w", db, err)
 	}
@@ -56,6 +97,56 @@ func (c *Client) StatementSnapshot(ctx context.Context, db string) ([]QueryStat,
 		return nil, fmt.Errorf("read pg_stat_statements in %q: %w", db, err)
 	}
 	return out, nil
+}
+
+// statementsVersion returns the installed pg_stat_statements extension version as
+// (major, minor), cached per database (it only changes on ALTER EXTENSION, so one
+// read per session is enough). The version drives which I/O-timing column names
+// statementsQuery selects — on a pg_upgraded PG17 cluster the extension can still
+// be 1.10, which lacks the 1.11 shared_blk_*_time / local_blk_*_time columns. An
+// unparseable version is treated as the newest (current) layout.
+func (c *Client) statementsVersion(ctx context.Context, db string) (int, int, error) {
+	c.mu.Lock()
+	if c.statStatementsVerKnown[db] {
+		v := c.statStatementsVer[db]
+		c.mu.Unlock()
+		return v[0], v[1], nil
+	}
+	c.mu.Unlock()
+
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return 0, 0, err
+	}
+	var ver string
+	if err := pool.QueryRow(ctx, sqlStatementsVersion).Scan(&ver); err != nil {
+		return 0, 0, fmt.Errorf("read pg_stat_statements version in %q: %w", db, err)
+	}
+	major, minor := parseExtVersion(ver)
+
+	c.mu.Lock()
+	c.statStatementsVer[db] = [2]int{major, minor}
+	c.statStatementsVerKnown[db] = true
+	c.mu.Unlock()
+	return major, minor, nil
+}
+
+// parseExtVersion parses an extension version like "1.11" into (1, 11). A version
+// it can't parse (empty / unexpected shape) defaults to a high number so callers
+// assume the newest column layout rather than the legacy one.
+func parseExtVersion(v string) (int, int) {
+	parts := strings.SplitN(strings.TrimSpace(v), ".", 3)
+	major, err1 := strconv.Atoi(parts[0])
+	if err1 != nil {
+		return 999, 0
+	}
+	minor := 0
+	if len(parts) > 1 {
+		if m, err2 := strconv.Atoi(parts[1]); err2 == nil {
+			minor = m
+		}
+	}
+	return major, minor
 }
 
 // TrackPlanning reports whether pg_stat_statements.track_planning is on. It is
@@ -206,6 +297,88 @@ func (c *Client) ExplainAnalyze(ctx context.Context, db, query string) (string, 
 		}
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// ExplainLiteral runs a plain EXPLAIN (VERBOSE, FORMAT TEXT) on a fully-literal
+// query — e.g. a real example query from pg_qualstats, whose constants are real
+// captured values, not the $n placeholders pg_stat_statements stores. Unlike
+// ExplainGeneric it does NOT pass GENERIC_PLAN, so the planner sees the real
+// values and picks the plan a real call would get; unlike ExplainAnalyze it does
+// NOT execute (no ANALYZE), so it's safe even for DML example queries. Sent via
+// the raw pgconn simple-query path inside a READ ONLY transaction, same as
+// ExplainGeneric (see that method for why pool.Query can't be used here).
+func (c *Client) ExplainLiteral(ctx context.Context, db, query string) (string, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return "", fmt.Errorf("explain in %q: %w", db, err)
+	}
+	defer conn.Release()
+
+	sql := "BEGIN READ ONLY;\nEXPLAIN (VERBOSE, FORMAT TEXT) " + query + ";\nROLLBACK;"
+	results, err := conn.Conn().PgConn().Exec(ctx, sql).ReadAll()
+	if err != nil {
+		return "", fmt.Errorf("explain in %q: %w", db, err)
+	}
+	var lines []string
+	for _, r := range results {
+		for _, row := range r.Rows {
+			if len(row) > 0 {
+				lines = append(lines, string(row[0]))
+			}
+		}
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// QualstatsExampleQuery returns one real example query for queryID — the
+// normalized statement with real constants spliced back in, as reconstructed by
+// pg_qualstats from the values it sampled. Returns "" (not an error) when
+// pg_qualstats has captured nothing for that queryid yet. Requires pg_qualstats;
+// callers should EnsureQualstats first and treat its absence as "no real sample".
+func (c *Client) QualstatsExampleQuery(ctx context.Context, db string, queryID int64) (string, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	var example *string
+	if err := pool.QueryRow(ctx, sqlQualstatsExample, queryID).Scan(&example); err != nil {
+		return "", fmt.Errorf("qualstats example in %q: %w", db, err)
+	}
+	if example == nil {
+		return "", nil
+	}
+	return *example, nil
+}
+
+// QualstatsSamples lists the real predicate constants pg_qualstats captured for
+// queryID, most-frequent first (see sqlQualstatsSamples). Empty when nothing has
+// been sampled. Callers should EnsureQualstats first.
+func (c *Client) QualstatsSamples(ctx context.Context, db string, queryID int64) ([]QualSample, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := pool.Query(ctx, sqlQualstatsSamples, queryID)
+	if err != nil {
+		return nil, fmt.Errorf("qualstats samples in %q: %w", db, err)
+	}
+	defer rows.Close()
+	var out []QualSample
+	for rows.Next() {
+		var s QualSample
+		if err := rows.Scan(&s.Relation, &s.Column, &s.Operator, &s.ConstValue, &s.Position, &s.Occurrences); err != nil {
+			return nil, fmt.Errorf("qualstats samples in %q: %w", db, err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("qualstats samples in %q: %w", db, err)
+	}
+	return out, nil
 }
 
 // InferParams discovers the types of a normalized query's $n placeholders by

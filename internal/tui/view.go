@@ -99,7 +99,7 @@ func (m *Model) View() string {
 		b.WriteString(m.renderWALRecordsInfo(contentHeight))
 	case m.showInfo && s.level == levelWALBlocks:
 		b.WriteString(m.renderWALBlocksInfo(contentHeight))
-	case m.showInfo && (s.level == levelStatements || s.level == levelStatementDetail):
+	case m.showInfo && (s.level == levelStatements || s.level == levelStatementDetail || s.level == levelStatementSamples):
 		b.WriteString(m.renderStatementsInfo(contentHeight))
 	case s.extPrompt != nil && s.extPrompt.blocking:
 		b.WriteString(m.renderExtPrompt(s, contentHeight))
@@ -160,6 +160,8 @@ func (m *Model) View() string {
 			b.WriteString(m.renderDiagResult(s, contentHeight))
 		case levelStatementDetail:
 			b.WriteString(m.renderStatementDetail(s, contentHeight))
+		case levelStatementSamples:
+			b.WriteString(m.renderStatementSamples(s, contentHeight))
 		default:
 			b.WriteString(m.renderList(s, contentHeight))
 		}

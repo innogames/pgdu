@@ -228,12 +228,22 @@ func (m *Model) renderStatementsInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" detail ") + "  " +
 		mu("press ") + styleBadge.Render("Enter") + mu(" on a row") + "\n")
-	b.WriteString("    " + mu("Shows the full text, the same metrics, a ‘sample call’ with synthesized literals for the") + "\n")
-	b.WriteString("    " + mu("$n parameters, and EXPLAIN (GENERIC_PLAN) — the plan for the parameterized query, computed") + "\n")
-	b.WriteString("    " + mu("without values and without executing it — run automatically (") + styleBadge.Render("x") +
-		mu(" re-runs it). For read-only") + "\n")
-	b.WriteString("    " + mu("SELECTs, ") + styleBadge.Render("Enter") +
-		mu(" runs EXPLAIN (ANALYZE, VERBOSE, BUFFERS) on the sample call — this executes the query.") + "\n")
+	b.WriteString("    " + mu("Shows the full text, the same metrics, a ‘sample call’ and its EXPLAIN, run automatically (") +
+		styleBadge.Render("x") + mu(" re-runs it).") + "\n")
+	b.WriteString("    " + mu("For read-only SELECTs, ") + styleBadge.Render("Enter") +
+		mu(" runs EXPLAIN (ANALYZE, VERBOSE, BUFFERS) — this executes the query.") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" real parameters ") + "  " +
+		mu("via pg_qualstats — optional") + "\n")
+	b.WriteString("    " + mu("pg_stat_statements normalizes away constants, so by default the sample call uses ") + "\n")
+	b.WriteString("    " + mu("synthesized literals (1, 'sample', …) and EXPLAIN runs as GENERIC_PLAN — the plan for the") + "\n")
+	b.WriteString("    " + mu("parameterized query, without real values. Install ") + styleBadge.Render("pg_qualstats") +
+		mu(" (in shared_preload_libraries, with") + "\n")
+	b.WriteString("    " + mu("pg_qualstats.track_constants=on) and pgdu uses the real values it captured: the sample call") + "\n")
+	b.WriteString("    " + mu("becomes a real example and EXPLAIN sees real data. Press ") + styleBadge.Render("p") +
+		mu(" in the detail view to browse all") + "\n")
+	b.WriteString("    " + mu("captured values by frequency (the value pattern); ") + styleBadge.Render("Enter") +
+		mu(" there EXPLAIN-ANALYZEs the highlighted one.") + "\n")
 
 	return padInfo(&b, height)
 }
@@ -299,6 +309,22 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 
 	// --- sample call ---
 	b.WriteString("\n  " + styleHeader.Render(" sample call ") + "\n")
+	// Once the sample source is resolved, name it: real captured values vs
+	// synthesized literals, and how to get real ones when pg_qualstats is absent.
+	if explainable && (s.statSampleCall != "" || s.statSampleErr != nil) {
+		var hint string
+		switch {
+		case s.statSampleReal:
+			hint = "real values · pg_qualstats"
+		case s.statQualstats:
+			hint = "synthesized — pg_qualstats has no sample for this query yet"
+		case s.extPrompt != nil && s.extPrompt.name == extQualstats:
+			hint = "synthesized — press i to install pg_qualstats for real values"
+		default:
+			hint = "synthesized — install pg_qualstats (shared_preload_libraries + track_constants) for real values"
+		}
+		b.WriteString("    " + mu(hint) + "\n")
+	}
 	switch {
 	case !explainable:
 		b.WriteString("    " + mu("not a SELECT/DML statement — no parameters to fill") + "\n")
@@ -314,8 +340,12 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 
 	// --- explain ---
 	explainHdr := " explain (generic plan) "
-	if s.statExplainAnalyze {
+	switch {
+	case s.statExplainAnalyze:
 		explainHdr = " explain (analyze · verbose · buffers) "
+	case s.statSampleReal:
+		// Real captured values → a plain EXPLAIN, so the planner sees real data.
+		explainHdr = " explain (real plan) "
 	}
 	b.WriteString("\n  " + styleHeader.Render(explainHdr) + "\n")
 	switch {
@@ -326,8 +356,8 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	case s.statExplainErr != nil:
 		b.WriteString("    " + styleErr.Render(s.statExplainErr.Error()) + "\n")
 	case s.statExplain != "":
-		for line := range strings.SplitSeq(s.statExplain, "\n") {
-			b.WriteString("    " + m.clipDetail(line) + "\n")
+		for _, line := range m.colorizeExplain(s.statExplain, s.statExplainAnalyze) {
+			b.WriteString("    " + line + "\n")
 		}
 	default:
 		b.WriteString("    " + mu("press ") + styleBadge.Render("x") + mu(" to EXPLAIN this query") + "\n")
@@ -339,6 +369,100 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	if explainable && !s.statExplaining && pg.ReadOnlyQuery(q.Query) && s.statSampleCall != "" {
 		b.WriteString("    " + mu("press ") + styleBadge.Render("Enter") +
 			mu(" to run EXPLAIN (ANALYZE, VERBOSE, BUFFERS) — ") +
+			styleErr.Render("executes the query for real") + "\n")
+	}
+
+	// Captured-values affordance: only when pg_qualstats is present, since that's
+	// the only source of real per-value data to browse.
+	if explainable && s.statQualstats {
+		b.WriteString("    " + mu("press ") + styleBadge.Render("p") +
+			mu(" to browse the real values pg_qualstats captured for this query") + "\n")
+	}
+
+	// Pad to fill the content area so the help row stays pinned.
+	rendered := strings.Count(b.String(), "\n")
+	for i := rendered; i < height; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// --- captured values (levelStatementSamples) ---
+
+// renderStatementSamples lists the real predicate constants pg_qualstats
+// captured for the query, most-frequent first, with the occurrence count drawn
+// as a bar so the value distribution (the "pattern") reads at a glance. When an
+// EXPLAIN ANALYZE has been run for the highlighted value (Enter), its plan is
+// shown below the list, reusing the detail view's heat-coloured rendering.
+func (m *Model) renderStatementSamples(s *screen, height int) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+
+	b.WriteString("\n")
+	qid := int64(0)
+	if s.statDetail != nil {
+		qid = s.statDetail.QueryID
+	}
+	b.WriteString("  " + styleSelected.Render(fmt.Sprintf("captured values · query %d", qid)) + "\n")
+	b.WriteString("  " + mu("real predicate constants sampled by pg_qualstats — most frequent first") + "\n\n")
+	used := 4 // the 4 lines written above (incl. the trailing blank)
+
+	// Split the remaining height: when a plan is on screen it takes the lower
+	// half, otherwise the list fills everything.
+	explainOn := s.statExplaining || s.statExplain != "" || s.statExplainErr != nil
+	listH := height - used
+	if explainOn {
+		listH = (height - used) / 2
+	}
+	if listH < 1 {
+		listH = 1
+	}
+
+	vis := s.visibleIndexes()
+	var maxOcc int64
+	for _, vi := range vis {
+		if sz := s.items[vi].size; sz > maxOcc {
+			maxOcc = sz
+		}
+	}
+	barW := m.barWidth(s)
+	s.offset, _ = viewportRange(s.cursor, s.offset, listH, len(vis))
+	end := min(s.offset+listH, len(vis))
+	for vi := s.offset; vi < end; vi++ {
+		it := s.items[vi]
+		cursor := "  "
+		name := it.name
+		if vi == s.cursor {
+			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
+			name = styleSelected.Render(name)
+		}
+		cells := 0
+		if maxOcc > 0 {
+			cells = int(float64(it.size) / float64(maxOcc) * float64(barW))
+		}
+		bar := paintBar(barW, barSegment{cells: cells, style: styleBar})
+		count := padRight(formatRows(it.size)+"×", 8)
+		b.WriteString(cursor + bar + "  " + mu(count) + "  " + name + "\n")
+	}
+	for i := end - s.offset; i < listH; i++ {
+		b.WriteString("\n")
+	}
+
+	if explainOn {
+		b.WriteString("\n  " + styleHeader.Render(" explain (analyze · verbose · buffers) ") + "\n")
+		switch {
+		case s.statExplaining:
+			b.WriteString("    " + mu("running EXPLAIN ANALYZE…") + "\n")
+		case s.statExplainErr != nil:
+			b.WriteString("    " + styleErr.Render(s.statExplainErr.Error()) + "\n")
+		default:
+			for _, line := range m.colorizeExplain(s.statExplain, true) {
+				b.WriteString("    " + line + "\n")
+			}
+		}
+	} else if s.statDetail != nil && pg.ReadOnlyQuery(s.statDetail.Query) {
+		b.WriteString("    " + mu("press ") + styleBadge.Render("Enter") +
+			mu(" to EXPLAIN (ANALYZE) the highlighted value — ") +
 			styleErr.Render("executes the query for real") + "\n")
 	}
 

@@ -37,6 +37,7 @@ const (
 	levelWALBlocks        // block references of one WAL record
 	levelStatements       // pg_stat_statements top-queries table (toolQueries)
 	levelStatementDetail  // single query: metrics, sample call, EXPLAIN
+	levelStatementSamples // captured real predicate constants (pg_qualstats) for one query
 )
 
 // tool identifies which top-level statistic the user is exploring.
@@ -445,6 +446,8 @@ type screen struct {
 	// statExplain text is.
 	statDetail         *pg.QueryStat
 	statSampleCall     string
+	statSampleReal     bool // statSampleCall is a real pg_qualstats example, not synthesized
+	statQualstats      bool // pg_qualstats is installed in db (drives source hint + captured-values key)
 	statSampleErr      error
 	statExplain        string
 	statExplainErr     error
@@ -464,12 +467,14 @@ const (
 	extPageInspect    = "pageinspect"
 	extWALInspect     = "pg_walinspect"
 	extStatStatements = "pg_stat_statements"
+	extQualstats      = "pg_qualstats"
 
 	extPromptReasonBufferCache    = "shared_buffers view requires the pg_buffercache extension"
 	extPromptReasonPgStatTuple    = "exact bloat measurements are available with pgstattuple"
 	extPromptReasonPageInspect    = "Page inspector requires the pageinspect extension"
 	extPromptReasonWALInspect     = "WAL inspector requires the pg_walinspect extension (and a superuser / pg_read_server_files role to read WAL)"
 	extPromptReasonStatStatements = "Top queries requires the pg_stat_statements extension (also needs it in shared_preload_libraries + a restart to collect)"
+	extPromptReasonQualstats      = "real EXPLAIN values are available with pg_qualstats (already in shared_preload_libraries here)"
 )
 
 // extPrompt is the per-screen "install this extension?" affordance.

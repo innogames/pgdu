@@ -34,11 +34,22 @@ type Client struct {
 	// True once pg_stat_statements is known to be installed in a given database.
 	statStatementsReady map[string]bool
 
+	// True once pg_qualstats is known to be installed in a given database. Used
+	// to source real EXPLAIN parameters (real captured constants) for the
+	// Top-queries view, falling back to synthesized literals when absent.
+	qualstatsReady map[string]bool
+
 	// Cached pg_stat_statements.track_planning per database (it only changes on
 	// a config reload, so one read per session is enough — and avoids the
 	// per-refresh query showing up as noise on unprivileged connections).
 	trackPlanning      map[string]bool
 	trackPlanningKnown map[string]bool
+
+	// Cached pg_stat_statements extension version [major, minor] per database. It
+	// selects the right I/O-timing column names (the 1.11 rename), so it must be
+	// known before the first snapshot query runs.
+	statStatementsVer      map[string][2]int
+	statStatementsVerKnown map[string]bool
 }
 
 type BloatMode int
@@ -51,15 +62,18 @@ const (
 
 func New(cfg cli.Config) *Client {
 	return &Client{
-		cfg:                 cfg,
-		pools:               map[string]*pgxpool.Pool{},
-		bloatProbed:         map[string]BloatMode{},
-		bufCacheReady:       map[string]bool{},
-		pageInspectReady:    map[string]bool{},
-		walInspectReady:     map[string]bool{},
-		statStatementsReady: map[string]bool{},
-		trackPlanning:       map[string]bool{},
-		trackPlanningKnown:  map[string]bool{},
+		cfg:                    cfg,
+		pools:                  map[string]*pgxpool.Pool{},
+		bloatProbed:            map[string]BloatMode{},
+		bufCacheReady:          map[string]bool{},
+		pageInspectReady:       map[string]bool{},
+		walInspectReady:        map[string]bool{},
+		statStatementsReady:    map[string]bool{},
+		qualstatsReady:         map[string]bool{},
+		trackPlanning:          map[string]bool{},
+		trackPlanningKnown:     map[string]bool{},
+		statStatementsVer:      map[string][2]int{},
+		statStatementsVerKnown: map[string]bool{},
 	}
 }
 

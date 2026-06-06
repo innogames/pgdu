@@ -735,3 +735,18 @@ type ParamType struct {
 	Ordinal int
 	Type    string
 }
+
+// QualSample is one real predicate constant captured by pg_qualstats for a
+// given queryid (with pg_qualstats.track_constants on, each distinct value is
+// a separate row). ConstValue is a ready-to-use, cast-carrying literal as
+// stored by the extension (e.g. `'line 1'::text`), so it can be spliced into a
+// query at Position. Relation/Column/Operator are resolved for display; they
+// may be empty when the qual's left side isn't a plain column reference.
+type QualSample struct {
+	Relation    string
+	Column      string
+	Operator    string
+	ConstValue  string
+	Position    int   // constant_position: char offset in the original query text
+	Occurrences int64 // occurences: how often this predicate fired
+}

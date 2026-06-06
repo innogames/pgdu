@@ -562,8 +562,73 @@ func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
 		return nil
 	}
 	s.statSampleCall = msg.sample
+	s.statSampleReal = msg.real
+	s.statQualstats = msg.qualstats
 	s.statSampleErr = msg.err
+	// Offer a one-key install when pg_qualstats is absent but already preloaded —
+	// then CREATE EXTENSION alone unlocks real values. Otherwise drop any stale
+	// qualstats prompt (e.g. after the user just installed it out of band).
+	if !msg.qualstats && msg.installable {
+		s.extPrompt = &extPrompt{
+			name:        extQualstats,
+			db:          s.db,
+			installable: true,
+			reason:      extPromptReasonQualstats,
+			blocking:    false,
+		}
+	} else if s.extPrompt != nil && s.extPrompt.name == extQualstats {
+		s.extPrompt = nil
+	}
+	// Auto-run the plan once the sample source is known (set up at drill-in,
+	// where statExplaining was flipped on). A real sample → plain EXPLAIN on it;
+	// otherwise the generic plan, which doesn't need the sample at all, so it
+	// still runs when parameter inference failed.
+	if s.statExplaining {
+		return m.statementPlanCmd(s)
+	}
 	return nil
+}
+
+func (m *Model) onStatementSamplesLoaded(msg statementSamplesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelStatementSamples)
+	if s == nil || s.statDetail == nil || s.statDetail.QueryID != msg.queryID {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	s.err = msg.err
+	s.items = sampleItems(msg.samples)
+	s.cursor, s.offset = 0, 0
+	return nil
+}
+
+// sampleItems maps captured pg_qualstats constants onto list items. The bar
+// magnitude (item.size) is the occurrence count, so the frequency pattern is
+// visible at a glance; data carries the QualSample for the Enter action. name
+// is the readable predicate, which also drives the fuzzy filter.
+func sampleItems(samples []pg.QualSample) []item {
+	out := make([]item, len(samples))
+	for i, sm := range samples {
+		out[i] = item{name: sampleLabel(sm), size: sm.Occurrences, data: sm}
+	}
+	return out
+}
+
+// sampleLabel renders a captured qual as "table.column op value", falling back
+// to bare value (then "=") when pg_qualstats couldn't resolve the left side.
+func sampleLabel(sm pg.QualSample) string {
+	if sm.Column == "" {
+		return sm.ConstValue
+	}
+	col := sm.Column
+	if sm.Relation != "" {
+		col = sm.Relation + "." + sm.Column
+	}
+	op := sm.Operator
+	if op == "" {
+		op = "="
+	}
+	return col + " " + op + " " + sm.ConstValue
 }
 
 func (m *Model) onStatementExplainLoaded(msg statementExplainLoadedMsg) tea.Cmd {

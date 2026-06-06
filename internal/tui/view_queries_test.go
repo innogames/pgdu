@@ -152,6 +152,126 @@ func TestRenderStatementDetailAndInfo(t *testing.T) {
 	}
 }
 
+// The detail view names the parameter source: real captured values when
+// pg_qualstats fed a real example, a "synthesized — install pg_qualstats" note
+// when it's absent, and the explain header flips real/generic to match.
+func TestRenderStatementDetailSourceHint(t *testing.T) {
+	sel := pg.QueryStat{QueryID: 1, Query: "select * from t where id = $1", Calls: 1}
+	base := func() *screen {
+		return &screen{
+			level: levelStatementDetail, title: "query", tool: toolQueries, db: "test",
+			loaded: true, statDetail: &sel, statWindowExecMs: 100,
+			statSampleCall: "select * from t where id = 42",
+		}
+	}
+
+	// Real values from pg_qualstats: "real values" hint, "(real plan)" header,
+	// and the captured-values affordance offered.
+	s := base()
+	s.statSampleReal = true
+	s.statQualstats = true
+	out := renderModel(s)
+	for _, want := range []string{"real values · pg_qualstats", "explain (real plan)", "to browse the real values"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("real-source detail missing %q", want)
+		}
+	}
+	if strings.Contains(out, "generic plan") {
+		t.Error("real-source detail must not show the generic-plan header")
+	}
+
+	// No pg_qualstats: synthesized, with the install hint and generic plan.
+	s = base()
+	s.statSampleReal = false
+	s.statQualstats = false
+	out = renderModel(s)
+	if !strings.Contains(out, "synthesized — install pg_qualstats") {
+		t.Error("missing-qualstats detail should suggest installing pg_qualstats")
+	}
+	if !strings.Contains(out, "explain (generic plan)") {
+		t.Error("missing-qualstats detail should use the generic-plan header")
+	}
+	if strings.Contains(out, "to browse the real values") {
+		t.Error("captured-values affordance must not show without pg_qualstats")
+	}
+
+	// pg_qualstats absent but preloaded: an install offer is surfaced, so both
+	// the sample-call hint and the non-blocking ext hint point at the i key.
+	s = base()
+	s.statSampleReal = false
+	s.statQualstats = false
+	s.extPrompt = &extPrompt{name: extQualstats, db: "test", installable: true, reason: extPromptReasonQualstats}
+	out = renderModel(s)
+	if !strings.Contains(out, "press i to install pg_qualstats for real values") {
+		t.Error("preloaded-but-absent detail should offer the i-key install in the sample hint")
+	}
+	if !strings.Contains(out, "to install pg_qualstats") {
+		t.Error("preloaded-but-absent detail should render the install ext hint")
+	}
+}
+
+// The captured-values level lists real constants with their frequency and
+// offers EXPLAIN ANALYZE on the highlighted one.
+func TestRenderStatementSamples(t *testing.T) {
+	sel := pg.QueryStat{QueryID: 9, Query: "select * from t where id = $1", Calls: 1}
+	samples := []pg.QualSample{
+		{Relation: "t", Column: "id", Operator: "=", ConstValue: "42::integer", Occurrences: 1500},
+		{Relation: "t", Column: "id", Operator: "=", ConstValue: "7::integer", Occurrences: 30},
+	}
+	s := &screen{
+		level: levelStatementSamples, title: "values", tool: toolQueries, db: "test",
+		loaded: true, statDetail: &sel, statQualstats: true, statSampleReal: true,
+		statSampleCall: "select * from t where id = 42::integer",
+		items:          sampleItems(samples),
+	}
+	out := renderModel(s)
+	for _, want := range []string{"captured values · query 9", "t.id = 42::integer", "t.id = 7::integer", "EXPLAIN (ANALYZE)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("samples view missing %q", want)
+		}
+	}
+}
+
+func TestSampleAnalyzeQuery(t *testing.T) {
+	one := pg.QualSample{Column: "id", Operator: "=", ConstValue: "42::integer"}
+	// Single-parameter query: the captured constant is unambiguously $1.
+	if got := sampleAnalyzeQuery("select * from t where id = $1", "example", one); got != "select * from t where id = 42::integer" {
+		t.Errorf("single-param substitution wrong: %q", got)
+	}
+	// Multi-parameter query: can't map one constant to one of several $n — fall
+	// back to the representative example query.
+	if got := sampleAnalyzeQuery("select * from t where a = $1 and b = $2", "EXAMPLE", one); got != "EXAMPLE" {
+		t.Errorf("multi-param should fall back to example, got %q", got)
+	}
+}
+
+func TestUniqueParams(t *testing.T) {
+	cases := map[string]int{
+		"select 1":                              0,
+		"select * from t where id = $1":         1,
+		"select * from t where a=$1 and b=$2":   2,
+		"values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)": 10,
+		"where x = $1 or y = $1":                1, // distinct, not occurrences
+	}
+	for q, want := range cases {
+		if got := uniqueParams(q); got != want {
+			t.Errorf("uniqueParams(%q) = %d, want %d", q, got, want)
+		}
+	}
+}
+
+func TestSampleLabel(t *testing.T) {
+	if got := sampleLabel(pg.QualSample{Relation: "t", Column: "id", Operator: "=", ConstValue: "42"}); got != "t.id = 42" {
+		t.Errorf("full label wrong: %q", got)
+	}
+	if got := sampleLabel(pg.QualSample{Column: "id", ConstValue: "42"}); got != "id = 42" {
+		t.Errorf("no-relation label should default operator to =: %q", got)
+	}
+	if got := sampleLabel(pg.QualSample{ConstValue: "42"}); got != "42" {
+		t.Errorf("bare-value label wrong: %q", got)
+	}
+}
+
 // An empty window (no activity since baseline) must render the header without
 // tripping the generic table's no-rows path.
 func TestRenderStatementsEmptyWindow(t *testing.T) {

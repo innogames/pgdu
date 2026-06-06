@@ -51,6 +51,7 @@ func (c *Client) CreateExtension(ctx context.Context, db, ext string) error {
 		"pageinspect":        c.pageInspectReady,
 		"pg_walinspect":      c.walInspectReady,
 		"pg_stat_statements": c.statStatementsReady,
+		"pg_qualstats":       c.qualstatsReady,
 	}[ext]; ready != nil {
 		ready[db] = true
 	}

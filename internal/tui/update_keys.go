@@ -1,11 +1,19 @@
 package tui
 
 import (
+	"regexp"
+	"strings"
+
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
 )
+
+// reParam matches a pg_stat_statements placeholder ($1, $2, …) in a normalized
+// query, used to decide whether a single captured constant maps unambiguously
+// to the query's lone parameter.
+var reParam = regexp.MustCompile(`\$\d+`)
 
 func max32(a, b int32) int32 {
 	if a > b {
@@ -120,14 +128,29 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.loadCurrent()
 		}
 	case key.Matches(msg, m.keys.Explain):
-		// Run EXPLAIN (GENERIC_PLAN) for the query in the detail view, on demand.
+		// Re-run the (non-ANALYZE) plan for the detail view's query on demand —
+		// real EXPLAIN when a pg_qualstats example is in hand, generic otherwise.
 		if s.level == levelStatementDetail && s.statDetail != nil && !s.statExplaining &&
 			pg.ExplainableQuery(s.statDetail.Query) {
 			s.statExplaining = true
 			s.statExplain = ""
 			s.statExplainErr = nil
 			s.statExplainAnalyze = false
-			return m, m.loadStatementExplainCmd(s.db, s.statDetail.Query)
+			return m, m.statementPlanCmd(s)
+		}
+	case key.Matches(msg, m.keys.Params):
+		// Browse the real values pg_qualstats captured for this query — only
+		// meaningful when pg_qualstats is present (else there's nothing real to
+		// show). Pushes levelStatementSamples and loads the captured constants.
+		if s.level == levelStatementDetail && s.statDetail != nil && s.statQualstats {
+			next := &screen{
+				level: levelStatementSamples, title: "values", tool: s.tool,
+				db: s.db, statDetail: s.statDetail,
+				statSampleCall: s.statSampleCall, statSampleReal: s.statSampleReal,
+				statQualstats: s.statQualstats, loading: true,
+			}
+			m.stack = append(m.stack, next)
+			return m, m.loadStatementSamplesCmd(s.db, s.statDetail.QueryID)
 		}
 	case key.Matches(msg, m.keys.Describe):
 		// Inert when already on a describe panel so `d` doesn't stack.
@@ -179,6 +202,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// EXPLAIN ANALYZE run on read-only queries.
 			if msg.Type == tea.KeyEnter {
 				return m, m.handleStatementAnalyze(s)
+			}
+			return m, nil
+		}
+		if s.level == levelStatementSamples {
+			// The captured-values list doesn't drill further; Enter runs EXPLAIN
+			// ANALYZE for the highlighted real value (read-only queries only).
+			if msg.Type == tea.KeyEnter {
+				return m, m.handleSampleAnalyze(s)
 			}
 			return m, nil
 		}
@@ -294,6 +325,73 @@ func (m *Model) handleStatementAnalyze(s *screen) tea.Cmd {
 	s.statExplainErr = nil
 	s.statExplainAnalyze = true
 	return m.loadStatementExplainAnalyzeCmd(s.db, s.statDetail.Query, s.statSampleCall)
+}
+
+// statementPlanCmd issues the right (non-ANALYZE) EXPLAIN for the detail view:
+// a plain EXPLAIN on the real example call when one is available (real captured
+// values from pg_qualstats), otherwise the generic plan on the normalized query.
+// The caller is responsible for setting statExplaining / clearing prior output.
+func (m *Model) statementPlanCmd(s *screen) tea.Cmd {
+	if s.statSampleReal && s.statSampleCall != "" {
+		return m.loadStatementExplainLiteralCmd(s.db, s.statDetail.Query, s.statSampleCall)
+	}
+	return m.loadStatementExplainCmd(s.db, s.statDetail.Query)
+}
+
+// handleSampleAnalyze runs EXPLAIN (ANALYZE, …) for the highlighted captured
+// value on the samples level. Reconstruction is only reliable when the
+// normalized query has exactly one placeholder — then the captured constant is
+// unambiguously that $1, and we substitute it for a true per-value plan. For
+// multi-parameter queries we can't map one captured constant to one of several
+// placeholders, so we fall back to the representative real example query
+// (statSampleCall). Gated to read-only shapes since ANALYZE executes.
+func (m *Model) handleSampleAnalyze(s *screen) tea.Cmd {
+	if s.statDetail == nil || s.statExplaining || !pg.ReadOnlyQuery(s.statDetail.Query) {
+		return nil
+	}
+	sm, ok := s.selectedSample()
+	if !ok {
+		return nil
+	}
+	q := sampleAnalyzeQuery(s.statDetail.Query, s.statSampleCall, sm)
+	if q == "" {
+		return nil
+	}
+	s.statExplaining = true
+	s.statExplain = ""
+	s.statExplainErr = nil
+	s.statExplainAnalyze = true
+	return m.loadStatementExplainAnalyzeCmd(s.db, s.statDetail.Query, q)
+}
+
+// selectedSample resolves the captured value under the cursor on the samples
+// level, honouring the active filter via visibleIndexes.
+func (s *screen) selectedSample() (pg.QualSample, bool) {
+	vis := s.visibleIndexes()
+	if s.cursor < 0 || s.cursor >= len(vis) {
+		return pg.QualSample{}, false
+	}
+	sm, ok := s.items[vis[s.cursor]].data.(pg.QualSample)
+	return sm, ok
+}
+
+// sampleAnalyzeQuery builds the literal query to EXPLAIN ANALYZE for a captured
+// value: a clean $1 substitution for single-parameter queries, else the real
+// example query. Returns "" when neither is usable.
+func sampleAnalyzeQuery(normalized, example string, sm pg.QualSample) string {
+	if uniqueParams(normalized) == 1 && sm.ConstValue != "" {
+		return strings.ReplaceAll(normalized, "$1", sm.ConstValue)
+	}
+	return example
+}
+
+// uniqueParams counts the distinct $n placeholders in a normalized query.
+func uniqueParams(query string) int {
+	seen := map[string]struct{}{}
+	for _, p := range reParam.FindAllString(query, -1) {
+		seen[p] = struct{}{}
+	}
+	return len(seen)
 }
 
 // descTarget holds the resolved target for a describe action.

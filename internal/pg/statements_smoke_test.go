@@ -63,4 +63,34 @@ func TestStatementsSmoke(t *testing.T) {
 	} else {
 		t.Logf("plan:\n%s", plan)
 	}
+
+	// Real parameters via pg_qualstats — only exercised when the extension is
+	// installed (it needs shared_preload_libraries + a restart). Skipped cleanly
+	// otherwise so the smoke test still passes on a plain server.
+	if err := c.EnsureQualstats(ctx, db); err != nil {
+		t.Logf("pg_qualstats not available (non-fatal): %v", err)
+		return
+	}
+	example, err := c.QualstatsExampleQuery(ctx, db, target.QueryID)
+	if err != nil {
+		t.Logf("QualstatsExampleQuery (non-fatal): %v", err)
+	} else if example == "" {
+		t.Logf("pg_qualstats has no captured example for queryid %d yet", target.QueryID)
+	} else {
+		t.Logf("real example query: %s", example)
+		if p, err := c.ExplainLiteral(ctx, db, example); err != nil {
+			t.Logf("ExplainLiteral (non-fatal): %v", err)
+		} else {
+			t.Logf("real plan:\n%s", p)
+		}
+	}
+	samples, err := c.QualstatsSamples(ctx, db, target.QueryID)
+	if err != nil {
+		t.Logf("QualstatsSamples (non-fatal): %v", err)
+	} else {
+		t.Logf("captured %d real values for queryid %d", len(samples), target.QueryID)
+		for _, s := range samples {
+			t.Logf("  %s.%s %s %s  (%d×)", s.Relation, s.Column, s.Operator, s.ConstValue, s.Occurrences)
+		}
+	}
 }

@@ -160,10 +160,16 @@ type statementsLoadedMsg struct {
 type statementsTickMsg struct{}
 
 type statementSampleLoadedMsg struct {
-	db     string
-	query  string // matches screen.statDetail.Query for stale-message rejection
-	sample string
-	err    error
+	db        string
+	query     string // matches screen.statDetail.Query for stale-message rejection
+	sample    string
+	real      bool // sample is a real captured example (pg_qualstats), not synthesized
+	qualstats bool // pg_qualstats is installed in db (drives the source hint / captured-values affordance)
+	// installable is true when pg_qualstats is absent but already in
+	// shared_preload_libraries, so a one-key CREATE EXTENSION would enable real
+	// values. Drives the detail view's optional install hint.
+	installable bool
+	err         error
 }
 type statementExplainLoadedMsg struct {
 	db      string
@@ -171,6 +177,12 @@ type statementExplainLoadedMsg struct {
 	plan    string
 	err     error
 	analyze bool // plan came from EXPLAIN ANALYZE rather than the generic plan
+}
+type statementSamplesLoadedMsg struct {
+	db      string
+	queryID int64 // matches screen.statDetail.QueryID for stale-message rejection
+	samples []pg.QualSample
+	err     error
 }
 
 // --- commands ---
@@ -426,13 +438,32 @@ func statementsTick() tea.Cmd {
 	})
 }
 
-func (m *Model) loadStatementSampleCmd(db, queryText string) tea.Cmd {
+// loadStatementSampleCmd resolves the example call to show under a query. It
+// prefers a *real* example query from pg_qualstats (real captured constants, so
+// EXPLAIN reflects the plan a real call gets); when pg_qualstats is absent or
+// has sampled nothing for this queryid yet, it falls back to synthesizing typed
+// literals from the inferred $n types (BuildSampleCall). The qualstats flag is
+// reported either way so the detail view can label the source and offer the
+// captured-values list only when there's real data behind it.
+func (m *Model) loadStatementSampleCmd(db string, queryID int64, queryText string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
+		qualstats := m.client.EnsureQualstats(ctx, db) == nil
+		if qualstats {
+			if ex, err := m.client.QualstatsExampleQuery(ctx, db, queryID); err == nil && ex != "" {
+				return statementSampleLoadedMsg{db: db, query: queryText, sample: ex, real: true, qualstats: true}
+			}
+		}
+		// Absent but preloaded → a plain CREATE EXTENSION would enable real values;
+		// surface that as an install hint rather than only synthesizing literals.
+		installable := false
+		if !qualstats {
+			installable, _ = m.client.QualstatsPreloaded(ctx, db)
+		}
 		params, err := m.client.InferParams(ctx, db, queryText)
 		if err != nil {
-			return statementSampleLoadedMsg{db: db, query: queryText, err: err}
+			return statementSampleLoadedMsg{db: db, query: queryText, err: err, qualstats: qualstats, installable: installable}
 		}
-		return statementSampleLoadedMsg{db: db, query: queryText, sample: pg.BuildSampleCall(queryText, params)}
+		return statementSampleLoadedMsg{db: db, query: queryText, sample: pg.BuildSampleCall(queryText, params), qualstats: qualstats, installable: installable}
 	})
 }
 
@@ -440,6 +471,30 @@ func (m *Model) loadStatementExplainCmd(db, queryText string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		plan, err := m.client.ExplainGeneric(ctx, db, queryText)
 		return statementExplainLoadedMsg{db: db, query: queryText, plan: plan, err: err}
+	})
+}
+
+// loadStatementSamplesCmd fetches the real predicate constants pg_qualstats
+// captured for queryID — the captured-values list behind the detail view's `p`.
+func (m *Model) loadStatementSamplesCmd(db string, queryID int64) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		if err := m.client.EnsureQualstats(ctx, db); err != nil {
+			return statementSamplesLoadedMsg{db: db, queryID: queryID, err: err}
+		}
+		samples, err := m.client.QualstatsSamples(ctx, db, queryID)
+		return statementSamplesLoadedMsg{db: db, queryID: queryID, samples: samples, err: err}
+	})
+}
+
+// loadStatementExplainLiteralCmd runs a plain EXPLAIN (no GENERIC_PLAN, no
+// ANALYZE) on sampleCall, a fully-literal real example query. matchQuery is the
+// normalized text used only to reject stale messages. Used in place of the
+// generic plan when a real pg_qualstats example is available, so the planner
+// sees real values instead of $n.
+func (m *Model) loadStatementExplainLiteralCmd(db, matchQuery, sampleCall string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		plan, err := m.client.ExplainLiteral(ctx, db, sampleCall)
+		return statementExplainLoadedMsg{db: db, query: matchQuery, plan: plan, err: err}
 	})
 }
 

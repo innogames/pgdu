@@ -1,6 +1,9 @@
 package pg
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDiffStatements(t *testing.T) {
 	baseline := map[int64]QueryStat{
@@ -55,6 +58,47 @@ func TestDiffStatements(t *testing.T) {
 
 	if _, dropped := byID[2]; dropped {
 		t.Error("queryid 2 had no window activity and should have been dropped")
+	}
+}
+
+func TestBuildStatements(t *testing.T) {
+	// pg_stat_statements 1.11+ (PG17 default / PG18): renamed shared_blk_* and
+	// the new local_blk_* columns are used verbatim.
+	v111 := buildStatements(map[string]bool{
+		"shared_blk_read_time": true, "shared_blk_write_time": true,
+		"local_blk_read_time": true, "local_blk_write_time": true,
+		"temp_blk_read_time": true, "temp_blk_write_time": true,
+	})
+	for _, want := range []string{
+		"shared_blk_read_time, shared_blk_write_time",
+		"local_blk_read_time, local_blk_write_time",
+		"temp_blk_read_time, temp_blk_write_time",
+	} {
+		if !strings.Contains(v111, want) {
+			t.Errorf("1.11 query missing %q:\n%s", want, v111)
+		}
+	}
+	if strings.Contains(v111, " AS ") {
+		t.Errorf("1.11 query should need no aliases:\n%s", v111)
+	}
+
+	// pg_stat_statements 1.10 (e.g. a PG17 cluster pg_upgrade'd from PG15, never
+	// updated): the old blk_*_time names alias into shared_blk_*; local_blk_*
+	// don't exist yet and fall back to zero. This is the case that crashed.
+	v110 := buildStatements(map[string]bool{
+		"blk_read_time": true, "blk_write_time": true,
+		"temp_blk_read_time": true, "temp_blk_write_time": true,
+	})
+	for _, want := range []string{
+		"blk_read_time AS shared_blk_read_time",
+		"blk_write_time AS shared_blk_write_time",
+		"0::float8 AS local_blk_read_time",
+		"0::float8 AS local_blk_write_time",
+		"temp_blk_read_time, temp_blk_write_time",
+	} {
+		if !strings.Contains(v110, want) {
+			t.Errorf("1.10 query missing %q:\n%s", want, v110)
+		}
 	}
 }
 
@@ -188,5 +232,62 @@ func TestBuildSampleCall(t *testing.T) {
 				t.Errorf("BuildSampleCall()\n got: %s\nwant: %s", got, c.want)
 			}
 		})
+	}
+}
+
+func TestParseExtVersion(t *testing.T) {
+	cases := []struct {
+		in               string
+		wantMaj, wantMin int
+	}{
+		{"1.11", 1, 11},
+		{"1.10", 1, 10},
+		{"1.9", 1, 9},
+		{" 1.12 ", 1, 12},
+		{"2", 2, 0},
+		{"1.11.0", 1, 11},
+		{"", 999, 0},
+		{"garbage", 999, 0},
+	}
+	for _, c := range cases {
+		if maj, min := parseExtVersion(c.in); maj != c.wantMaj || min != c.wantMin {
+			t.Errorf("parseExtVersion(%q) = (%d,%d), want (%d,%d)", c.in, maj, min, c.wantMaj, c.wantMin)
+		}
+	}
+}
+
+func TestStatementsQueryVersionColumns(t *testing.T) {
+	// 1.11+: native shared_/local_ timing columns, no aliasing or 0-fills.
+	modern := statementsQuery(1, 11)
+	for _, want := range []string{"shared_blk_read_time", "local_blk_read_time", "temp_blk_read_time"} {
+		if !strings.Contains(modern, want) {
+			t.Errorf("1.11 query missing %q", want)
+		}
+	}
+	if strings.Contains(modern, "blk_read_time AS shared_blk_read_time") {
+		t.Error("1.11 query should not alias legacy blk_read_time")
+	}
+
+	// 1.10: legacy blk_*_time aliased to shared_*, local timing 0-filled, temp native.
+	v110 := statementsQuery(1, 10)
+	for _, want := range []string{
+		"blk_read_time AS shared_blk_read_time",
+		"0::float8 AS local_blk_read_time",
+		"temp_blk_read_time, temp_blk_write_time",
+	} {
+		if !strings.Contains(v110, want) {
+			t.Errorf("1.10 query missing %q", want)
+		}
+	}
+
+	// 1.9: temp timing also unavailable → 0-filled.
+	v19 := statementsQuery(1, 9)
+	if !strings.Contains(v19, "0::float8 AS temp_blk_read_time") {
+		t.Error("1.9 query should 0-fill temp_blk_read_time")
+	}
+
+	// The LIKE filters with literal % must survive the builder intact.
+	if !strings.Contains(modern, "query NOT LIKE '%pg_stat_statements%'") {
+		t.Error("builder mangled the LIKE filter literal %")
 	}
 }

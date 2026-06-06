@@ -309,17 +309,16 @@ func (m *Model) loadCurrent() tea.Cmd {
 		s.loading = false
 		s.loaded = true
 		if s.statDetail != nil && pg.ExplainableQuery(s.statDetail.Query) {
-			// Infer the sample call and run the generic-plan EXPLAIN up front so
-			// the plan is on screen without an extra keystroke; ANALYZE stays
-			// opt-in (Enter) because it executes the query.
+			// Resolve the sample call first, then auto-run the plan once it's
+			// known: a real pg_qualstats example takes a plain EXPLAIN, a
+			// synthesized one the generic plan. onStatementSampleLoaded fires the
+			// EXPLAIN while statExplaining is set. ANALYZE stays opt-in (Enter)
+			// because it executes the query.
 			s.statExplaining = true
 			s.statExplain = ""
 			s.statExplainErr = nil
 			s.statExplainAnalyze = false
-			return tea.Batch(
-				m.loadStatementSampleCmd(s.db, s.statDetail.Query),
-				m.loadStatementExplainCmd(s.db, s.statDetail.Query),
-			)
+			return m.loadStatementSampleCmd(s.db, s.statDetail.QueryID, s.statDetail.Query)
 		}
 		return nil
 	}
