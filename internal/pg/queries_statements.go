@@ -6,6 +6,20 @@ package pg
 // carries the older extension and its older I/O-timing column names.
 const sqlStatementsVersion = `SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_statements'`
 
+// sqlSampleTableColumns resolves a relation reference (schema-qualified or bare,
+// as parsed from a statement) to its schema, name and live column list, so a
+// sample-value query can be built from trusted catalog identifiers. to_regclass
+// returns NULL for an unknown name, yielding no row (best-effort callers treat
+// that as "give up and synthesize").
+const sqlSampleTableColumns = `
+SELECT n.nspname, c.relname,
+       coalesce(array_agg(a.attname) FILTER (WHERE a.attnum > 0 AND NOT a.attisdropped), '{}')
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_attribute a ON a.attrelid = c.oid
+WHERE c.oid = to_regclass($1)
+GROUP BY n.nspname, c.relname`
+
 // statementsQuery builds the snapshot SQL for the current database, selecting the
 // I/O-timing columns under the names the installed extension version actually
 // has. The block-count columns are stable across versions, but the timing

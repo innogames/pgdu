@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -550,10 +551,17 @@ func (m *Model) onStatementsTick() tea.Cmd {
 		m.statTicking = false
 		return nil
 	}
-	if top.level == levelStatements {
-		return tea.Batch(m.loadStatementsCmd(top.db), statementsTick())
+	next := m.statementsTick()
+	if next == nil {
+		// Auto-refresh was disabled or paused while the tool was open; stop the
+		// loop. A resume (t) or re-entry restarts it.
+		m.statTicking = false
+		return nil
 	}
-	return statementsTick()
+	if top.level == levelStatements {
+		return tea.Batch(m.loadStatementsCmd(top.db), next)
+	}
+	return next
 }
 
 func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
@@ -563,6 +571,7 @@ func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
 	}
 	s.statSampleCall = msg.sample
 	s.statSampleReal = msg.real
+	s.statSampleFromData = msg.fromData
 	s.statQualstats = msg.qualstats
 	s.statSampleErr = msg.err
 	// Offer a one-key install when pg_qualstats is absent but already preloaded —
@@ -586,6 +595,15 @@ func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
 	if s.statExplaining {
 		return m.statementPlanCmd(s)
 	}
+	return nil
+}
+
+func (m *Model) onExportDone(msg exportDoneMsg) tea.Cmd {
+	if msg.err != nil {
+		m.notice = "export failed: " + msg.err.Error()
+		return nil
+	}
+	m.notice = fmt.Sprintf("exported %d rows → %s", msg.rows, msg.path)
 	return nil
 }
 
@@ -632,13 +650,33 @@ func sampleLabel(sm pg.QualSample) string {
 }
 
 func (m *Model) onStatementExplainLoaded(msg statementExplainLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelStatementDetail)
-	if s == nil || s.statDetail == nil || s.statDetail.Query != msg.query {
+	// The EXPLAIN can be launched from either the detail view or the captured-
+	// values (samples) view — each carries its own statExplaining/statExplain.
+	// Route the result to the screen that actually started it, otherwise the
+	// samples view stays stuck on "running EXPLAIN ANALYZE…" while the plan lands
+	// on the hidden detail screen below it.
+	s := m.findExplainTarget(msg.query)
+	if s == nil {
 		return nil
 	}
 	s.statExplaining = false
 	s.statExplain = msg.plan
 	s.statExplainErr = msg.err
 	s.statExplainAnalyze = msg.analyze
+	return nil
+}
+
+// findExplainTarget returns the topmost statement screen whose EXPLAIN is in
+// flight for the given normalized query — the one that issued the request.
+func (m *Model) findExplainTarget(query string) *screen {
+	for i := len(m.stack) - 1; i >= 0; i-- {
+		s := m.stack[i]
+		if s.level != levelStatementDetail && s.level != levelStatementSamples {
+			continue
+		}
+		if s.statExplaining && s.statDetail != nil && s.statDetail.Query == query {
+			return s
+		}
+	}
 	return nil
 }

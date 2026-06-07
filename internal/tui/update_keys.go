@@ -36,6 +36,9 @@ func (m *Model) pageStep() int {
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := m.top()
+	// Any keypress clears the transient notice (e.g. the last export's path) so
+	// it reads as a one-shot confirmation rather than lingering state.
+	m.notice = ""
 	// While the filter input has focus, route keys into the filter editor
 	// instead of the list. Bypasses every other binding (so e.g. typing "s"
 	// extends the query rather than cycling the sort).
@@ -127,6 +130,20 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.statBaseline = nil
 			return m, m.loadCurrent()
 		}
+	case key.Matches(msg, m.keys.ToggleRefresh):
+		// Pause/resume the live window's auto-refresh. Inert when refresh is
+		// disabled by config (--queries-refresh 0) — there's nothing to pause.
+		if (s.level == levelStatements || s.level == levelStatementDetail) && m.statRefresh > 0 {
+			m.statPaused = !m.statPaused
+			// Resuming restarts the self-rescheduling loop if it isn't running.
+			if !m.statPaused && !m.statTicking {
+				if tick := m.statementsTick(); tick != nil {
+					m.statTicking = true
+					return m, tick
+				}
+			}
+			return m, nil
+		}
 	case key.Matches(msg, m.keys.Explain):
 		// Re-run the (non-ANALYZE) plan for the detail view's query on demand —
 		// real EXPLAIN when a pg_qualstats example is in hand, generic otherwise.
@@ -152,6 +169,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.stack = append(m.stack, next)
 			return m, m.loadStatementSamplesCmd(s.db, s.statDetail.QueryID)
 		}
+	case key.Matches(msg, m.keys.Export):
+		// Write the current table/view to pgdu-<tool>-<datetime>.csv. Returns nil
+		// (→ a hint) on screens with nothing tabular to export.
+		if cmd := m.exportCSVCmd(s); cmd != nil {
+			return m, cmd
+		}
+		m.notice = "nothing to export on this screen"
 	case key.Matches(msg, m.keys.Describe):
 		// Inert when already on a describe panel so `d` doesn't stack.
 		if s.level == levelDescribe {
@@ -172,6 +196,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.stack = append(m.stack, next)
 		if t.isIndex {
 			return m, m.loadDescribeIndexCmd(t.db, t.indexOID, t.indexName)
+		}
+		if t.byName {
+			return m, m.loadDescribeTableByNameCmd(t.db, t.tableName)
 		}
 		next.table = t.table
 		return m, m.loadDescribeTableCmd(t.table)
@@ -397,8 +424,10 @@ func uniqueParams(query string) int {
 // descTarget holds the resolved target for a describe action.
 type descTarget struct {
 	isIndex   bool
-	table     pg.Table // when !isIndex
-	db        string   // when isIndex
+	byName    bool     // when the relation is known only by name (top-queries view)
+	table     pg.Table // when !isIndex && !byName
+	db        string   // when isIndex || byName
+	tableName string   // when byName — resolved server-side via ResolveTable
 	indexOID  uint32   // when isIndex
 	indexName string   // when isIndex
 }
@@ -418,6 +447,29 @@ func describeTarget(s *screen) (descTarget, bool) {
 	}
 
 	switch s.level {
+	case levelStatements:
+		// item.name is the flattened statement text; parse out its main table and
+		// describe it by name (resolved server-side, since we have no OID here).
+		it, ok := curItem()
+		if !ok {
+			return descTarget{}, false
+		}
+		name := pg.MainTable(it.name)
+		if name == "" {
+			return descTarget{}, false
+		}
+		return descTarget{byName: true, db: s.db, tableName: name}, true
+
+	case levelStatementDetail, levelStatementSamples:
+		if s.statDetail == nil {
+			return descTarget{}, false
+		}
+		name := pg.MainTable(s.statDetail.Query)
+		if name == "" {
+			return descTarget{}, false
+		}
+		return descTarget{byName: true, db: s.db, tableName: name}, true
+
 	case levelTables:
 		it, ok := curItem()
 		if !ok {

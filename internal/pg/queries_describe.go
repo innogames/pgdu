@@ -2,6 +2,22 @@ package pg
 
 // --- describe queries (psql \d-style) ---
 
+// sqlResolveTable resolves a (optionally schema-qualified) relation name to the
+// catalog metadata DescribeTable needs. to_regclass honours search_path for an
+// unqualified name and returns NULL — rather than erroring — when the name
+// doesn't resolve, so a stray label can't blow up the describe path. $1 = name.
+const sqlResolveTable = `
+SELECT c.oid,
+       n.nspname,
+       c.relname,
+       pg_total_relation_size(c.oid),
+       c.reltuples::bigint
+FROM   pg_class c
+JOIN   pg_namespace n ON n.oid = c.relnamespace
+WHERE  c.oid = to_regclass($1)
+  AND  c.relkind IN ('r', 'p', 'm', 'f')
+`
+
 // sqlDescribeColumns lists a table's live columns in declaration order with
 // NOT NULL and the column default expression. $1 = table oid. PG 12+.
 const sqlDescribeColumns = `

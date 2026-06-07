@@ -131,6 +131,7 @@ func (m *Model) colorizeExplain(plan string, analyze bool) []string {
 	type decision struct {
 		style    lipgloss.Style
 		boldName bool
+		selfPct  float64 // node's self-time share of the whole query (analyze only)
 	}
 	decided := make(map[int]decision)
 	if total > 0 {
@@ -139,7 +140,7 @@ func (m *Model) colorizeExplain(plan string, analyze bool) []string {
 			if !hot {
 				continue
 			}
-			decided[n.lineIdx] = decision{style: style, boldName: i == worst}
+			decided[n.lineIdx] = decision{style: style, boldName: i == worst, selfPct: n.self / total * 100}
 		}
 	}
 
@@ -151,7 +152,7 @@ func (m *Model) colorizeExplain(plan string, analyze bool) []string {
 			out = append(out, clipped)
 			continue
 		}
-		out = append(out, paintExplainLine(clipped, d.style, d.boldName, analyze))
+		out = append(out, paintExplainLine(clipped, d.style, d.boldName, analyze, d.selfPct))
 	}
 	return out
 }
@@ -160,7 +161,7 @@ func (m *Model) colorizeExplain(plan string, analyze bool) []string {
 // node-type name) of one already-clipped plan line in the given heat style. It
 // operates on plain text (no embedded ANSI), so substring math is safe; if the
 // metric was clipped away the line is returned unchanged.
-func paintExplainLine(line string, style lipgloss.Style, boldName, analyze bool) string {
+func paintExplainLine(line string, style lipgloss.Style, boldName, analyze bool, selfPct float64) string {
 	bold := lipgloss.NewStyle().Bold(true)
 
 	// Colour the node-type name first (offsets before the metric are unaffected
@@ -182,7 +183,13 @@ func paintExplainLine(line string, style lipgloss.Style, boldName, analyze bool)
 		return line
 	}
 	end += start + 1 // include the ')'
-	return line[:start] + style.Render(line[start:end]) + line[end:]
+	painted := line[:start] + style.Render(line[start:end])
+	// For ANALYZE plans, annotate the node's self-time share right after the
+	// metric block so the hotspot reads quantitatively, not just by colour.
+	if analyze {
+		painted += " " + style.Render(fmt1(selfPct)+"%")
+	}
+	return painted + line[end:]
 }
 
 // paintNodeName styles the node-type label — the text between the optional

@@ -164,6 +164,7 @@ type statementSampleLoadedMsg struct {
 	query     string // matches screen.statDetail.Query for stale-message rejection
 	sample    string
 	real      bool // sample is a real captured example (pg_qualstats), not synthesized
+	fromData  bool // synthesized, but ≥1 placeholder was filled with a real value sampled from the live table
 	qualstats bool // pg_qualstats is installed in db (drives the source hint / captured-values affordance)
 	// installable is true when pg_qualstats is absent but already in
 	// shared_preload_libraries, so a one-key CREATE EXTENSION would enable real
@@ -349,6 +350,20 @@ func (m *Model) loadDescribeTableCmd(t pg.Table) tea.Cmd {
 	})
 }
 
+// loadDescribeTableByNameCmd resolves a relation name (parsed out of a query in
+// the top-queries view) to its catalog metadata, then describes it — both in one
+// round-trip so the describe panel opens with a single Cmd like the others.
+func (m *Model) loadDescribeTableByNameCmd(db, name string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		t, err := m.client.ResolveTable(ctx, db, name)
+		if err != nil {
+			return describeLoadedMsg{err: err}
+		}
+		d, err := m.client.DescribeTable(ctx, t)
+		return describeLoadedMsg{oid: t.OID, desc: d, err: err}
+	})
+}
+
 func (m *Model) loadDescribeIndexCmd(db string, oid uint32, name string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		d, err := m.client.DescribeIndex(ctx, db, oid, name)
@@ -427,13 +442,15 @@ func (m *Model) loadStatementsCmd(db string) tea.Cmd {
 	})
 }
 
-// statementsRefreshInterval is how often the top-queries window re-samples the
-// counters. 2 s is responsive enough to watch load build without hammering the
-// server with snapshot queries.
-const statementsRefreshInterval = 2 * time.Second
-
-func statementsTick() tea.Cmd {
-	return tea.Tick(statementsRefreshInterval, func(time.Time) tea.Msg {
+// statementsTick schedules the next top-queries re-sample, or returns nil when
+// auto-refresh is off — either disabled by config (statRefresh <= 0) or paused
+// at runtime (t key). Returning nil stops the self-rescheduling loop; a resume
+// or re-entry into the tool restarts it.
+func (m *Model) statementsTick() tea.Cmd {
+	if m.statRefresh <= 0 || m.statPaused {
+		return nil
+	}
+	return tea.Tick(m.statRefresh, func(time.Time) tea.Msg {
 		return statementsTickMsg{}
 	})
 }
@@ -449,7 +466,10 @@ func (m *Model) loadStatementSampleCmd(db string, queryID int64, queryText strin
 	return query(func(ctx context.Context) tea.Msg {
 		qualstats := m.client.EnsureQualstats(ctx, db) == nil
 		if qualstats {
-			if ex, err := m.client.QualstatsExampleQuery(ctx, db, queryID); err == nil && ex != "" {
+			// pg_qualstats caps example queries at track_activity_query_size, so a
+			// long statement comes back truncated mid-token — unusable for EXPLAIN.
+			// Reject those and fall through to the synthesized (full-length) call.
+			if ex, err := m.client.QualstatsExampleQuery(ctx, db, queryID); err == nil && ex != "" && pg.QualstatsExampleUsable(queryText, ex) {
 				return statementSampleLoadedMsg{db: db, query: queryText, sample: ex, real: true, qualstats: true}
 			}
 		}
@@ -463,7 +483,12 @@ func (m *Model) loadStatementSampleCmd(db string, queryID int64, queryText strin
 		if err != nil {
 			return statementSampleLoadedMsg{db: db, query: queryText, err: err, qualstats: qualstats, installable: installable}
 		}
-		return statementSampleLoadedMsg{db: db, query: queryText, sample: pg.BuildSampleCall(queryText, params), qualstats: qualstats, installable: installable}
+		// Pull real values for the predicate columns from the live table so the
+		// synthesized call uses constants that actually exist in the data; any
+		// ordinal it can't resolve falls back to a generic typed literal.
+		real := m.client.SampleParamValues(ctx, db, queryText, params)
+		return statementSampleLoadedMsg{db: db, query: queryText, sample: pg.BuildSampleCall(queryText, params, real),
+			fromData: len(real) > 0, qualstats: qualstats, installable: installable}
 	})
 }
 

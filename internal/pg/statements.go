@@ -46,7 +46,7 @@ func (c *Client) QualstatsPreloaded(ctx context.Context, db string) (bool, error
 	).Scan(&spl); err != nil {
 		return false, fmt.Errorf("read shared_preload_libraries in %q: %w", db, err)
 	}
-	for _, lib := range strings.Split(spl, ",") {
+	for lib := range strings.SplitSeq(spl, ",") {
 		if strings.TrimSpace(lib) == "pg_qualstats" {
 			return true, nil
 		}
@@ -208,6 +208,14 @@ func ReadOnlyQuery(query string) bool {
 	if len(fields) == 0 {
 		return false
 	}
+	// A row-locking clause (SELECT … FOR UPDATE/SHARE/…) takes real locks the
+	// moment it executes — and EXPLAIN ANALYZE executes — so it isn't safe to run
+	// even inside a rolled-back transaction (it would block concurrent writers
+	// for the duration). Reject it regardless of the leading keyword; the plain
+	// EXPLAIN (no ANALYZE) path still shows its plan.
+	if hasLockingClause(fields) {
+		return false
+	}
 	switch fields[0] {
 	case "select", "table", "values":
 		return true
@@ -224,6 +232,72 @@ func ReadOnlyQuery(query string) bool {
 	default:
 		return false
 	}
+}
+
+// hasLockingClause reports whether the (lower-cased, whitespace-split) tokens
+// contain a row-level locking clause: FOR UPDATE, FOR SHARE, FOR NO KEY UPDATE,
+// or FOR KEY SHARE. It keys off "for" immediately followed by one of those
+// lock-strength keywords, which distinguishes it from the other SQL uses of FOR
+// (e.g. substring(x FROM a FOR b)), whose next token is an expression.
+func hasLockingClause(fields []string) bool {
+	for i, f := range fields {
+		if strings.Trim(f, "(),") != "for" || i+1 >= len(fields) {
+			continue
+		}
+		switch strings.Trim(fields[i+1], "(),") {
+		case "update", "share", "no", "key":
+			return true
+		}
+	}
+	return false
+}
+
+// QualstatsExampleUsable reports whether a pg_qualstats example query is a
+// complete denormalization of the normalized statement rather than a truncated
+// fragment. pg_qualstats stores example queries capped at track_activity_query_size
+// (1 KB by default), so a long statement comes back cut off mid-token — wrapping
+// such a fragment in EXPLAIN yields a syntax error. We detect this structurally:
+// the text following the last $n placeholder in the normalized query carries no
+// constants, so a complete example must end with that same suffix; a truncated
+// one won't. When the query has no trailing constant-free text to anchor on (it
+// ends at/with its last parameter), we can't tell and optimistically accept it —
+// such queries are short and rarely truncated.
+func QualstatsExampleUsable(normalized, example string) bool {
+	tail := strings.TrimSpace(normalizedTailAfterLastParam(normalized))
+	if tail == "" {
+		return true
+	}
+	return strings.HasSuffix(collapseSpaces(example), collapseSpaces(tail))
+}
+
+// normalizedTailAfterLastParam returns the substring following the highest-
+// numbered $n placeholder occurrence in a normalized query (the constant-free
+// suffix). Returns "" when the query has no placeholders.
+func normalizedTailAfterLastParam(query string) string {
+	last := -1
+	for i := 0; i < len(query); i++ {
+		if query[i] != '$' {
+			continue
+		}
+		j := i + 1
+		for j < len(query) && query[j] >= '0' && query[j] <= '9' {
+			j++
+		}
+		if j > i+1 { // at least one digit → a real placeholder
+			last = j
+		}
+	}
+	if last < 0 {
+		return ""
+	}
+	return query[last:]
+}
+
+// collapseSpaces normalizes all whitespace runs to single spaces (and trims),
+// so a suffix comparison ignores the indentation/newlines that differ between
+// pg_stat_statements text and a reconstructed example.
+func collapseSpaces(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // ExplainGeneric returns the EXPLAIN (GENERIC_PLAN) of a normalized query —
@@ -419,16 +493,22 @@ func (c *Client) InferParams(ctx context.Context, db, query string) ([]ParamType
 	return out, nil
 }
 
-// BuildSampleCall substitutes each $n in a normalized query with a synthesized
-// literal of the inferred type, producing a copy-pasteable example. Pure (no
-// DB access) so it is unit-testable. Replacement runs from the highest ordinal
-// down so "$1" doesn't clobber the prefix of "$10".
-func BuildSampleCall(query string, params []ParamType) string {
+// BuildSampleCall substitutes each $n in a normalized query with a literal,
+// producing a copy-pasteable example. real holds per-ordinal literals fetched
+// from the live table (see SampleParamValues); ordinals missing from it fall
+// back to a synthesized literal of the inferred type. Pure (no DB access) so it
+// is unit-testable. Replacement runs from the highest ordinal down so "$1"
+// doesn't clobber the prefix of "$10".
+func BuildSampleCall(query string, params []ParamType, real map[int]string) string {
 	out := query
 	for i := len(params) - 1; i >= 0; i-- {
 		p := params[i]
+		lit, ok := real[p.Ordinal]
+		if !ok {
+			lit = sampleLiteral(p.Type)
+		}
 		placeholder := "$" + strconv.Itoa(p.Ordinal)
-		out = strings.ReplaceAll(out, placeholder, sampleLiteral(p.Type))
+		out = strings.ReplaceAll(out, placeholder, lit)
 	}
 	return out
 }

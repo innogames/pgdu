@@ -64,11 +64,7 @@ func TestDiffStatements(t *testing.T) {
 func TestBuildStatements(t *testing.T) {
 	// pg_stat_statements 1.11+ (PG17 default / PG18): renamed shared_blk_* and
 	// the new local_blk_* columns are used verbatim.
-	v111 := buildStatements(map[string]bool{
-		"shared_blk_read_time": true, "shared_blk_write_time": true,
-		"local_blk_read_time": true, "local_blk_write_time": true,
-		"temp_blk_read_time": true, "temp_blk_write_time": true,
-	})
+	v111 := statementsQuery(1, 11)
 	for _, want := range []string{
 		"shared_blk_read_time, shared_blk_write_time",
 		"local_blk_read_time, local_blk_write_time",
@@ -85,10 +81,7 @@ func TestBuildStatements(t *testing.T) {
 	// pg_stat_statements 1.10 (e.g. a PG17 cluster pg_upgrade'd from PG15, never
 	// updated): the old blk_*_time names alias into shared_blk_*; local_blk_*
 	// don't exist yet and fall back to zero. This is the case that crashed.
-	v110 := buildStatements(map[string]bool{
-		"blk_read_time": true, "blk_write_time": true,
-		"temp_blk_read_time": true, "temp_blk_write_time": true,
-	})
+	v110 := statementsQuery(1, 10)
 	for _, want := range []string{
 		"blk_read_time AS shared_blk_read_time",
 		"blk_write_time AS shared_blk_write_time",
@@ -145,11 +138,47 @@ func TestReadOnlyQuery(t *testing.T) {
 		"WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
 		"with ins as (insert into t values (1) returning id) select * from ins",
 		"VACUUM t", "SET x = 1",
+		// Row-locking clauses take real locks when ANALYZE executes them.
+		"SELECT * FROM t WHERE id = $1 FOR UPDATE",
+		"select resource from game_bag_resource where bag_id = $1 for update",
+		"SELECT 1 FROM t FOR SHARE",
+		"SELECT 1 FROM t FOR NO KEY UPDATE",
+		"SELECT 1 FROM t FOR KEY SHARE",
+		"SELECT * FROM t FOR UPDATE OF t",
 	}
 	for _, q := range no {
 		if ReadOnlyQuery(q) {
 			t.Errorf("ReadOnlyQuery(%q) = true, want false", q)
 		}
+	}
+
+	// FOR as a function argument keyword (substring) is not a locking clause.
+	if !ReadOnlyQuery("SELECT substring(name FROM 1 FOR 3) FROM t WHERE id = $1") {
+		t.Error("substring(... FOR n) must not be mistaken for a locking clause")
+	}
+}
+
+func TestQualstatsExampleUsable(t *testing.T) {
+	normalized := "SELECT a, b FROM t WHERE x = $1 AND y <= $2 FOR UPDATE OF t"
+	// A complete denormalization ends with the same constant-free suffix.
+	full := "SELECT a, b FROM t WHERE x = '104188' AND y <= '1779' FOR UPDATE OF t"
+	if !QualstatsExampleUsable(normalized, full) {
+		t.Errorf("complete example wrongly rejected:\n%s", full)
+	}
+	// Truncated mid-token (what pg_qualstats returns past track_activity_query_size).
+	trunc := "SELECT a, b FROM t WHERE x = '104188' AND y <= '17"
+	if QualstatsExampleUsable(normalized, trunc) {
+		t.Errorf("truncated example wrongly accepted:\n%s", trunc)
+	}
+	// Whitespace/indentation differences between catalog text and example must
+	// not matter (the real example is multi-line, the suffix is normalized).
+	multiline := "SELECT a, b\n  FROM t\n  WHERE x = '1'\n    AND y <= '2'\n  FOR UPDATE OF t"
+	if !QualstatsExampleUsable(normalized, multiline) {
+		t.Errorf("multi-line complete example wrongly rejected:\n%s", multiline)
+	}
+	// No placeholders → nothing to anchor on → accept.
+	if !QualstatsExampleUsable("SELECT 1", "SELECT 1") {
+		t.Error("placeholder-free query should be accepted")
 	}
 }
 
@@ -189,6 +218,7 @@ func TestBuildSampleCall(t *testing.T) {
 		name   string
 		query  string
 		params []ParamType
+		real   map[int]string
 		want   string
 	}{
 		{
@@ -205,6 +235,16 @@ func TestBuildSampleCall(t *testing.T) {
 				{Ordinal: 2, Type: "text"},
 			},
 			want: "SELECT * FROM t WHERE id = 1::integer AND name = 'sample'::text",
+		},
+		{
+			name:  "real values override synthesized, missing ones fall back",
+			query: "SELECT * FROM t WHERE id = $1 AND name = $2",
+			params: []ParamType{
+				{Ordinal: 1, Type: "integer"},
+				{Ordinal: 2, Type: "text"},
+			},
+			real: map[int]string{2: "'germany'::text"},
+			want: "SELECT * FROM t WHERE id = 1::integer AND name = 'germany'::text",
 		},
 		{
 			// $10 must not be mangled by the $1 substitution.
@@ -228,8 +268,60 @@ func TestBuildSampleCall(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := BuildSampleCall(c.query, c.params); got != c.want {
+			if got := BuildSampleCall(c.query, c.params, c.real); got != c.want {
 				t.Errorf("BuildSampleCall()\n got: %s\nwant: %s", got, c.want)
+			}
+		})
+	}
+}
+
+func TestParamColumns(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  map[int]string
+	}{
+		{
+			name:  "equality and qualified column",
+			query: "SELECT * FROM t WHERE id = $1 AND t.name = $2",
+			want:  map[int]string{1: "id", 2: "name"},
+		},
+		{
+			name:  "in list shares the column",
+			query: "SELECT * FROM t WHERE country IN ($1, $2, $3)",
+			want:  map[int]string{1: "country", 2: "country", 3: "country"},
+		},
+		{
+			name:  "any array and comparison",
+			query: "SELECT * FROM t WHERE id = ANY($1) AND created > $2",
+			want:  map[int]string{1: "id", 2: "created"},
+		},
+		{
+			name:  "between",
+			query: "SELECT * FROM t WHERE n BETWEEN $1 AND $2",
+			want:  map[int]string{1: "n", 2: "n"},
+		},
+		{
+			name:  "no placeholders",
+			query: "SELECT now()",
+			want:  nil,
+		},
+		{
+			name:  "quoted column",
+			query: `SELECT * FROM t WHERE "UserId" = $1`,
+			want:  map[int]string{1: "UserId"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := paramColumns(c.query)
+			if len(got) != len(c.want) {
+				t.Fatalf("paramColumns()\n got: %v\nwant: %v", got, c.want)
+			}
+			for k, v := range c.want {
+				if got[k] != v {
+					t.Errorf("paramColumns()[%d] = %q, want %q", k, got[k], v)
+				}
 			}
 		})
 	}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
@@ -23,7 +24,7 @@ func TestMain(m *testing.M) {
 // newExplainModel builds a Model wide enough that clipDetail never truncates
 // the sample plans. The client is never exercised by colorizeExplain.
 func newExplainModel() *Model {
-	m := NewModel(pg.New(cli.Config{}))
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second)
 	m.width = 200
 	return m
 }

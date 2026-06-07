@@ -6,9 +6,15 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/pflag"
 )
+
+// defaultQueriesRefresh is the out-of-the-box re-sample cadence for the
+// top-queries window — responsive enough to watch load build without hammering
+// the server with snapshot queries.
+const defaultQueriesRefresh = 2 * time.Second
 
 // ErrHelp is returned by Parse when the user asked for --help so callers can
 // exit cleanly without printing a redundant error.
@@ -22,6 +28,11 @@ type Config struct {
 	Password string
 	SSLMode  string
 	DSN      string
+
+	// QueriesRefresh is how often the top-queries window re-samples. Zero (or
+	// negative) disables auto-refresh, leaving the window static until the user
+	// resets it (R) or toggles refresh back on (t).
+	QueriesRefresh time.Duration
 }
 
 func Parse(args []string) (Config, error) {
@@ -37,6 +48,8 @@ func Parse(args []string) (Config, error) {
 		Database: os.Getenv("PGDATABASE"),
 		Password: os.Getenv("PGPASSWORD"),
 		SSLMode:  os.Getenv("PGSSLMODE"),
+
+		QueriesRefresh: envDurationOr("PGDU_QUERIES_REFRESH", defaultQueriesRefresh),
 	}
 
 	fs.StringVarP(&cfg.Host, "host", "h", cfg.Host, "database server host or socket path (empty = libpq default)")
@@ -45,6 +58,7 @@ func Parse(args []string) (Config, error) {
 	fs.StringVarP(&cfg.Database, "dbname", "d", cfg.Database, "initial database to connect to (empty = same as user)")
 	fs.StringVar(&cfg.SSLMode, "sslmode", cfg.SSLMode, "SSL mode (disable|allow|prefer|require|verify-ca|verify-full)")
 	fs.StringVar(&cfg.DSN, "dsn", "", "full PostgreSQL connection URL (overrides individual flags)")
+	fs.DurationVar(&cfg.QueriesRefresh, "queries-refresh", cfg.QueriesRefresh, "top-queries auto-refresh interval (e.g. 5s, 1m; 0 disables)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "pgdu - PostgreSQL disk usage explorer (ncdu-style TUI)\n\n")
@@ -166,6 +180,17 @@ func envIntOr(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+// envDurationOr parses a Go duration string (e.g. "5s", "0") from the
+// environment, falling back to def when unset or unparseable.
+func envDurationOr(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
 		}
 	}
 	return def

@@ -447,6 +447,7 @@ type screen struct {
 	statDetail         *pg.QueryStat
 	statSampleCall     string
 	statSampleReal     bool // statSampleCall is a real pg_qualstats example, not synthesized
+	statSampleFromData bool // statSampleCall is synthesized but uses real values sampled from the live table
 	statQualstats      bool // pg_qualstats is installed in db (drives source hint + captured-values key)
 	statSampleErr      error
 	statExplain        string
@@ -508,19 +509,30 @@ type Model struct {
 	// second tick loop.
 	statTicking bool
 
+	// statRefresh is the top-queries re-sample cadence (from --queries-refresh /
+	// PGDU_QUERIES_REFRESH). Zero disables auto-refresh entirely. statPaused is
+	// the runtime toggle (t key) layered on top of it.
+	statRefresh time.Duration
+	statPaused  bool
+
+	// notice is a transient one-line status shown in the header (e.g. the path
+	// a CSV export was written to). Cleared on the next keypress.
+	notice string
+
 	target string // host:port for header
 }
 
-func NewModel(client *pg.Client) *Model {
+func NewModel(client *pg.Client, queriesRefresh time.Duration) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	m := &Model{
-		client:     client,
-		spinner:    sp,
-		help:       help.New(),
-		keys:       defaultKeys(),
-		fetchBloat: true,
-		target:     client.Target(),
+		client:      client,
+		spinner:     sp,
+		help:        help.New(),
+		keys:        defaultKeys(),
+		fetchBloat:  true,
+		statRefresh: queriesRefresh,
+		target:      client.Target(),
 	}
 	m.stack = []*screen{{
 		level:    levelTools,
@@ -535,11 +547,11 @@ func NewModel(client *pg.Client) *Model {
 func toolItems() []item {
 	return []item{
 		{name: "Disk usage", detail: "browse tables by total relation size on disk", hasChildren: true, data: toolDisk},
+		{name: "Top queries", detail: "powa-style top queries from pg_stat_statements — calls, time, I/O; EXPLAIN and sample params on Enter", hasChildren: true, data: toolQueries},
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},
-		{name: "Top queries", detail: "powa-style top queries from pg_stat_statements — calls, time, I/O; EXPLAIN and sample params on Enter", hasChildren: true, data: toolQueries},
-		{name: "Tools", detail: "run diagnostic queries — index / table / vacuum / activity / wal / server health", hasChildren: true, data: toolTools},
+		{name: "Other Tools", detail: "run diagnostic queries — index / table / vacuum / activity / wal / server health", hasChildren: true, data: toolTools},
 	}
 }
 

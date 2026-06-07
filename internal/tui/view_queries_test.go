@@ -12,7 +12,7 @@ import (
 // renderModel builds a Model with a given screen on top and renders it. The
 // client is never used by the render path, so a non-connecting one is fine.
 func renderModel(top *screen) string {
-	m := NewModel(pg.New(cli.Config{}))
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second)
 	m.width, m.height = 200, 40
 	m.stack = append(m.stack, top)
 	return m.View()
@@ -71,7 +71,7 @@ func TestRenderStatementsTrackPlanningOff(t *testing.T) {
 // When pg_stat_statements isn't installed the table is replaced by a blocking
 // install prompt — no table, instructions on how to install instead.
 func TestStatementsMissingExtension(t *testing.T) {
-	m := NewModel(pg.New(cli.Config{}))
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second)
 	m.width, m.height = 120, 30
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
@@ -140,7 +140,7 @@ func TestRenderStatementDetailAndInfo(t *testing.T) {
 	}
 
 	// The ? info overlay must render without panicking and cover the columns.
-	m := NewModel(pg.New(cli.Config{}))
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second)
 	m.width, m.height = 200, 50
 	m.stack = append(m.stack, s)
 	m.showInfo = true
@@ -247,11 +247,11 @@ func TestSampleAnalyzeQuery(t *testing.T) {
 
 func TestUniqueParams(t *testing.T) {
 	cases := map[string]int{
-		"select 1":                              0,
-		"select * from t where id = $1":         1,
-		"select * from t where a=$1 and b=$2":   2,
+		"select 1":                                0,
+		"select * from t where id = $1":           1,
+		"select * from t where a=$1 and b=$2":     2,
 		"values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)": 10,
-		"where x = $1 or y = $1":                1, // distinct, not occurrences
+		"where x = $1 or y = $1":                  1, // distinct, not occurrences
 	}
 	for q, want := range cases {
 		if got := uniqueParams(q); got != want {

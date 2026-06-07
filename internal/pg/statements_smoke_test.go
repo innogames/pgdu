@@ -54,7 +54,9 @@ func TestStatementsSmoke(t *testing.T) {
 		t.Logf("InferParams (non-fatal): %v", err)
 	} else {
 		t.Logf("inferred %d params: %+v", len(params), params)
-		t.Logf("sample call: %s", BuildSampleCall(target.Query, params))
+		real := c.SampleParamValues(ctx, db, target.Query, params)
+		t.Logf("sampled %d real values: %+v", len(real), real)
+		t.Logf("sample call: %s", BuildSampleCall(target.Query, params, real))
 	}
 
 	plan, err := c.ExplainGeneric(ctx, db, target.Query)

@@ -283,6 +283,9 @@ func (m *Model) renderStatus(s *screen) string {
 	if wl := walStatusLabel(s); wl != "" {
 		parts = append(parts, wl)
 	}
+	if m.notice != "" {
+		parts = append(parts, styleSelected.Render(m.notice))
+	}
 	return strings.Join(parts, "  ·  ")
 }
 

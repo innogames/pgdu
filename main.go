@@ -34,7 +34,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	model := tui.NewModel(client)
+	model := tui.NewModel(client, cfg.QueriesRefresh)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "pgdu:", err)

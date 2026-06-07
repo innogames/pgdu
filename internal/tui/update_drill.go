@@ -413,8 +413,10 @@ func (m *Model) loadCurrent() tea.Cmd {
 		// window baseline (see onStatementsLoaded).
 		cmds := []tea.Cmd{m.loadStatementsCmd(s.db)}
 		if !m.statTicking {
-			m.statTicking = true
-			cmds = append(cmds, statementsTick())
+			if tick := m.statementsTick(); tick != nil {
+				m.statTicking = true
+				cmds = append(cmds, tick)
+			}
 		}
 		return tea.Batch(cmds...)
 	}

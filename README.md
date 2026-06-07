@@ -79,6 +79,7 @@ Honors the usual libpq environment: `PGHOST`, `PGPORT`, `PGUSER`,
 | `/`            | filter                |
 | `s` / `r`      | sort column / reverse |
 | `space`        | refresh               |
+| `e`            | export view to CSV    |
 | `b`            | toggle bloat stats    |
 | `i`            | install extension     |
 | `?`            | help                  |
