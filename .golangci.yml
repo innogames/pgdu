@@ -1,0 +1,3 @@
+# Pin the config format so `make lint` and CI behave identically regardless of
+# the golangci-lint version on the runner. Uses the default linter set.
+version: "2"

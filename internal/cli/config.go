@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -19,6 +20,11 @@ const defaultQueriesRefresh = 2 * time.Second
 // ErrHelp is returned by Parse when the user asked for --help so callers can
 // exit cleanly without printing a redundant error.
 var ErrHelp = pflag.ErrHelp
+
+// ErrVersion is returned by Parse when the user asked for --version. The caller
+// owns the version string (injected at build time), so Parse only signals the
+// request and lets main print it.
+var ErrVersion = errors.New("version requested")
 
 type Config struct {
 	Host     string
@@ -60,6 +66,9 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.DSN, "dsn", "", "full PostgreSQL connection URL (overrides individual flags)")
 	fs.DurationVar(&cfg.QueriesRefresh, "queries-refresh", cfg.QueriesRefresh, "top-queries auto-refresh interval (e.g. 5s, 1m; 0 disables)")
 
+	var showVersion bool
+	fs.BoolVar(&showVersion, "version", false, "print version and exit")
+
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "pgdu - PostgreSQL disk usage explorer (ncdu-style TUI)\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: pgdu [flags]\n\n")
@@ -70,6 +79,10 @@ func Parse(args []string) (Config, error) {
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
+	}
+
+	if showVersion {
+		return Config{}, ErrVersion
 	}
 
 	if cfg.DSN == "" && cfg.User == "" {

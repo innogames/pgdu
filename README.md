@@ -1,5 +1,9 @@
 # pgdu
 
+[![CI](https://github.com/innogames/pgdu/actions/workflows/ci.yml/badge.svg)](https://github.com/innogames/pgdu/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/innogames/pgdu)](https://github.com/innogames/pgdu/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 PostgreSQL disk usage explorer — an ncdu-style TUI for browsing what's
 taking up space in your database.
 
@@ -43,13 +47,17 @@ Built-in diagnostic queries for live activity, WAL, and index health.
 
 ## Install
 
-Pre-built `.deb`:
+Grab a pre-built binary for your platform from the
+[Releases](https://github.com/innogames/pgdu/releases) page (Linux, macOS and
+Windows; amd64 and arm64).
+
+Debian/Ubuntu — download the `.deb` from the same page and:
 
 ```sh
-sudo dpkg -i pgdu_0.1.0_amd64.deb
+sudo dpkg -i pgdu_*_amd64.deb
 ```
 
-From source:
+From source (needs Go 1.26+):
 
 ```sh
 make build      # ./pgdu
@@ -103,6 +111,6 @@ safe to re-run — each table is dropped and rebuilt.
 
 ## Requirements
 
-- PostgreSQL 12+
+- PostgreSQL 17+
 - `pg_stat_statements` and `pgstattuple` are used opportunistically;
   press `i` in the relevant view to install them if missing.

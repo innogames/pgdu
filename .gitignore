@@ -1,9 +1,14 @@
-.idea
-vendor
-./*.csv
-./pgdu
-.devcontainer
-.claude
-/pgdu_*.deb
+# Build output
 /pgdu
+/pgdu_*.deb
+/dist/
 /debian-pkg/usr/
+
+# CSV exports written by the TUI
+*.csv
+
+# Local tooling / editor
+.idea/
+.claude/
+.devcontainer/
+vendor/
