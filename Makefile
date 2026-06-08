@@ -6,7 +6,7 @@ ARCH    := amd64
 DEB     := $(NAME)_$(VERSION)_$(ARCH).deb
 
 build:
-	go build -trimpath -ldflags="-s -w" -o $(NAME) .
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(NAME) .
 
 run:
 	go run . $(ARGS)

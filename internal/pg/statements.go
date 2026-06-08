@@ -217,6 +217,35 @@ func ExplainableQuery(query string) bool {
 	}
 }
 
+// QueryKind returns a one-letter tag for the statement's command type — S
+// (SELECT), I (INSERT), U (UPDATE), D (DELETE), M (MERGE), T (TRUNCATE), W
+// (WITH/CTE) — for the top-queries `T` column. The leading keyword is taken
+// after stripping any ORM comment tag; anything unrecognized returns "?".
+func QueryKind(query string) string {
+	fields := strings.Fields(StripSQLComments(query))
+	if len(fields) == 0 {
+		return "?"
+	}
+	switch strings.ToLower(fields[0]) {
+	case "select", "table", "values":
+		return "S"
+	case "insert":
+		return "I"
+	case "update":
+		return "U"
+	case "delete":
+		return "D"
+	case "merge":
+		return "M"
+	case "truncate":
+		return "T"
+	case "with":
+		return "W"
+	default:
+		return "?"
+	}
+}
+
 // ReadOnlyQuery reports whether a normalized statement is safe to actually
 // execute, which EXPLAIN ANALYZE does (it runs the query). Only read-only
 // shapes qualify: a bare SELECT / TABLE / VALUES, or a WITH whose CTEs contain

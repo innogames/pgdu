@@ -36,7 +36,7 @@ func defaultKeys() keyMap {
 		Top:            key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "top")),
 		Bottom:         key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom")),
 		Enter:          key.NewBinding(key.WithKeys("enter", "right", "l"), key.WithHelp("↵/l", "drill in")),
-		Back:           key.NewBinding(key.WithKeys("left", "h", "esc", "backspace"), key.WithHelp("←/h", "back")),
+		Back:           key.NewBinding(key.WithKeys("left", "h", "esc", "backspace", "q"), key.WithHelp("←/h/q", "back")),
 		Sort:           key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sort: cycle column")),
 		ReverseSort:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reverse sort")),
 		Refresh:        key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "refresh")),
@@ -54,7 +54,7 @@ func defaultKeys() keyMap {
 		DeleteSnapshot: key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete snapshot")),
 		Filter:         key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		Help:           key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:           key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Quit:           key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
 	}
 }
 
