@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // EnsureStatements makes sure pg_stat_statements is installed in db. Mirrors
@@ -99,6 +100,25 @@ func (c *Client) StatementSnapshot(ctx context.Context, db string) ([]QueryStat,
 	return out, nil
 }
 
+// StatementsInfo returns the last time pg_stat_statements counters were reset
+// for db (pg_stat_statements_info, PG14+). Best-effort: a zero time with nil
+// error means the view exists but has never recorded a reset, or the read was
+// not permitted — callers use it only to warn about an invalidated baseline.
+func (c *Client) StatementsInfo(ctx context.Context, db string) (time.Time, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var reset *time.Time
+	if err := pool.QueryRow(ctx, sqlStatementsInfo).Scan(&reset); err != nil {
+		return time.Time{}, fmt.Errorf("read pg_stat_statements_info in %q: %w", db, err)
+	}
+	if reset == nil {
+		return time.Time{}, nil
+	}
+	return *reset, nil
+}
+
 // statementsVersion returns the installed pg_stat_statements extension version as
 // (major, minor), cached per database (it only changes on ALTER EXTENSION, so one
 // read per session is enough). The version drives which I/O-timing column names
@@ -183,9 +203,9 @@ func (c *Client) TrackPlanning(ctx context.Context, db string) (bool, error) {
 // have no plan and PREPARE rejects them — so the detail view skips the EXPLAIN
 // / sample-call machinery for them instead of surfacing a raw syntax error.
 func ExplainableQuery(query string) bool {
-	// First keyword, lower-cased. Leading SQL comments are uncommon in
-	// normalized text, so a simple Fields split is enough.
-	fields := strings.Fields(query)
+	// First keyword, lower-cased. ORM-generated statements often carry a leading
+	// /* … */ tag, so strip comments before looking at the keyword.
+	fields := strings.Fields(StripSQLComments(query))
 	if len(fields) == 0 {
 		return false
 	}
@@ -204,7 +224,7 @@ func ExplainableQuery(query string) bool {
 // running them for real would write. This is stricter than ExplainableQuery,
 // which also admits DML (EXPLAIN without ANALYZE never executes).
 func ReadOnlyQuery(query string) bool {
-	fields := strings.Fields(strings.ToLower(query))
+	fields := strings.Fields(strings.ToLower(StripSQLComments(query)))
 	if len(fields) == 0 {
 		return false
 	}
@@ -263,11 +283,30 @@ func hasLockingClause(fields []string) bool {
 // ends at/with its last parameter), we can't tell and optimistically accept it —
 // such queries are short and rarely truncated.
 func QualstatsExampleUsable(normalized, example string) bool {
+	// A complete denormalization has every constant spliced in. When pg_qualstats
+	// can't reconstruct a qual (e.g. WHERE alias.id=$1) it leaves the $n in place;
+	// a plain EXPLAIN on that fails with "there is no parameter $n" since, unlike
+	// GENERIC_PLAN, it supplies no value. Reject so the caller falls back to the
+	// synthesized sample call (which EXPLAINs via GENERIC_PLAN).
+	if hasParamPlaceholder(example) {
+		return false
+	}
 	tail := strings.TrimSpace(normalizedTailAfterLastParam(normalized))
 	if tail == "" {
 		return true
 	}
 	return strings.HasSuffix(collapseSpaces(example), collapseSpaces(tail))
+}
+
+// hasParamPlaceholder reports whether s contains a $n placeholder (a '$'
+// immediately followed by one or more digits).
+func hasParamPlaceholder(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '$' && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizedTailAfterLastParam returns the substring following the highest-

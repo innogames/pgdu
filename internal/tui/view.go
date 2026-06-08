@@ -99,7 +99,7 @@ func (m *Model) View() string {
 		b.WriteString(m.renderWALRecordsInfo(contentHeight))
 	case m.showInfo && s.level == levelWALBlocks:
 		b.WriteString(m.renderWALBlocksInfo(contentHeight))
-	case m.showInfo && (s.level == levelStatements || s.level == levelStatementDetail || s.level == levelStatementSamples):
+	case m.showInfo && (s.level == levelStatements || s.level == levelStatementDetail || s.level == levelStatementSamples || s.level == levelSnapshots):
 		b.WriteString(m.renderStatementsInfo(contentHeight))
 	case s.extPrompt != nil && s.extPrompt.blocking:
 		b.WriteString(m.renderExtPrompt(s, contentHeight))
@@ -114,7 +114,7 @@ func (m *Model) View() string {
 			b.WriteString("\n")
 		}
 	case len(s.items) == 0 && s.level != levelDescribe && s.level != levelDiagnosticResult &&
-		s.level != levelStatements && s.level != levelStatementDetail:
+		s.level != levelStatements && s.level != levelStatementDetail && s.level != levelSnapshots:
 		// levelDescribe never populates items — it renders from s.describe.
 		// levelDiagnosticResult with 0 items means the query returned no rows,
 		// which is valid; fall through to the renderer which shows "(no rows)".
@@ -162,6 +162,8 @@ func (m *Model) View() string {
 			b.WriteString(m.renderStatementDetail(s, contentHeight))
 		case levelStatementSamples:
 			b.WriteString(m.renderStatementSamples(s, contentHeight))
+		case levelSnapshots:
+			b.WriteString(m.renderStatementSnapshots(s, contentHeight))
 		default:
 			b.WriteString(m.renderList(s, contentHeight))
 		}

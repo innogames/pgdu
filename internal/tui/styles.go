@@ -111,3 +111,38 @@ func gradedPercentStyle(pct float64) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(colorBloat)
 	}
 }
+
+// costStyleRelative grades a "lower is better" cost value (miss/io_ms/wal/…)
+// against the largest value in its column for the current window: 0 (or an
+// all-zero column where max is 0) is green, then green→yellow→red as the value
+// approaches the window's worst row. Three bands only — cyan is reserved for the
+// higher-is-better percent path so the two scales don't read alike.
+func costStyleRelative(v, max float64) lipgloss.Style {
+	if v <= 0 || max <= 0 {
+		return lipgloss.NewStyle().Foreground(colorOK)
+	}
+	switch frac := v / max; {
+	case frac >= 0.66:
+		return lipgloss.NewStyle().Foreground(colorBloat)
+	case frac >= 0.33:
+		return lipgloss.NewStyle().Foreground(colorAccent)
+	default:
+		return lipgloss.NewStyle().Foreground(colorOK)
+	}
+}
+
+// blkPerRowStyle grades blocks-per-row in the query-detail view. Unlike the
+// table's costStyleRelative this uses ABSOLUTE thresholds: the detail view shows
+// a single query, so there's no window of other rows to scale against. A few
+// blocks per row is index-lookup territory (green); tens are getting wasteful
+// (yellow); more means a scan reading many pages per result row (red).
+func blkPerRowStyle(bpr float64) lipgloss.Style {
+	switch {
+	case bpr <= 4:
+		return lipgloss.NewStyle().Foreground(colorOK)
+	case bpr <= 50:
+		return lipgloss.NewStyle().Foreground(colorAccent)
+	default:
+		return lipgloss.NewStyle().Foreground(colorBloat)
+	}
+}

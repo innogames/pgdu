@@ -26,6 +26,12 @@ func TestMainTable(t *testing.T) {
 		"WITH c AS (SELECT 1) SELECT * FROM c": "c",
 		"SET search_path = $1":                 "",
 		"":                                     "",
+		// Leading ORM comments must be skipped, not parsed as the statement.
+		"/* TechnologyRepository.findAllByPlayerId */ SELECT * FROM technology WHERE id = $1": "technology",
+		"/* update for com.example.Battle */update battle set modified = $1 where id = $2":    "battle",
+		"-- a note\nUPDATE worker SET x = $1":                                                 "worker",
+		"/* multi\nline\ncomment */ SELECT * FROM hero":                                       "hero",
+		"/* outer /* nested */ still comment */ DELETE FROM session WHERE id = $1":            "session",
 	}
 	for q, want := range cases {
 		if got := MainTable(q); got != want {

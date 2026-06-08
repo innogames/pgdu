@@ -488,6 +488,7 @@ func (m *Model) onDiagnosticLoaded(msg diagnosticLoadedMsg) tea.Cmd {
 			data: row, // []pg.DiagCell
 		})
 	}
+	s.diagMetricsDirty = true
 	m.applySort(s)
 	return nil
 }
@@ -511,7 +512,9 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 	s.statTrackPlanning = msg.trackPlanning
 
 	// First snapshot becomes the baseline: the window opens here, so there are
-	// no deltas to show yet — the table fills in as queries run.
+	// no deltas to show yet — the table fills in as queries run. A disk baseline
+	// (statBaseSnap) is installed before this load, so statBaseline is non-nil
+	// and we skip straight to the diff path below.
 	if s.statBaseline == nil {
 		s.statBaseline = make(map[int64]pg.QueryStat, len(msg.stats))
 		for _, q := range msg.stats {
@@ -528,12 +531,20 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 		return nil
 	}
 
-	s.statRows = pg.DiffStatements(s.statBaseline, msg.stats)
+	// A disk baseline can produce negative deltas if the counters were reset
+	// between capture and now; clamp them. (Snapshots invalidated this way are
+	// already filtered out of the L browser, so this is just defence in depth.)
+	if s.statBaseSnap != nil {
+		s.statRows = pg.DiffStatementsClamped(s.statBaseline, msg.stats)
+	} else {
+		s.statRows = pg.DiffStatements(s.statBaseline, msg.stats)
+	}
 	items, windowMs := buildStatementItems(s.statRows, s.statTrackPlanning)
 	s.statWindowExecMs = windowMs
 	s.diagCols = statementColumns(s.statTrackPlanning)
 	s.diagBarCol = -1
 	s.items = items
+	s.diagMetricsDirty = true
 	// Preserve the user's chosen sort column/direction across refreshes (set on
 	// the first/baseline load); applySort re-orders to match.
 	m.applySort(s)
@@ -559,9 +570,159 @@ func (m *Model) onStatementsTick() tea.Cmd {
 		return nil
 	}
 	if top.level == levelStatements {
+		// A frozen A→B diff has no "now" to re-sample — keep the tick alive (so it
+		// resumes if the user returns to a live window) but don't reload.
+		if top.statEndSnap != nil {
+			return next
+		}
 		return tea.Batch(m.loadStatementsCmd(top.db), next)
 	}
 	return next
+}
+
+// onSnapshotSaved reports the dump's path (or error) in the transient notice.
+func (m *Model) onSnapshotSaved(msg snapshotSavedMsg) tea.Cmd {
+	if msg.err != nil {
+		m.notice = "snapshot failed: " + msg.err.Error()
+		return nil
+	}
+	m.notice = "snapshot saved → " + msg.path
+	return nil
+}
+
+// onSnapshotsListed fills the snapshots browser with the directory listing.
+// Snapshots from the current server/database whose counters have since been
+// reset (CapturedAt predates the live stats_reset) are dropped silently — they
+// can't serve as a baseline, so there's nothing to load. Snapshots from a
+// different server/database are kept but flagged incompatible (dimmed, not
+// loadable), since we can't judge their validity.
+func (m *Model) onSnapshotsListed(msg snapshotsListedMsg) tea.Cmd {
+	s := m.findLevel(levelSnapshots)
+	if s == nil {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	s.err = msg.err
+
+	st := m.findLevel(levelStatements)
+	curDB := ""
+	if st != nil {
+		curDB = st.db
+	}
+
+	metas := make([]pg.SnapshotMeta, 0, len(msg.metas))
+	for _, meta := range msg.metas {
+		compatible := meta.Target == m.target && meta.Database == curDB
+		if compatible && !msg.liveReset.IsZero() && meta.CapturedAt.Before(msg.liveReset) {
+			continue // invalidated by a stats reset since capture
+		}
+		metas = append(metas, meta)
+	}
+
+	s.statSnapMetas = metas
+	s.items = make([]item, len(metas))
+	for i, meta := range metas {
+		s.items[i] = item{
+			name:     snapshotLabel(meta),
+			size:     int64(meta.QueryCount),
+			snapPath: meta.Path,
+		}
+	}
+	// Clamp the cursor: a delete (or filter) can shrink the list out from under it.
+	if s.cursor >= len(s.items) {
+		s.cursor = max(len(s.items)-1, 0)
+	}
+	// A marked base that's no longer listed (deleted or filtered) can't be used.
+	if s.statMarkBase != "" && !snapshotPathPresent(metas, s.statMarkBase) {
+		s.statMarkBase = ""
+	}
+	return nil
+}
+
+// onSnapshotBaseLoaded installs a disk snapshot as the live window's baseline,
+// then re-samples so the table shows everything since the snapshot till now.
+func (m *Model) onSnapshotBaseLoaded(msg snapshotBaseLoadedMsg) tea.Cmd {
+	st := m.findLevel(levelStatements)
+	if st == nil {
+		return nil
+	}
+	if msg.err != nil || msg.snap == nil {
+		m.notice = "load snapshot failed: " + errText(msg.err)
+		m.popToStatements()
+		return nil
+	}
+	st.statBaseSnap = msg.snap
+	st.statEndSnap = nil
+	st.statBaseline = msg.snap.BaselineMap()
+	st.statBaselineAt = msg.snap.CapturedAt
+	m.popToStatements()
+	return m.loadCurrent()
+}
+
+// onSnapshotFrozenLoaded builds a frozen A→B diff between two snapshots: no live
+// re-sampling, the table is the delta of end relative to base.
+func (m *Model) onSnapshotFrozenLoaded(msg snapshotFrozenLoadedMsg) tea.Cmd {
+	st := m.findLevel(levelStatements)
+	if st == nil {
+		return nil
+	}
+	if msg.err != nil || msg.base == nil || msg.end == nil {
+		m.notice = "load snapshots failed: " + errText(msg.err)
+		m.popToStatements()
+		return nil
+	}
+	st.statBaseSnap = msg.base
+	st.statEndSnap = msg.end
+	st.statBaseline = msg.base.BaselineMap()
+	st.statBaselineAt = msg.base.CapturedAt
+	st.statSampledAt = msg.end.CapturedAt
+	st.statTrackPlanning = msg.base.TrackPlanning && msg.end.TrackPlanning
+	// A reset between the two captures yields negative deltas; clamping in
+	// populateFrozenWindow (DiffStatementsClamped) floors them silently.
+	m.populateFrozenWindow(st)
+	m.popToStatements()
+	return nil
+}
+
+// populateFrozenWindow recomputes a frozen window's rows/items from the two
+// loaded snapshots. Split out so loadCurrent can rebuild on a Refresh without DB.
+func (m *Model) populateFrozenWindow(st *screen) {
+	st.statRows = pg.DiffStatementsClamped(st.statBaseSnap.BaselineMap(), st.statEndSnap.Stats)
+	items, windowMs := buildStatementItems(st.statRows, st.statTrackPlanning)
+	st.statWindowExecMs = windowMs
+	st.diagCols = statementColumns(st.statTrackPlanning)
+	st.diagBarCol = -1
+	st.items = items
+	st.diagMetricsDirty = true
+	st.loading = false
+	st.loaded = true
+	m.applySort(st)
+}
+
+// popToStatements unwinds the screen stack back to the top-queries table,
+// dropping any snapshots-browser screen pushed on top of it.
+func (m *Model) popToStatements() {
+	for len(m.stack) > 1 && m.top().level != levelStatements {
+		m.stack = m.stack[:len(m.stack)-1]
+	}
+}
+
+// snapshotPathPresent reports whether path is still among the listed snapshots.
+func snapshotPathPresent(metas []pg.SnapshotMeta, path string) bool {
+	for _, meta := range metas {
+		if meta.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func errText(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	return err.Error()
 }
 
 func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {

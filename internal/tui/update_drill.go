@@ -267,6 +267,8 @@ func (m *Model) drillIn() tea.Cmd {
 		}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
+	case levelSnapshots:
+		return m.loadSelectedSnapshot(s, cur)
 	case levelParts:
 		// Only the heap row drills further — into per-column space estimates.
 		// Toast and index rows have no meaningful sub-breakdown.
@@ -290,6 +292,12 @@ func (m *Model) drillIn() tea.Cmd {
 // so a refresh shows a clean state.
 func (m *Model) loadCurrent() tea.Cmd {
 	s := m.top()
+	// A frozen A→B window rebuilds from its two loaded snapshots — no DB read,
+	// so it's handled before the generic loading path sets the spinner.
+	if s.level == levelStatements && s.statEndSnap != nil {
+		m.populateFrozenWindow(s)
+		return nil
+	}
 	switch s.level {
 	case levelTools:
 		s.items = toolItems()
@@ -419,8 +427,57 @@ func (m *Model) loadCurrent() tea.Cmd {
 			}
 		}
 		return tea.Batch(cmds...)
+	case levelSnapshots:
+		return m.listSnapshotsCmd(m.snapshotDir, s.db)
 	}
 	return nil
+}
+
+// loadSelectedSnapshot acts on Enter in the snapshots browser. With no marked
+// base it loads the highlighted snapshot as the live window's baseline
+// (base→now); with a marked base it builds a frozen A→B diff between the two
+// (ordered oldest→newest). Incompatible snapshots (different server/database than
+// the in-view top-queries screen, or each other) are refused with a notice.
+func (m *Model) loadSelectedSnapshot(s *screen, cur item) tea.Cmd {
+	meta, ok := metaByPath(s.statSnapMetas, cur.snapPath)
+	if !ok {
+		return nil
+	}
+	st := m.findLevel(levelStatements)
+	if st == nil {
+		return nil
+	}
+	if meta.Target != m.target || meta.Database != st.db {
+		m.notice = "snapshot is from a different server/database — can't diff this window"
+		return nil
+	}
+	if s.statMarkBase == "" || s.statMarkBase == meta.Path {
+		return m.loadSnapshotBaseCmd(meta.Path)
+	}
+	base, ok := metaByPath(s.statSnapMetas, s.statMarkBase)
+	if !ok {
+		return m.loadSnapshotBaseCmd(meta.Path)
+	}
+	if base.Target != meta.Target || base.Database != meta.Database {
+		m.notice = "the two snapshots are from different servers/databases — can't diff"
+		return nil
+	}
+	// Order oldest→newest so the A→B delta (end − base) is non-negative.
+	older, newer := base, meta
+	if newer.CapturedAt.Before(older.CapturedAt) {
+		older, newer = newer, older
+	}
+	return m.loadSnapshotFrozenCmd(older.Path, newer.Path)
+}
+
+// metaByPath finds the snapshot meta with the given file path.
+func metaByPath(metas []pg.SnapshotMeta, path string) (pg.SnapshotMeta, bool) {
+	for _, meta := range metas {
+		if meta.Path == path {
+			return meta, true
+		}
+	}
+	return pg.SnapshotMeta{}, false
 }
 
 // heapWindowDefault is the number of heap pages loaded per page-inspector

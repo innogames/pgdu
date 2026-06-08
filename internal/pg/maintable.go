@@ -72,7 +72,11 @@ func indexOf(toks []string, word string) int {
 // digits, underscore, dollar (placeholders), dot (schema qualification) and the
 // double quote (quoted identifiers); every other byte is a separator. The "("
 // marker lets callers tell `FROM (SELECT …)` (a subquery) apart from `FROM t`.
+//
+// Comments are stripped first so an ORM tag like `/* update for … */` can't be
+// mistaken for the statement keyword or its table.
 func sqlWords(s string) []string {
+	s = StripSQLComments(s)
 	var out []string
 	var cur strings.Builder
 	flush := func() {
@@ -96,4 +100,52 @@ func sqlWords(s string) []string {
 	}
 	flush()
 	return out
+}
+
+// StripSQLComments replaces every SQL comment with a single space, so the
+// keyword/field parsers don't trip over an ORM tag like `/* … */` prepended to
+// the statement (Hibernate's use_sql_comments) or a trailing `-- note`. Block
+// comments may span lines and nest, matching Postgres; an unterminated comment
+// consumes the rest of the string. Comments are replaced rather than deleted so
+// `a/* */b` stays two tokens.
+func StripSQLComments(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '/' && i+1 < len(s) && s[i+1] == '*':
+			i = skipBlockComment(s, i) // lands on the closing '/' (or end)
+			b.WriteByte(' ')
+		case s[i] == '-' && i+1 < len(s) && s[i+1] == '-':
+			for i+1 < len(s) && s[i+1] != '\n' {
+				i++
+			}
+			b.WriteByte(' ')
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
+// skipBlockComment returns the index of the last byte of the /* … */ comment
+// that opens at start, so the caller's loop advances past it. Block comments
+// nest in Postgres, so an inner /* … */ must close before the outer one does.
+// An unterminated comment consumes the rest of the string.
+func skipBlockComment(s string, start int) int {
+	depth := 0
+	for i := start; i < len(s); i++ {
+		switch {
+		case s[i] == '/' && i+1 < len(s) && s[i+1] == '*':
+			depth++
+			i++
+		case s[i] == '*' && i+1 < len(s) && s[i+1] == '/':
+			depth--
+			i++
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return len(s)
 }

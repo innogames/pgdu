@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,12 +21,13 @@ const (
 	colStmtCalls = iota
 	colStmtRows
 	colStmtTotalMs
+	colStmtPctTime
 	colStmtMeanMs
 	colStmtPlanMs
-	colStmtPctTime
 	colStmtHit
 	colStmtMiss
 	colStmtHitPct
+	colStmtBlkPerRow
 	colStmtIOms
 	colStmtWAL
 	colStmtTable
@@ -42,14 +44,15 @@ func statementColumns(trackPlanning bool) []pg.DiagColumn {
 		{Name: "calls", Kind: pg.DiagInt},
 		{Name: "rows", Kind: pg.DiagInt},
 		{Name: "total_ms", Kind: pg.DiagFloat},
+		{Name: "%time", Kind: pg.DiagPercent},
 		{Name: "mean_ms", Kind: pg.DiagFloat},
 		{Name: "plan_ms", Kind: pg.DiagFloat},
-		{Name: "%time", Kind: pg.DiagPercent},
 		{Name: "hit", Kind: pg.DiagInt},
-		{Name: "miss", Kind: pg.DiagInt},
+		{Name: "miss", Kind: pg.DiagCostGraded},
 		{Name: "hit%", Kind: pg.DiagPercentGraded},
-		{Name: "io_ms", Kind: pg.DiagFloat},
-		{Name: "wal", Kind: pg.DiagBytes},
+		{Name: "blk/row", Kind: pg.DiagCostGraded},
+		{Name: "io_ms", Kind: pg.DiagCostGraded},
+		{Name: "wal", Kind: pg.DiagCostGraded},
 		{Name: "table", Kind: pg.DiagText},
 		{Name: "query", Kind: pg.DiagText},
 	}
@@ -102,9 +105,15 @@ func statementCells(q pg.QueryStat, windowMs float64, trackPlanning bool) []pg.D
 	}
 
 	cells[colStmtIOms] = diagNum(fmtMs(q.IOTime()), q.IOTime())
-	// DiagBytes columns are rendered via humanize.Bytes from Num; Display is a
-	// fallback only.
-	cells[colStmtWAL] = pg.DiagCell{Display: humanize.Bytes(q.WALBytes), Num: float64(q.WALBytes), HasNum: true}
+	// wal is a DiagCostGraded column (not DiagBytes), so the renderer no longer
+	// humanizes Num for us — bake the human string into Display, keeping Num for
+	// sort and the cost grade.
+	cells[colStmtWAL] = diagNum(humanize.Bytes(q.WALBytes), float64(q.WALBytes))
+	if bpr, ok := q.BlocksPerRow(); ok {
+		cells[colStmtBlkPerRow] = diagNum(fmtFloat(bpr), bpr)
+	} else {
+		cells[colStmtBlkPerRow] = pg.DiagCell{Display: "—"}
+	}
 	cells[colStmtTable] = pg.DiagCell{Display: pg.MainTable(q.Query)}
 	cells[colStmtQuery] = pg.DiagCell{Display: flattenQuery(q.Query)}
 	if !trackPlanning {
@@ -166,12 +175,32 @@ func (m *Model) renderStatementsHeader(s *screen) string {
 	if s.statBaselineAt.IsZero() {
 		return "  " + styleHeader.Render(" queries ") + "  " + mu("opening window — run some queries…")
 	}
-	elapsed := max(s.statSampledAt.Sub(s.statBaselineAt), 0)
-	line := "  " + styleHeader.Render(" queries ") + "  " +
-		mu("window ") + styleSelected.Render(fmtDuration(elapsed)) +
-		mu(" since "+s.statBaselineAt.Format("15:04:05")) +
-		mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t toggles · R resets · Enter for detail",
-			len(s.statRows), m.refreshLabel()))
+	var line string
+	switch {
+	case s.statEndSnap != nil:
+		// Frozen A→B diff between two snapshots: no live "now", so the window is the
+		// fixed span between the two capture times and there's nothing to refresh.
+		line = "  " + styleHeader.Render(" queries ") + "  " +
+			styleSelected.Render(s.statBaselineAt.Format("15:04:05")) + mu(" → ") +
+			styleSelected.Render(s.statSampledAt.Format("15:04:05")) +
+			mu(fmt.Sprintf("  ·  snapshot diff (frozen)  ·  %d queries  ·  R for live · Enter for detail", len(s.statRows)))
+	case s.statBaseSnap != nil:
+		// Disk baseline, live end: the window runs from the snapshot's capture time
+		// up to the latest live sample.
+		elapsed := max(s.statSampledAt.Sub(s.statBaselineAt), 0)
+		line = "  " + styleHeader.Render(" queries ") + "  " +
+			mu("window ") + styleSelected.Render(fmtDuration(elapsed)) +
+			mu(" since "+s.statBaselineAt.Format("2006-01-02 15:04:05")+" (snapshot) · live") +
+			mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t toggles · R for live · Enter for detail",
+				len(s.statRows), m.refreshLabel()))
+	default:
+		elapsed := max(s.statSampledAt.Sub(s.statBaselineAt), 0)
+		line = "  " + styleHeader.Render(" queries ") + "  " +
+			mu("window ") + styleSelected.Render(fmtDuration(elapsed)) +
+			mu(" since "+s.statBaselineAt.Format("15:04:05")) +
+			mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t toggles · R resets · S saves · L loads · Enter for detail",
+				len(s.statRows), m.refreshLabel()))
+	}
 	if !s.statTrackPlanning {
 		// The planning-time column is hidden (it would always read 0); point the
 		// user at the setting that turns planning-time collection on.
@@ -242,17 +271,27 @@ func (m *Model) renderStatementsInfo(height int) string {
 	col("calls", "times the query was executed in the window")
 	col("rows", "rows returned / affected across those calls")
 	col("total_ms", "total execution time in the window (the default sort — your hottest queries)")
+	col("%time", "share of the window's total execution time spent in this query")
 	col("mean_ms", "average execution time per call (total_ms ÷ calls)")
 	col("plan_ms", "total planning time — only shown when track_planning is on (hidden otherwise)")
-	col("%time", "share of the window's total execution time spent in this query")
 	col("hit", "shared blocks served from cache (shared_blks_hit)")
 	col("miss", "shared blocks read from disk/OS (shared_blks_read)")
 	col("hit%", "cache hit ratio: hit ÷ (hit+miss); ‘—’ when the query touched no blocks")
+	col("blk/row", "shared blocks (hit+read) per row — work per result row; lower is better; ‘—’ when 0 rows")
 	col("io_ms", "time in block read+write I/O (needs track_io_timing for non-zero values)")
 	col("wal", "WAL bytes generated by the query")
 	col("table", "the main table parsed from the statement (FROM/UPDATE/INTO) — d describes it")
 	col("query", "the normalized statement text ($1, $2 … in place of constants)")
 	b.WriteString("\n")
+
+	b.WriteString("  " + styleHeader.Render(" cost colours ") + "  " +
+		mu("lower is better — 0 is ideal") + "\n")
+	b.WriteString("    " + mu("miss, io_ms, wal and blk/row are tinted ") +
+		gradedPercentStyle(100).Render("green") + mu(" at 0/low, ") +
+		gradedPercentStyle(85).Render("yellow") + mu(" in the middle, ") +
+		gradedPercentStyle(0).Render("red") + mu(" at the worst row in the window.") + "\n")
+	b.WriteString("    " + mu("The grade is relative to the largest value visible in each column, so colours re-scale as the") + "\n")
+	b.WriteString("    " + mu("window changes; an all-zero column stays green. The detail view's blk/row uses fixed thresholds instead.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" describe ") + "  " +
 		mu("press ") + styleBadge.Render("d") + mu(" on a row") + "\n")
@@ -276,7 +315,21 @@ func (m *Model) renderStatementsInfo(height int) string {
 	b.WriteString("    " + mu("becomes a real example and EXPLAIN sees real data. Press ") + styleBadge.Render("p") +
 		mu(" in the detail view to browse all") + "\n")
 	b.WriteString("    " + mu("captured values by frequency (the value pattern); ") + styleBadge.Render("Enter") +
-		mu(" there EXPLAIN-ANALYZEs the highlighted one.") + "\n")
+		mu(" there EXPLAIN-ANALYZEs the highlighted one.") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" snapshots ") + "  " +
+		mu("capture the window to disk and diff it later") + "\n")
+	b.WriteString("    " + mu("Press ") + styleBadge.Render("S") +
+		mu(" to dump the current pg_stat_statements counters to a file (under ~/.local/state/pgdu/snapshots") + "\n")
+	b.WriteString("    " + mu("by default; --snapshot-dir to change). Press ") + styleBadge.Render("L") +
+		mu(" to browse saved snapshots: ") + styleBadge.Render("Enter") + mu(" loads one as the") + "\n")
+	b.WriteString("    " + mu("baseline so the window becomes ‘since that snapshot till now’ (live). Mark a base with ") +
+		styleBadge.Render("m") + mu(",") + "\n")
+	b.WriteString("    " + mu("then ") + styleBadge.Render("Enter") +
+		mu(" another for a frozen A→B diff between the two captures; ") + styleBadge.Render("D") + mu(" deletes a file.") + "\n")
+	b.WriteString("    " + mu("Press ") + styleBadge.Render("R") +
+		mu(" to drop a loaded snapshot and return to the live window. Snapshots invalidated by a") + "\n")
+	b.WriteString("    " + mu("counter reset since their capture are left out of the list — they can't serve as a baseline.") + "\n")
 
 	return padInfo(&b, height)
 }
@@ -307,6 +360,10 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	if hr, ok := q.HitRatio(); ok {
 		hitStr = gradedPercentStyle(hr).Render(fmtFloat(hr) + "%")
 	}
+	bprStr := "—"
+	if bpr, ok := q.BlocksPerRow(); ok {
+		bprStr = blkPerRowStyle(bpr).Render(fmtFloat(bpr))
+	}
 	b.WriteString("  " + styleHeader.Render(" window metrics ") + "\n")
 	metrics := [][2]string{
 		{"calls", formatRows(q.Calls)},
@@ -319,6 +376,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 		{"shared blocks", fmt.Sprintf("%s hit · %s read (miss) · %s dirtied · %s written",
 			formatRows(q.SharedBlksHit), formatRows(q.SharedBlksRead),
 			formatRows(q.SharedBlksDirtied), formatRows(q.SharedBlksWritten))},
+		{"blocks/row", bprStr + mu("  (hit+read ÷ rows)")},
 		{"temp blocks", fmt.Sprintf("%s read · %s written", formatRows(q.TempBlksRead), formatRows(q.TempBlksWritten))},
 		{"WAL", fmt.Sprintf("%s · %s records · %s FPI", humanize.Bytes(q.WALBytes), formatRows(q.WALRecords), formatRows(q.WALFPI))},
 	}
@@ -419,10 +477,27 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 			mu(" to browse the real values pg_qualstats captured for this query") + "\n")
 	}
 
-	// Pad to fill the content area so the help row stays pinned.
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
+	// The detail panel has no list to page through, so it scrolls as a single
+	// body: s.offset is the first visible line. Long sample calls / EXPLAIN
+	// output overflow short terminals otherwise, hiding the header off-screen.
+	return scrollWindow(b.String(), &s.offset, height)
+}
+
+// scrollWindow renders a height-line slice of body starting at *offset, clamping
+// *offset to the last full screen (writing the clamp back so the key handler can
+// over-scroll and let the view settle it) and padding short content to height so
+// the help row stays pinned.
+func scrollWindow(body string, offset *int, height int) string {
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	*offset = max(0, min(*offset, len(lines)-height))
+	end := min(*offset+height, len(lines))
+	var b strings.Builder
+	for _, ln := range lines[*offset:end] {
+		b.WriteString(ln)
+		b.WriteByte('\n')
+	}
+	for i := end - *offset; i < height; i++ {
+		b.WriteByte('\n')
 	}
 	return b.String()
 }
@@ -504,6 +579,114 @@ func (m *Model) renderStatementSamples(s *screen, height int) string {
 		b.WriteString("    " + mu("press ") + styleBadge.Render("Enter") +
 			mu(" to EXPLAIN (ANALYZE) the highlighted value — ") +
 			styleErr.Render("executes the query for real") + "\n")
+	}
+
+	// Pad to fill the content area so the help row stays pinned.
+	rendered := strings.Count(b.String(), "\n")
+	for i := rendered; i < height; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// --- snapshots browser (levelSnapshots) ---
+
+// snapshotLabel is the row text for a snapshot, also the fuzzy-filter key. It
+// leads with the capture time (newest-first list) and the database it covers.
+func snapshotLabel(meta pg.SnapshotMeta) string {
+	return meta.CapturedAt.Local().Format("2006-01-02 15:04:05") + " · " + meta.Database
+}
+
+// renderStatementSnapshots lists the on-disk snapshots. The query count is drawn
+// as a bar so the relative size of each capture reads at a glance; each row shows
+// its age and database, plus tags for the marked A-base, an active live/frozen
+// baseline, and snapshots that don't match the current server/database (dimmed,
+// not loadable). Enter loads the highlighted snapshot as a baseline (or, with a
+// marked base, a frozen A→B diff).
+func (m *Model) renderStatementSnapshots(s *screen, height int) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+
+	b.WriteString("\n")
+	b.WriteString("  " + styleSelected.Render("query snapshots") + mu("  ·  "+m.snapshotDir) + "\n")
+	b.WriteString("  " + mu("Enter loads as baseline (since → now) · ") + styleBadge.Render("m") +
+		mu(" mark base then Enter another for a frozen A→B diff · ") + styleBadge.Render("D") + mu(" delete") + "\n\n")
+	used := 4
+
+	st := m.findLevel(levelStatements)
+	curDB := ""
+	if st != nil {
+		curDB = st.db
+	}
+
+	if m.pendingDeleteSnap != "" {
+		b.WriteString("  " + styleErr.Render("delete this snapshot? ") + mu("press ") +
+			styleBadge.Render("y") + mu(" to confirm, any other key cancels") + "\n")
+		used++
+	}
+
+	if len(s.items) == 0 {
+		b.WriteString("  " + mu("no snapshots yet — press ") + styleBadge.Render("S") +
+			mu(" in the queries view to save one") + "\n")
+		for i := strings.Count(b.String(), "\n"); i < height; i++ {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+
+	listH := max(height-used, 1)
+	vis := s.visibleIndexes()
+	var maxCount int64
+	for _, vi := range vis {
+		if sz := s.items[vi].size; sz > maxCount {
+			maxCount = sz
+		}
+	}
+	barW := m.barWidth(s)
+	s.offset, _ = viewportRange(s.cursor, s.offset, listH, len(vis))
+	end := min(s.offset+listH, len(vis))
+	for vi := s.offset; vi < end; vi++ {
+		it := s.items[vi]
+		meta, _ := metaByPath(s.statSnapMetas, it.snapPath)
+		compatible := meta.Target == m.target && meta.Database == curDB
+
+		cursor := "  "
+		name := it.name
+		if vi == s.cursor {
+			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
+			name = styleSelected.Render(name)
+		}
+		cells := 0
+		if maxCount > 0 {
+			cells = int(float64(it.size) / float64(maxCount) * float64(barW))
+		}
+		bar := paintBar(barW, barSegment{cells: cells, style: styleBar})
+		count := padRight(formatRows(it.size)+"q", 7)
+		age := padRight(relativeAge(time.Since(meta.CapturedAt)), 9)
+
+		var tags []string
+		if it.snapPath == s.statMarkBase {
+			tags = append(tags, styleBadge.Render(" base "))
+		}
+		if st != nil && st.statBaseSnap != nil {
+			if st.statEndSnap != nil && (st.statEndSnap.CapturedAt.Equal(meta.CapturedAt) || st.statBaseSnap.CapturedAt.Equal(meta.CapturedAt)) {
+				tags = append(tags, mu("[frozen]"))
+			} else if st.statEndSnap == nil && st.statBaseSnap.CapturedAt.Equal(meta.CapturedAt) {
+				tags = append(tags, mu("[loaded]"))
+			}
+		}
+		if !compatible {
+			tags = append(tags, styleErr.Render("other server/db"))
+		}
+		row := cursor + bar + "  " + mu(count) + "  " + mu(age) + "  " + name +
+			"  " + mu(filepath.Base(it.snapPath))
+		if len(tags) > 0 {
+			row += "  " + strings.Join(tags, " ")
+		}
+		b.WriteString(row + "\n")
+	}
+	for i := end - s.offset; i < listH; i++ {
+		b.WriteString("\n")
 	}
 
 	// Pad to fill the content area so the help row stays pinned.

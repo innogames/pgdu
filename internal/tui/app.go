@@ -38,6 +38,7 @@ const (
 	levelStatements       // pg_stat_statements top-queries table (toolQueries)
 	levelStatementDetail  // single query: metrics, sample call, EXPLAIN
 	levelStatementSamples // captured real predicate constants (pg_qualstats) for one query
+	levelSnapshots        // on-disk top-queries snapshots browser (load as baseline / A→B)
 )
 
 // tool identifies which top-level statistic the user is exploring.
@@ -297,6 +298,11 @@ type item struct {
 	// rows (whose .data is []pg.DiagCell for the generic table renderer) so a
 	// drill can look the full QueryStat back up from screen.statRows.
 	statQueryID int64
+
+	// snapPath is the file path of the snapshot a levelSnapshots row represents,
+	// so the load/delete actions can act on the highlighted file. The row's
+	// SnapshotMeta is held in the parallel screen.statSnapMetas slice.
+	snapPath string
 }
 
 type screen struct {
@@ -422,6 +428,18 @@ type screen struct {
 	diagBarCol  int // headline bar column index, or -1
 	diagSortCol int // active sort column index for the generic table
 
+	// Memoized per-column render metrics for renderDiagResult. These scan every
+	// row (O(rows×cols), calling lipgloss.Width per cell) but depend only on the
+	// loaded cell *values*, not on the cursor or sort order — so recomputing them
+	// on every keypress is what made the table lag on busy servers (thousands of
+	// pg_stat_statements rows). They're computed once per data load: item-load
+	// sites set diagMetricsDirty, and renderDiagResult recomputes lazily.
+	diagMetricsDirty bool
+	diagColWBase     []int     // capped per-column display width (pre last-column grow)
+	diagNaturalW     []int     // uncapped per-column display width
+	diagBarMax       float64   // numeric max of the bar column, for bar scaling
+	diagCostMax      []float64 // per-column numeric max for DiagCostGraded grading
+
 	// Top-queries state (levelStatements). statBaseline is the snapshot taken
 	// when the tool was entered (or last re-baselined); every refresh diffs
 	// the live counters against it so the table shows the window "since you
@@ -436,6 +454,21 @@ type screen struct {
 	statBaselineAt    time.Time
 	statSampledAt     time.Time
 	statTrackPlanning bool // pg_stat_statements.track_planning — gates the plan_ms column
+
+	// Snapshot baseline state (levelStatements). statBaseSnap is non-nil when the
+	// window's baseline was loaded from a disk snapshot rather than the live
+	// auto-baseline: the header then reads "since <CapturedAt> (snapshot)".
+	// statEndSnap is non-nil for a *frozen* A→B diff between two snapshots — the
+	// window then doesn't re-sample live (statEndSnap is the "now").
+	statBaseSnap *pg.Snapshot
+	statEndSnap  *pg.Snapshot
+
+	// Snapshots-browser state (levelSnapshots). statSnapMetas is aligned by index
+	// with items (one meta per row). statMarkBase is the path of the snapshot
+	// marked as the A-base (m); when set, Enter on another row builds a frozen
+	// A→B diff instead of loading the row as a live baseline.
+	statSnapMetas []pg.SnapshotMeta
+	statMarkBase  string
 
 	// Query-detail state (levelStatementDetail). statDetail is the window-delta
 	// QueryStat for the drilled-into query; statSampleCall is the synthesized
@@ -519,10 +552,17 @@ type Model struct {
 	// a CSV export was written to). Cleared on the next keypress.
 	notice string
 
+	// snapshotDir is where top-queries snapshots are saved (S) and listed (L).
+	snapshotDir string
+
+	// pendingDeleteSnap holds the path of the snapshot the user pressed D on in
+	// the browser; the next key confirms (y/Y) or cancels — mirrors pendingReindex.
+	pendingDeleteSnap string
+
 	target string // host:port for header
 }
 
-func NewModel(client *pg.Client, queriesRefresh time.Duration) *Model {
+func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir string) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	m := &Model{
@@ -532,6 +572,7 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration) *Model {
 		keys:        defaultKeys(),
 		fetchBloat:  true,
 		statRefresh: queriesRefresh,
+		snapshotDir: snapshotDir,
 		target:      client.Target(),
 	}
 	m.stack = []*screen{{
@@ -1050,6 +1091,8 @@ func levelLabel(l level) string {
 		return "queries"
 	case levelStatementDetail:
 		return "query-detail"
+	case levelSnapshots:
+		return "snapshots"
 	}
 	return "?"
 }

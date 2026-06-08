@@ -12,7 +12,7 @@ import (
 // renderModel builds a Model with a given screen on top and renders it. The
 // client is never used by the render path, so a non-connecting one is fine.
 func renderModel(top *screen) string {
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second)
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
 	m.width, m.height = 200, 40
 	m.stack = append(m.stack, top)
 	return m.View()
@@ -32,7 +32,7 @@ func TestRenderStatementsTable(t *testing.T) {
 		statTrackPlanning: true,
 	}
 	out := renderModel(s)
-	for _, want := range []string{"total_ms", "hit%", "plan_ms", "miss", "query", "window", "since"} {
+	for _, want := range []string{"total_ms", "hit%", "plan_ms", "miss", "blk/row", "query", "window", "since"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("statements table missing %q in output", want)
 		}
@@ -61,7 +61,7 @@ func TestRenderStatementsTrackPlanningOff(t *testing.T) {
 		t.Error("expected a note pointing at the track_planning setting")
 	}
 	// Other columns must survive the drop.
-	for _, want := range []string{"total_ms", "mean_ms", "hit%", "query"} {
+	for _, want := range []string{"total_ms", "mean_ms", "hit%", "blk/row", "query"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table missing %q after dropping plan_ms", want)
 		}
@@ -71,7 +71,7 @@ func TestRenderStatementsTrackPlanningOff(t *testing.T) {
 // When pg_stat_statements isn't installed the table is replaced by a blocking
 // install prompt — no table, instructions on how to install instead.
 func TestStatementsMissingExtension(t *testing.T) {
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second)
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
 	m.width, m.height = 120, 30
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
@@ -133,19 +133,19 @@ func TestRenderStatementDetailAndInfo(t *testing.T) {
 		statExplain:    "Seq Scan on t  (cost=0.00..1.00 rows=1 width=4)\n  Filter: (id = $1)",
 	}
 	out := renderModel(s)
-	for _, want := range []string{"query 7", "window metrics", "plan time", "sample call", "explain (generic plan)", "Seq Scan"} {
+	for _, want := range []string{"query 7", "window metrics", "plan time", "blocks/row", "sample call", "explain (generic plan)", "Seq Scan"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("detail view missing %q", want)
 		}
 	}
 
 	// The ? info overlay must render without panicking and cover the columns.
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second)
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
 	m.width, m.height = 200, 50
 	m.stack = append(m.stack, s)
 	m.showInfo = true
 	info := m.View()
-	for _, want := range []string{"Top queries reference", "the window", "columns", "plan_ms", "miss", "GENERIC_PLAN"} {
+	for _, want := range []string{"Top queries reference", "the window", "columns", "plan_ms", "miss", "blk/row", "cost colours", "GENERIC_PLAN"} {
 		if !strings.Contains(info, want) {
 			t.Errorf("info overlay missing %q", want)
 		}

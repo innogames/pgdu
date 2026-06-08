@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"math"
 	"regexp"
 	"strings"
 
@@ -59,6 +60,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s.pendingReindex = ""
 		return m, nil
 	}
+	// Snapshot delete confirmation, same y/n arming as reindex.
+	if m.pendingDeleteSnap != "" {
+		path := m.pendingDeleteSnap
+		m.pendingDeleteSnap = ""
+		if msg.String() == "y" || msg.String() == "Y" {
+			// A deleted base/end mark would dangle; clear it.
+			if s.statMarkBase == path {
+				s.statMarkBase = ""
+			}
+			return m, m.deleteSnapshotCmd(path, m.snapshotDir, s.db)
+		}
+		return m, nil
+	}
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
@@ -70,7 +84,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelBufferTables || s.level == levelHeapPages || s.level == levelHeapTuples ||
 			s.level == levelIndexPages || s.level == levelIndexTuples ||
 			s.level == levelWAL || s.level == levelWALRecords || s.level == levelWALBlocks ||
-			s.level == levelStatements || s.level == levelStatementDetail {
+			s.level == levelStatements || s.level == levelStatementDetail || s.level == levelSnapshots {
 			m.showInfo = !m.showInfo
 			break
 		}
@@ -78,14 +92,26 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Filter):
 		s.filterFocused = true
 	case key.Matches(msg, m.keys.Down):
+		if s.level == levelStatementDetail {
+			s.offset++ // clamped to the last screen by scrollWindow
+			break
+		}
 		if s.cursor < s.visibleLen()-1 {
 			s.cursor++
 		}
 	case key.Matches(msg, m.keys.Up):
+		if s.level == levelStatementDetail {
+			s.offset = max(s.offset-1, 0)
+			break
+		}
 		if s.cursor > 0 {
 			s.cursor--
 		}
 	case key.Matches(msg, m.keys.PageDown):
+		if s.level == levelStatementDetail {
+			s.offset += m.pageStep() // clamped by scrollWindow
+			break
+		}
 		// On levelHeapPages / levelIndexPages PageDown shifts the load
 		// window instead of the cursor — within a window the cursor moves
 		// with j/k. Clamps to the last full window so we never call
@@ -101,6 +127,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		s.cursor = max(min(s.cursor+m.pageStep(), s.visibleLen()-1), 0)
 	case key.Matches(msg, m.keys.PageUp):
+		if s.level == levelStatementDetail {
+			s.offset = max(s.offset-m.pageStep(), 0)
+			break
+		}
 		if (s.level == levelHeapPages || s.level == levelIndexPages) && s.heapWindowStart > 0 {
 			s.heapWindowStart = max32(s.heapWindowStart-s.heapWindowCount, 0)
 			s.cursor = 0
@@ -109,8 +139,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		s.cursor = max(s.cursor-m.pageStep(), 0)
 	case key.Matches(msg, m.keys.Top):
+		if s.level == levelStatementDetail {
+			s.offset = 0
+			break
+		}
 		s.cursor = 0
 	case key.Matches(msg, m.keys.Bottom):
+		if s.level == levelStatementDetail {
+			s.offset = math.MaxInt32 // clamped to the last screen by scrollWindow
+			break
+		}
 		s.cursor = max(s.visibleLen()-1, 0)
 	case key.Matches(msg, m.keys.Sort):
 		m.cycleSort(s)
@@ -125,10 +163,44 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.triggerInstall(s)
 	case key.Matches(msg, m.keys.Rebaseline):
 		// Restart the top-queries window: clear the baseline so the next
-		// snapshot becomes the new "since" point.
+		// snapshot becomes the new "since" point. Also drops any loaded disk
+		// snapshot (base→now or frozen A→B), returning to the live window.
 		if s.level == levelStatements {
 			s.statBaseline = nil
+			s.statBaseSnap = nil
+			s.statEndSnap = nil
 			return m, m.loadCurrent()
+		}
+	case key.Matches(msg, m.keys.SaveSnapshot):
+		// Dump the current pg_stat_statements counters to disk. Available from the
+		// table and the detail view (both carry s.db).
+		if s.level == levelStatements || s.level == levelStatementDetail {
+			return m, m.saveSnapshotCmd(s.db)
+		}
+	case key.Matches(msg, m.keys.Snapshots):
+		// Open the on-disk snapshots browser over the top-queries table.
+		if s.level == levelStatements {
+			next := &screen{level: levelSnapshots, title: "snapshots", tool: s.tool, db: s.db, loading: true}
+			m.stack = append(m.stack, next)
+			return m, m.loadCurrent()
+		}
+	case key.Matches(msg, m.keys.MarkBase):
+		// Mark/unmark the highlighted snapshot as the A-base for a frozen A→B diff.
+		if s.level == levelSnapshots {
+			if meta, ok := s.selectedSnapshot(); ok {
+				if s.statMarkBase == meta.Path {
+					s.statMarkBase = ""
+				} else {
+					s.statMarkBase = meta.Path
+				}
+			}
+		}
+	case key.Matches(msg, m.keys.DeleteSnapshot):
+		// Arm the y/n delete confirmation for the highlighted snapshot.
+		if s.level == levelSnapshots {
+			if meta, ok := s.selectedSnapshot(); ok {
+				m.pendingDeleteSnap = meta.Path
+			}
 		}
 	case key.Matches(msg, m.keys.ToggleRefresh):
 		// Pause/resume the live window's auto-refresh. Inert when refresh is
@@ -389,6 +461,17 @@ func (m *Model) handleSampleAnalyze(s *screen) tea.Cmd {
 	s.statExplainErr = nil
 	s.statExplainAnalyze = true
 	return m.loadStatementExplainAnalyzeCmd(s.db, s.statDetail.Query, q)
+}
+
+// selectedSnapshot resolves the snapshot meta under the cursor on the snapshots
+// level, honouring the active filter via visibleIndexes.
+func (s *screen) selectedSnapshot() (pg.SnapshotMeta, bool) {
+	vis := s.visibleIndexes()
+	if s.cursor < 0 || s.cursor >= len(vis) {
+		return pg.SnapshotMeta{}, false
+	}
+	path := s.items[vis[s.cursor]].snapPath
+	return metaByPath(s.statSnapMetas, path)
 }
 
 // selectedSample resolves the captured value under the cursor on the samples

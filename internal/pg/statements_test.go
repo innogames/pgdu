@@ -74,8 +74,21 @@ func TestBuildStatements(t *testing.T) {
 			t.Errorf("1.11 query missing %q:\n%s", want, v111)
 		}
 	}
-	if strings.Contains(v111, " AS ") {
-		t.Errorf("1.11 query should need no aliases:\n%s", v111)
+	// 1.11 has the timing columns natively, so the version-shim aliases never
+	// appear. (We check the specific shims rather than any " AS " because the
+	// aggregate wrapper legitimately adds its own AS clauses.)
+	for _, shim := range []string{
+		"blk_read_time AS shared_blk_read_time",
+		"0::float8 AS local_blk_read_time",
+	} {
+		if strings.Contains(v111, shim) {
+			t.Errorf("1.11 query should not need shim %q:\n%s", shim, v111)
+		}
+	}
+	// Rows are collapsed to one per queryid so the queryid-keyed window baseline
+	// can't collide across the multiple roles that ran the same statement.
+	if !strings.Contains(v111, "GROUP BY queryid") {
+		t.Errorf("query should aggregate by queryid:\n%s", v111)
 	}
 
 	// pg_stat_statements 1.10 (e.g. a PG17 cluster pg_upgrade'd from PG15, never
@@ -100,6 +113,9 @@ func TestExplainableQuery(t *testing.T) {
 		"select 1", "SELECT * FROM t WHERE id = $1", "  with x as (select 1) select * from x",
 		"INSERT INTO t VALUES ($1)", "update t set x = $1", "DELETE FROM t WHERE id = $1",
 		"values ($1)", "TABLE t", "merge into t ...",
+		// ORM-tagged statements: the leading comment must not hide the keyword.
+		"/* EquipmentRepository.findByPlayerId */ select e.id from equipment e where e.player_id = $1",
+		"-- name: GetUser\nSELECT * FROM users WHERE id = $1",
 	}
 	for _, q := range yes {
 		if !ExplainableQuery(q) {
@@ -124,6 +140,7 @@ func TestReadOnlyQuery(t *testing.T) {
 	yes := []string{
 		"select 1", "SELECT * FROM t WHERE id = $1", "TABLE t", "values ($1)",
 		"  with x as (select 1) select * from x",
+		"/* EquipmentRepository.findByPlayerId */ select e.id from equipment e where e.player_id = $1",
 	}
 	for _, q := range yes {
 		if !ReadOnlyQuery(q) {
@@ -179,6 +196,13 @@ func TestQualstatsExampleUsable(t *testing.T) {
 	// No placeholders → nothing to anchor on → accept.
 	if !QualstatsExampleUsable("SELECT 1", "SELECT 1") {
 		t.Error("placeholder-free query should be accepted")
+	}
+	// pg_qualstats failed to reconstruct the qual and left $1 in place. The query
+	// ends at $1 so there's no tail to anchor on, but a leftover placeholder still
+	// makes a plain EXPLAIN fail — reject it.
+	leftover := "select s.data from t s where s.id=$1"
+	if QualstatsExampleUsable(leftover, leftover) {
+		t.Errorf("example with a leftover $n placeholder wrongly accepted:\n%s", leftover)
 	}
 }
 

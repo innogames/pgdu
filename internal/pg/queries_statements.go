@@ -6,6 +6,12 @@ package pg
 // carries the older extension and its older I/O-timing column names.
 const sqlStatementsVersion = `SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_statements'`
 
+// sqlStatementsInfo reads the last time pg_stat_statements counters were reset
+// (pg_stat_statements_info, PG14+). A snapshot persisted to disk records this so
+// that a later diff can detect a reset in between — which would make the cumulative
+// counters smaller than the baseline and the delta meaningless.
+const sqlStatementsInfo = `SELECT stats_reset FROM pg_stat_statements_info`
+
 // sqlSampleTableColumns resolves a relation reference (schema-qualified or bare,
 // as parsed from a statement) to its schema, name and live column list, so a
 // sample-value query can be built from trusted catalog identifiers. to_regclass
@@ -34,6 +40,14 @@ GROUP BY n.nspname, c.relname`
 // the same query runs on PG17/18 and newer. wal_bytes is a numeric in the
 // catalog — cast to bigint so it scans into int64. Rows whose queryid is NULL
 // (text unavailable / insufficient privilege) are skipped.
+//
+// pg_stat_statements rows are keyed by (userid, dbid, queryid); even after the
+// dbid filter the same queryid appears once per role that ran it. The inner
+// select is wrapped in a SUM…GROUP BY queryid so each statement is one row —
+// otherwise the window baseline (keyed by queryid alone, see DiffStatements)
+// would collide across roles and report near-cumulative deltas for shared
+// statements like BEGIN/COMMIT/version(). userid/dbid are meaningless once
+// summed (nothing downstream reads them) and emit 0.
 func statementsQuery(major, minor int) string {
 	shared := "shared_blk_read_time, shared_blk_write_time"
 	local := "local_blk_read_time, local_blk_write_time"
@@ -47,11 +61,12 @@ func statementsQuery(major, minor int) string {
 	}
 	// Plain concatenation rather than fmt.Sprintf: the WHERE clause's LIKE
 	// patterns contain literal % characters that Sprintf would treat as verbs.
-	return sqlStatementsHead +
+	inner := sqlStatementsHead +
 		"       " + shared + ",\n" +
 		"       " + local + ",\n" +
 		"       " + temp + ",\n" +
 		sqlStatementsTail
+	return sqlStatementsAggHead + inner + sqlStatementsAggTail
 }
 
 // statementsAtLeast reports whether extension version major.minor is >= want.
@@ -89,6 +104,53 @@ WHERE  dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
   AND  query NOT LIKE 'EXPLAIN (VERBOSE, FORMAT TEXT)%'
   AND  query NOT LIKE 'PREPARE pgdu_infer_params%'
 `
+
+// sqlStatementsAggHead / sqlStatementsAggTail wrap the per-(userid,queryid) inner
+// select and collapse it to one row per queryid. The column list and order match
+// StatementSnapshot's Scan exactly. Integer counters are summed and cast back to
+// bigint (sum() of bigint is numeric, which won't scan into int64); timing/exec
+// floats sum to double precision. mean_exec_time is recomputed as a calls-weighted
+// mean (per-row means aren't additive); min/max collapse with min()/max(); stddev
+// can't be combined across rows, so it's emitted as 0 (the window diff zeroes
+// min/max/stddev anyway). userid/dbid are unused downstream and emit 0.
+const sqlStatementsAggHead = `
+SELECT queryid,
+       0::oid AS userid,
+       0::oid AS dbid,
+       min(query) AS query,
+       sum(calls)::bigint AS calls,
+       sum(rows)::bigint AS rows,
+       sum(total_exec_time) AS total_exec_time,
+       min(min_exec_time) AS min_exec_time,
+       max(max_exec_time) AS max_exec_time,
+       (sum(mean_exec_time * calls) / GREATEST(sum(calls), 1))::float8 AS mean_exec_time,
+       0::float8 AS stddev_exec_time,
+       sum(plans)::bigint AS plans,
+       sum(total_plan_time) AS total_plan_time,
+       sum(shared_blks_hit)::bigint AS shared_blks_hit,
+       sum(shared_blks_read)::bigint AS shared_blks_read,
+       sum(shared_blks_dirtied)::bigint AS shared_blks_dirtied,
+       sum(shared_blks_written)::bigint AS shared_blks_written,
+       sum(local_blks_hit)::bigint AS local_blks_hit,
+       sum(local_blks_read)::bigint AS local_blks_read,
+       sum(local_blks_dirtied)::bigint AS local_blks_dirtied,
+       sum(local_blks_written)::bigint AS local_blks_written,
+       sum(temp_blks_read)::bigint AS temp_blks_read,
+       sum(temp_blks_written)::bigint AS temp_blks_written,
+       sum(shared_blk_read_time) AS shared_blk_read_time,
+       sum(shared_blk_write_time) AS shared_blk_write_time,
+       sum(local_blk_read_time) AS local_blk_read_time,
+       sum(local_blk_write_time) AS local_blk_write_time,
+       sum(temp_blk_read_time) AS temp_blk_read_time,
+       sum(temp_blk_write_time) AS temp_blk_write_time,
+       sum(wal_records)::bigint AS wal_records,
+       sum(wal_fpi)::bigint AS wal_fpi,
+       sum(wal_bytes)::bigint AS wal_bytes
+FROM (`
+
+const sqlStatementsAggTail = `
+) ss
+GROUP BY queryid`
 
 // sqlQualstatsExample reconstructs one real example query (with real literal
 // constants) for a queryid, using the constants pg_qualstats captured. Returns

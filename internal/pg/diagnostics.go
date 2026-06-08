@@ -22,6 +22,7 @@ const (
 	DiagPercent                             // 0–100 %: bar scaled 0–100, coloured by percentStyle when it is the bar col
 	DiagBytes                               // byte count: rendered via humanize.Bytes when it is the bar col
 	DiagPercentGraded                       // 0–100 % where higher is better: cell text graded green→red (e.g. cache hit ratio)
+	DiagCostGraded                          // numeric, lower is better: 0 = green, nonzero graded green→red relative to the per-column window max
 )
 
 // DiagColumn describes one column of a diagnostic result set.

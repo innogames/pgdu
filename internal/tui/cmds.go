@@ -152,7 +152,29 @@ type statementsLoadedMsg struct {
 	db            string
 	stats         []pg.QueryStat // raw cumulative snapshot; diffed against the baseline
 	trackPlanning bool           // whether plan time is being collected
+	statsReset    time.Time      // pg_stat_statements_info.stats_reset — guards a disk baseline
 	err           error
+}
+
+// Snapshot persistence messages (levelStatements / levelSnapshots).
+type snapshotSavedMsg struct {
+	path string
+	err  error
+}
+type snapshotsListedMsg struct {
+	dir       string
+	metas     []pg.SnapshotMeta
+	liveReset time.Time // current pg_stat_statements stats_reset — drops invalidated snapshots
+	err       error
+}
+type snapshotBaseLoadedMsg struct {
+	snap *pg.Snapshot
+	err  error
+}
+type snapshotFrozenLoadedMsg struct {
+	base *pg.Snapshot
+	end  *pg.Snapshot
+	err  error
 }
 
 // statementsTickMsg drives the self-rescheduling refresh of the top-queries
@@ -437,8 +459,66 @@ func (m *Model) loadStatementsCmd(db string) tea.Cmd {
 		if err != nil {
 			return statementsLoadedMsg{db: db, err: err}
 		}
-		tp, _ := m.client.TrackPlanning(ctx, db) // best-effort column decoration
-		return statementsLoadedMsg{db: db, stats: stats, trackPlanning: tp}
+		tp, _ := m.client.TrackPlanning(ctx, db)     // best-effort column decoration
+		reset, _ := m.client.StatementsInfo(ctx, db) // best-effort reset guard for disk baselines
+		return statementsLoadedMsg{db: db, stats: stats, trackPlanning: tp, statsReset: reset}
+	})
+}
+
+// saveSnapshotCmd captures the current pg_stat_statements counters for db and
+// writes them to the snapshot directory, reporting the resulting path.
+func (m *Model) saveSnapshotCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		snap, err := m.client.CaptureSnapshot(ctx, db)
+		if err != nil {
+			return snapshotSavedMsg{err: err}
+		}
+		path, err := pg.SaveSnapshot(m.snapshotDir, snap)
+		return snapshotSavedMsg{path: path, err: err}
+	})
+}
+
+// listSnapshotsCmd reads the snapshot directory for the browser, along with the
+// current pg_stat_statements stats_reset for db so the handler can drop snapshots
+// the live counters have since outgrown (a reset between capture and now).
+func (m *Model) listSnapshotsCmd(dir, db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		metas, err := pg.ListSnapshots(dir)
+		reset, _ := m.client.StatementsInfo(ctx, db) // best-effort validity filter
+		return snapshotsListedMsg{dir: dir, metas: metas, liveReset: reset, err: err}
+	})
+}
+
+// loadSnapshotBaseCmd loads one snapshot to use as the live window's baseline.
+func (m *Model) loadSnapshotBaseCmd(path string) tea.Cmd {
+	return query(func(context.Context) tea.Msg {
+		snap, err := pg.LoadSnapshot(path)
+		return snapshotBaseLoadedMsg{snap: snap, err: err}
+	})
+}
+
+// loadSnapshotFrozenCmd loads two snapshots for a frozen A→B diff (base→end).
+func (m *Model) loadSnapshotFrozenCmd(basePath, endPath string) tea.Cmd {
+	return query(func(context.Context) tea.Msg {
+		base, err := pg.LoadSnapshot(basePath)
+		if err != nil {
+			return snapshotFrozenLoadedMsg{err: err}
+		}
+		end, err := pg.LoadSnapshot(endPath)
+		return snapshotFrozenLoadedMsg{base: base, end: end, err: err}
+	})
+}
+
+// deleteSnapshotCmd removes a snapshot file then re-lists the directory so the
+// browser refreshes; the listing carries any delete error.
+func (m *Model) deleteSnapshotCmd(path, dir, db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		if err := pg.DeleteSnapshot(path); err != nil {
+			return snapshotsListedMsg{dir: dir, err: err}
+		}
+		metas, err := pg.ListSnapshots(dir)
+		reset, _ := m.client.StatementsInfo(ctx, db)
+		return snapshotsListedMsg{dir: dir, metas: metas, liveReset: reset, err: err}
 	})
 }
 

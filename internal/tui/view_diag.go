@@ -174,6 +174,67 @@ func (m *Model) renderDiagnosticList(s *screen, height int) string {
 // row fits in the terminal.
 const diagColWidth = 36
 
+// diagMetrics returns the per-column render metrics renderDiagResult needs:
+// the capped column widths (before the width-dependent last-column grow), the
+// uncapped natural widths, the bar column's numeric max, and the per-column max
+// for DiagCostGraded columns ("lower is better" cells graded relative to the
+// worst value in their own column; HasNum=false cells never inflate it).
+//
+// All four scan every row (O(rows×cols), with a lipgloss.Width call per cell)
+// but depend only on the cell values — not the cursor, sort order or terminal
+// width — so the result is memoized on the screen and recomputed only when the
+// data reloads (item-load sites set diagMetricsDirty) or the column count drifts
+// from the cache (a defensive guard against e.g. a track_planning toggle).
+func (s *screen) diagMetrics(cols []pg.DiagColumn, barCol int) (colW, naturalW []int, barMax float64, costMax []float64) {
+	nCols := len(cols)
+	if !s.diagMetricsDirty && len(s.diagColWBase) == nCols {
+		return s.diagColWBase, s.diagNaturalW, s.diagBarMax, s.diagCostMax
+	}
+
+	colW = make([]int, nCols)
+	naturalW = make([]int, nCols)
+	costMax = make([]float64, nCols)
+	for i, c := range cols {
+		colW[i] = lipgloss.Width(c.Name)
+		naturalW[i] = colW[i]
+	}
+	for _, it := range s.items {
+		row, ok := it.data.([]pg.DiagCell)
+		if !ok {
+			continue
+		}
+		for i := 0; i < nCols && i < len(row); i++ {
+			cell := row[i]
+			display := cell.Display
+			if cell.HasNum && cols[i].Kind == pg.DiagBytes {
+				display = humanize.Bytes(int64(cell.Num))
+			}
+			w := lipgloss.Width(display)
+			if w > naturalW[i] {
+				naturalW[i] = w
+			}
+			if w > colW[i] {
+				colW[i] = w
+			}
+			if colW[i] > diagColWidth {
+				colW[i] = diagColWidth
+			}
+			if cell.HasNum {
+				if barCol == i && cell.Num > barMax {
+					barMax = cell.Num
+				}
+				if cols[i].Kind == pg.DiagCostGraded && cell.Num > costMax[i] {
+					costMax[i] = cell.Num
+				}
+			}
+		}
+	}
+
+	s.diagColWBase, s.diagNaturalW, s.diagBarMax, s.diagCostMax = colW, naturalW, barMax, costMax
+	s.diagMetricsDirty = false
+	return colW, naturalW, barMax, costMax
+}
+
 // renderDiagResult renders the result table for a selected diagnostic query.
 // It computes per-column widths, renders a header with the active sort marked
 // by an arrow, and optionally renders a bar for the headline column.
@@ -204,41 +265,12 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 	barIsPercent := barCol >= 0 && barCol < nCols && cols[barCol].Kind == pg.DiagPercent
 	barIsBytes := barCol >= 0 && barCol < nCols && cols[barCol].Kind == pg.DiagBytes
 
-	// Compute per-column display widths from the header and all visible rows,
-	// capped at diagColWidth so wide text columns don't dominate the layout.
-	// The bar column's width applies to the number that sits after the bar,
-	// not the bar itself.
-	colW := make([]int, nCols)
-	naturalW := make([]int, nCols) // uncapped width, used to grow the last column
-	for i, c := range cols {
-		colW[i] = lipgloss.Width(c.Name)
-		naturalW[i] = colW[i]
-	}
-	for _, it := range s.items {
-		row, ok := it.data.([]pg.DiagCell)
-		if !ok {
-			continue
-		}
-		for i, cell := range row {
-			if i >= nCols {
-				break
-			}
-			display := cell.Display
-			if cell.HasNum && i < nCols && cols[i].Kind == pg.DiagBytes {
-				display = humanize.Bytes(int64(cell.Num))
-			}
-			w := lipgloss.Width(display)
-			if w > naturalW[i] {
-				naturalW[i] = w
-			}
-			if w > colW[i] {
-				colW[i] = w
-			}
-			if colW[i] > diagColWidth {
-				colW[i] = diagColWidth
-			}
-		}
-	}
+	// Per-column display widths (capped at diagColWidth), uncapped natural widths,
+	// the bar column's numeric max, and the per-column cost-grade maxima. These
+	// scan every row but depend only on the cell values, so they're memoized on
+	// the screen and recomputed only when the data reloads (see diagMetrics).
+	colWBase, naturalW, barMax, costMax := s.diagMetrics(cols, barCol)
+	colW := append([]int(nil), colWBase...) // local copy: the last-column grow below mutates it
 
 	// With no bar column, the bar's horizontal budget is unused, so let the last
 	// column grow past diagColWidth into the remaining terminal width — this is
@@ -266,20 +298,6 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 		}
 	}
 	barW := min(max(m.width-fixedW, barWidthMin), barWidthMax)
-
-	// Collect bar column numeric max across all items for scaling.
-	var barMax float64
-	if barCol >= 0 {
-		for _, it := range s.items {
-			row, ok := it.data.([]pg.DiagCell)
-			if !ok || barCol >= len(row) {
-				continue
-			}
-			if row[barCol].HasNum && row[barCol].Num > barMax {
-				barMax = row[barCol].Num
-			}
-		}
-	}
 
 	// ── header ──────────────────────────────────────────────────────────────
 	arrow := "↑"
@@ -384,15 +402,21 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			}
 			display := truncateDiagCell(raw, colW[i])
 			graded := i < nCols && cols[i].Kind == pg.DiagPercentGraded
+			costGraded := i < nCols && cols[i].Kind == pg.DiagCostGraded
 			isNumeric := cell.HasNum || (i < nCols && (cols[i].Kind == pg.DiagInt ||
 				cols[i].Kind == pg.DiagFloat || cols[i].Kind == pg.DiagPercent ||
-				cols[i].Kind == pg.DiagBytes || graded))
+				cols[i].Kind == pg.DiagBytes || graded || costGraded))
 
 			// Grade "higher is better" percent cells green→red so the eye can
 			// triage hit ratios without reading digits. Skipped on the selected
 			// row, which renders in the selection style like every other cell.
 			if graded && cell.HasNum && !selected {
 				display = gradedPercentStyle(cell.Num).Render(display)
+			}
+			// Grade "lower is better" cost cells relative to their column max: 0
+			// green, worst-in-window red. Same selected-row suppression.
+			if costGraded && cell.HasNum && !selected {
+				display = costStyleRelative(cell.Num, costMax[i]).Render(display)
 			}
 
 			var rendered string

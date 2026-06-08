@@ -65,6 +65,10 @@ make deb         # Debian package (debian-pkg/, pgdu_<ver>_<arch>.deb)
 `pgdu` defaults match `psql`: no `-h` → Unix socket + peer auth. `PGPASSWORD`
 is read directly; `~/.pgpass` is honoured by libpq at connect time.
 
+Top-queries snapshots are written to `--snapshot-dir` (default
+`$XDG_STATE_HOME/pgdu/snapshots`, i.e. `~/.local/state/pgdu/snapshots`;
+`PGDU_SNAPSHOT_DIR` overrides) as one timestamped JSON file each (`pg.Snapshot`).
+
 ## Things to know before touching code
 
 - `screen.table` is the source of truth at `levelParts`/`levelColumns` — there
@@ -77,3 +81,13 @@ is read directly; `~/.pgpass` is honoured by libpq at connect time.
   prompts render as a soft hint line above it.
 - Reindex flow is two-step: Enter on a >5% bloated index arms `pendingReindex`,
   any next key cancels — `y`/`Y` executes (see `handleKey`).
+- Top-queries snapshots (`internal/pg/snapshots.go`): `S` dumps the raw
+  cumulative counters to disk, `L` opens `levelSnapshots`. Loading a snapshot as
+  the baseline sets `screen.statBaseSnap` (window = "since snapshot, live"); a
+  marked base (`m`) + Enter on another sets `statEndSnap` too (frozen A→B diff,
+  no live re-sampling — `loadCurrent`/`onStatementsTick` special-case it).
+  Disk-baseline diffs use `DiffStatementsClamped`; snapshots invalidated by a
+  `pg_stat_statements_info.stats_reset` after their capture are filtered out of
+  the `L` browser (`onSnapshotsListed`, using the live reset from
+  `listSnapshotsCmd`) rather than warned about. `D` deletes via the same
+  two-step `pendingDeleteSnap` arm as reindex.

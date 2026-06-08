@@ -711,6 +711,17 @@ func (q QueryStat) RowsPerCall() float64 {
 	return float64(q.Rows) / float64(q.Calls)
 }
 
+// BlocksPerRow is the average shared blocks (cache hits + disk reads) touched
+// per row returned/affected — a work-per-result-row signal where lower is
+// better (a scan reading many pages to yield few rows scores high). The bool is
+// false when the query returned no rows (ratio undefined → render "—").
+func (q QueryStat) BlocksPerRow() (float64, bool) {
+	if q.Rows <= 0 {
+		return 0, false
+	}
+	return float64(q.SharedBlksHit+q.SharedBlksRead) / float64(q.Rows), true
+}
+
 // DiffStatements computes the window deltas of a fresh snapshot against a
 // baseline keyed by queryid. Queries with no activity in the window (≤0 calls)
 // are dropped; queries new since the baseline keep their full counters.
@@ -720,6 +731,73 @@ func DiffStatements(baseline map[int64]QueryStat, current []QueryStat) []QuerySt
 		d := c
 		if b, ok := baseline[c.QueryID]; ok {
 			d = c.sub(b)
+		}
+		if d.Calls <= 0 {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// clampNonNeg zeroes any negative counter field. A delta against a *disk*
+// baseline can go negative when pg_stat_statements was reset, or the query was
+// evicted and re-added with smaller counters, between the snapshot and now —
+// in which case the difference is meaningless. We clamp so the table shows 0
+// rather than nonsense, and the caller surfaces a warning separately.
+func (q QueryStat) clampNonNeg() QueryStat {
+	nz := func(v *int64) {
+		if *v < 0 {
+			*v = 0
+		}
+	}
+	nf := func(v *float64) {
+		if *v < 0 {
+			*v = 0
+		}
+	}
+	nz(&q.Calls)
+	nz(&q.Rows)
+	nf(&q.TotalExecTime)
+	nz(&q.Plans)
+	nf(&q.TotalPlanTime)
+	nz(&q.SharedBlksHit)
+	nz(&q.SharedBlksRead)
+	nz(&q.SharedBlksDirtied)
+	nz(&q.SharedBlksWritten)
+	nz(&q.LocalBlksHit)
+	nz(&q.LocalBlksRead)
+	nz(&q.LocalBlksDirtied)
+	nz(&q.LocalBlksWritten)
+	nz(&q.TempBlksRead)
+	nz(&q.TempBlksWritten)
+	nf(&q.SharedBlkReadTime)
+	nf(&q.SharedBlkWriteTime)
+	nf(&q.LocalBlkReadTime)
+	nf(&q.LocalBlkWriteTime)
+	nf(&q.TempBlkReadTime)
+	nf(&q.TempBlkWriteTime)
+	nz(&q.WALRecords)
+	nz(&q.WALFPI)
+	nz(&q.WALBytes)
+	if q.Calls > 0 {
+		q.MeanExecTime = q.TotalExecTime / float64(q.Calls)
+	} else {
+		q.MeanExecTime = 0
+	}
+	return q
+}
+
+// DiffStatementsClamped is DiffStatements with every negative counter clamped to
+// zero. Used when the baseline came from a disk snapshot, where a stats reset or
+// eviction between capture and now can otherwise yield negative deltas. The
+// in-memory live baseline can't go backwards, so it keeps the plain DiffStatements.
+func DiffStatementsClamped(baseline map[int64]QueryStat, current []QueryStat) []QueryStat {
+	out := make([]QueryStat, 0, len(current))
+	for _, c := range current {
+		d := c
+		if b, ok := baseline[c.QueryID]; ok {
+			d = c.sub(b).clampNonNeg()
 		}
 		if d.Calls <= 0 {
 			continue

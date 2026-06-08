@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,10 @@ type Config struct {
 	// negative) disables auto-refresh, leaving the window static until the user
 	// resets it (R) or toggles refresh back on (t).
 	QueriesRefresh time.Duration
+
+	// SnapshotDir is where top-queries snapshots are written (S) and read (L).
+	// Defaults to $XDG_STATE_HOME/pgdu/snapshots (~/.local/state/pgdu/snapshots).
+	SnapshotDir string
 }
 
 func Parse(args []string) (Config, error) {
@@ -56,6 +61,7 @@ func Parse(args []string) (Config, error) {
 		SSLMode:  os.Getenv("PGSSLMODE"),
 
 		QueriesRefresh: envDurationOr("PGDU_QUERIES_REFRESH", defaultQueriesRefresh),
+		SnapshotDir:    envOr("PGDU_SNAPSHOT_DIR", defaultSnapshotDir()),
 	}
 
 	fs.StringVarP(&cfg.Host, "host", "h", cfg.Host, "database server host or socket path (empty = libpq default)")
@@ -65,6 +71,7 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.SSLMode, "sslmode", cfg.SSLMode, "SSL mode (disable|allow|prefer|require|verify-ca|verify-full)")
 	fs.StringVar(&cfg.DSN, "dsn", "", "full PostgreSQL connection URL (overrides individual flags)")
 	fs.DurationVar(&cfg.QueriesRefresh, "queries-refresh", cfg.QueriesRefresh, "top-queries auto-refresh interval (e.g. 5s, 1m; 0 disables)")
+	fs.StringVar(&cfg.SnapshotDir, "snapshot-dir", cfg.SnapshotDir, "directory for top-queries snapshots (S saves, L loads)")
 
 	var showVersion bool
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
@@ -180,6 +187,21 @@ func (c Config) Target() string {
 		return host
 	}
 	return host + ":" + strconv.Itoa(port)
+}
+
+// defaultSnapshotDir is $XDG_STATE_HOME/pgdu/snapshots, falling back to
+// ~/.local/state/pgdu/snapshots (the XDG default base dir) and finally a
+// relative path when even the home directory can't be resolved.
+func defaultSnapshotDir() string {
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return filepath.Join(".pgdu", "snapshots")
+		}
+		base = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(base, "pgdu", "snapshots")
 }
 
 func envOr(key, def string) string {

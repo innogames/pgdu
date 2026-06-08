@@ -26,6 +26,28 @@ func TestTableQualified(t *testing.T) {
 	}
 }
 
+func TestQueryStatBlocksPerRow(t *testing.T) {
+	cases := []struct {
+		name            string
+		hit, read, rows int64
+		want            float64
+		ok              bool
+	}{
+		{"ten blocks per row", 900, 100, 100, 10, true},
+		{"no rows", 900, 100, 0, 0, false},
+		{"no blocks", 0, 0, 5, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			q := QueryStat{SharedBlksHit: c.hit, SharedBlksRead: c.read, Rows: c.rows}
+			got, ok := q.BlocksPerRow()
+			if ok != c.ok || got != c.want {
+				t.Errorf("BlocksPerRow() = (%v, %v), want (%v, %v)", got, ok, c.want, c.ok)
+			}
+		})
+	}
+}
+
 func TestTableBufferStatHitRatio(t *testing.T) {
 	cases := []struct {
 		name        string
