@@ -195,7 +195,7 @@ func (s *screen) diagMetrics(cols []pg.DiagColumn, barCol int) (colW, naturalW [
 	naturalW = make([]int, nCols)
 	costMax = make([]float64, nCols)
 	for i, c := range cols {
-		colW[i] = lipgloss.Width(c.Name)
+		colW[i] = displayWidth(c.Name)
 		naturalW[i] = colW[i]
 	}
 	for _, it := range s.items {
@@ -209,7 +209,7 @@ func (s *screen) diagMetrics(cols []pg.DiagColumn, barCol int) (colW, naturalW [
 			if cell.HasNum && cols[i].Kind == pg.DiagBytes {
 				display = humanize.Bytes(int64(cell.Num))
 			}
-			w := lipgloss.Width(display)
+			w := displayWidth(display)
 			if w > naturalW[i] {
 				naturalW[i] = w
 			}
@@ -450,6 +450,19 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 // truncateDiagCell clips a cell value to maxW cells, appending "…" when the
 // value is wider than the cap.
 func truncateDiagCell(s string, maxW int) string {
+	if maxW <= 0 {
+		return ""
+	}
+	// Fast path for the common ASCII cell (query text, numbers, identifiers):
+	// display width is the byte length, so we can slice directly and skip the
+	// per-rune grapheme-width scans that made this the hottest frame in the
+	// profile. Keep maxW-1 columns for text plus one for the ellipsis.
+	if w, ok := asciiWidth(s); ok {
+		if w <= maxW {
+			return s
+		}
+		return s[:maxW-1] + "…"
+	}
 	if lipgloss.Width(s) <= maxW {
 		return s
 	}
@@ -462,7 +475,7 @@ func truncateDiagCell(s string, maxW int) string {
 
 // padLeft right-aligns s in a field of width n (like padRight but for numbers).
 func padLeft(s string, n int) string {
-	w := lipgloss.Width(s)
+	w := displayWidth(s)
 	if w >= n {
 		return s
 	}

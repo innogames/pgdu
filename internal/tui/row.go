@@ -307,10 +307,37 @@ func max0(n int) int {
 }
 
 func padRight(s string, n int) string {
-	if lipgloss.Width(s) >= n {
+	w := displayWidth(s)
+	if w >= n {
 		return s
 	}
-	return s + strings.Repeat(" ", n-lipgloss.Width(s))
+	return s + strings.Repeat(" ", n-w)
+}
+
+// displayWidth is lipgloss.Width with a fast path for pure printable-ASCII
+// strings, whose display width is simply their byte length. This avoids
+// lipgloss's grapheme-cluster segmentation, which dominated CPU while scrolling
+// the (almost always ASCII) top-queries table. Any byte outside 0x20–0x7e —
+// including the 0x1b that begins an ANSI escape, and any UTF-8 lead byte — falls
+// back to the correct (slower) lipgloss path.
+func displayWidth(s string) int {
+	if w, ok := asciiWidth(s); ok {
+		return w
+	}
+	return lipgloss.Width(s)
+}
+
+// asciiWidth returns (len(s), true) when s is entirely printable ASCII, else
+// (0, false). Restricting to 0x20–0x7e keeps control bytes and ANSI escapes
+// (0x1b) on the slow path, where their zero/variable display width is handled
+// correctly.
+func asciiWidth(s string) (int, bool) {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return 0, false
+		}
+	}
+	return len(s), true
 }
 
 // Column widths for the buffer-tables view; kept here so the header and rows
