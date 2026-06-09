@@ -99,9 +99,9 @@ func flattenQuery(q string) string {
 	return strings.Join(strings.Fields(q), " ")
 }
 
-// fmtFloat renders a number with up to 2 decimals, trailing zeros stripped.
+// fmtFloat renders a number with up to 1 decimals, trailing zeros stripped.
 func fmtFloat(f float64) string {
-	s := strconv.FormatFloat(f, 'f', 2, 64)
+	s := strconv.FormatFloat(f, 'f', 1, 64)
 	if strings.ContainsRune(s, '.') {
 		s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
 	}
@@ -396,7 +396,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	}
 	bprStr := "—"
 	if bpr, ok := q.BlocksPerRow(); ok {
-		bprStr = blkPerRowStyle(bpr).Render(fmtFloat(bpr))
+		bprStr = blkPerRowStyle(bpr).Render(fmt1(bpr))
 	}
 	b.WriteString("  " + styleHeader.Render(" window metrics ") + "\n")
 	metrics := [][2]string{
