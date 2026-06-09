@@ -31,6 +31,15 @@ type partsLoadedMsg struct {
 	parts []pg.Part
 	err   error
 }
+
+// diskTableResolvedMsg carries the result of resolving a query's main table to a
+// catalog relation, so the disk-usage jump (u in the top-queries views) can fill
+// in the placeholder parts screen or report an unresolvable name.
+type diskTableResolvedMsg struct {
+	name  string
+	table pg.Table
+	err   error
+}
 type bloatFilledMsg struct {
 	table pg.Table
 	parts []pg.Part
@@ -303,6 +312,16 @@ func (m *Model) installExtensionCmd(db, ext string) tea.Cmd {
 	})
 }
 
+// upgradeExtensionCmd runs ALTER EXTENSION ... UPDATE and reports completion via
+// the same extInstalledMsg the install path uses — onExtInstalled clears the
+// prompt and reloads the screen, which now reads the lifted version.
+func (m *Model) upgradeExtensionCmd(db, ext string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		err := m.client.UpdateExtension(ctx, db, ext)
+		return extInstalledMsg{db: db, ext: ext, err: err}
+	})
+}
+
 func (m *Model) loadHeapPagesCmd(t pg.Table, start, count int32) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		pages, err := m.client.ListHeapPages(ctx, t, start, count)
@@ -383,6 +402,18 @@ func (m *Model) loadDescribeTableByNameCmd(db, name string) tea.Cmd {
 		}
 		d, err := m.client.DescribeTable(ctx, t)
 		return describeLoadedMsg{oid: t.OID, desc: d, err: err}
+	})
+}
+
+// resolveDiskTableCmd resolves a relation name (parsed out of a query in the
+// top-queries view) to its catalog metadata so the caller can open the
+// disk-usage (parts) view for it. Only the resolve step runs here; a placeholder
+// parts screen is already on the stack and onDiskTableResolved fills in the
+// table and fires the parts load via loadCurrent.
+func (m *Model) resolveDiskTableCmd(db, name string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		t, err := m.client.ResolveTable(ctx, db, name)
+		return diskTableResolvedMsg{name: name, table: t, err: err}
 	})
 }
 

@@ -6,6 +6,12 @@ package pg
 // carries the older extension and its older I/O-timing column names.
 const sqlStatementsVersion = `SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_statements'`
 
+// sqlStatementsDefaultVersion reads the version CREATE/ALTER EXTENSION would
+// install from the on-disk extension files (independent of what's currently
+// installed). Used to tell the user what an `ALTER EXTENSION ... UPDATE` would
+// lift an outdated extension to. Empty when the extension isn't on the server.
+const sqlStatementsDefaultVersion = `SELECT COALESCE(default_version, '') FROM pg_available_extensions WHERE name = 'pg_stat_statements'`
+
 // sqlStatementsInfo reads the last time pg_stat_statements counters were reset
 // (pg_stat_statements_info, PG14+). A snapshot persisted to disk records this so
 // that a later diff can detect a reset in between — which would make the cumulative
@@ -68,6 +74,17 @@ func statementsQuery(major, minor int) string {
 		sqlStatementsTail
 	return sqlStatementsAggHead + inner + sqlStatementsAggTail
 }
+
+// statementsMinMajor/Minor is the oldest pg_stat_statements version whose
+// columns statementsQuery can scan: 1.8 (PG13) is where total_time became
+// total_exec_time and plans/total_plan_time/wal_* were added — all of which the
+// query selects unconditionally. Below it the query fails with "column
+// total_exec_time does not exist"; StatementSnapshot detects that up front and
+// returns an *OutdatedExtensionError instead.
+const (
+	statementsMinMajor = 1
+	statementsMinMinor = 8
+)
 
 // statementsAtLeast reports whether extension version major.minor is >= want.
 func statementsAtLeast(major, minor, wantMajor, wantMinor int) bool {

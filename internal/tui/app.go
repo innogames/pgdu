@@ -522,7 +522,10 @@ const (
 	extPromptReasonQualstats      = "real EXPLAIN values are available with pg_qualstats (already in shared_preload_libraries here)"
 )
 
-// extPrompt is the per-screen "install this extension?" affordance.
+// extPrompt is the per-screen "install this extension?" affordance. It doubles
+// as an "upgrade this extension?" prompt when upgrade is set (the extension is
+// installed but too old — see OutdatedExtensionError): the `i` key then runs
+// ALTER EXTENSION ... UPDATE instead of CREATE EXTENSION.
 type extPrompt struct {
 	name        string // "pg_buffercache", "pgstattuple"
 	db          string
@@ -530,6 +533,12 @@ type extPrompt struct {
 	reason      string // human-readable explanation of why pgdu wants it
 	blocking    bool   // when true, the screen content is replaced by the prompt
 	err         error  // populated when a previous install attempt failed
+
+	// Set for the outdated-extension (upgrade) variant of the prompt.
+	upgrade   bool
+	installed string // currently installed version, e.g. "1.6"
+	available string // version an UPDATE would install, e.g. "1.11"
+	required  string // minimum version pgdu needs, e.g. "1.8"
 }
 
 type Model struct {

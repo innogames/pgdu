@@ -69,6 +69,23 @@ func (c *Client) StatementSnapshot(ctx context.Context, db string) ([]QueryStat,
 	if err != nil {
 		return nil, err
 	}
+	// A cluster pg_upgraded to PG17 can still carry a 1.6/1.7 extension whose
+	// catalog lacks total_exec_time/plans/wal_*; running the query would fail
+	// with an opaque "column does not exist". Detect it here and hand the TUI a
+	// typed error carrying the upgrade path instead.
+	if !statementsAtLeast(major, minor, statementsMinMajor, statementsMinMinor) {
+		var def string
+		_ = pool.QueryRow(ctx, sqlStatementsDefaultVersion).Scan(&def)
+		dMaj, dMin := parseExtVersion(def)
+		return nil, &OutdatedExtensionError{
+			Extension: "pg_stat_statements",
+			DB:        db,
+			Installed: fmt.Sprintf("%d.%d", major, minor),
+			Available: def,
+			Required:  fmt.Sprintf("%d.%d", statementsMinMajor, statementsMinMinor),
+			Updatable: def != "" && statementsAtLeast(dMaj, dMin, statementsMinMajor, statementsMinMinor),
+		}
+	}
 	rows, err := pool.Query(ctx, statementsQuery(major, minor))
 	if err != nil {
 		return nil, fmt.Errorf("read pg_stat_statements in %q: %w", db, err)
@@ -217,18 +234,29 @@ func ExplainableQuery(query string) bool {
 	}
 }
 
-// QueryKind returns a one-letter tag for the statement's command type — S
-// (SELECT), I (INSERT), U (UPDATE), D (DELETE), M (MERGE), T (TRUNCATE), W
-// (WITH/CTE) — for the top-queries `T` column. The leading keyword is taken
-// after stripping any ORM comment tag; anything unrecognized returns "?".
+// QueryKind returns a short tag for the statement's command type — S (SELECT),
+// SL (a locking SELECT … FOR UPDATE/SHARE/…), L (a SELECT that acquires an
+// advisory lock), I (INSERT), U (UPDATE), D (DELETE), M (MERGE), T
+// (BEGIN/COMMIT) — for the top-queries `T` column. SL and L flag SELECTs that
+// take locks rather than just reading, which stand out in a hot-query list. The
+// leading keyword is taken after stripping any ORM comment tag; anything
+// unrecognized returns "?".
 func QueryKind(query string) string {
-	fields := strings.Fields(StripSQLComments(query))
+	lower := strings.ToLower(StripSQLComments(query))
+	fields := strings.Fields(lower)
 	if len(fields) == 0 {
 		return "?"
 	}
-	switch strings.ToLower(fields[0]) {
-	case "select", "table", "values":
-		return "S"
+	switch fields[0] {
+	case "select", "table", "values", "with":
+		switch {
+		case isAdvisoryLock(lower):
+			return "L"
+		case hasLockingClause(fields):
+			return "SL"
+		default:
+			return "S"
+		}
 	case "insert":
 		return "I"
 	case "update":
@@ -237,13 +265,24 @@ func QueryKind(query string) string {
 		return "D"
 	case "merge":
 		return "M"
-	case "truncate":
+	case "begin", "commit":
 		return "T"
-	case "with":
-		return "W"
 	default:
 		return "?"
 	}
+}
+
+// isAdvisoryLock reports whether a (lower-cased) statement calls a PostgreSQL
+// advisory-lock acquisition function: pg_advisory_lock / pg_advisory_xact_lock
+// and their pg_try_* variants (each substring also covers the _shared form).
+// These are SELECTs whose purpose is to take a lock rather than read data, so
+// QueryKind tags them "L". Advisory *unlock* functions are deliberately
+// excluded — they release a lock, not acquire one.
+func isAdvisoryLock(lower string) bool {
+	return strings.Contains(lower, "pg_advisory_lock") ||
+		strings.Contains(lower, "pg_advisory_xact_lock") ||
+		strings.Contains(lower, "pg_try_advisory_lock") ||
+		strings.Contains(lower, "pg_try_advisory_xact_lock")
 }
 
 // ReadOnlyQuery reports whether a normalized statement is safe to actually

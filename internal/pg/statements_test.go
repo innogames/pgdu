@@ -175,6 +175,63 @@ func TestReadOnlyQuery(t *testing.T) {
 	}
 }
 
+func TestQueryKind(t *testing.T) {
+	cases := []struct {
+		query string
+		want  string
+	}{
+		// Plain reads.
+		{"select 1", "S"},
+		{"SELECT * FROM t WHERE id = $1", "S"},
+		{"  with x as (select 1) select * from x", "S"},
+		{"TABLE t", "S"},
+		{"values ($1)", "S"},
+		// ORM comment tag must not hide the keyword.
+		{"/* UserRepo.find */ select * from users where id = $1", "S"},
+
+		// Locking SELECTs → SL.
+		{"SELECT * FROM t WHERE id = $1 FOR UPDATE", "SL"},
+		{"select resource from game_bag_resource where bag_id = $1 for update", "SL"},
+		{"SELECT 1 FROM t FOR SHARE", "SL"},
+		{"SELECT 1 FROM t FOR NO KEY UPDATE", "SL"},
+		{"SELECT 1 FROM t FOR KEY SHARE", "SL"},
+		{"SELECT * FROM t FOR UPDATE OF t", "SL"},
+		{"with x as (select 1) select * from t for update", "SL"},
+
+		// Advisory-lock acquisition → L (takes precedence over SL/S).
+		{"SELECT pg_advisory_lock($1)", "L"},
+		{"select pg_advisory_lock(123)", "L"},
+		{"SELECT pg_advisory_xact_lock($1, $2)", "L"},
+		{"SELECT pg_try_advisory_lock($1)", "L"},
+		{"SELECT pg_advisory_lock_shared($1)", "L"},
+		{"SELECT pg_try_advisory_xact_lock($1)", "L"},
+		// Advisory unlock is not an acquisition — stays a plain SELECT.
+		{"SELECT pg_advisory_unlock($1)", "S"},
+		{"SELECT pg_advisory_unlock_all()", "S"},
+
+		// substring(... FOR n) is not a locking clause.
+		{"SELECT substring(name FROM 1 FOR 3) FROM t", "S"},
+
+		// DML and transaction control.
+		{"INSERT INTO t VALUES ($1)", "I"},
+		{"update t set x = $1", "U"},
+		{"DELETE FROM t WHERE id = $1", "D"},
+		{"merge into t ...", "M"},
+		{"BEGIN", "T"},
+		{"commit", "T"},
+
+		// Unknown / empty.
+		{"VACUUM t", "?"},
+		{"", "?"},
+		{"   ", "?"},
+	}
+	for _, c := range cases {
+		if got := QueryKind(c.query); got != c.want {
+			t.Errorf("QueryKind(%q) = %q, want %q", c.query, got, c.want)
+		}
+	}
+}
+
 func TestQualstatsExampleUsable(t *testing.T) {
 	normalized := "SELECT a, b FROM t WHERE x = $1 AND y <= $2 FOR UPDATE OF t"
 	// A complete denormalization ends with the same constant-free suffix.

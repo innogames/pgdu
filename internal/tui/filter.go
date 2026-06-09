@@ -21,6 +21,28 @@ func fuzzyMatch(query, target string) bool {
 	return qi == len(q)
 }
 
+// substringMatch returns true when target contains query as a contiguous
+// (case-insensitive) substring. Empty queries match everything.
+func substringMatch(query, target string) bool {
+	if query == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(target), strings.ToLower(query))
+}
+
+// matchFilter applies the active filter to one item's name using the rule that
+// suits the level. levelStatements rows carry the whole normalized query as
+// their name, where fuzzy subsequence matching degenerates (a scattered
+// b…a…t…t…l…e matches almost any long statement), so it uses substring
+// matching instead; every other level keeps fuzzy matching, which is forgiving
+// of typos in short identifiers like game_player_inventory_log.
+func (s *screen) matchFilter(name string) bool {
+	if s.level == levelStatements {
+		return substringMatch(s.filter, name)
+	}
+	return fuzzyMatch(s.filter, name)
+}
+
 // visibleIndexes returns indexes into s.items that pass the active filter,
 // preserving the underlying order. When the filter is empty this is the
 // identity mapping. Callers treat s.cursor and s.offset as indexes into the
@@ -37,7 +59,7 @@ func (s *screen) visibleIndexes() []int {
 	}
 	var out []int
 	for i, it := range s.items {
-		if fuzzyMatch(s.filter, it.name) {
+		if s.matchFilter(it.name) {
 			out = append(out, i)
 		}
 	}
@@ -53,7 +75,7 @@ func (s *screen) visibleLen() int {
 	}
 	n := 0
 	for _, it := range s.items {
-		if fuzzyMatch(s.filter, it.name) {
+		if s.matchFilter(it.name) {
 			n++
 		}
 	}

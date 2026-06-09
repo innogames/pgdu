@@ -13,6 +13,7 @@ type keyMap struct {
 	ToggleBloat      key.Binding
 	Install          key.Binding
 	Describe         key.Binding
+	DiskUsage        key.Binding
 	Rebaseline       key.Binding
 	ToggleRefresh    key.Binding
 	Explain          key.Binding
@@ -44,6 +45,7 @@ func defaultKeys() keyMap {
 		ToggleBloat:    key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "toggle bloat")),
 		Install:        key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "install extension")),
 		Describe:       key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "describe")),
+		DiskUsage:      key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "disk usage")),
 		Rebaseline:     key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "reset window")),
 		ToggleRefresh:  key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "toggle refresh")),
 		Explain:        key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "explain")),
@@ -69,7 +71,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Top, k.Bottom},
 		{k.Enter, k.Back},
 		{k.Filter, k.Sort, k.ReverseSort},
-		{k.Refresh, k.ToggleBloat, k.Install, k.Describe},
+		{k.Refresh, k.ToggleBloat, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ToggleRefresh, k.Explain, k.Params, k.Export},
 		{k.SaveSnapshot, k.Snapshots, k.MarkBase, k.DeleteSnapshot, k.Columns},
 		{k.Help, k.Quit},

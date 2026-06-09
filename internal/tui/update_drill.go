@@ -264,6 +264,10 @@ func (m *Model) drillIn() tea.Cmd {
 		next := &screen{
 			level: levelStatementDetail, title: "query", tool: s.tool,
 			db: s.db, statDetail: qs, statWindowExecMs: s.statWindowExecMs,
+			// Carry the parent's track_planning state so the plan-time line
+			// matches the overview's plan_ms column; without it the detail view
+			// defaults to false and wrongly reports "track_planning off".
+			statTrackPlanning: s.statTrackPlanning,
 		}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()

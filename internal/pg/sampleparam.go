@@ -55,7 +55,7 @@ var sampleConnector = map[string]bool{
 func columnBefore(toks []string, i int) string {
 	for j := i - 1; j >= 0; j-- {
 		t := toks[j]
-		if t == "(" || strings.HasPrefix(t, "$") || sampleConnector[strings.ToLower(t)] {
+		if t == "(" || t == ")" || strings.HasPrefix(t, "$") || sampleConnector[strings.ToLower(t)] {
 			continue
 		}
 		return bareColumn(t)

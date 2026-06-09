@@ -288,6 +288,25 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		next.table = t.table
 		return m, m.loadDescribeTableCmd(t.table)
+	case key.Matches(msg, m.keys.DiskUsage):
+		// From the top-queries views, jump to the main table's disk-usage (parts)
+		// breakdown. Only meaningful for name-resolved targets (the statement
+		// levels); a no-op elsewhere since those levels are already in the disk
+		// tree or have no relation to point at. The relation is parsed/resolved
+		// the same way as Describe, so the two stay consistent.
+		t, ok := describeTarget(s)
+		if !ok || !t.byName {
+			break
+		}
+		// Push a loading parts screen now (spinner while we resolve), then resolve
+		// the name; onDiskTableResolved fills in the table and loads its parts.
+		next := &screen{
+			level: levelParts, title: "disk usage", tool: toolDisk,
+			db: t.db, loading: true,
+			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
+		}
+		m.stack = append(m.stack, next)
+		return m, m.resolveDiskTableCmd(t.db, t.tableName)
 	case key.Matches(msg, m.keys.Back):
 		// Esc is shared with Back; when an overlay/filter is up, Esc closes
 		// that instead of unwinding the stack. Other Back keys (←/h/
@@ -703,12 +722,16 @@ func describeTarget(s *screen) (descTarget, bool) {
 
 // triggerInstall is a no-op unless the current screen has an extPrompt
 // that's still installable. Sets `installing` so the view can show a
-// spinner, and dispatches the CREATE EXTENSION command.
+// spinner, and dispatches CREATE EXTENSION — or, for the outdated-extension
+// (upgrade) variant, ALTER EXTENSION ... UPDATE.
 func (m *Model) triggerInstall(s *screen) tea.Cmd {
 	if s.extPrompt == nil || !s.extPrompt.installable || s.installing {
 		return nil
 	}
 	s.installing = true
 	s.extPrompt.err = nil
+	if s.extPrompt.upgrade {
+		return m.upgradeExtensionCmd(s.extPrompt.db, s.extPrompt.name)
+	}
 	return m.installExtensionCmd(s.extPrompt.db, s.extPrompt.name)
 }

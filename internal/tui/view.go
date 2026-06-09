@@ -525,6 +525,9 @@ func (m *Model) renderExtHint(s *screen) string {
 // Called instead of the list when extPrompt.blocking is set.
 func (m *Model) renderExtPrompt(s *screen, height int) string {
 	p := s.extPrompt
+	if p.upgrade {
+		return m.renderUpgradePrompt(s, height)
+	}
 	var b strings.Builder
 	b.WriteString("\n")
 	b.WriteString("  " + styleSelected.Render("Extension required") + "\n\n")
@@ -544,6 +547,45 @@ func (m *Model) renderExtPrompt(s *screen, height int) string {
 		b.WriteString("  " + styleMuted.Render("(requires database-owner or superuser privileges)") + "\n")
 	default:
 		b.WriteString("  " + styleErr.Render(p.name+" is not available on this server — ask the DBA to install it") + "\n")
+	}
+	rendered := strings.Count(b.String(), "\n")
+	for i := rendered; i < height; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// renderUpgradePrompt renders the blocking "extension outdated" screen for the
+// upgrade variant of extPrompt: it states the installed and available versions
+// (the "what is installed / what is possible" note) and offers the ALTER
+// EXTENSION UPDATE that lifts it. Shown instead of an opaque "column does not
+// exist" error when a pg_upgraded cluster still carries an old extension.
+func (m *Model) renderUpgradePrompt(s *screen, height int) string {
+	p := s.extPrompt
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString("  " + styleSelected.Render("Extension outdated") + "\n\n")
+	b.WriteString("  " + p.reason + "\n")
+	b.WriteString("  " + styleMuted.Render(p.name+" in database "+p.db+" is too old for this view") + "\n")
+	b.WriteString("  " + styleMuted.Render("installed ") + styleBadge.Render(p.installed) +
+		styleMuted.Render(" · available ") + styleBadge.Render(p.available) +
+		styleMuted.Render(" · pgdu needs ≥ ") + styleBadge.Render(p.required) + "\n\n")
+	switch {
+	case s.installing:
+		b.WriteString("  " + m.spinner.View() + " upgrading " + p.name + "…\n")
+	case p.err != nil:
+		b.WriteString("  " + styleErr.Render("upgrade failed: "+p.err.Error()) + "\n")
+		b.WriteString("  " + styleMuted.Render("press ") + styleBadge.Render("i") +
+			styleMuted.Render(" to retry, or ") + styleBadge.Render("←") +
+			styleMuted.Render(" to back out") + "\n")
+		b.WriteString("  " + styleMuted.Render("(ALTER EXTENSION requires extension-owner or superuser privileges)") + "\n")
+	case p.installable:
+		b.WriteString("  press " + styleBadge.Render("i") +
+			" to run " + styleMuted.Render("ALTER EXTENSION "+p.name+" UPDATE") + "\n")
+		b.WriteString("  " + styleMuted.Render("(requires extension-owner or superuser privileges)") + "\n")
+	default:
+		b.WriteString("  " + styleErr.Render("the server's own "+p.name+" ("+p.available+
+			") is older than pgdu needs — upgrade PostgreSQL / the extension package") + "\n")
 	}
 	rendered := strings.Count(b.String(), "\n")
 	for i := rendered; i < height; i++ {

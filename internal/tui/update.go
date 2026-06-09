@@ -33,6 +33,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onTablesLoaded(msg)
 	case partsLoadedMsg:
 		return m, m.onPartsLoaded(msg)
+	case diskTableResolvedMsg:
+		return m, m.onDiskTableResolved(msg)
 	case bufferStatsLoadedMsg:
 		return m, m.onBufferStatsLoaded(msg)
 	case bufferSummaryLoadedMsg:
@@ -122,6 +124,38 @@ func setExtensionPrompt(s *screen, ext *pg.MissingExtensionError, reason string)
 		installable: ext.Installable,
 		reason:      reason,
 		blocking:    true,
+	}
+	s.items = s.items[:0]
+	return nil
+}
+
+// asOutdatedExt returns the underlying *pg.OutdatedExtensionError if err is one,
+// or nil. errors.As handles wrapping so command callers can wrap freely.
+func asOutdatedExt(err error) *pg.OutdatedExtensionError {
+	var e *pg.OutdatedExtensionError
+	if errors.As(err, &e) {
+		return e
+	}
+	return nil
+}
+
+// setUpgradePrompt replaces a screen's list with a blocking "upgrade this
+// extension?" prompt built from an OutdatedExtensionError. installable is reused
+// as "can an ALTER EXTENSION UPDATE help" (Updatable): false means even the
+// server's default version is too old, so the prompt explains there's nothing an
+// in-database upgrade can do.
+func setUpgradePrompt(s *screen, ext *pg.OutdatedExtensionError, reason string) tea.Cmd {
+	s.err = nil
+	s.extPrompt = &extPrompt{
+		name:        ext.Extension,
+		db:          ext.DB,
+		installable: ext.Updatable,
+		reason:      reason,
+		blocking:    true,
+		upgrade:     true,
+		installed:   ext.Installed,
+		available:   ext.Available,
+		required:    ext.Required,
 	}
 	s.items = s.items[:0]
 	return nil

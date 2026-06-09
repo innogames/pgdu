@@ -22,6 +22,41 @@ func TestFuzzyMatch(t *testing.T) {
 	}
 }
 
+func TestSubstringMatch(t *testing.T) {
+	cases := []struct {
+		query, target string
+		want          bool
+	}{
+		{"", "anything", true},
+		{"battle", "select * from battle", true},
+		{"battle", "BATTLE", true}, // case-insensitive
+		// The subsequence that fooled fuzzyMatch: b…a…t…t…l…e scattered across a
+		// long statement must NOT match as a substring.
+		{"battle", "select b1_0.id, b1_0.created_at from player_state", false},
+		{"ac", "abc", false}, // not contiguous
+	}
+	for _, c := range cases {
+		if got := substringMatch(c.query, c.target); got != c.want {
+			t.Errorf("substringMatch(%q, %q) = %v, want %v", c.query, c.target, got, c.want)
+		}
+	}
+}
+
+func TestMatchFilterPerLevel(t *testing.T) {
+	// b…a…t…t…l…e is a subsequence of this query but not a substring.
+	const q = "select b1_0.id, b1_0.created_at from player_state where a > $1"
+
+	stmt := &screen{level: levelStatements, filter: "battle"}
+	if stmt.matchFilter(q) {
+		t.Error("levelStatements should use substring matching: 'battle' must not match a query that only contains it as a subsequence")
+	}
+
+	other := &screen{level: levelTables, filter: "battle"}
+	if !other.matchFilter(q) {
+		t.Error("non-statement levels should keep fuzzy matching: 'battle' is a subsequence of the query")
+	}
+}
+
 func TestViewportRange(t *testing.T) {
 	cases := []struct {
 		name                           string

@@ -78,6 +78,29 @@ func (m *Model) onPartsLoaded(msg partsLoadedMsg) tea.Cmd {
 	return nil
 }
 
+// onDiskTableResolved completes the disk-usage jump from the top-queries views:
+// the placeholder parts screen pushed by the key handler gets the resolved table
+// (so loadCurrent can load its parts), or, when the name doesn't resolve to a
+// real relation, the placeholder is popped and the failure shown as a notice.
+func (m *Model) onDiskTableResolved(msg diskTableResolvedMsg) tea.Cmd {
+	s := m.top()
+	// Stale guard: only act on the placeholder we pushed (top, levelParts, no
+	// table resolved yet). If the user navigated on, drop the result.
+	if s == nil || s.level != levelParts || s.table.OID != 0 {
+		return nil
+	}
+	if msg.err != nil {
+		m.stack = m.stack[:len(m.stack)-1]
+		m.notice = fmt.Sprintf("no disk usage for %q: %s", msg.name, errText(msg.err))
+		return nil
+	}
+	s.table = msg.table
+	s.schema = msg.table.Schema
+	s.db = msg.table.DB
+	s.title = msg.table.Name
+	return m.loadCurrent()
+}
+
 func (m *Model) onBufferStatsLoaded(msg bufferStatsLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelBufferTables)
 	if s == nil || s.db != msg.db || s.schema != msg.schema {
@@ -503,6 +526,10 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 	if ext := asMissingExt(msg.err); ext != nil {
 		s.diagCols = nil
 		return setExtensionPrompt(s, ext, extPromptReasonStatStatements)
+	}
+	if ext := asOutdatedExt(msg.err); ext != nil {
+		s.diagCols = nil
+		return setUpgradePrompt(s, ext, extPromptReasonStatStatements)
 	}
 	s.err = msg.err
 	if msg.err != nil {

@@ -16,6 +16,10 @@ func TestMainTable(t *testing.T) {
 		"insert into game_event values ($1)":                "game_event",
 		"MERGE INTO inventory t USING src s ON t.id = s.id": "inventory",
 		"TABLE game_config":                                 "game_config",
+		// ONLY is a no-inherit modifier, not the relation (FK/PK check queries).
+		`SELECT 1 FROM ONLY "public"."game_player" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x`: `"public"."game_player"`,
+		"UPDATE ONLY parts SET a = $1 WHERE id = $2":                                                          "parts",
+		"DELETE FROM ONLY parts WHERE id = $1":                                                                "parts",
 		// Quoted / schema-qualified identifiers survive intact.
 		`SELECT 1 FROM "MixedCase"`:        `"MixedCase"`,
 		"SELECT 1 FROM myschema.\"Tbl\" x": `myschema."Tbl"`,
@@ -24,6 +28,12 @@ func TestMainTable(t *testing.T) {
 		"SELECT 1":                             "",
 		"SELECT * FROM (SELECT 1) sub":         "",
 		"WITH c AS (SELECT 1) SELECT * FROM c": "c",
+		// WITH wrapping a DML statement: the subject is the UPDATE/DELETE/INSERT
+		// target, not the first FROM (which references the CTE). The CTE body's own
+		// keywords are at paren depth > 0 and must be skipped.
+		"WITH units_to_delete (player_id, unit_id, count) AS (VALUES ($1,$2,$3)) UPDATE game_army_units u SET count = u.count - to_delete.count FROM units_to_delete to_delete WHERE u.player_id = to_delete.player_id RETURNING u.*": "game_army_units",
+		"WITH moved AS (DELETE FROM staging WHERE id = $1 RETURNING *) INSERT INTO archive SELECT * FROM moved":                                                                                                                       "archive",
+		"WITH d AS (SELECT id FROM tmp) DELETE FROM events WHERE id IN (SELECT id FROM d)":                                                                                                                                            "events",
 		// Count/paginate wrapper: descend into the subquery's own FROM relation.
 		"SELECT COUNT(*) FROM (SELECT DISTINCT c.* FROM game_conversation c JOIN game_message m ON c.id = m.conversation_id) AS c": "game_conversation",
 		// FROM unnest(…)/generate_series(…) is a set-returning function, not a

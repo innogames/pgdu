@@ -63,6 +63,30 @@ func (c *Client) CreateExtension(ctx context.Context, db, ext string) error {
 	return nil
 }
 
+// UpdateExtension runs `ALTER EXTENSION <ext> UPDATE` in db, lifting an
+// already-installed extension to the server's default version (e.g. a
+// pg_upgrade leftover stuck at pg_stat_statements 1.6 → 1.11). Like
+// CreateExtension, ext must be a known constant identifier, never user input.
+// Requires extension-owner or superuser privileges; a permission failure
+// surfaces as the wrapped error so the TUI can show it.
+func (c *Client) UpdateExtension(ctx context.Context, db, ext string) error {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return err
+	}
+	stmt := "ALTER EXTENSION " + quoteIdent(ext) + " UPDATE"
+	if _, err := pool.Exec(ctx, stmt); err != nil {
+		return fmt.Errorf("update extension %s: %w", ext, err)
+	}
+	c.mu.Lock()
+	// The installed version changed; drop the cached read so the next
+	// statementsVersion re-queries it (and statementsQuery selects the new
+	// column layout). Harmless for extensions without a version cache.
+	delete(c.statStatementsVerKnown, db)
+	c.mu.Unlock()
+	return nil
+}
+
 // EnsureBufferCache makes sure pg_buffercache is installed in db. When the
 // extension is missing we return a *MissingExtensionError so the TUI can
 // offer the user an interactive install instead of guessing — previous
