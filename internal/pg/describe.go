@@ -84,7 +84,7 @@ func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, erro
 	defer idxRows.Close()
 	for idxRows.Next() {
 		var idx DescribeIndexDef
-		if err := idxRows.Scan(&idx.Name, &idx.Def, &idx.IsPrimary, &idx.IsUnique); err != nil {
+		if err := idxRows.Scan(&idx.Name, &idx.Def, &idx.IsPrimary, &idx.IsUnique, &idx.Clustered); err != nil {
 			return nil, fmt.Errorf("describe indexes for %q.%q: %w", t.Schema, t.Name, err)
 		}
 		d.Indexes = append(d.Indexes, idx)

@@ -85,8 +85,12 @@ func (m *Model) View() string {
 	switch {
 	case m.showColumnConfig && s.level == levelStatements:
 		b.WriteString(m.renderColumnConfig(s, contentHeight))
+	case m.showDiagQuery && s.level == levelDiagnosticResult && s.diag != nil:
+		b.WriteString(m.renderDiagQuery(s, contentHeight))
 	case m.showInfo && s.level == levelBufferTables:
 		b.WriteString(m.renderBufferInfo(contentHeight))
+	case m.showInfo && s.level == levelBufferDetail:
+		b.WriteString(m.renderBufferDetailInfo(contentHeight))
 	case m.showInfo && s.level == levelHeapPages:
 		b.WriteString(m.renderHeapPagesInfo(contentHeight))
 	case m.showInfo && s.level == levelHeapTuples:
@@ -101,7 +105,7 @@ func (m *Model) View() string {
 		b.WriteString(m.renderWALRecordsInfo(contentHeight))
 	case m.showInfo && s.level == levelWALBlocks:
 		b.WriteString(m.renderWALBlocksInfo(contentHeight))
-	case m.showInfo && (s.level == levelStatements || s.level == levelStatementDetail || s.level == levelStatementSamples || s.level == levelSnapshots):
+	case m.showInfo && (s.level == levelStatements || s.level == levelStatementDetail || s.level == levelStatementSamples || s.level == levelStatementResult || s.level == levelSnapshots):
 		b.WriteString(m.renderStatementsInfo(contentHeight))
 	case s.extPrompt != nil && s.extPrompt.blocking:
 		b.WriteString(m.renderExtPrompt(s, contentHeight))
@@ -116,13 +120,15 @@ func (m *Model) View() string {
 			b.WriteString("\n")
 		}
 	case len(s.items) == 0 && s.level != levelDescribe && s.level != levelDiagnosticResult &&
-		s.level != levelStatements && s.level != levelStatementDetail && s.level != levelSnapshots:
+		s.level != levelStatements && s.level != levelStatementDetail &&
+		s.level != levelStatementResult && s.level != levelSnapshots &&
+		s.level != levelBufferDetail:
 		// levelDescribe never populates items — it renders from s.describe.
-		// levelDiagnosticResult with 0 items means the query returned no rows,
-		// which is valid; fall through to the renderer which shows "(no rows)".
-		// levelStatements (empty = no activity in the window yet) and
-		// levelStatementDetail (renders from s.statDetail) are likewise valid
-		// with no items.
+		// levelDiagnosticResult and levelStatementResult with 0 items mean the
+		// query returned no rows, which is valid; fall through to the renderer
+		// which shows "(no rows)". levelStatements (empty = no activity in the
+		// window yet) and levelStatementDetail (renders from s.statDetail) are
+		// likewise valid with no items.
 		b.WriteString("  (no items)\n")
 		for i := 1; i < contentHeight; i++ {
 			b.WriteString("\n")
@@ -133,6 +139,8 @@ func (m *Model) View() string {
 			b.WriteString(m.renderToolPicker(s, contentHeight))
 		case levelBufferTables:
 			b.WriteString(m.renderBufferList(s, contentHeight, rankByOID))
+		case levelBufferDetail:
+			b.WriteString(m.renderBufferDetail(s, contentHeight))
 		case levelHeapPages:
 			b.WriteString(m.renderHeapPagesList(s, contentHeight))
 		case levelHeapTuples:
@@ -164,6 +172,9 @@ func (m *Model) View() string {
 			b.WriteString(m.renderStatementDetail(s, contentHeight))
 		case levelStatementSamples:
 			b.WriteString(m.renderStatementSamples(s, contentHeight))
+		case levelStatementResult:
+			// Executed-query rows reuse the generic result-table renderer.
+			b.WriteString(m.renderDiagResult(s, contentHeight))
 		case levelSnapshots:
 			b.WriteString(m.renderStatementSnapshots(s, contentHeight))
 		default:
@@ -176,6 +187,9 @@ func (m *Model) View() string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
+	// Trim the footer to the current screen's bindings (disabled keys are
+	// skipped by the help component), matching what handleKey will dispatch.
+	m.keys.applyContext(m.top())
 	b.WriteString(styleHelp.Render(m.help.View(m.keys)))
 	return b.String()
 }
@@ -371,6 +385,8 @@ func (m *Model) breadcrumb() string {
 			if sc.statDetail != nil {
 				parts = append(parts, fmt.Sprintf("query %d", sc.statDetail.QueryID))
 			}
+		case levelStatementResult:
+			parts = append(parts, "result")
 		}
 	}
 	out := make([]string, len(parts))
@@ -631,12 +647,13 @@ const (
 func barReserve(l level, tl tool) int {
 	switch l {
 	case levelBufferTables:
-		// cursor + bar(brackets) + buffered + total + cached + hit + name
+		// cursor + bar(brackets) + buffered + total + cached + hit + dirty + name
 		return colCursor + colBrackets +
 			bufColBuffered + colGutter +
 			bufColTotal + colGutter +
 			bufColCached + colGutter +
 			bufColHit + colGutter +
+			bufColDirty + colGutter +
 			colName
 	case levelTables:
 		if tl == toolPageInspect {

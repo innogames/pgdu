@@ -37,9 +37,235 @@ func (m *Model) renderBufferInfo(height int) string {
 	b.WriteString("    " + sw(styleBarAlt) + "  " + mu("other dbs    buffered pages from other databases (and shared catalogs)") + "\n")
 	b.WriteString("    " + mu("░  free         empty pages within shared_buffers") + "\n\n")
 
+	b.WriteString("  " + styleHeader.Render(" temperature ") + "  " +
+		mu("clock-sweep usage counts — how reused each cached page is") + "\n")
+	b.WriteString("    " + sw(usageHeatStyle(0)) + "  " + mu("cold (0)     evictable: not touched since the sweep last passed") + "\n")
+	b.WriteString("    " + sw(usageHeatStyle(5)) + "  " + mu("hot  (5)     reused often, burned in (cap is 5)") + "\n")
+	b.WriteString("    " + mu("a bar mostly cold means shared_buffers is bigger than the working set") + "\n")
+	b.WriteString("    " + sw(styleDirty) + "  " + mu("dirty        pages modified in memory, not yet flushed to disk —") + "\n")
+	b.WriteString("    " + mu("                 the checkpointer/bgwriter owes a write; high = write pressure") + "\n\n")
+
 	b.WriteString("  " + mu("The top 10 tables by BufferedBytes each get a distinct palette hue;") + "\n")
 	b.WriteString("  " + mu("their row bar matches the slice on the shared_buffers bar above.") + "\n")
-	b.WriteString("  " + mu("Tables ranked 11+ use the default bar colour.") + "\n")
+	b.WriteString("  " + mu("Tables ranked 11+ use the default bar colour.  ") +
+		styleBadge.Render("enter") + mu(" opens a per-table breakdown.") + "\n")
+
+	rendered := strings.Count(b.String(), "\n")
+	for i := rendered; i < height; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// renderUsageHeatBar paints the cluster (or any) usagecount histogram as one
+// stacked bar: one segment per count, width proportional to its buffer share,
+// coloured cold→hot by usageHeatStyle. Rounding loss falls into the muted tail.
+func renderUsageHeatBar(counts []pg.BufferUsageCount, width int) string {
+	var total int64
+	for _, u := range counts {
+		total += u.Buffers
+	}
+	if total <= 0 {
+		return paintBar(width)
+	}
+	segs := make([]barSegment, 0, len(counts))
+	used := 0
+	for _, u := range counts {
+		c := max0(int(float64(width) * float64(u.Buffers) / float64(total)))
+		if used+c > width {
+			c = width - used
+		}
+		segs = append(segs, barSegment{cells: c, style: usageHeatStyle(u.Count)})
+		used += c
+	}
+	return paintBar(width, segs...)
+}
+
+// renderUsageCountBar paints one usagecount bucket's bar in the detail view:
+// fill is proportional to this bucket's buffers over the busiest bucket
+// (maxBufs), so band sizes compare at a glance; the dirty portion of the fill
+// is overlaid in styleDirty to show write pressure within the band.
+func renderUsageCountBar(u pg.BufferUsageCount, maxBufs int64, width int) string {
+	if maxBufs <= 0 {
+		return paintBar(width)
+	}
+	fill := min(max0(int(float64(width)*float64(u.Buffers)/float64(maxBufs))), width)
+	dirty := 0
+	if u.Buffers > 0 {
+		dirty = int(float64(fill) * float64(u.Dirty) / float64(u.Buffers))
+	}
+	if dirty > fill {
+		dirty = fill
+	}
+	return paintBar(width,
+		barSegment{cells: fill - dirty, style: usageHeatStyle(u.Count)},
+		barSegment{cells: dirty, style: styleDirty},
+	)
+}
+
+// bufferDetailBarWidth sizes the bars on the buffer-detail screen: wide enough
+// to read, but leaving room for the count/percent/dirty columns to their right.
+func bufferDetailBarWidth(termW int) int {
+	w := termW - 44
+	if w < barWidthMin {
+		return barWidthMin
+	}
+	if w > summaryBarMax {
+		return summaryBarMax
+	}
+	return w
+}
+
+// renderBufferDetail draws the single-table drill-down: the cache-footprint
+// figures carried from the parent row (rendered synchronously), then the
+// clock-sweep temperature histogram for this table's buffers (loaded async).
+func (m *Model) renderBufferDetail(s *screen, height int) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+	st := s.bufDetail
+	if st == nil {
+		for range height {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+
+	b.WriteString("\n")
+	b.WriteString("  " + styleSelected.Render(st.Schema+"."+st.Name) +
+		mu("  ·  shared-buffers detail") + "\n\n")
+
+	barW := bufferDetailBarWidth(m.width)
+
+	// The buffer-volatile figures (buffered/dirty/avg usage) are recomputed from
+	// the fresh histogram (s.bufUsage) rather than the older list-load snapshot
+	// in st, so the footprint and the bars below always agree — pg_buffercache is
+	// sampled live, and a table can be dirtied/warmed between the two reads. Only
+	// table size (on-disk) and hit ratio (cumulative) come from st. On a histogram
+	// error we fall back to st's snapshot since fresh data is unavailable.
+	var totBufs, totDirty, maxBufs, weighted int64
+	for _, u := range s.bufUsage {
+		totBufs += u.Buffers
+		totDirty += u.Dirty
+		weighted += int64(u.Count) * u.Buffers
+		if u.Buffers > maxBufs {
+			maxBufs = u.Buffers
+		}
+	}
+	bs := s.bufBlockSize
+	if bs <= 0 {
+		bs = 8192 // defensive: standard BLCKSZ if the block_size read failed
+	}
+	bufferedBytes, dirtyBytes, avgUsage := totBufs*bs, totDirty*bs, 0.0
+	if totBufs > 0 {
+		avgUsage = float64(weighted) / float64(totBufs)
+	}
+	if s.bufUsageErr != nil {
+		bufferedBytes, dirtyBytes, avgUsage = st.BufferedBytes, st.DirtyBytes, st.UsageAvg
+	}
+
+	// --- cache footprint ---
+	b.WriteString("  " + styleHeader.Render(" cache footprint ") + "\n")
+	cachedVal := "—"
+	if st.TotalBytes > 0 {
+		pct := float64(bufferedBytes) / float64(st.TotalBytes) * 100
+		cachedVal = percentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct)) +
+			"  " + renderSolidBar(bufferedBytes, st.TotalBytes, barW, percentStyle(pct))
+	}
+	hitVal := "—"
+	if hr := st.HitRatio(); hr >= 0 {
+		pct := hr * 100
+		hitVal = gradedPercentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct))
+	}
+	rows := [][2]string{
+		{"buffered", humanize.Bytes(bufferedBytes)},
+		{"table size", humanize.Bytes(st.TotalBytes)},
+		{"cached", cachedVal},
+		{"hit ratio", hitVal},
+		{"dirty", humanize.Bytes(dirtyBytes)},
+		{"avg usage", fmt.Sprintf("%.1f / 5", avgUsage)},
+	}
+	labelW := 0
+	for _, kv := range rows {
+		if n := len(kv[0]); n > labelW {
+			labelW = n
+		}
+	}
+	for _, kv := range rows {
+		b.WriteString("    " + mu(padRight(kv[0], labelW)) + "  " + kv[1] + "\n")
+	}
+
+	// --- clock-sweep temperature histogram ---
+	b.WriteString("\n  " + styleHeader.Render(" buffer temperature ") + "\n")
+	switch {
+	case s.bufUsageErr != nil:
+		b.WriteString("    " + styleErr.Render(s.bufUsageErr.Error()) + "\n")
+	default:
+		if totBufs == 0 {
+			b.WriteString("    " + mu("not currently in shared_buffers") + "\n")
+		} else {
+			for _, u := range s.bufUsage {
+				word := ""
+				switch u.Count {
+				case 0:
+					word = "cold"
+				case len(usageHeatPalette) - 1:
+					word = "hot"
+				}
+				pct := float64(u.Buffers) * 100 / float64(totBufs)
+				line := "  " + mu(padRight(word, 4)) + " " +
+					usageHeatStyle(u.Count).Render(fmt.Sprintf("%d", u.Count)) + "  " +
+					renderUsageCountBar(u, maxBufs, barW) + "  " +
+					padRight(formatRows(u.Buffers), 6) + "  " +
+					padRight(fmt.Sprintf("%.1f%%", pct), 6)
+				if u.Dirty > 0 {
+					line += "  " + styleDirty.Render("dirty "+formatRows(u.Dirty))
+				}
+				if u.Pinned > 0 {
+					line += "  " + styleBarAlt.Render("pinned "+formatRows(u.Pinned))
+				}
+				b.WriteString(line + "\n")
+			}
+			b.WriteString("\n  " + mu("0 = cold (evictable) → 5 = hot (frequently reused)  ·  ") +
+				styleDirty.Render("▇") + mu(" dirty (modified, awaiting flush)") + "\n")
+		}
+	}
+
+	rendered := strings.Count(b.String(), "\n")
+	for i := rendered; i < height; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// renderBufferDetailInfo is the ? overlay for the per-table buffer-detail
+// screen: it explains the cache-footprint figures and the clock-sweep
+// temperature histogram, sized to fill `height` lines.
+func (m *Model) renderBufferDetailInfo(height int) string {
+	var b strings.Builder
+	mu := styleMuted.Render
+	sw := func(style lipgloss.Style) string { return style.Render("▇") }
+	b.WriteString("\n")
+	b.WriteString("  " + styleSelected.Render("Buffer detail reference") + mu("  ·  press ") +
+		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" cache footprint ") + "  " +
+		mu("how much of this table lives in shared_buffers") + "\n")
+	b.WriteString("    " + mu("buffered     bytes of this table (heap + toast + all indexes) cached") + "\n")
+	b.WriteString("    " + mu("table size   on-disk pg_total_relation_size, for context") + "\n")
+	b.WriteString("    " + mu("cached       buffered ÷ table size — how much of the table fits in cache") + "\n")
+	b.WriteString("    " + mu("hit ratio    cumulative shared-buffer hits ÷ (hits + disk reads)") + "\n")
+	b.WriteString("    " + mu("dirty        bytes modified in memory, not yet flushed to disk") + "\n")
+	b.WriteString("    " + mu("avg usage    mean clock-sweep usage count of this table's pages (0–5)") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" buffer temperature ") + "  " +
+		mu("this table's pages grouped by clock-sweep usage count") + "\n")
+	b.WriteString("    " + sw(usageHeatStyle(0)) + " " + sw(usageHeatStyle(2)) + " " + sw(usageHeatStyle(5)) +
+		"  " + mu("cold (0) → hot (5): each access bumps a page's count up to 5;") + "\n")
+	b.WriteString("    " + mu("           the clock-sweep eviction scan ticks it back down. A page is") + "\n")
+	b.WriteString("    " + mu("           only evicted once it reaches 0, so count = reuse / staying power.") + "\n")
+	b.WriteString("    " + sw(styleDirty) + "  " + mu("dirty        the modified-but-unflushed slice of each band — pages the") + "\n")
+	b.WriteString("    " + mu("                 checkpointer still owes a write; lots of hot+dirty = write pressure") + "\n")
+	b.WriteString("    " + mu("each row's bar is scaled to the table's busiest band, so band sizes compare.") + "\n")
 
 	rendered := strings.Count(b.String(), "\n")
 	for i := rendered; i < height; i++ {
@@ -134,7 +360,44 @@ func (m *Model) renderBufferSummary(s *screen) (string, map[uint32]int) {
 	lines = append(lines, summaryRow("shared_buffers", sbBar))
 	lines = append(lines, summaryStats(sbStats))
 
+	// Temperature bar: the cluster-wide clock-sweep usagecount distribution.
+	// Cold (0) pages are evictable, hot (5) pages are burned in; a bar dominated
+	// by cold means shared_buffers is bigger than the working set.
+	if line := m.bufferTemperatureLines(sum, barW); line != "" {
+		lines = append(lines, line)
+	}
+
 	return strings.Join(lines, "\n"), rankBuffersByOID(s.items)
+}
+
+// bufferTemperatureLines renders the "temperature" summary bar + stats line
+// from the cluster usagecount histogram, or "" when it's unavailable.
+func (m *Model) bufferTemperatureLines(sum *pg.BufferCacheSummary, barW int) string {
+	if len(sum.UsageCounts) == 0 {
+		return ""
+	}
+	var totBufs, totDirty, totPinned, weighted int64
+	for _, u := range sum.UsageCounts {
+		totBufs += u.Buffers
+		totDirty += u.Dirty
+		totPinned += u.Pinned
+		weighted += int64(u.Count) * u.Buffers
+	}
+	if totBufs == 0 {
+		return ""
+	}
+	blockSize := sum.TotalBytes / totBufs
+	avg := float64(weighted) / float64(totBufs)
+	cold := sum.UsageCounts[0].Buffers
+	hot := sum.UsageCounts[len(sum.UsageCounts)-1].Buffers
+	muted := styleMuted.Render
+	sw := func(style lipgloss.Style) string { return style.Render("▇") + " " }
+	stats := muted(fmt.Sprintf("avg %.1f/5  ·  ", avg)) +
+		sw(usageHeatStyle(0)) + muted(fmt.Sprintf("cold %.0f%%  ·  ", float64(cold)*100/float64(totBufs))) +
+		sw(usageHeatStyle(len(usageHeatPalette)-1)) + muted(fmt.Sprintf("hot %.0f%%  ·  ", float64(hot)*100/float64(totBufs))) +
+		sw(styleDirty) + muted(fmt.Sprintf("dirty %s  ·  pinned %d", humanize.Bytes(totDirty*blockSize), totPinned))
+	bar := renderUsageHeatBar(sum.UsageCounts, barW)
+	return summaryRow("temperature", bar) + "\n" + summaryStats(stats)
 }
 
 // summaryRow is one "  <label>  [bar]" line. label is padded so multiple

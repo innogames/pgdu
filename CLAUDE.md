@@ -82,15 +82,29 @@ Top-queries snapshots are written to `--snapshot-dir` (default
 - Reindex flow is two-step: Enter on a >5% bloated index arms `pendingReindex`,
   any next key cancels — `y`/`Y` executes (see `handleKey`).
 - Top-queries snapshots (`internal/pg/snapshots.go`): `S` dumps the raw
-  cumulative counters to disk, `L` opens `levelSnapshots`. Loading a snapshot as
-  the baseline sets `screen.statBaseSnap` (window = "since snapshot, live"); a
-  marked base (`m`) + Enter on another sets `statEndSnap` too (frozen A→B diff,
-  no live re-sampling — `loadCurrent`/`onStatementsTick` special-case it).
+  cumulative counters to disk, `L` opens `levelSnapshots` — a timeline range
+  picker whose `◀ start`/`◀ end` markers reflect the applied window (derived by
+  `appliedWindowPaths`). Enter pairs the pick with the applied start (the
+  anchor): no anchor → pick→now live (`statBaseSnap`, "since snapshot, live");
+  anchor set → time-ordered range, `statEndSnap` too when frozen (no live
+  re-sampling — `loadCurrent`/`onStatementsTick` special-case it). A pick that
+  lands as a frozen end keeps the browser open (`snapshotFrozenLoadedMsg.stay`);
+  start picks pop back to the table.
   Disk-baseline diffs use `DiffStatementsClamped`; snapshots invalidated by a
   `pg_stat_statements_info.stats_reset` after their capture are filtered out of
   the `L` browser (`onSnapshotsListed`, using the live reset from
   `listSnapshotsCmd`) rather than warned about. `D` deletes via the same
-  two-step `pendingDeleteSnap` arm as reindex.
+  two-step `pendingDeleteSnap` arm as reindex. The `L` list also carries three
+  virtual timeline anchors (sentinel paths `@now`/`@session`/`@reset` in
+  `cmds.go`, never backed by a file): "now" (live end, sized from
+  `screen.statLiveCount`), "session start" (restores the preserved
+  `statSessionBaseline`/`statSessionStart` in-memory window — captured once on
+  the first live load, untouched by `R`), and "since last reset" (cumulative,
+  dated from the live `statLiveReset`). The render loop (`renderStatementSnapshots`)
+  and `loadSelectedSnapshot`/`snapTime` special-case anchors: they carry no
+  server/db identity (never "other server/db"), `@session` can only diff
+  against `@now`, and `@session` never acts as a pairing anchor (the default
+  window isn't a "pick").
 - The top-queries table's columns come from a single registry
   (`stmtColumnRegistry` in `queries_columns.go`): each
   `stmtColDesc` carries an id, kind, `defaultOn`, an `available(ctx)` gate

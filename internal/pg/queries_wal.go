@@ -10,6 +10,13 @@ package pg
 // bytes. A brand-new cluster with less than $1 of WAL yields start='0/0',
 // which pg_get_wal_stats rejects as "not available" — acceptable since any
 // server old enough to have pg_walinspect installed has long passed that.
+//
+// This is the fallback form, used only when the privileged sqlWALWindowClamped
+// can't run (pg_ls_waldir needs pg_monitor/superuser). Clamping only at '0/0'
+// is unsafe in general: when the write head sits less than $1 into a fresh
+// segment, `cur − $1` reaches back into the previous segment, which a
+// checkpoint may already have recycled — pg_get_wal_stats then fails with
+// "requested WAL segment … has already been removed".
 const sqlWALWindow = `
 SELECT (CASE
           WHEN (cur - '0/0'::pg_lsn) > $1::numeric THEN cur - $1::numeric
@@ -17,6 +24,44 @@ SELECT (CASE
         END)::text AS start_lsn,
        cur::text AS end_lsn
 FROM   (SELECT pg_current_wal_lsn() AS cur) q
+`
+
+// sqlWALWindowClamped is the preferred window resolver: like sqlWALWindow but
+// it floors `start` at the oldest WAL segment still present on disk rather than
+// at '0/0', so the window never reaches into a segment a checkpoint already
+// recycled. The real (still-readable) segments in pg_wal are those whose name
+// is <= the current write segment; recycled/future ones carry higher names, so
+// `min(name) <= pg_walfile_name(cur)` is the oldest readable segment. Its start
+// LSN is reconstructed from the filename: name = TLI(8) || logid(8) ||
+// segidx(8) hex, and a segment's byte offset is logid·2³² + segidx·seg_size,
+// i.e. LSN '<logid>/<segidx·seg_size>'. GREATEST keeps the naive window when
+// older segments are still present and only lifts the floor when they're gone.
+// Needs pg_ls_waldir (pg_monitor / superuser); the caller falls back to
+// sqlWALWindow on a privilege error.
+const sqlWALWindowClamped = `
+WITH cur AS (
+  SELECT pg_current_wal_lsn() AS lsn,
+         pg_size_bytes(current_setting('wal_segment_size')) AS seg
+),
+oldest AS (
+  SELECT min(name) AS nm
+  FROM   pg_ls_waldir(), cur
+  WHERE  name ~ '^[0-9A-F]{24}$'
+    AND  name <= pg_walfile_name(cur.lsn)
+)
+SELECT GREATEST(
+         CASE WHEN (cur.lsn - '0/0'::pg_lsn) > $1::numeric
+              THEN cur.lsn - $1::numeric
+              ELSE '0/0'::pg_lsn
+         END,
+         CASE WHEN oldest.nm IS NULL THEN '0/0'::pg_lsn
+              ELSE (substr(oldest.nm, 9, 8) || '/' ||
+                    to_hex(('x' || substr(oldest.nm, 17, 8))::bit(32)::int::bigint * cur.seg)
+                   )::pg_lsn
+         END
+       )::text AS start_lsn,
+       cur.lsn::text AS end_lsn
+FROM   cur, oldest
 `
 
 // sqlWALSummary is the header block: current insert/flush position, the

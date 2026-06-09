@@ -17,12 +17,13 @@ func TestMainTable(t *testing.T) {
 		"MERGE INTO inventory t USING src s ON t.id = s.id": "inventory",
 		"TABLE game_config":                                 "game_config",
 		// ONLY is a no-inherit modifier, not the relation (FK/PK check queries).
-		`SELECT 1 FROM ONLY "public"."game_player" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x`: `"public"."game_player"`,
+		`SELECT 1 FROM ONLY "public"."game_player" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x`: `public.game_player`,
 		"UPDATE ONLY parts SET a = $1 WHERE id = $2":                                                          "parts",
 		"DELETE FROM ONLY parts WHERE id = $1":                                                                "parts",
-		// Quoted / schema-qualified identifiers survive intact.
-		`SELECT 1 FROM "MixedCase"`:        `"MixedCase"`,
-		"SELECT 1 FROM myschema.\"Tbl\" x": `myschema."Tbl"`,
+		// Quoted identifiers are unwrapped: the bare name is what the label and
+		// to_regclass want, not the quoted literal.
+		`SELECT 1 FROM "MixedCase"`:        `MixedCase`,
+		"SELECT 1 FROM myschema.\"Tbl\" x": `myschema.Tbl`,
 		// No useful table to point at.
 		"VALUES ($1), ($2)":                    "",
 		"SELECT 1":                             "",

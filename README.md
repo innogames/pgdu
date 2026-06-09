@@ -1,15 +1,13 @@
-# pgdu
+# pgdu — PostgreSQL Deep Utility
 
 [![CI](https://github.com/innogames/pgdu/actions/workflows/ci.yml/badge.svg)](https://github.com/innogames/pgdu/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/innogames/pgdu)](https://github.com/innogames/pgdu/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-PostgreSQL disk usage explorer — an ncdu-style TUI for browsing what's
-taking up space in your database.
-
-Drill from databases into schemas, tables, partitions, indexes and
-columns; sort by size, bloat, or buffer hit ratio; spot the relations
-worth reindexing or pruning.
+An ncdu-style TUI for deep inspection of your PostgreSQL database — drill
+from databases into schemas, tables, partitions, indexes, columns, pages,
+and tuples; analyse query performance, WAL activity, and index health; inspect
+what's living in `shared_buffers`.
 
 ### Disk usage
 

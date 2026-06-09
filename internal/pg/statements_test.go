@@ -356,6 +356,62 @@ func TestBuildSampleCall(t *testing.T) {
 	}
 }
 
+func TestRewriteExtractFieldParams(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "no extract unchanged",
+			query: "SELECT * FROM t WHERE id = $1",
+			want:  "SELECT * FROM t WHERE id = $1",
+		},
+		{
+			// The real query from the bug report: several EXTRACT fields, plus a
+			// genuine value parameter that must be left untouched.
+			name:  "multiple extract fields, real params preserved",
+			query: "SELECT x FROM t WHERE extract($2 FROM log_date) >= $3 AND extract($4 FROM log_date) < least($5, extract($6 FROM localtimestamp)) AND player_id = $1",
+			want:  "SELECT x FROM t WHERE extract($2, log_date) >= $3 AND extract($4, log_date) < least($5, extract($6, localtimestamp)) AND player_id = $1",
+		},
+		{
+			name:  "case and whitespace insensitive",
+			query: "SELECT EXTRACT(  $1   FROM ts)",
+			want:  "SELECT extract($1, ts)",
+		},
+		{
+			// A non-placeholder field (no normalization happened) is left alone.
+			name:  "literal field untouched",
+			query: "SELECT extract(epoch FROM ts)",
+			want:  "SELECT extract(epoch FROM ts)",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := rewriteExtractFieldParams(c.query); got != c.want {
+				t.Errorf("rewriteExtractFieldParams()\n got: %s\nwant: %s", got, c.want)
+			}
+		})
+	}
+}
+
+func TestExtractFieldOrdinals(t *testing.T) {
+	q := "SELECT x FROM t WHERE extract($2 FROM log_date) >= $3 AND extract($4 FROM log_date) < least($5, extract($6 FROM localtimestamp)) AND player_id = $1"
+	got := ExtractFieldOrdinals(q)
+	want := []int{2, 4, 6}
+	if len(got) != len(want) {
+		t.Fatalf("ExtractFieldOrdinals() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ExtractFieldOrdinals() = %v, want %v", got, want)
+		}
+	}
+	if n := ExtractFieldOrdinals("SELECT * FROM t WHERE id = $1"); len(n) != 0 {
+		t.Errorf("ExtractFieldOrdinals(no extract) = %v, want empty", n)
+	}
+}
+
 func TestParamColumns(t *testing.T) {
 	cases := []struct {
 		name  string

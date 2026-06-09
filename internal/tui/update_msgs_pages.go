@@ -1,0 +1,218 @@
+package tui
+
+import (
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+func (m *Model) onHeapPagesLoaded(msg heapPagesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelHeapPages)
+	if s == nil || s.table.OID != msg.table.OID || s.heapWindowStart != msg.start {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	}
+	s.err = msg.err
+	s.heapPageCount = msg.totalPages
+	s.items = s.items[:0]
+	for _, p := range msg.pages {
+		s.items = append(s.items, heapPageToItem(p))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onTupleRowLoaded(msg tupleRowLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelTupleRow)
+	if s == nil || s.table.OID != msg.tableOID || s.tupleCtid != msg.ctid {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, c := range msg.cells {
+		s.items = append(s.items, tupleCellToItem(c))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onToastValueLoaded(msg toastValueLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelTupleRow)
+	if s == nil || s.table.OID != msg.tableOID || s.toastChunkID != msg.chunkID {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, c := range msg.cells {
+		s.items = append(s.items, tupleCellToItem(c))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onHeapTuplesLoaded(msg heapTuplesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelHeapTuples)
+	if s == nil || s.table.OID != msg.tableOID || s.heapPageBlkno != msg.blkno {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	}
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, t := range msg.tuples {
+		s.items = append(s.items, heapTupleToItem(t))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onRelationsLoaded(msg relationsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelRelations)
+	if s == nil || s.db != msg.db || s.schema != msg.schema {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, r := range msg.rels {
+		s.items = append(s.items, relationToItem(r))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onIndexPagesLoaded(msg indexPagesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexPages)
+	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	}
+	s.err = msg.err
+	s.heapPageCount = msg.totalPages
+	s.items = s.items[:0]
+	for _, p := range msg.pages {
+		s.items = append(s.items, indexPageToItem(p))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onIndexTuplesLoaded(msg indexTuplesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexTuples)
+	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno || s.indexPageType != msg.pageType {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	}
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, t := range msg.tuples {
+		s.items = append(s.items, indexTupleToItem(t))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onWALOverviewLoaded(msg walOverviewLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelWAL)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
+	}
+	s.err = msg.err
+	s.walStart = msg.start
+	s.walEnd = msg.end
+	s.items = s.items[:0]
+	for _, st := range msg.stats {
+		s.items = append(s.items, walRmgrToItem(st))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onWALSummaryLoaded(msg walSummaryLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelWAL)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	// Summary failure is non-fatal: the header sources (pg_ls_waldir /
+	// pg_stat_wal) need a monitoring role the user may lack even when the
+	// pg_walinspect rmgr list works. A missing-extension error here is
+	// already covered by onWALOverviewLoaded's blocking prompt, so swallow it.
+	if asMissingExt(msg.err) != nil {
+		return nil
+	}
+	if msg.err != nil {
+		s.walSummaryErr = msg.err
+		s.walSummary = nil
+		return nil
+	}
+	sum := msg.summary
+	sum.StartLSN = s.walStart
+	sum.EndLSN = s.walEnd
+	sum.WindowBytes = walWindowBytes
+	s.walSummary = &sum
+	s.walSummaryErr = nil
+	return nil
+}
+
+func (m *Model) onWALRecordsLoaded(msg walRecordsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelWALRecords)
+	if s == nil || s.db != msg.db || s.walRmgr != msg.rmgr {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		s.walRecTypeStats = nil
+		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
+	}
+	s.err = msg.err
+	s.walRecTypeStats = msg.typeStats
+	s.items = s.items[:0]
+	for _, r := range msg.records {
+		s.items = append(s.items, walRecordToItem(r))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onWALBlocksLoaded(msg walBlocksLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelWALBlocks)
+	if s == nil || s.db != msg.db || s.walRecLSN != msg.recLSN {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
+	}
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, b := range msg.blocks {
+		s.items = append(s.items, walBlockToItem(b))
+	}
+	m.applySort(s)
+	return nil
+}

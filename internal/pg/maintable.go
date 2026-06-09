@@ -127,7 +127,10 @@ func cleanTable(toks []string, i int) string {
 	if strings.EqualFold(toks[i], "only") {
 		return cleanTable(toks, i+1)
 	}
-	return toks[i]
+	// Drop the double quotes Postgres uses for case/keyword-sensitive identifiers
+	// ("server", "schema"."table") — the label and to_regclass want the bare name,
+	// not the quoted literal. The quote chars survive sqlWords as part of the token.
+	return strings.ReplaceAll(toks[i], `"`, "")
 }
 
 // indexOfAfter returns the position of the first token equal (case-insensitively)

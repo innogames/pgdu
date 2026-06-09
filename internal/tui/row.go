@@ -347,6 +347,7 @@ const (
 	bufColTotal    = 11
 	bufColCached   = 8 // "100.0%"
 	bufColHit      = 8
+	bufColDirty    = 10 // dirty bytes — usually small or "0 B"
 )
 
 // renderBufferList draws the shared-buffer occupancy view as a column table:
@@ -408,12 +409,14 @@ func renderBufferHeader(sort sortMode, sortDesc bool, barW int) string {
 	cachedLabel := mark("cached", sort == sortByCached)
 	hitLabel := mark("hit", sort == sortByHitRatio)
 	nameLabel := mark("table", sort == sortByName)
-	// Pad: cursor (2) + bar slot (barW+2) + "  " then columns.
+	// Pad: cursor (2) + bar slot (barW+2) + "  " then columns. "dirty" carries
+	// no sort arrow — it's informational (no sortMode), unlike the others.
 	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
 		padRight(bufLabel, bufColBuffered) + "  " +
 		padRight(totalLabel, bufColTotal) + "  " +
 		padRight(cachedLabel, bufColCached) + "  " +
 		padRight(hitLabel, bufColHit) + "  " +
+		padRight("dirty", bufColDirty) + "  " +
 		nameLabel
 	return styleMuted.Render(line)
 }
@@ -477,10 +480,15 @@ func renderBufferRow(it item, st pg.TableBufferStat, maxSize int64, barW int, se
 		pct := hr * 100
 		hitStr = percentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct))
 	}
+	dirtyStr := styleMuted.Render("—")
+	if st.DirtyBytes > 0 {
+		dirtyStr = styleDirty.Render(humanize.Bytes(st.DirtyBytes))
+	}
 	return cursor + bar + "  " +
 		padRight(bufStr, bufColBuffered) + "  " +
 		padRight(totStr, bufColTotal) + "  " +
 		padRight(cachedStr, bufColCached) + "  " +
 		padRight(hitStr, bufColHit) + "  " +
+		padRight(dirtyStr, bufColDirty) + "  " +
 		name
 }

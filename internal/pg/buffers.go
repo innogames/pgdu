@@ -111,9 +111,40 @@ func (c *Client) TableBufferStats(ctx context.Context, db, schema string) ([]Tab
 	return collect(ctx, pool, fmt.Sprintf("table buffer stats in %q.%q", db, schema), sqlBufferStats, []any{schema},
 		func(row pgx.CollectableRow) (TableBufferStat, error) {
 			s := TableBufferStat{DB: db, Schema: schema}
-			err := row.Scan(&s.OID, &s.Schema, &s.Name, &s.BufferedBytes, &s.TotalBytes, &s.Hits, &s.Reads)
+			err := row.Scan(&s.OID, &s.Schema, &s.Name, &s.BufferedBytes, &s.TotalBytes,
+				&s.Hits, &s.Reads, &s.DirtyBytes, &s.UsageAvg)
 			return s, err
 		})
+}
+
+// TableBufferUsageCounts returns the per-table clock-sweep temperature
+// histogram (usagecount 0..5 → buffers/dirty/pinned) for one relation, summing
+// its heap, toast and index filenodes. Always six rows (empty buckets included)
+// so the caller can render a stable bar. Also returns the cluster block_size so
+// the caller can express the (page-counted) histogram in bytes — and recompute
+// the buffered/dirty footprint from this same fresh snapshot, keeping it
+// consistent with the histogram rather than the older list-load snapshot.
+// Powers the buffer-detail drill-down.
+func (c *Client) TableBufferUsageCounts(ctx context.Context, db string, oid uint32) ([]BufferUsageCount, int64, error) {
+	if err := c.EnsureBufferCache(ctx, db); err != nil {
+		return nil, 0, err
+	}
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return nil, 0, err
+	}
+	var blockSize int64
+	if err := pool.QueryRow(ctx, "SELECT current_setting('block_size')::bigint").Scan(&blockSize); err != nil {
+		return nil, 0, fmt.Errorf("block size in %q: %w", db, err)
+	}
+	counts, err := collect(ctx, pool, fmt.Sprintf("table buffer usage counts for oid %d in %q", oid, db),
+		sqlBufferTableUsageCounts, []any{oid},
+		func(row pgx.CollectableRow) (BufferUsageCount, error) {
+			var u BufferUsageCount
+			err := row.Scan(&u.Count, &u.Buffers, &u.Dirty, &u.Pinned)
+			return u, err
+		})
+	return counts, blockSize, err
 }
 
 // BufferCacheSummary returns the cluster-wide shared_buffers occupancy split
@@ -129,6 +160,16 @@ func (c *Client) BufferCacheSummary(ctx context.Context, db string) (BufferCache
 	var s BufferCacheSummary
 	if err := pool.QueryRow(ctx, sqlBufferCacheSummary).Scan(&s.TotalBytes, &s.ThisDBBytes, &s.OtherDBBytes); err != nil {
 		return BufferCacheSummary{}, fmt.Errorf("buffer cache summary: %w", err)
+	}
+	// The temperature histogram is supplementary — if pg_buffercache_usage_counts()
+	// is somehow unavailable, keep the occupancy summary rather than failing it.
+	if counts, err := collect(ctx, pool, "buffer usage counts", sqlBufferUsageCounts, nil,
+		func(row pgx.CollectableRow) (BufferUsageCount, error) {
+			var u BufferUsageCount
+			err := row.Scan(&u.Count, &u.Buffers, &u.Dirty, &u.Pinned)
+			return u, err
+		}); err == nil {
+		s.UsageCounts = counts
 	}
 	return s, nil
 }

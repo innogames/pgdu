@@ -19,10 +19,20 @@ func (c *Client) EnsureWALInspect(ctx context.Context, db string) error {
 // WALWindow resolves the [start, end] LSN window the inspector analyses: the
 // most recent windowBytes of WAL up to the current write position. Built-ins
 // only, so it works without pg_walinspect.
+//
+// It first tries the segment-aware sqlWALWindowClamped, which floors the start
+// at the oldest segment still on disk so the window never names a recycled
+// segment. That needs pg_ls_waldir (pg_monitor / superuser); a privilege error
+// there is non-fatal — we fall back to the '0/0'-clamped sqlWALWindow, which
+// can still trip "segment already removed" downstream but is the best we can do
+// without directory access.
 func (c *Client) WALWindow(ctx context.Context, db string, windowBytes int64) (start, end string, err error) {
 	pool, err := c.PoolFor(ctx, db)
 	if err != nil {
 		return "", "", err
+	}
+	if err := pool.QueryRow(ctx, sqlWALWindowClamped, windowBytes).Scan(&start, &end); err == nil {
+		return start, end, nil
 	}
 	if err := pool.QueryRow(ctx, sqlWALWindow, windowBytes).Scan(&start, &end); err != nil {
 		return "", "", fmt.Errorf("resolve wal window in %q: %w", db, err)

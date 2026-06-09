@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -23,6 +24,7 @@ const (
 	DiagBytes                               // byte count: rendered via humanize.Bytes when it is the bar col
 	DiagPercentGraded                       // 0–100 % where higher is better: cell text graded green→red (e.g. cache hit ratio)
 	DiagCostGraded                          // numeric, lower is better: 0 = green, nonzero graded green→red relative to the per-column window max
+	DiagCmdType                             // statement command-type tag (QueryKind): green for read-only S, red for writing/locking ones
 )
 
 // DiagColumn describes one column of a diagnostic result set.
@@ -61,14 +63,9 @@ func (c *Client) RunDiagnostic(ctx context.Context, db string, d Diagnostic) (*D
 	}
 	defer rows.Close()
 
-	// Column metadata from the field descriptions sent by the server.
-	fds := rows.FieldDescriptions()
-	cols := make([]DiagColumn, len(fds))
-	for i, fd := range fds {
-		cols[i] = DiagColumn{
-			Name: fd.Name,
-			Kind: colKindFromName(fd.Name),
-		}
+	cols, resultRows, _, err := scanDiagRows(rows, 0)
+	if err != nil {
+		return nil, fmt.Errorf("run diagnostic %q: %w", d.Key, err)
 	}
 
 	// Resolve bar column from the Diagnostic definition.
@@ -95,11 +92,32 @@ func (c *Client) RunDiagnostic(ctx context.Context, db string, d Diagnostic) (*D
 		sortCol = barCol
 	}
 
-	var resultRows [][]DiagCell
+	return &DiagResult{Columns: cols, Rows: resultRows, BarCol: barCol, SortCol: sortCol}, nil
+}
+
+// scanDiagRows drains rows into generic column/cell form: column metadata comes
+// from the server's field descriptions (kind inferred by name, promoted to
+// numeric on the first numeric value seen), each value goes through
+// formatDiagValue. When maxRows > 0 it stops after that many rows and reports
+// truncated=true if more were waiting. The caller owns rows.Close().
+func scanDiagRows(rows pgx.Rows, maxRows int) (cols []DiagColumn, out [][]DiagCell, truncated bool, err error) {
+	fds := rows.FieldDescriptions()
+	cols = make([]DiagColumn, len(fds))
+	for i, fd := range fds {
+		cols[i] = DiagColumn{
+			Name: fd.Name,
+			Kind: colKindFromName(fd.Name),
+		}
+	}
+
 	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			return nil, fmt.Errorf("run diagnostic %q: scan row: %w", d.Key, err)
+		if maxRows > 0 && len(out) >= maxRows {
+			truncated = true
+			break
+		}
+		vals, verr := rows.Values()
+		if verr != nil {
+			return nil, nil, false, fmt.Errorf("scan row: %w", verr)
 		}
 		cells := make([]DiagCell, len(vals))
 		for i, v := range vals {
@@ -116,12 +134,16 @@ func (c *Client) RunDiagnostic(ctx context.Context, db string, d Diagnostic) (*D
 				cols[i].Kind = DiagInt
 			}
 		}
-		resultRows = append(resultRows, cells)
+		out = append(out, cells)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("run diagnostic %q: %w", d.Key, err)
+	// Only surface iteration errors when we drained the cursor; an early break
+	// for maxRows leaves rows.Err() unset, which is the truncated case.
+	if !truncated {
+		if err := rows.Err(); err != nil {
+			return nil, nil, false, err
+		}
 	}
-	return &DiagResult{Columns: cols, Rows: resultRows, BarCol: barCol, SortCol: sortCol}, nil
+	return cols, out, truncated, nil
 }
 
 // colKindFromName derives a column kind from naming conventions so the

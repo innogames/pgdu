@@ -83,6 +83,36 @@ func bufferSliceStyle(i int) lipgloss.Style {
 	return bufferSlicePalette[i%len(bufferSlicePalette)]
 }
 
+// usageHeatPalette is the clock-sweep "temperature" gradient for buffer
+// usagecounts 0..5: cold blue (evictable) through cyan/green to hot orange/red
+// (frequently reused, burned in). Index == usagecount. Used by the buffer
+// temperature bars in the summary and the per-table detail view.
+var usageHeatPalette = []lipgloss.Style{
+	lipgloss.NewStyle().Foreground(lipgloss.Color("27")),  // 0 — cold blue
+	lipgloss.NewStyle().Foreground(lipgloss.Color("39")),  // 1 — cyan
+	lipgloss.NewStyle().Foreground(lipgloss.Color("79")),  // 2 — teal-green
+	lipgloss.NewStyle().Foreground(lipgloss.Color("220")), // 3 — yellow
+	lipgloss.NewStyle().Foreground(lipgloss.Color("208")), // 4 — orange
+	lipgloss.NewStyle().Foreground(lipgloss.Color("203")), // 5 — hot red
+}
+
+// styleDirty marks the dirty (modified-in-memory, awaiting flush) portion of a
+// buffer bar — a bright magenta that reads distinctly against the heat gradient.
+var styleDirty = lipgloss.NewStyle().Foreground(lipgloss.Color("201"))
+
+// usageHeatStyle returns the temperature colour for a usagecount, clamped to
+// the palette range so an out-of-range count (shouldn't happen given
+// BM_MAX_USAGE_COUNT=5) still renders.
+func usageHeatStyle(count int) lipgloss.Style {
+	switch {
+	case count < 0:
+		count = 0
+	case count >= len(usageHeatPalette):
+		count = len(usageHeatPalette) - 1
+	}
+	return usageHeatPalette[count]
+}
+
 // percentStyle picks a colour for a "higher is better" percentage value:
 // green near 100, cyan in the healthy band, yellow as a warning, red below.
 // Used for hit ratio, cached %, and shared_buffers occupancy so the eye
@@ -134,6 +164,17 @@ func costStyleRelative(v, max float64) lipgloss.Style {
 	default:
 		return lipgloss.NewStyle().Foreground(colorCostLow)
 	}
+}
+
+// cmdTypeStyle colours the top-queries `T` command-type tag: green for a plain
+// read-only SELECT ("S"), red for everything else — writes (I/U/D/M), locking
+// SELECTs (SL/L) and transaction-control (T) — so a glance separates the queries
+// that only read from those that mutate or take locks.
+func cmdTypeStyle(tag string) lipgloss.Style {
+	if tag == "S" {
+		return lipgloss.NewStyle().Foreground(colorOK)
+	}
+	return lipgloss.NewStyle().Foreground(colorBloat)
 }
 
 // blkPerRowStyle grades blocks-per-row in the query-detail view. Unlike the

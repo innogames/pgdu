@@ -228,10 +228,21 @@ type TableBufferStat struct {
 	Schema        string
 	Name          string
 	OID           uint32
-	BufferedBytes int64 // pages in shared_buffers * block_size
-	TotalBytes    int64 // pg_total_relation_size(oid), for "% cached" context
-	Hits          int64 // heap_blks_hit + idx_blks_hit
-	Reads         int64 // heap_blks_read + idx_blks_read
+	BufferedBytes int64   // pages in shared_buffers * block_size
+	TotalBytes    int64   // pg_total_relation_size(oid), for "% cached" context
+	Hits          int64   // heap_blks_hit + idx_blks_hit
+	Reads         int64   // heap_blks_read + idx_blks_read
+	DirtyBytes    int64   // buffered pages flagged isdirty * block_size
+	UsageAvg      float64 // mean clock-sweep usagecount across this table's buffers (0..5)
+}
+
+// CachedFrac returns BufferedBytes / TotalBytes in [0,1], or -1 when the
+// table's on-disk size is unknown (zero) so callers can show "—".
+func (s TableBufferStat) CachedFrac() float64 {
+	if s.TotalBytes <= 0 {
+		return -1
+	}
+	return float64(s.BufferedBytes) / float64(s.TotalBytes)
 }
 
 // HitRatio returns hits / (hits + reads) in [0,1], or -1 when the table has
@@ -261,6 +272,22 @@ type BufferCacheSummary struct {
 	// ServerMemFreeBytes is MemFree from /proc/meminfo — strictly unallocated
 	// memory, excluding the kernel page cache. Zero when unavailable.
 	ServerMemFreeBytes int64
+	// UsageCounts is the cluster-wide clock-sweep "temperature" histogram from
+	// pg_buffercache_usage_counts(): one entry per usagecount (0 = cold/evictable,
+	// up to 5 = hot). Nil when the function is unavailable. Drives the temperature
+	// bar in the shared-buffers summary.
+	UsageCounts []BufferUsageCount
+}
+
+// BufferUsageCount is one bucket of the clock-sweep usage histogram: how many
+// shared_buffers pages currently sit at this usagecount, and how many of those
+// are dirty (modified, awaiting flush) or pinned (in use right now). Returned
+// both cluster-wide (pg_buffercache_usage_counts) and per-table.
+type BufferUsageCount struct {
+	Count   int
+	Buffers int64
+	Dirty   int64
+	Pinned  int64
 }
 
 func (b BufferCacheSummary) FreeBytes() int64 {
@@ -580,6 +607,7 @@ type DescribeIndexDef struct {
 	Def       string // pg_get_indexdef full CREATE INDEX text
 	IsPrimary bool
 	IsUnique  bool
+	Clustered bool // pg_index.indisclustered: table is CLUSTERed on this index
 }
 
 // DescribeConstraint is one row from pg_constraint in the describe-table view.

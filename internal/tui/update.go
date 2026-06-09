@@ -39,6 +39,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onBufferStatsLoaded(msg)
 	case bufferSummaryLoadedMsg:
 		return m, m.onBufferSummaryLoaded(msg)
+	case bufferDetailLoadedMsg:
+		return m, m.onBufferDetailLoaded(msg)
 	case columnsLoadedMsg:
 		return m, m.onColumnsLoaded(msg)
 	case bloatFilledMsg:
@@ -85,6 +87,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onStatementExplainLoaded(msg)
 	case statementSamplesLoadedMsg:
 		return m, m.onStatementSamplesLoaded(msg)
+	case statementResultLoadedMsg:
+		return m, m.onStatementResultLoaded(msg)
 	case snapshotSavedMsg:
 		return m, m.onSnapshotSaved(msg)
 	case snapshotsListedMsg:

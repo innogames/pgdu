@@ -10,6 +10,29 @@ import (
 	"pgdu/internal/pg"
 )
 
+// renderDiagQuery prints the executed SQL for the current diagnostic so it can
+// be selected and copied out of the terminal. It replaces the result table
+// while open (s key on levelDiagnosticResult); any key dismisses it. The query
+// text is shown verbatim (server-side formatting) padded to `height` lines so
+// the help row stays pinned to the bottom.
+func (m *Model) renderDiagQuery(s *screen, height int) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString("  " + styleSelected.Render(s.diag.Title+" — SQL") + mu("  ·  press ") +
+		styleBadge.Render("s") + mu(" or any key to dismiss") + "\n\n")
+
+	used := 2 // the two lines written above
+	for line := range strings.SplitSeq(strings.Trim(s.diag.SQL, "\n"), "\n") {
+		b.WriteString("  " + line + "\n")
+		used++
+	}
+	for i := used; i < height; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // renderDescribe draws the \d-style description panel for levelDescribe. It
 // is a plain-text free-form view (no bars) padded to `height` lines so the
 // help row stays pinned to the bottom. Switches on s.describe.Kind to render
@@ -85,6 +108,9 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 					badges += " " + styleBadge.Render("primary")
 				} else if idx.IsUnique {
 					badges += " " + styleBadge.Render("unique")
+				}
+				if idx.Clustered {
+					badges += " " + styleBadge.Render("clustered")
 				}
 				b.WriteString("    " + idx.Name + badges + "\n")
 				b.WriteString("      " + mu(truncLine(idx.Def)) + "\n")
@@ -439,6 +465,10 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			// green, worst-in-window red. Same selected-row suppression.
 			if costGraded && cell.HasNum && !selected {
 				display = costStyleRelative(cell.Num, costMax[i]).Render(display)
+			}
+			// Command-type tag: green for read-only S, red for writing/locking ones.
+			if i < nCols && cols[i].Kind == pg.DiagCmdType && !selected {
+				display = cmdTypeStyle(cell.Display).Render(display)
 			}
 
 			var rendered string

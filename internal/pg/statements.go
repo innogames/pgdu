@@ -3,9 +3,12 @@ package pg
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // EnsureStatements makes sure pg_stat_statements is installed in db. Mirrors
@@ -430,7 +433,11 @@ func (c *Client) ExplainGeneric(ctx context.Context, db, query string) (string, 
 	}
 	defer conn.Release()
 
-	sql := "BEGIN READ ONLY;\nEXPLAIN (GENERIC_PLAN, FORMAT TEXT) " + query + ";\nROLLBACK;"
+	// Rewrite EXTRACT($n FROM …) pseudo-parameters to the bindable function-call
+	// form; otherwise GENERIC_PLAN fails to parse the verbatim normalized text
+	// (see rewriteExtractFieldParams). The remaining $n stay placeholders for
+	// GENERIC_PLAN to plan without values.
+	sql := "BEGIN READ ONLY;\nEXPLAIN (GENERIC_PLAN, FORMAT TEXT) " + rewriteExtractFieldParams(query) + ";\nROLLBACK;"
 	results, err := conn.Conn().PgConn().Exec(ctx, sql).ReadAll()
 	if err != nil {
 		return "", fmt.Errorf("explain in %q: %w", db, err)
@@ -515,6 +522,38 @@ func (c *Client) ExplainLiteral(ctx context.Context, db, query string) (string, 
 	return strings.Join(lines, "\n"), nil
 }
 
+// RunReadOnlyQuery executes a fully-literal query (a sample call where the $n
+// placeholders have already been substituted) and returns its rows in the
+// generic column/row form the TUI renderer uses. Like ExplainAnalyze it
+// *executes* the query, so callers must restrict it to read-only statements
+// (ReadOnlyQuery). It runs inside a READ ONLY transaction that always rolls
+// back — defence-in-depth on top of that gate. At most maxRows rows are
+// returned; the bool reports whether more were waiting (the result was
+// truncated).
+func (c *Client) RunReadOnlyQuery(ctx context.Context, db, query string, maxRows int) (*DiagResult, bool, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return nil, false, err
+	}
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, false, fmt.Errorf("execute query in %q: %w", db, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, query)
+	if err != nil {
+		return nil, false, fmt.Errorf("execute query in %q: %w", db, err)
+	}
+	defer rows.Close()
+
+	cols, resultRows, truncated, err := scanDiagRows(rows, maxRows)
+	if err != nil {
+		return nil, false, fmt.Errorf("execute query in %q: %w", db, err)
+	}
+	return &DiagResult{Columns: cols, Rows: resultRows, BarCol: -1, SortCol: -1}, truncated, nil
+}
+
 // QualstatsExampleQuery returns one real example query for queryID — the
 // normalized statement with real constants spliced back in, as reconstructed by
 // pg_qualstats from the values it sampled. Returns "" (not an error) when
@@ -562,6 +601,41 @@ func (c *Client) QualstatsSamples(ctx context.Context, db string, queryID int64)
 	return out, nil
 }
 
+// extractFieldRe matches an EXTRACT(field FROM source) expression whose field
+// slot is a $n placeholder. pg_stat_statements normalizes *every* constant to a
+// $n, including the EXTRACT field keyword ("epoch", "year", …) — but in the
+// SQL grammar that slot is a field identifier / string literal, not a bind
+// parameter, so the verbatim normalized text ("extract($2 FROM log_date)") is
+// neither PREPARE-able nor EXPLAIN-able (both fail with "syntax error at or near
+// $n"). The pattern is case-insensitive and tolerates whitespace; it captures the
+// ordinal so callers can fill that placeholder with a real field literal.
+var extractFieldRe = regexp.MustCompile(`(?i)\bextract\s*\(\s*\$(\d+)\s+from\b`)
+
+// rewriteExtractFieldParams turns each EXTRACT($n FROM source) back into a form
+// PostgreSQL will parse with the $n still a bindable parameter, by switching the
+// SQL-keyword syntax to the equivalent function-call form extract($n, source)
+// (the SQL-standard EXTRACT maps to pg_catalog.extract(text, …) since PG14). This
+// keeps the placeholder numbering gap-free — $n stays $n — so inferred parameter
+// types and sampled values still map back to the original query by ordinal.
+func rewriteExtractFieldParams(query string) string {
+	return extractFieldRe.ReplaceAllString(query, "extract($$${1},")
+}
+
+// ExtractFieldOrdinals returns the $n ordinals that sit in the field slot of an
+// EXTRACT(field FROM source) expression in a normalized query. Those placeholders
+// are not real bind parameters (see extractFieldRe), so BuildSampleCall must fill
+// them with a valid bare field literal rather than a synthesized typed value.
+func ExtractFieldOrdinals(query string) []int {
+	matches := extractFieldRe.FindAllStringSubmatch(query, -1)
+	var out []int
+	for _, m := range matches {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // InferParams discovers the types of a normalized query's $n placeholders by
 // PREPAREing it and reading pg_prepared_statements.parameter_types. Best-effort:
 // utility statements and queries whose text was truncated by
@@ -582,7 +656,10 @@ func (c *Client) InferParams(ctx context.Context, db, query string) ([]ParamType
 	// against a leftover from a prior aborted call on the same pooled conn.
 	const name = "pgdu_infer_params"
 	_, _ = conn.Exec(ctx, "DEALLOCATE "+name)
-	if _, err := conn.Exec(ctx, "PREPARE "+name+" AS "+query); err != nil {
+	// EXTRACT($n FROM …) pseudo-parameters would make PREPARE fail with a syntax
+	// error; rewrite them to the bindable function-call form first (ordinals are
+	// preserved, so the returned ParamType ordinals still match the original $n).
+	if _, err := conn.Exec(ctx, "PREPARE "+name+" AS "+rewriteExtractFieldParams(query)); err != nil {
 		return nil, fmt.Errorf("infer parameters: %w", err)
 	}
 	defer func() { _, _ = conn.Exec(ctx, "DEALLOCATE "+name) }()

@@ -37,6 +37,10 @@ func (m *Model) pageStep() int {
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := m.top()
+	// Scope tool/level-specific bindings to the current screen so a disabled
+	// binding never matches here (key.Matches honours Enabled), letting other
+	// tools reuse the same physical key.
+	m.keys.applyContext(s)
 	// Any keypress clears the transient notice (e.g. the last export's path) so
 	// it reads as a one-shot confirmation rather than lingering state.
 	m.notice = ""
@@ -65,10 +69,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		path := m.pendingDeleteSnap
 		m.pendingDeleteSnap = ""
 		if msg.String() == "y" || msg.String() == "Y" {
-			// A deleted base/end mark would dangle; clear it.
-			if s.statMarkBase == path {
-				s.statMarkBase = ""
-			}
 			return m, m.deleteSnapshotCmd(path, m.snapshotDir, s.db)
 		}
 		return m, nil
@@ -79,6 +79,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.showColumnConfig && s.level == levelStatements {
 		return m, m.handleColumnConfigKey(s, msg)
 	}
+	// The SQL overlay (s on a diagnostic result) is modal: any key dismisses it
+	// so the underlying table bindings don't fire while it's up. Quit still quits.
+	if m.showDiagQuery {
+		if key.Matches(msg, m.keys.Quit) {
+			return m, tea.Quit
+		}
+		m.showDiagQuery = false
+		return m, nil
+	}
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
@@ -87,7 +96,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// aren't obvious — use ? to toggle a dedicated reference overlay
 		// instead of expanding the key list. Other levels keep the standard
 		// help-expansion behaviour.
-		if s.level == levelBufferTables || s.level == levelHeapPages || s.level == levelHeapTuples ||
+		if s.level == levelBufferTables || s.level == levelBufferDetail ||
+			s.level == levelHeapPages || s.level == levelHeapTuples ||
 			s.level == levelIndexPages || s.level == levelIndexTuples ||
 			s.level == levelWAL || s.level == levelWALRecords || s.level == levelWALBlocks ||
 			s.level == levelStatements || s.level == levelStatementDetail || s.level == levelSnapshots {
@@ -156,6 +166,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		s.cursor = max(s.visibleLen()-1, 0)
+	case key.Matches(msg, m.keys.ShowQuery):
+		// Pop up the executed SQL for the current diagnostic so it can be
+		// selected/copied. Enabled only on levelDiagnosticResult (applyContext),
+		// where it shadows the Sort binding on the shared "s" key.
+		if s.diag != nil {
+			m.showDiagQuery = true
+		}
 	case key.Matches(msg, m.keys.Sort):
 		m.cycleSort(s)
 	case key.Matches(msg, m.keys.ReverseSort):
@@ -170,11 +187,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Rebaseline):
 		// Restart the top-queries window: clear the baseline so the next
 		// snapshot becomes the new "since" point. Also drops any loaded disk
-		// snapshot (base→now or frozen A→B), returning to the live window.
+		// snapshot (base→now or frozen A→B) and the cumulative flag.
 		if s.level == levelStatements {
 			s.statBaseline = nil
 			s.statBaseSnap = nil
 			s.statEndSnap = nil
+			s.statCumulative = false
 			return m, m.loadCurrent()
 		}
 	case key.Matches(msg, m.keys.SaveSnapshot):
@@ -198,17 +216,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showColumnConfig = true
 			m.colCfgCursor = 0
 		}
-	case key.Matches(msg, m.keys.MarkBase):
-		// Mark/unmark the highlighted snapshot as the A-base for a frozen A→B diff.
-		if s.level == levelSnapshots {
-			if meta, ok := s.selectedSnapshot(); ok {
-				if s.statMarkBase == meta.Path {
-					s.statMarkBase = ""
-				} else {
-					s.statMarkBase = meta.Path
-				}
-			}
-		}
 	case key.Matches(msg, m.keys.DeleteSnapshot):
 		// Arm the y/n delete confirmation for the highlighted snapshot.
 		if s.level == levelSnapshots {
@@ -217,29 +224,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case key.Matches(msg, m.keys.ToggleRefresh):
-		// Pause/resume the live window's auto-refresh. Inert when refresh is
-		// disabled by config (--queries-refresh 0) — there's nothing to pause.
-		if (s.level == levelStatements || s.level == levelStatementDetail) && m.statRefresh > 0 {
-			m.statPaused = !m.statPaused
-			// Resuming restarts the self-rescheduling loop if it isn't running.
-			if !m.statPaused && !m.statTicking {
+		// Cycle the live window's auto-refresh cadence: 2s → 60s → off → 2s.
+		if s.level == levelStatements || s.level == levelStatementDetail {
+			m.cycleStatRefresh()
+			// Cycling back on restarts the self-rescheduling loop if it stopped.
+			if m.statRefresh > 0 && !m.statTicking {
 				if tick := m.statementsTick(); tick != nil {
 					m.statTicking = true
 					return m, tick
 				}
 			}
 			return m, nil
-		}
-	case key.Matches(msg, m.keys.Explain):
-		// Re-run the (non-ANALYZE) plan for the detail view's query on demand —
-		// real EXPLAIN when a pg_qualstats example is in hand, generic otherwise.
-		if s.level == levelStatementDetail && s.statDetail != nil && !s.statExplaining &&
-			pg.ExplainableQuery(s.statDetail.Query) {
-			s.statExplaining = true
-			s.statExplain = ""
-			s.statExplainErr = nil
-			s.statExplainAnalyze = false
-			return m, m.statementPlanCmd(s)
 		}
 	case key.Matches(msg, m.keys.Params):
 		// Browse the real values pg_qualstats captured for this query — only
@@ -254,6 +249,20 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.stack = append(m.stack, next)
 			return m, m.loadStatementSamplesCmd(s.db, s.statDetail.QueryID)
+		}
+	case key.Matches(msg, m.keys.Execute):
+		// Execute the detail view's query for real and show its rows as a table.
+		// Gated exactly like the EXPLAIN ANALYZE affordance (handleStatementAnalyze):
+		// read-only statements only, and only once a literal sample call exists to
+		// actually run (the normalized query has unbindable $n placeholders).
+		if s.level == levelStatementDetail && s.statDetail != nil &&
+			pg.ReadOnlyQuery(s.statDetail.Query) && s.statSampleCall != "" {
+			next := &screen{
+				level: levelStatementResult, title: "result", tool: s.tool,
+				db: s.db, statDetail: s.statDetail, diagBarCol: -1, loading: true,
+			}
+			m.stack = append(m.stack, next)
+			return m, m.loadStatementResultCmd(s.db, s.statDetail.Query, s.statSampleCall)
 		}
 	case key.Matches(msg, m.keys.Export):
 		// Write the current table/view to pgdu-<tool>-<datetime>.csv. Returns nil

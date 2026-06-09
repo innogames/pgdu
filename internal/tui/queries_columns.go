@@ -173,7 +173,7 @@ func stmtColumnRegistry() []stmtColDesc {
 		{id: colTable, name: "table", kind: pg.DiagText, defaultOn: true,
 			desc: "main table parsed from the statement (d describes it)",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return pg.DiagCell{Display: pg.MainTable(q.Query)} }},
-		{id: colType, name: "T", kind: pg.DiagText, defaultOn: true,
+		{id: colType, name: "T", kind: pg.DiagCmdType, defaultOn: true,
 			desc: "command type: S/SL/L/I/U/D/M/T",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return pg.DiagCell{Display: pg.QueryKind(q.Query)} }},
 		{id: colQuery, name: "query", kind: pg.DiagText, defaultOn: true, mandatory: true,

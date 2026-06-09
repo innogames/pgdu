@@ -40,7 +40,8 @@ const sqlDescribeIndexes = `
 SELECT i.relname,
        pg_get_indexdef(idx.indexrelid) AS def,
        idx.indisprimary,
-       idx.indisunique
+       idx.indisunique,
+       idx.indisclustered
 FROM   pg_index idx
 JOIN   pg_class i ON i.oid = idx.indexrelid
 WHERE  idx.indrelid = $1

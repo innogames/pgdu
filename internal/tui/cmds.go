@@ -10,6 +10,16 @@ import (
 	"pgdu/internal/sysmem"
 )
 
+// Synthetic sentinel paths for the two timeline anchors in the L snapshots browser.
+// They start with "@" so they can't collide with absolute file paths (which start
+// with "/"). "@now" represents the live "now" end; "@reset" represents the
+// cumulative origin (since the last pg_stat_statements reset).
+const (
+	snapNow     = "@now"
+	snapReset   = "@reset"
+	snapSession = "@session" // the in-memory baseline from when the tool was opened
+)
+
 // --- messages ---
 
 type databasesLoadedMsg struct {
@@ -54,6 +64,13 @@ type bufferSummaryLoadedMsg struct {
 	db      string
 	summary pg.BufferCacheSummary
 	err     error
+}
+type bufferDetailLoadedMsg struct {
+	db        string
+	oid       uint32
+	counts    []pg.BufferUsageCount
+	blockSize int64
+	err       error
 }
 type columnsLoadedMsg struct {
 	tableOID uint32
@@ -181,9 +198,11 @@ type snapshotBaseLoadedMsg struct {
 	err  error
 }
 type snapshotFrozenLoadedMsg struct {
-	base *pg.Snapshot
-	end  *pg.Snapshot
-	err  error
+	base       *pg.Snapshot // nil when cumulative (since-reset baseline)
+	end        *pg.Snapshot
+	cumulative bool // base is an empty map (since last reset), not a real snapshot
+	stay       bool // keep the snapshots browser open (the pick landed as the end)
+	err        error
 }
 
 // statementsTickMsg drives the self-rescheduling refresh of the top-queries
@@ -215,6 +234,12 @@ type statementSamplesLoadedMsg struct {
 	queryID int64 // matches screen.statDetail.QueryID for stale-message rejection
 	samples []pg.QualSample
 	err     error
+}
+type statementResultLoadedMsg struct {
+	query     string // matches screen.statDetail.Query for stale-message rejection
+	result    *pg.DiagResult
+	truncated bool // more rows were waiting than statementResultMaxRows
+	err       error
 }
 
 // --- commands ---
@@ -295,6 +320,13 @@ func (m *Model) loadBufferSummaryCmd(db string) tea.Cmd {
 			sum.ServerMemFreeBytes = mem.Free
 		}
 		return bufferSummaryLoadedMsg{db: db, summary: sum, err: err}
+	})
+}
+
+func (m *Model) loadBufferDetailCmd(db string, oid uint32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		counts, blockSize, err := m.client.TableBufferUsageCounts(ctx, db, oid)
+		return bufferDetailLoadedMsg{db: db, oid: oid, counts: counts, blockSize: blockSize, err: err}
 	})
 }
 
@@ -528,15 +560,23 @@ func (m *Model) loadSnapshotBaseCmd(path string) tea.Cmd {
 	})
 }
 
-// loadSnapshotFrozenCmd loads two snapshots for a frozen A→B diff (base→end).
-func (m *Model) loadSnapshotFrozenCmd(basePath, endPath string) tea.Cmd {
+// loadSnapshotFrozenCmd loads one or two snapshots for a frozen diff (base→end).
+// When basePath is snapReset the baseline is empty (cumulative since last reset)
+// and only the end snapshot is loaded from disk. stay keeps the snapshots
+// browser open after the window applies (the pick landed as the end, so the
+// user likely wants to adjust the start next).
+func (m *Model) loadSnapshotFrozenCmd(basePath, endPath string, stay bool) tea.Cmd {
 	return query(func(context.Context) tea.Msg {
+		if basePath == snapReset {
+			end, err := pg.LoadSnapshot(endPath)
+			return snapshotFrozenLoadedMsg{end: end, cumulative: true, stay: stay, err: err}
+		}
 		base, err := pg.LoadSnapshot(basePath)
 		if err != nil {
 			return snapshotFrozenLoadedMsg{err: err}
 		}
 		end, err := pg.LoadSnapshot(endPath)
-		return snapshotFrozenLoadedMsg{base: base, end: end, err: err}
+		return snapshotFrozenLoadedMsg{base: base, end: end, stay: stay, err: err}
 	})
 }
 
@@ -554,16 +594,30 @@ func (m *Model) deleteSnapshotCmd(path, dir, db string) tea.Cmd {
 }
 
 // statementsTick schedules the next top-queries re-sample, or returns nil when
-// auto-refresh is off — either disabled by config (statRefresh <= 0) or paused
-// at runtime (t key). Returning nil stops the self-rescheduling loop; a resume
-// or re-entry into the tool restarts it.
+// auto-refresh is off — disabled by config (--queries-refresh 0) or cycled off
+// at runtime (t key). Returning nil stops the self-rescheduling loop; cycling
+// refresh back on or re-entering the tool restarts it.
 func (m *Model) statementsTick() tea.Cmd {
-	if m.statRefresh <= 0 || m.statPaused {
+	if m.statRefresh <= 0 {
 		return nil
 	}
 	return tea.Tick(m.statRefresh, func(time.Time) tea.Msg {
 		return statementsTickMsg{}
 	})
+}
+
+// cycleStatRefresh steps the live-window cadence through the t-key cycle:
+// 2s (the default) → 60s → off → 2s. Any other value — a custom configured
+// interval or 0 (off) — snaps to the 2s default on the first press.
+func (m *Model) cycleStatRefresh() {
+	switch m.statRefresh {
+	case 2 * time.Second:
+		m.statRefresh = 60 * time.Second
+	case 60 * time.Second:
+		m.statRefresh = 0
+	default:
+		m.statRefresh = 2 * time.Second
+	}
 }
 
 // loadStatementSampleCmd resolves the example call to show under a query. It
@@ -598,8 +652,21 @@ func (m *Model) loadStatementSampleCmd(db string, queryID int64, queryText strin
 		// synthesized call uses constants that actually exist in the data; any
 		// ordinal it can't resolve falls back to a generic typed literal.
 		real := m.client.SampleParamValues(ctx, db, queryText, params)
+		fromData := len(real) > 0 // genuine live-table values, before the EXTRACT fills below
+		// EXTRACT($n FROM …): the field slot is not a real parameter, so fill it
+		// with a valid bare field literal ('epoch' is accepted for every temporal
+		// type EXTRACT takes) rather than a typed value — keeps the sample call
+		// parseable and runnable.
+		if ords := pg.ExtractFieldOrdinals(queryText); len(ords) > 0 {
+			if real == nil {
+				real = make(map[int]string)
+			}
+			for _, ord := range ords {
+				real[ord] = "'epoch'"
+			}
+		}
 		return statementSampleLoadedMsg{db: db, query: queryText, sample: pg.BuildSampleCall(queryText, params, real),
-			fromData: len(real) > 0, qualstats: qualstats, installable: installable}
+			fromData: fromData, qualstats: qualstats, installable: installable}
 	})
 }
 
@@ -641,5 +708,20 @@ func (m *Model) loadStatementExplainAnalyzeCmd(db, matchQuery, sampleCall string
 	return query(func(ctx context.Context) tea.Msg {
 		plan, err := m.client.ExplainAnalyze(ctx, db, sampleCall)
 		return statementExplainLoadedMsg{db: db, query: matchQuery, plan: plan, err: err, analyze: true}
+	})
+}
+
+// statementResultMaxRows caps how many rows the execute action fetches into the
+// result table — enough to eyeball a query's output without stalling the TUI on
+// a query that returns millions of rows.
+const statementResultMaxRows = 100
+
+// loadStatementResultCmd executes sampleCall (a fully literal, read-only query)
+// and returns its rows as a generic result table. matchQuery is the normalized
+// query text used only to reject stale messages — sampleCall is what executes.
+func (m *Model) loadStatementResultCmd(db, matchQuery, sampleCall string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		result, truncated, err := m.client.RunReadOnlyQuery(ctx, db, sampleCall, statementResultMaxRows)
+		return statementResultLoadedMsg{query: matchQuery, result: result, truncated: truncated, err: err}
 	})
 }
