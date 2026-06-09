@@ -524,10 +524,13 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 		s.statRows = nil
 		s.items = s.items[:0]
 		s.statWindowExecMs = 0
-		s.diagCols = statementColumns(s.statTrackPlanning)
+		descs := m.visibleStmtCols(stmtCtx{trackPlanning: s.statTrackPlanning})
+		s.stmtCols = descs
+		s.diagCols = diagColumnsFrom(descs)
 		s.diagBarCol = -1
-		s.diagSortCol = colStmtTotalMs
+		m.stmtSortColID = colTotalMs
 		s.sortDesc = true
+		m.syncStmtSort(s, descs)
 		return nil
 	}
 
@@ -539,16 +542,27 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 	} else {
 		s.statRows = pg.DiffStatements(s.statBaseline, msg.stats)
 	}
-	items, windowMs := buildStatementItems(s.statRows, s.statTrackPlanning)
-	s.statWindowExecMs = windowMs
-	s.diagCols = statementColumns(s.statTrackPlanning)
-	s.diagBarCol = -1
-	s.items = items
-	s.diagMetricsDirty = true
-	// Preserve the user's chosen sort column/direction across refreshes (set on
-	// the first/baseline load); applySort re-orders to match.
-	m.applySort(s)
+	// rebuildStatementItems preserves the user's chosen sort column (tracked by id)
+	// and the current column visibility across refreshes.
+	m.rebuildStatementItems(s)
 	return nil
+}
+
+// rebuildStatementItems regenerates the top-queries table from the already-fetched
+// window deltas (s.statRows) for the current column-visibility set and
+// track_planning state — no DB round-trip. Used by every load site and by the C
+// column-config toggles so the columns, cells, footer and sort stay consistent.
+func (m *Model) rebuildStatementItems(s *screen) {
+	items, descs, windowMs, total := m.buildStatementItems(s.statRows, s.statTrackPlanning)
+	s.items = items
+	s.stmtCols = descs
+	s.diagCols = diagColumnsFrom(descs)
+	s.statWindowExecMs = windowMs
+	s.diagTotalRow = total
+	s.diagBarCol = -1
+	s.diagMetricsDirty = true
+	m.syncStmtSort(s, descs)
+	m.applySort(s)
 }
 
 // onStatementsTick keeps the live window fresh. It re-samples only while the
@@ -689,15 +703,9 @@ func (m *Model) onSnapshotFrozenLoaded(msg snapshotFrozenLoadedMsg) tea.Cmd {
 // loaded snapshots. Split out so loadCurrent can rebuild on a Refresh without DB.
 func (m *Model) populateFrozenWindow(st *screen) {
 	st.statRows = pg.DiffStatementsClamped(st.statBaseSnap.BaselineMap(), st.statEndSnap.Stats)
-	items, windowMs := buildStatementItems(st.statRows, st.statTrackPlanning)
-	st.statWindowExecMs = windowMs
-	st.diagCols = statementColumns(st.statTrackPlanning)
-	st.diagBarCol = -1
-	st.items = items
-	st.diagMetricsDirty = true
+	m.rebuildStatementItems(st)
 	st.loading = false
 	st.loaded = true
-	m.applySort(st)
 }
 
 // popToStatements unwinds the screen stack back to the top-queries table,

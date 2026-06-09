@@ -24,6 +24,12 @@ func TestMainTable(t *testing.T) {
 		"SELECT 1":                             "",
 		"SELECT * FROM (SELECT 1) sub":         "",
 		"WITH c AS (SELECT 1) SELECT * FROM c": "c",
+		// Count/paginate wrapper: descend into the subquery's own FROM relation.
+		"SELECT COUNT(*) FROM (SELECT DISTINCT c.* FROM game_conversation c JOIN game_message m ON c.id = m.conversation_id) AS c": "game_conversation",
+		// FROM unnest(…)/generate_series(…) is a set-returning function, not a
+		// base relation: skip it to the real table in the EXISTS/JOIN subquery.
+		"SELECT wanted.id FROM unnest('{}'::integer[]::int[]) AS wanted(id) WHERE EXISTS ( SELECT 'sample'::text FROM game_great_buildings_construction g WHERE g.owner_player_id = wanted.id )": "game_great_buildings_construction",
+		"SELECT * FROM generate_series(1, 10)": "",
 		"SET search_path = $1":                 "",
 		"":                                     "",
 		// Leading ORM comments must be skipped, not parsed as the statement.

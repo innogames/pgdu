@@ -1,15 +1,25 @@
 package pg
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 )
+
+// snapshotExt is the on-disk suffix for snapshots. Files are gzip-compressed
+// JSON: the captured Stats slice is highly repetitive (the same query-text
+// shapes and column names recur on every row), so gzip typically shrinks a
+// snapshot to a fraction of its JSON size. The double extension keeps the
+// inner format visible. Pre-compression plain ".json" files are ignored.
+const snapshotExt = ".json.gz"
 
 // snapshotVersion is the on-disk schema version. Bump it when the Snapshot
 // layout changes incompatibly; LoadSnapshot/ListSnapshots tolerate older files
@@ -81,28 +91,53 @@ func (c *Client) CaptureSnapshot(ctx context.Context, db string) (*Snapshot, err
 	}, nil
 }
 
-// SaveSnapshot writes s to dir as pretty JSON and returns the file path. The
-// filename is <sanitized-db>-<UTC timestamp>.json so snapshots sort and read
-// chronologically. The directory is created if missing.
+// SaveSnapshot writes s to dir as gzip-compressed pretty JSON and returns the
+// file path. The filename is <sanitized-db>-<UTC timestamp>.json.gz so
+// snapshots sort and read chronologically. The directory is created if missing.
 func SaveSnapshot(dir string, s *Snapshot) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create snapshot dir %q: %w", dir, err)
 	}
-	name := fmt.Sprintf("%s-%s.json", sanitizeDB(s.Database), s.CapturedAt.UTC().Format("20060102T150405Z"))
+	name := fmt.Sprintf("%s-%s%s", sanitizeDB(s.Database), s.CapturedAt.UTC().Format("20060102T150405Z"), snapshotExt)
 	path := filepath.Join(dir, name)
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("encode snapshot: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(data); err != nil {
+		return "", fmt.Errorf("compress snapshot: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		return "", fmt.Errorf("compress snapshot: %w", err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		return "", fmt.Errorf("write snapshot %q: %w", path, err)
 	}
 	return path, nil
 }
 
-// ListSnapshots returns the metadata of every readable *.json snapshot in dir,
-// newest capture first. A missing directory is not an error (no snapshots yet);
-// unreadable or undecodable files are skipped so one bad file doesn't hide the rest.
+// readSnapshotFile reads a gzip-compressed snapshot file and returns the
+// decompressed JSON bytes.
+func readSnapshotFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+	return io.ReadAll(gz)
+}
+
+// ListSnapshots returns the metadata of every readable *.json.gz snapshot in
+// dir, newest capture first. A missing directory is not an error (no snapshots
+// yet); unreadable or undecodable files are skipped so one bad file doesn't hide
+// the rest. Pre-compression plain *.json files are ignored.
 func ListSnapshots(dir string) ([]SnapshotMeta, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -113,11 +148,11 @@ func ListSnapshots(dir string) ([]SnapshotMeta, error) {
 	}
 	var out []SnapshotMeta
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), snapshotExt) {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
-		data, err := os.ReadFile(path)
+		data, err := readSnapshotFile(path)
 		if err != nil {
 			continue
 		}
@@ -151,9 +186,9 @@ func ListSnapshots(dir string) ([]SnapshotMeta, error) {
 	return out, nil
 }
 
-// LoadSnapshot reads and decodes a single snapshot file.
+// LoadSnapshot reads and decodes a single gzip-compressed snapshot file.
 func LoadSnapshot(path string) (*Snapshot, error) {
-	data, err := os.ReadFile(path)
+	data, err := readSnapshotFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read snapshot %q: %w", path, err)
 	}

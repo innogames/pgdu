@@ -428,6 +428,17 @@ type screen struct {
 	diagBarCol  int // headline bar column index, or -1
 	diagSortCol int // active sort column index for the generic table
 
+	// stmtCols is the projected top-queries column descriptors, parallel to
+	// diagCols (same length/order). Non-nil only on levelStatements; it maps the
+	// renderer's column index (diagSortCol) back to a stable column id so the
+	// cycle-sort can record the active column by identity (see m.stmtSortColID).
+	stmtCols []stmtColDesc
+
+	// diagTotalRow, when non-nil, is rendered as a pinned footer summing every
+	// row of the table (whole-table, filter-independent). Only the top-queries
+	// load sites set it; every other diagnostic table leaves it nil.
+	diagTotalRow []pg.DiagCell
+
 	// Memoized per-column render metrics for renderDiagResult. These scan every
 	// row (O(rows×cols), calling lipgloss.Width per cell) but depend only on the
 	// loaded cell *values*, not on the cursor or sort order — so recomputing them
@@ -536,6 +547,18 @@ type Model struct {
 	// showInfo toggles the buffer-tables info overlay (? key) — a static
 	// explainer for the server-memory and shared_buffers bars.
 	showInfo bool
+
+	// Top-queries column configuration (C key on levelStatements). stmtColsVisible
+	// is the per-column-id visibility set (nil = registry defaults, so a fresh run
+	// shows the historical columns; lazily filled on first use). stmtSortColID
+	// tracks the active sort column by identity so it survives a visibility change
+	// — the projected index (screen.diagSortCol) is recomputed each rebuild.
+	// showColumnConfig toggles the htop-style picker overlay; colCfgCursor is its
+	// row cursor over the column registry.
+	stmtColsVisible  map[stmtColID]bool
+	stmtSortColID    stmtColID
+	showColumnConfig bool
+	colCfgCursor     int
 
 	// statTicking is true while a self-rescheduling refresh tick is running for
 	// the top-queries tool, so re-entering levelStatements doesn't spawn a

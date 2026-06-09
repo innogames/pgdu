@@ -83,6 +83,8 @@ func (m *Model) View() string {
 	}
 
 	switch {
+	case m.showColumnConfig && s.level == levelStatements:
+		b.WriteString(m.renderColumnConfig(s, contentHeight))
 	case m.showInfo && s.level == levelBufferTables:
 		b.WriteString(m.renderBufferInfo(contentHeight))
 	case m.showInfo && s.level == levelHeapPages:

@@ -3,12 +3,13 @@ package tui
 import "github.com/charmbracelet/lipgloss"
 
 var (
-	colorBar    = lipgloss.Color("39")  // cyan-blue
-	colorBloat  = lipgloss.Color("203") // red-orange
-	colorMuted  = lipgloss.Color("244")
-	colorAccent = lipgloss.Color("220") // yellow
-	colorError  = lipgloss.Color("196")
-	colorOK     = lipgloss.Color("114")
+	colorBar     = lipgloss.Color("39")  // cyan-blue
+	colorBloat   = lipgloss.Color("203") // red-orange
+	colorMuted   = lipgloss.Color("244")
+	colorAccent  = lipgloss.Color("220") // yellow
+	colorError   = lipgloss.Color("196")
+	colorOK      = lipgloss.Color("114")
+	colorCostLow = lipgloss.Color("108") // sage — a low-but-nonzero cost (green is reserved for 0)
 
 	styleHeader = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("231")).
@@ -23,10 +24,13 @@ var (
 	styleErr      = lipgloss.NewStyle().Foreground(colorError).Bold(true)
 	styleSelected = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
 	styleMuted    = lipgloss.NewStyle().Foreground(colorMuted)
-	styleBar      = lipgloss.NewStyle().Foreground(colorBar)
-	styleBloat    = lipgloss.NewStyle().Foreground(colorBloat)
-	styleBadge    = lipgloss.NewStyle().Foreground(colorOK)
-	styleBarAlt   = lipgloss.NewStyle().Foreground(colorAccent)
+	// styleTotal renders the pinned "← Sum" footer of the top-queries table:
+	// bold and ungraded so it reads as an aggregate, not just another data row.
+	styleTotal  = lipgloss.NewStyle().Bold(true)
+	styleBar    = lipgloss.NewStyle().Foreground(colorBar)
+	styleBloat  = lipgloss.NewStyle().Foreground(colorBloat)
+	styleBadge  = lipgloss.NewStyle().Foreground(colorOK)
+	styleBarAlt = lipgloss.NewStyle().Foreground(colorAccent)
 
 	// Server-memory bar: shared_buffers free pages, the kernel/app "other
 	// used" portion, and the reclaimable kernel page cache. Chosen to read
@@ -113,10 +117,11 @@ func gradedPercentStyle(pct float64) lipgloss.Style {
 }
 
 // costStyleRelative grades a "lower is better" cost value (miss/io_ms/wal/…)
-// against the largest value in its column for the current window: 0 (or an
-// all-zero column where max is 0) is green, then green→yellow→red as the value
-// approaches the window's worst row. Three bands only — cyan is reserved for the
-// higher-is-better percent path so the two scales don't read alike.
+// against the largest value in its column for the current window. Bright green
+// is reserved for a genuine zero (the only "free" row); any nonzero value — even
+// a tiny one — gets at least the sage low band so it reads as "did some work",
+// then sage→yellow→red as it approaches the window's worst row. Cyan stays
+// reserved for the higher-is-better percent path so the two scales don't alias.
 func costStyleRelative(v, max float64) lipgloss.Style {
 	if v <= 0 || max <= 0 {
 		return lipgloss.NewStyle().Foreground(colorOK)
@@ -127,7 +132,7 @@ func costStyleRelative(v, max float64) lipgloss.Style {
 	case frac >= 0.33:
 		return lipgloss.NewStyle().Foreground(colorAccent)
 	default:
-		return lipgloss.NewStyle().Foreground(colorOK)
+		return lipgloss.NewStyle().Foreground(colorCostLow)
 	}
 }
 

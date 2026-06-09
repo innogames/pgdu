@@ -91,3 +91,15 @@ Top-queries snapshots are written to `--snapshot-dir` (default
   the `L` browser (`onSnapshotsListed`, using the live reset from
   `listSnapshotsCmd`) rather than warned about. `D` deletes via the same
   two-step `pendingDeleteSnap` arm as reindex.
+- The top-queries table's columns come from a single registry
+  (`stmtColumnRegistry` in `queries_columns.go`): each
+  `stmtColDesc` carries an id, kind, `defaultOn`, an `available(ctx)` gate
+  (planning columns need `track_planning`) and a `cell` builder. `C` opens an
+  htop-style picker (`showColumnConfig` overlay) to toggle visibility; choices
+  are session-only. `buildStatementItems` *projects* the registry to the visible
+  subset so `diagCols` and each row's `[]pg.DiagCell` stay parallel by
+  construction (no index constants). The sort column is tracked by stable id
+  (`Model.stmtSortColID`); `syncStmtSort` remaps it to the projected
+  `diagSortCol` after every rebuild, falling back to `total_ms` if it was hidden.
+  New opt-in metrics are one registry entry — every counter is already on
+  `QueryStat`.

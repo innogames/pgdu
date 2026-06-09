@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -14,117 +13,80 @@ import (
 	"pgdu/internal/pg"
 )
 
-// Column indices for the top-queries table. The order is numeric-first with the
-// (wide) query text last, so — with no bar column — renderDiagResult lets the
-// query column grow into the remaining terminal width.
-const (
-	colStmtCalls = iota
-	colStmtRows
-	colStmtTotalMs
-	colStmtPctTime
-	colStmtMeanMs
-	colStmtPlanMs
-	colStmtHit
-	colStmtMiss
-	colStmtHitPct
-	colStmtBlkPerRow
-	colStmtIOms
-	colStmtWAL
-	colStmtTable
-	colStmtType
-	colStmtQuery
-)
-
-// statementColumns is the fixed schema of the top-queries table, reusing the
-// generic diagnostic-table column kinds so renderDiagResult and the per-column
-// cycle-sort work unchanged. When track_planning is off the plan_ms column is
-// dropped entirely (it would always read 0) — statementCells drops the matching
-// cell so columns and cells stay parallel.
-func statementColumns(trackPlanning bool) []pg.DiagColumn {
-	cols := []pg.DiagColumn{
-		{Name: "calls", Kind: pg.DiagInt},
-		{Name: "rows", Kind: pg.DiagInt},
-		{Name: "total_ms", Kind: pg.DiagFloat},
-		{Name: "%time", Kind: pg.DiagPercent},
-		{Name: "mean_ms", Kind: pg.DiagFloat},
-		{Name: "plan_ms", Kind: pg.DiagFloat},
-		{Name: "hit", Kind: pg.DiagInt},
-		{Name: "miss", Kind: pg.DiagCostGraded},
-		{Name: "hit%", Kind: pg.DiagPercentGraded},
-		{Name: "blk/row", Kind: pg.DiagCostGraded},
-		{Name: "io_ms", Kind: pg.DiagCostGraded},
-		{Name: "wal", Kind: pg.DiagCostGraded},
-		{Name: "table", Kind: pg.DiagText},
-		{Name: "T", Kind: pg.DiagText},
-		{Name: "query", Kind: pg.DiagText},
-	}
-	if !trackPlanning {
-		cols = slices.Delete(cols, colStmtPlanMs, colStmtPlanMs+1)
-	}
-	return cols
+// statementColumns is the projected column schema for the current visibility set
+// and track_planning state, derived from stmtColumnRegistry. Used on the first
+// (empty) load before any rows exist; buildStatementItems returns the same
+// schema once rows arrive.
+func (m *Model) statementColumns(trackPlanning bool) []pg.DiagColumn {
+	return diagColumnsFrom(m.visibleStmtCols(stmtCtx{trackPlanning: trackPlanning}))
 }
 
 // buildStatementItems converts window-delta QueryStats into generic-table rows
-// (item.data = []pg.DiagCell). It returns the items and the summed window exec
-// time, which is the denominator for the %time column and is carried to the
-// detail view.
-func buildStatementItems(rows []pg.QueryStat, trackPlanning bool) ([]item, float64) {
+// (item.data = []pg.DiagCell) over the currently visible columns. It returns the
+// items, the projected column descriptors (parallel to each item's cells), the
+// summed window exec time (the %time denominator, also carried to the detail
+// view), and the cells for a pinned "← Sum" footer totalling the whole table
+// (nil when there are no rows).
+func (m *Model) buildStatementItems(rows []pg.QueryStat, trackPlanning bool) ([]item, []stmtColDesc, float64, []pg.DiagCell) {
 	var windowMs float64
 	for _, q := range rows {
 		windowMs += q.TotalExecTime
 	}
+	ctx := stmtCtx{windowMs: windowMs, trackPlanning: trackPlanning}
+	descs := m.visibleStmtCols(ctx)
+
 	items := make([]item, 0, len(rows))
 	for _, q := range rows {
 		items = append(items, item{
 			name:        flattenQuery(q.Query),
-			data:        statementCells(q, windowMs, trackPlanning),
+			data:        cellsFor(descs, q, ctx),
 			statQueryID: q.QueryID,
 		})
 	}
-	return items, windowMs
+	if len(rows) == 0 {
+		return items, descs, windowMs, nil
+	}
+	// Build the footer over a summed QueryStat so the ratio columns come out as
+	// true pooled totals for free: mean_ms = Σtotal_ms÷Σcalls, hit% the weighted
+	// ratio, blk/row Σblocks÷Σrows, and %time exactly 100 (Σtotal_ms == windowMs).
+	total := cellsFor(descs, sumQueryStats(rows), ctx)
+	labelStmtFooter(descs, total)
+	return items, descs, windowMs, total
 }
 
-func statementCells(q pg.QueryStat, windowMs float64, trackPlanning bool) []pg.DiagCell {
-	cells := make([]pg.DiagCell, colStmtQuery+1)
-	cells[colStmtCalls] = diagNum(formatRows(q.Calls), float64(q.Calls))
-	cells[colStmtRows] = diagNum(formatRows(q.Rows), float64(q.Rows))
-	cells[colStmtTotalMs] = diagNum(fmtMs(q.TotalExecTime), q.TotalExecTime)
-	cells[colStmtMeanMs] = diagNum(fmtMs(q.MeanTime()), q.MeanTime())
-	cells[colStmtPlanMs] = diagNum(fmtMs(q.TotalPlanTime), q.TotalPlanTime)
-
-	pct := 0.0
-	if windowMs > 0 {
-		pct = q.TotalExecTime / windowMs * 100
+// sumQueryStats totals every additive counter across rows into one aggregate
+// QueryStat (identity fields left zero). Summing all counters — not just those
+// any single column reads today — keeps the footer correct as opt-in columns are
+// enabled or new ones added to the registry.
+func sumQueryStats(rows []pg.QueryStat) pg.QueryStat {
+	var t pg.QueryStat
+	for _, q := range rows {
+		t.Calls += q.Calls
+		t.Rows += q.Rows
+		t.TotalExecTime += q.TotalExecTime
+		t.Plans += q.Plans
+		t.TotalPlanTime += q.TotalPlanTime
+		t.SharedBlksHit += q.SharedBlksHit
+		t.SharedBlksRead += q.SharedBlksRead
+		t.SharedBlksDirtied += q.SharedBlksDirtied
+		t.SharedBlksWritten += q.SharedBlksWritten
+		t.LocalBlksHit += q.LocalBlksHit
+		t.LocalBlksRead += q.LocalBlksRead
+		t.LocalBlksDirtied += q.LocalBlksDirtied
+		t.LocalBlksWritten += q.LocalBlksWritten
+		t.TempBlksRead += q.TempBlksRead
+		t.TempBlksWritten += q.TempBlksWritten
+		t.SharedBlkReadTime += q.SharedBlkReadTime
+		t.SharedBlkWriteTime += q.SharedBlkWriteTime
+		t.LocalBlkReadTime += q.LocalBlkReadTime
+		t.LocalBlkWriteTime += q.LocalBlkWriteTime
+		t.TempBlkReadTime += q.TempBlkReadTime
+		t.TempBlkWriteTime += q.TempBlkWriteTime
+		t.WALRecords += q.WALRecords
+		t.WALFPI += q.WALFPI
+		t.WALBytes += q.WALBytes
 	}
-	cells[colStmtPctTime] = diagNum(fmt1(pct), pct)
-
-	cells[colStmtHit] = diagNum(formatRows(q.SharedBlksHit), float64(q.SharedBlksHit))
-	cells[colStmtMiss] = diagNum(formatRows(q.SharedBlksRead), float64(q.SharedBlksRead))
-	if hr, ok := q.HitRatio(); ok {
-		cells[colStmtHitPct] = diagNum(fmt1(hr), hr)
-	} else {
-		cells[colStmtHitPct] = pg.DiagCell{Display: "—"}
-	}
-
-	cells[colStmtIOms] = diagNum(fmtMs(q.IOTime()), q.IOTime())
-	// wal is a DiagCostGraded column (not DiagBytes), so the renderer no longer
-	// humanizes Num for us — bake the human string into Display, keeping Num for
-	// sort and the cost grade.
-	cells[colStmtWAL] = diagNum(humanize.Bytes(q.WALBytes), float64(q.WALBytes))
-	if bpr, ok := q.BlocksPerRow(); ok {
-		cells[colStmtBlkPerRow] = diagNum(fmtFloat(bpr), bpr)
-	} else {
-		cells[colStmtBlkPerRow] = pg.DiagCell{Display: "—"}
-	}
-	cells[colStmtTable] = pg.DiagCell{Display: pg.MainTable(q.Query)}
-	cells[colStmtType] = pg.DiagCell{Display: pg.QueryKind(q.Query)}
-	cells[colStmtQuery] = pg.DiagCell{Display: flattenQuery(q.Query)}
-	if !trackPlanning {
-		// Drop the plan_ms cell to stay parallel with statementColumns, which
-		// omits the column when planning time isn't being collected.
-		cells = slices.Delete(cells, colStmtPlanMs, colStmtPlanMs+1)
-	}
-	return cells
+	return t
 }
 
 func diagNum(display string, n float64) pg.DiagCell {
@@ -267,16 +229,17 @@ func (m *Model) renderStatementsInfo(height int) string {
 	b.WriteString("    " + mu("press ") + styleBadge.Render("R") + mu(" to drop the baseline and restart the window. Stats are scoped to the current database.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" columns ") + "  " +
-		mu("all sortable — ") + styleBadge.Render("s") + mu(" cycles the column, ") + styleBadge.Render("r") + mu(" reverses") + "\n")
+		mu("all sortable — ") + styleBadge.Render("s") + mu(" cycles the column, ") + styleBadge.Render("r") +
+		mu(" reverses, ") + styleBadge.Render("C") + mu(" chooses which columns show (and opt-in metrics)") + "\n")
 	col := func(name, desc string) {
 		b.WriteString("    " + padRight(name, 9) + mu(desc) + "\n")
 	}
-	col("calls", "times the query was executed in the window")
-	col("rows", "rows returned / affected across those calls")
 	col("total_ms", "total execution time in the window (the default sort — your hottest queries)")
 	col("%time", "share of the window's total execution time spent in this query")
 	col("mean_ms", "average execution time per call (total_ms ÷ calls)")
 	col("plan_ms", "total planning time — only shown when track_planning is on (hidden otherwise)")
+	col("calls", "times the query was executed in the window")
+	col("rows", "rows returned / affected across those calls")
 	col("hit", "shared blocks served from cache (shared_blks_hit)")
 	col("miss", "shared blocks read from disk/OS (shared_blks_read)")
 	col("hit%", "cache hit ratio: hit ÷ (hit+miss); ‘—’ when the query touched no blocks")
@@ -291,9 +254,10 @@ func (m *Model) renderStatementsInfo(height int) string {
 	b.WriteString("  " + styleHeader.Render(" cost colours ") + "  " +
 		mu("lower is better — 0 is ideal") + "\n")
 	b.WriteString("    " + mu("miss, io_ms, wal and blk/row are tinted ") +
-		gradedPercentStyle(100).Render("green") + mu(" at 0/low, ") +
-		gradedPercentStyle(85).Render("yellow") + mu(" in the middle, ") +
-		gradedPercentStyle(0).Render("red") + mu(" at the worst row in the window.") + "\n")
+		costStyleRelative(0, 1).Render("green") + mu(" only at 0, ") +
+		costStyleRelative(1, 10).Render("sage") + mu(" for any low nonzero, ") +
+		costStyleRelative(5, 10).Render("yellow") + mu(" in the middle, ") +
+		costStyleRelative(10, 10).Render("red") + mu(" at the worst row in the window.") + "\n")
 	b.WriteString("    " + mu("The grade is relative to the largest value visible in each column, so colours re-scale as the") + "\n")
 	b.WriteString("    " + mu("window changes; an all-zero column stays green. The detail view's blk/row uses fixed thresholds instead.") + "\n\n")
 
@@ -334,6 +298,67 @@ func (m *Model) renderStatementsInfo(height int) string {
 	b.WriteString("    " + mu("Press ") + styleBadge.Render("R") +
 		mu(" to drop a loaded snapshot and return to the live window. Snapshots invalidated by a") + "\n")
 	b.WriteString("    " + mu("counter reset since their capture are left out of the list — they can't serve as a baseline.") + "\n")
+
+	return padInfo(&b, height)
+}
+
+// --- column config overlay (C on levelStatements) ---
+
+// renderColumnConfig draws the htop-style column picker: one checkbox row per
+// registry column, with the current cursor highlighted. Default-on and opt-in
+// columns are toggled with space/Enter; the mandatory query column and the
+// planning columns when track_planning is off are shown but not toggleable.
+func (m *Model) renderColumnConfig(s *screen, height int) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+
+	b.WriteString("\n")
+	b.WriteString("  " + styleSelected.Render("configure columns") + mu("  ·  ") +
+		styleBadge.Render("space") + mu(" toggles · ") + styleBadge.Render("↑/↓") + mu(" move · ") +
+		styleBadge.Render("C") + mu(" or ") + styleBadge.Render("esc") + mu(" to close") + "\n")
+	b.WriteString("  " + mu("choose which columns the top-queries table shows — opt-in metrics are off by default") + "\n\n")
+
+	m.ensureStmtColsInit()
+	ctx := stmtCtx{trackPlanning: s.statTrackPlanning}
+	reg := stmtColumnRegistry()
+	nameW := 0
+	for _, d := range reg {
+		if n := len(d.name); n > nameW {
+			nameW = n
+		}
+	}
+	for i, d := range reg {
+		unavailable := d.available != nil && !d.available(ctx)
+		on := d.mandatory || m.stmtColEnabled(d.id, d.defaultOn)
+
+		box := "[ ]"
+		switch {
+		case unavailable:
+			box = "[·]"
+		case on:
+			box = "[x]"
+		}
+
+		cursor := "  "
+		if i == m.colCfgCursor {
+			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
+		}
+
+		label := box + "  " + padRight(d.name, nameW)
+		var rendered string
+		switch {
+		case unavailable:
+			rendered = mu(label+"  "+d.desc) + "  " + styleBadge.Render("track_planning off")
+		case i == m.colCfgCursor:
+			rendered = styleSelected.Render(label) + "  " + mu(d.desc)
+		default:
+			rendered = label + "  " + mu(d.desc)
+		}
+		if d.mandatory {
+			rendered += mu("  (always shown)")
+		}
+		b.WriteString(cursor + rendered + "\n")
+	}
 
 	return padInfo(&b, height)
 }

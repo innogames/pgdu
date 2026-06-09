@@ -230,6 +230,25 @@ func (s *screen) diagMetrics(cols []pg.DiagColumn, barCol int) (colW, naturalW [
 		}
 	}
 
+	// Widen columns to fit the pinned total footer too, so its summed values
+	// (the largest in the table) render compact-but-whole instead of truncated
+	// with "…". Width only: the total must not inflate barMax/costMax, or it
+	// would re-scale every data cell's bar/grade against the grand total.
+	for i := 0; i < nCols && i < len(s.diagTotalRow); i++ {
+		cell := s.diagTotalRow[i]
+		display := cell.Display
+		if cell.HasNum && cols[i].Kind == pg.DiagBytes {
+			display = humanize.Bytes(int64(cell.Num))
+		}
+		w := displayWidth(display)
+		if w > naturalW[i] {
+			naturalW[i] = w
+		}
+		if w > colW[i] {
+			colW[i] = min(w, diagColWidth)
+		}
+	}
+
 	s.diagColWBase, s.diagNaturalW, s.diagBarMax, s.diagCostMax = colW, naturalW, barMax, costMax
 	s.diagMetricsDirty = false
 	return colW, naturalW, barMax, costMax
@@ -328,9 +347,12 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 
 	// ── rows ────────────────────────────────────────────────────────────────
 	vis := s.visibleIndexes()
-	rowsH := max(
-		// header consumes one line
-		height-1, 0)
+	// header consumes one line; a pinned total footer (when present) one more.
+	reserve := 1
+	if s.diagTotalRow != nil {
+		reserve = 2
+	}
+	rowsH := max(height-reserve, 0)
 	if rowsH > 0 {
 		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
 	}
@@ -440,9 +462,51 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 		b.WriteString(lineStr + "\n")
 	}
 
-	// Pad to height with blank lines so help stays pinned.
+	// Pad the data area to its budget so the footer (and help) stay pinned.
 	for i := end - s.offset; i < rowsH; i++ {
 		b.WriteString("\n")
+	}
+
+	// Pinned total footer: always the last content line, so it stays visible
+	// regardless of scroll. Reuses the column layout but is never selected,
+	// barred or graded (the total is each column's max — grading would paint it
+	// solid red).
+	if s.diagTotalRow != nil {
+		var line strings.Builder
+		line.WriteString("  ") // cursor placeholder, no ▶
+		for i := range nCols {
+			var cell pg.DiagCell
+			if i < len(s.diagTotalRow) {
+				cell = s.diagTotalRow[i]
+			}
+			if i == barCol {
+				// No bar for the total; keep the bar area blank so columns align.
+				line.WriteString(strings.Repeat(" ", barW+colBrackets+colGutter))
+				line.WriteString(padRight(cell.Display, colW[i]))
+				line.WriteString(strings.Repeat(" ", colGutter))
+				continue
+			}
+			raw := cell.Display
+			if cell.HasNum && cols[i].Kind == pg.DiagBytes {
+				raw = humanize.Bytes(int64(cell.Num))
+			}
+			display := truncateDiagCell(raw, colW[i])
+			isNumeric := cell.HasNum || cols[i].Kind == pg.DiagInt ||
+				cols[i].Kind == pg.DiagFloat || cols[i].Kind == pg.DiagPercent ||
+				cols[i].Kind == pg.DiagBytes || cols[i].Kind == pg.DiagPercentGraded ||
+				cols[i].Kind == pg.DiagCostGraded
+			if isNumeric {
+				line.WriteString(padLeft(display, colW[i]))
+			} else {
+				line.WriteString(padRight(display, colW[i]))
+			}
+			line.WriteString(strings.Repeat(" ", colGutter))
+		}
+		lineStr := styleTotal.Render(line.String())
+		if m.width > 4 && lipgloss.Width(lineStr) > m.width {
+			lineStr = truncateToWidth(lineStr, m.width)
+		}
+		b.WriteString(lineStr + "\n")
 	}
 	return b.String()
 }

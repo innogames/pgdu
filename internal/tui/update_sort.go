@@ -59,6 +59,25 @@ func (m *Model) applySort(s *screen) {
 	s.clampCursor()
 }
 
+// syncStmtSort re-resolves the top-queries sort column index (s.diagSortCol) from
+// the identity m.stmtSortColID after a rebuild, since hiding/showing columns
+// shifts every index. When the sorted column is no longer visible it falls back
+// to total_ms (the default), or the first visible column if that's hidden too.
+func (m *Model) syncStmtSort(s *screen, descs []stmtColDesc) {
+	idx := indexOfStmtCol(descs, m.stmtSortColID)
+	if idx < 0 {
+		idx = indexOfStmtCol(descs, colTotalMs)
+		s.sortDesc = true
+		if idx < 0 {
+			idx = 0
+		}
+		if idx < len(descs) {
+			m.stmtSortColID = descs[idx].id
+		}
+	}
+	s.diagSortCol = idx
+}
+
 // itemHitRatio extracts the hit ratio from an item's payload when it carries
 // buffer-cache stats. The second return is false when the item has no such
 // payload, or when the table has no recorded I/O (HitRatio == -1).
@@ -170,6 +189,12 @@ func (m *Model) cycleSort(s *screen) {
 			s.sortDesc = true
 		default:
 			s.sortDesc = false
+		}
+		// On the top-queries table, remember the chosen column by stable id so a
+		// later column hide/show re-pins the sort to the same column (see
+		// syncStmtSort). Other diagnostic tables don't carry stmtCols.
+		if s.stmtCols != nil && s.diagSortCol < len(s.stmtCols) {
+			m.stmtSortColID = s.stmtCols[s.diagSortCol].id
 		}
 		m.applySort(s)
 		return

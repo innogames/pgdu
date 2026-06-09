@@ -38,10 +38,26 @@ func MainTable(query string) string {
 }
 
 // tableAfter returns the relation name following the keyword at index kw. A
-// negative kw (keyword absent) or a missing/parenthesised operand yields "".
+// negative kw (keyword absent) or a missing operand yields "".
+//
+// When the operand is a subquery (FROM (SELECT … FROM t …)) it descends one
+// level and uses the subquery's own first FROM relation. This catches the
+// common count/paginate wrapper shape `SELECT … FROM (SELECT … FROM t …) AS x`,
+// where the relation the query is "about" is t, not the anonymous subquery.
 func tableAfter(toks []string, kw int) string {
 	if kw < 0 {
 		return ""
+	}
+	if kw+1 < len(toks) && toks[kw+1] == "(" {
+		return tableAfter(toks, indexOfFrom(toks, kw+2))
+	}
+	// A set-returning function in FROM (unnest(…), generate_series(…),
+	// jsonb_to_recordset(…)) is an identifier immediately followed by "(", not a
+	// base relation. Skip it and use the next FROM relation — the table the query
+	// is really about, commonly inside an EXISTS or JOIN subquery. Guarded to FROM
+	// so an INSERT INTO t (col, …) column list isn't mistaken for a function call.
+	if strings.EqualFold(toks[kw], "from") && kw+2 < len(toks) && toks[kw+2] == "(" {
+		return tableAfter(toks, indexOfFrom(toks, kw+2))
 	}
 	return cleanTable(toks, kw+1)
 }
@@ -61,6 +77,17 @@ func cleanTable(toks []string, i int) string {
 func indexOf(toks []string, word string) int {
 	for i, t := range toks {
 		if strings.EqualFold(t, word) {
+			return i
+		}
+	}
+	return -1
+}
+
+// indexOfFrom returns the position of the first "from" token at or after start,
+// or -1. Used to descend into a subquery operand (FROM (SELECT … FROM t …)).
+func indexOfFrom(toks []string, start int) int {
+	for i := start; i < len(toks); i++ {
+		if strings.EqualFold(toks[i], "from") {
 			return i
 		}
 	}

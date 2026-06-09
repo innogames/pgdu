@@ -73,6 +73,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// The column-config overlay is modal: while open (only on the top-queries
+	// table) it captures navigation and toggle keys instead of the normal list
+	// bindings (Quit still quits).
+	if m.showColumnConfig && s.level == levelStatements {
+		return m, m.handleColumnConfigKey(s, msg)
+	}
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
@@ -183,6 +189,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			next := &screen{level: levelSnapshots, title: "snapshots", tool: s.tool, db: s.db, loading: true}
 			m.stack = append(m.stack, next)
 			return m, m.loadCurrent()
+		}
+	case key.Matches(msg, m.keys.Columns):
+		// Open the htop-style column picker over the top-queries table.
+		if s.level == levelStatements {
+			m.ensureStmtColsInit()
+			m.showInfo = false // don't stack the picker under the ? reference overlay
+			m.showColumnConfig = true
+			m.colCfgCursor = 0
 		}
 	case key.Matches(msg, m.keys.MarkBase):
 		// Mark/unmark the highlighted snapshot as the A-base for a frozen A→B diff.
@@ -320,6 +334,50 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.drillIn()
 	}
 	return m, nil
+}
+
+// handleColumnConfigKey drives the modal column-config overlay (C on the
+// top-queries table): Up/Down/Top/Bottom move the cursor over the column
+// registry, space/Enter toggle the highlighted column's visibility and rebuild
+// the table from the cached window (no DB), and C/esc close it. The mandatory
+// query column and columns unavailable under the current track_planning setting
+// can't be toggled. Quit still quits.
+func (m *Model) handleColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+	reg := stmtColumnRegistry()
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return tea.Quit
+	case key.Matches(msg, m.keys.Columns), msg.Type == tea.KeyEsc:
+		m.showColumnConfig = false
+	case key.Matches(msg, m.keys.Up):
+		if m.colCfgCursor > 0 {
+			m.colCfgCursor--
+		}
+	case key.Matches(msg, m.keys.Down):
+		if m.colCfgCursor < len(reg)-1 {
+			m.colCfgCursor++
+		}
+	case key.Matches(msg, m.keys.Top):
+		m.colCfgCursor = 0
+	case key.Matches(msg, m.keys.Bottom):
+		m.colCfgCursor = len(reg) - 1
+	case key.Matches(msg, m.keys.Refresh), key.Matches(msg, m.keys.Enter):
+		// Refresh is space — the natural htop toggle; Enter also toggles.
+		if m.colCfgCursor < 0 || m.colCfgCursor >= len(reg) {
+			break
+		}
+		d := reg[m.colCfgCursor]
+		if d.mandatory {
+			break
+		}
+		if d.available != nil && !d.available(stmtCtx{trackPlanning: s.statTrackPlanning}) {
+			break // can't show a column that isn't collected (e.g. plan_ms with track_planning off)
+		}
+		m.ensureStmtColsInit()
+		m.stmtColsVisible[d.id] = !m.stmtColEnabled(d.id, d.defaultOn)
+		m.rebuildStatementItems(s)
+	}
+	return nil
 }
 
 // handleFilterKey is the input handler while s.filterFocused is true. Esc

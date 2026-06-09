@@ -5,9 +5,20 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"pgdu/internal/cli"
 	"pgdu/internal/pg"
 )
+
+// keyMsg builds a tea.KeyMsg for a literal key string: " " becomes the space
+// key (which the Refresh binding matches), anything else a rune key press.
+func keyMsg(s string) tea.KeyMsg {
+	if s == " " {
+		return tea.KeyMsg{Type: tea.KeySpace}
+	}
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+}
 
 // renderModel builds a Model with a given screen on top and renders it. The
 // client is never used by the render path, so a non-connecting one is fine.
@@ -18,24 +29,73 @@ func renderModel(top *screen) string {
 	return m.View()
 }
 
+// cellByID resolves a footer/row cell by its stable column id, independent of
+// where the column lands in the current projection.
+func cellByID(descs []stmtColDesc, cells []pg.DiagCell, id stmtColID) pg.DiagCell {
+	i := indexOfStmtCol(descs, id)
+	if i < 0 || i >= len(cells) {
+		return pg.DiagCell{}
+	}
+	return cells[i]
+}
+
 func TestRenderStatementsTable(t *testing.T) {
 	rows := []pg.QueryStat{
 		{QueryID: 1, Query: "select * from t where id = $1", Calls: 100, Rows: 100, TotalExecTime: 500, SharedBlksHit: 900, SharedBlksRead: 100, WALBytes: 4096},
 		{QueryID: 2, Query: "update t set x = $1 where id = $2", Calls: 10, Rows: 10, TotalExecTime: 50, SharedBlksHit: 5, SharedBlksRead: 5},
 	}
-	items, windowMs := buildStatementItems(rows, true)
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	items, descs, windowMs, total := m.buildStatementItems(rows, true)
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
 		loaded: true, statRows: rows, statWindowExecMs: windowMs, items: items,
-		diagCols: statementColumns(true), diagBarCol: -1, diagSortCol: colStmtTotalMs, sortDesc: true,
+		diagCols: diagColumnsFrom(descs), stmtCols: descs, diagBarCol: -1, diagTotalRow: total,
+		diagSortCol: 0, sortDesc: true,
 		statBaselineAt: time.Now().Add(-90 * time.Second), statSampledAt: time.Now(),
 		statTrackPlanning: true,
 	}
 	out := renderModel(s)
-	for _, want := range []string{"total_ms", "hit%", "plan_ms", "miss", "blk/row", "query", "window", "since"} {
+	for _, want := range []string{"total_ms", "hit%", "plan_ms", "miss", "blk/row", "query", "window", "since", "← Sum"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("statements table missing %q in output", want)
 		}
+	}
+}
+
+// The pinned footer totals the whole table: additive columns are summed and the
+// derived columns are pooled (mean = Σtime÷Σcalls, %time = 100, hit% weighted).
+func TestStatementsTotalRow(t *testing.T) {
+	rows := []pg.QueryStat{
+		{QueryID: 1, Query: "select 1", Calls: 100, Rows: 100, TotalExecTime: 500, SharedBlksHit: 900, SharedBlksRead: 100, WALBytes: 4096},
+		{QueryID: 2, Query: "select 2", Calls: 10, Rows: 10, TotalExecTime: 50, SharedBlksHit: 5, SharedBlksRead: 5},
+	}
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	_, descs, _, total := m.buildStatementItems(rows, true)
+	if total == nil {
+		t.Fatal("expected a total row for a non-empty table")
+	}
+	if got := cellByID(descs, total, colCalls).Num; got != 110 {
+		t.Errorf("total calls = %v, want 110", got)
+	}
+	if got := cellByID(descs, total, colRows).Num; got != 110 {
+		t.Errorf("total rows = %v, want 110", got)
+	}
+	if got := cellByID(descs, total, colTotalMs).Num; got != 550 {
+		t.Errorf("total total_ms = %v, want 550", got)
+	}
+	if got := cellByID(descs, total, colPctTime).Num; got != 100 {
+		t.Errorf("total %%time = %v, want 100 (whole window)", got)
+	}
+	// Pooled mean: 550ms ÷ 110 calls = 5, not the (5+5)/2 average of per-row means.
+	if got := cellByID(descs, total, colMeanMs).Num; got != 5 {
+		t.Errorf("pooled mean_ms = %v, want 5", got)
+	}
+	if got := cellByID(descs, total, colQuery).Display; got != "← Sum" {
+		t.Errorf("query column should be labelled, got %q", got)
+	}
+	// An empty table yields no footer.
+	if _, _, _, empty := m.buildStatementItems(nil, true); empty != nil {
+		t.Error("empty table should have no total row")
 	}
 }
 
@@ -45,11 +105,13 @@ func TestRenderStatementsTrackPlanningOff(t *testing.T) {
 	rows := []pg.QueryStat{
 		{QueryID: 1, Query: "select * from t where id = $1", Calls: 100, Rows: 100, TotalExecTime: 500, SharedBlksHit: 900, SharedBlksRead: 100},
 	}
-	items, windowMs := buildStatementItems(rows, false)
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	items, descs, windowMs, total := m.buildStatementItems(rows, false)
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
 		loaded: true, statRows: rows, statWindowExecMs: windowMs, items: items,
-		diagCols: statementColumns(false), diagBarCol: -1, diagSortCol: colStmtTotalMs, sortDesc: true,
+		diagCols: diagColumnsFrom(descs), stmtCols: descs, diagBarCol: -1, diagTotalRow: total,
+		diagSortCol: 0, sortDesc: true,
 		statBaselineAt: time.Now().Add(-30 * time.Second), statSampledAt: time.Now(),
 		statTrackPlanning: false,
 	}
@@ -75,7 +137,7 @@ func TestStatementsMissingExtension(t *testing.T) {
 	m.width, m.height = 120, 30
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
-		items: []item{{name: "x"}}, diagCols: statementColumns(true),
+		items: []item{{name: "x"}}, diagCols: m.statementColumns(true),
 	}
 	m.stack = append(m.stack, s)
 	m.onStatementsLoaded(statementsLoadedMsg{
@@ -260,6 +322,125 @@ func TestUniqueParams(t *testing.T) {
 	}
 }
 
+// The projected columns and every row's cells (and the footer) must stay the
+// same length and order regardless of which columns are visible — the generic
+// renderer walks them strictly in parallel by index.
+func TestStatementColumnProjectionParallel(t *testing.T) {
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	rows := []pg.QueryStat{{QueryID: 1, Query: "select 1", Calls: 1, TotalExecTime: 1}}
+
+	check := func(label string) {
+		items, descs, _, total := m.buildStatementItems(rows, true)
+		cols := diagColumnsFrom(descs)
+		for _, it := range items {
+			cells, _ := it.data.([]pg.DiagCell)
+			if len(cells) != len(cols) {
+				t.Errorf("%s: row cells=%d, cols=%d (must stay parallel)", label, len(cells), len(cols))
+			}
+		}
+		if total != nil && len(total) != len(cols) {
+			t.Errorf("%s: total cells=%d, cols=%d", label, len(total), len(cols))
+		}
+	}
+	check("defaults")
+
+	m.ensureStmtColsInit()
+	for _, d := range stmtColumnRegistry() {
+		m.stmtColsVisible[d.id] = true
+	}
+	check("all opt-in enabled")
+	m.stmtColsVisible[colMiss] = false
+	check("a default column hidden")
+
+	// The query column is mandatory: it survives even when explicitly disabled.
+	m.stmtColsVisible[colQuery] = false
+	_, descs, _, _ := m.buildStatementItems(rows, true)
+	if indexOfStmtCol(descs, colQuery) < 0 {
+		t.Error("query column must always be present (mandatory)")
+	}
+}
+
+// Planning columns are unavailable when track_planning is off, even if the user
+// enabled them — they'd always read zero.
+func TestStatementColumnsTrackPlanningGate(t *testing.T) {
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	m.ensureStmtColsInit()
+	m.stmtColsVisible[colPlanMs] = true
+	m.stmtColsVisible[colMeanPlanMs] = true
+	m.stmtColsVisible[colPlans] = true
+
+	off := m.visibleStmtCols(stmtCtx{trackPlanning: false})
+	for _, id := range []stmtColID{colPlanMs, colMeanPlanMs, colPlans} {
+		if indexOfStmtCol(off, id) >= 0 {
+			t.Errorf("%q must be hidden when track_planning is off even if enabled", id)
+		}
+	}
+	on := m.visibleStmtCols(stmtCtx{trackPlanning: true})
+	if indexOfStmtCol(on, colPlanMs) < 0 {
+		t.Error("plan_ms should appear when track_planning is on and enabled")
+	}
+}
+
+// When the sorted column is no longer visible, syncStmtSort re-pins the sort to
+// total_ms (the default) rather than dangling at a stale index.
+func TestSyncStmtSortFallback(t *testing.T) {
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	s := &screen{level: levelStatements}
+	m.stmtSortColID = colPlans // opt-in + planning-gated, so absent from the defaults
+	descs := m.visibleStmtCols(stmtCtx{trackPlanning: true})
+	m.syncStmtSort(s, descs)
+	if m.stmtSortColID != colTotalMs {
+		t.Errorf("hidden sort column should fall back to total_ms, got %q", m.stmtSortColID)
+	}
+	if s.diagSortCol < 0 || s.diagSortCol >= len(descs) || descs[s.diagSortCol].id != colTotalMs {
+		t.Errorf("diagSortCol should point at total_ms")
+	}
+	if !s.sortDesc {
+		t.Error("fallback should default to descending")
+	}
+}
+
+// Opening the C overlay and toggling a column rebuilds the table from the cached
+// window and reflects in the rendered output, without a DB round-trip.
+func TestColumnConfigToggleRebuilds(t *testing.T) {
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	m.width, m.height = 200, 40
+	rows := []pg.QueryStat{{QueryID: 1, Query: "select 1", Calls: 1, TotalExecTime: 1, TempBlksRead: 7}}
+	items, descs, windowMs, total := m.buildStatementItems(rows, true)
+	s := &screen{
+		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
+		loaded: true, statRows: rows, statWindowExecMs: windowMs, items: items,
+		diagCols: diagColumnsFrom(descs), stmtCols: descs, diagBarCol: -1, diagTotalRow: total,
+		diagSortCol: 0, sortDesc: true,
+		statBaselineAt: time.Now().Add(-time.Minute), statSampledAt: time.Now(),
+		statTrackPlanning: true,
+	}
+	m.stack = append(m.stack, s)
+
+	// temp_read is opt-in (off by default), so it isn't in the table yet.
+	if strings.Contains(m.View(), "temp_read") {
+		t.Fatal("temp_read should be hidden by default")
+	}
+	// Open the picker, move to temp_read, toggle it on.
+	m.ensureStmtColsInit()
+	m.showColumnConfig = true
+	m.colCfgCursor = indexInRegistry(colTempRead)
+	if cmd := m.handleColumnConfigKey(s, keyMsg(" ")); cmd != nil {
+		t.Fatal("toggling a column should not issue a command (no DB round-trip)")
+	}
+	if !m.showColumnConfig {
+		t.Fatal("space should toggle the column, not close the overlay")
+	}
+	m.showColumnConfig = false // close the overlay to render the table
+	if !strings.Contains(m.View(), "temp_read") {
+		t.Error("temp_read should appear in the table after enabling it")
+	}
+}
+
+func indexInRegistry(id stmtColID) int {
+	return indexOfStmtCol(stmtColumnRegistry(), id)
+}
+
 func TestSampleLabel(t *testing.T) {
 	if got := sampleLabel(pg.QualSample{Relation: "t", Column: "id", Operator: "=", ConstValue: "42"}); got != "t.id = 42" {
 		t.Errorf("full label wrong: %q", got)
@@ -275,9 +456,10 @@ func TestSampleLabel(t *testing.T) {
 // An empty window (no activity since baseline) must render the header without
 // tripping the generic table's no-rows path.
 func TestRenderStatementsEmptyWindow(t *testing.T) {
+	mb := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
-		loaded: true, diagCols: statementColumns(true), diagBarCol: -1, diagSortCol: colStmtTotalMs,
+		loaded: true, diagCols: mb.statementColumns(true), diagBarCol: -1, diagSortCol: 0,
 		statBaselineAt: time.Now(), statSampledAt: time.Now(),
 	}
 	out := renderModel(s)
