@@ -245,6 +245,15 @@ func ExplainableQuery(query string) bool {
 // leading keyword is taken after stripping any ORM comment tag; anything
 // unrecognized returns "?".
 func QueryKind(query string) string {
+	if v, ok := queryKindMemo.Load(query); ok {
+		return v.(string)
+	}
+	r := parseQueryKind(query)
+	queryKindMemo.Store(query, r)
+	return r
+}
+
+func parseQueryKind(query string) string {
 	lower := strings.ToLower(StripSQLComments(query))
 	fields := strings.Fields(lower)
 	if len(fields) == 0 {

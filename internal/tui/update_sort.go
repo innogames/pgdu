@@ -11,6 +11,10 @@ import (
 // For levelDiagnosticResult screens (diagCols != nil) it uses the generic
 // column comparator instead of the sortMode-based one.
 func (m *Model) applySort(s *screen) {
+	// Reordering changes which index each row sits at, so the filtered-index
+	// cache must rebuild. applySort runs after every load/rebuild too, so this
+	// one bump covers the common item-mutation paths.
+	s.itemsRev++
 	if s.diagCols != nil {
 		// Generic diagnostic-table sort: compare by diagSortCol, numeric rows
 		// before text rows (HasNum=false sinks below rows with a value), then
@@ -117,6 +121,18 @@ func itemCachedRatio(it item) (float64, bool) {
 	return float64(st.BufferedBytes) / float64(st.TotalBytes), true
 }
 
+// itemDirtyBytes extracts the dirty (modified-in-memory, awaiting flush) byte
+// footprint of a buffer-tables item. Returns (0, false) for rows without
+// buffer-stat data so they sort below tables we can measure; a real zero
+// (clean table) still sorts as the smallest measurable value.
+func itemDirtyBytes(it item) (int64, bool) {
+	st, ok := it.data.(pg.TableBufferStat)
+	if !ok {
+		return 0, false
+	}
+	return st.DirtyBytes, true
+}
+
 // itemRows extracts the row-count estimate from a table or relation item.
 // Second return is false for items lacking row estimates and for negative
 // EstRows (planner stats unavailable).
@@ -148,7 +164,7 @@ func validSorts(l level) []sortMode {
 	case levelTables:
 		return []sortMode{sortBySize, sortByRows, sortByName}
 	case levelBufferTables:
-		return []sortMode{sortBySize, sortByTotal, sortByCached, sortByHitRatio, sortByName}
+		return []sortMode{sortBySize, sortByTotal, sortByCached, sortByHitRatio, sortByDirty, sortByName}
 	case levelHeapPages:
 		return []sortMode{sortByBlkno, sortByDeadRatio, sortByFreeSpace}
 	case levelHeapTuples:

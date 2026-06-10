@@ -63,7 +63,7 @@ func TestRenderStatementsTable(t *testing.T) {
 }
 
 // The pinned footer totals the whole table: additive columns are summed and the
-// derived columns are pooled (mean = Σtime÷Σcalls, %time = 100, hit% weighted).
+// derived columns are pooled (mean = Σtime÷Σcalls, time% = 100, hit% weighted).
 func TestStatementsTotalRow(t *testing.T) {
 	rows := []pg.QueryStat{
 		{QueryID: 1, Query: "select 1", Calls: 100, Rows: 100, TotalExecTime: 500, SharedBlksHit: 900, SharedBlksRead: 100, WALBytes: 4096},
@@ -84,7 +84,7 @@ func TestStatementsTotalRow(t *testing.T) {
 		t.Errorf("total total_ms = %v, want 550", got)
 	}
 	if got := cellByID(descs, total, colPctTime).Num; got != 100 {
-		t.Errorf("total %%time = %v, want 100 (whole window)", got)
+		t.Errorf("total time%% = %v, want 100 (whole window)", got)
 	}
 	// Pooled mean: 550ms ÷ 110 calls = 5, not the (5+5)/2 average of per-row means.
 	if got := cellByID(descs, total, colMeanMs).Num; got != 5 {

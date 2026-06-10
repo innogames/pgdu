@@ -345,6 +345,7 @@ func (m *Model) onStatementSamplesLoaded(msg statementSamplesLoadedMsg) tea.Cmd 
 	s.loaded = true
 	s.err = msg.err
 	s.items = sampleItems(msg.samples)
+	s.itemsRev++ // doesn't go through applySort; invalidate the filter cache
 	s.cursor, s.offset = 0, 0
 	return nil
 }

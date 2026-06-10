@@ -321,11 +321,13 @@ func (m *Model) loadCurrent() tea.Cmd {
 	switch s.level {
 	case levelTools:
 		s.items = toolItems()
+		s.itemsRev++ // doesn't go through applySort; invalidate the filter cache
 		s.loading = false
 		s.loaded = true
 		return nil
 	case levelDiagnostics:
 		s.items = diagnosticItems()
+		s.itemsRev++ // doesn't go through applySort; invalidate the filter cache
 		s.loading = false
 		s.loaded = true
 		return nil

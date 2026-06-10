@@ -88,6 +88,7 @@ const (
 	sortByLevel
 	sortByCount // WAL: record count per resource manager
 	sortByFPI   // WAL: full-page-image bytes
+	sortByDirty // buffer-tables: dirty (modified-in-memory) bytes
 )
 
 // defaultDesc is the natural direction for each sort column: bigger-first for
@@ -95,7 +96,7 @@ const (
 // ratio so the worst-cached tables bubble to the top.
 func (sm sortMode) defaultDesc() bool {
 	switch sm {
-	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI:
+	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty:
 		return true
 	case sortByName, sortByHitRatio, sortByBlkno, sortByLP, sortByLevel:
 		return false
@@ -130,6 +131,8 @@ func (sm sortMode) name() string {
 		return "count"
 	case sortByFPI:
 		return "fpi"
+	case sortByDirty:
+		return "dirty"
 	default:
 		return "name"
 	}
@@ -263,6 +266,16 @@ func (sm sortMode) less(a, b item) bool {
 			return false
 		}
 		return ai < bi
+	case sortByDirty:
+		ai, oka := itemDirtyBytes(a)
+		bi, okb := itemDirtyBytes(b)
+		if oka != okb {
+			return okb
+		}
+		if !oka {
+			return false
+		}
+		return ai < bi
 	case sortByName:
 		return false
 	}
@@ -360,6 +373,19 @@ type screen struct {
 	// (typing triggers shortcuts).
 	filter        string
 	filterFocused bool
+
+	// Filter-result cache. visibleIndexes/visibleLen run on every render frame,
+	// and on a 3000-row table (top-queries) the per-row match dominates the frame
+	// while scrolling — yet the filtered set only changes when the filter text or
+	// the item list does, not when the cursor moves. Cache the computed slice and
+	// reuse it until the key changes: the key is the filter plus itemsRev (bumped
+	// whenever items are reordered/reloaded, see applySort — the choke point every
+	// load funnels through) plus len(items) as a cheap guard for any setter that
+	// bypasses applySort.
+	visCache    []int
+	visCacheKey visKey
+	visCacheOK  bool
+	itemsRev    uint64
 
 	// pendingReindex holds the index name the user pressed ENTER on (parts
 	// level, index row with bloat > 5%). Pressing `y` confirms and runs
@@ -465,7 +491,7 @@ type screen struct {
 	// opened it" — pg_stat_statements has no time axis of its own. statRows is
 	// the current set of window deltas (used to resolve a drilled-into row back
 	// to its full QueryStat). statWindowExecMs is the summed exec time across
-	// the window, the denominator for the %time column. statBaselineAt /
+	// the window, the denominator for the time% column. statBaselineAt /
 	// statSampledAt drive the window-status header.
 	statBaseline      map[int64]pg.QueryStat
 	statRows          []pg.QueryStat

@@ -180,6 +180,9 @@ const walRecTypeMaxRows = 12
 // "VACUUM_PRUNE").
 const walRecTypeNameW = 22
 
+// walRecTypePctW sizes the share-of-combined column ("100.0%").
+const walRecTypePctW = 6
+
 // renderWALRecTypeStats draws the per-record-type breakdown table pinned above
 // the records list: how WAL bytes split across the selected rmgr's operations
 // (INSERT / HOT_UPDATE / LOCK for Heap, INSERT_LEAF / SPLIT_R / … for Btree).
@@ -197,11 +200,19 @@ func (m *Model) renderWALRecTypeStats(s *screen) string {
 	header := indent +
 		padRight("record_type", walRecTypeNameW) + "  " +
 		padRight("combined", walColCombined) + "  " +
+		padRight("%", walRecTypePctW) + "  " +
 		padRight("record", walColRecord) + "  " +
 		padRight("fpi", walColFPI) + "  " +
 		padRight("count", walColCount)
 
 	lines := []string{title, mu(header)}
+
+	// Share is taken over every type in the window, not just the shown subset,
+	// so the percentages stay honest when the table is truncated below.
+	var totalCombined int64
+	for _, st := range stats {
+		totalCombined += st.CombinedSize
+	}
 
 	shown := stats
 	extra := 0
@@ -219,9 +230,14 @@ func (m *Model) renderWALRecTypeStats(s *screen) string {
 		if st.FPISize > 0 {
 			fpiStr = styleBarAlt.Render(humanize.Bytes(st.FPISize))
 		}
+		pct := "—"
+		if totalCombined > 0 {
+			pct = fmt.Sprintf("%.1f%%", 100*float64(st.CombinedSize)/float64(totalCombined))
+		}
 		lines = append(lines, indent+
 			padRight(name, walRecTypeNameW)+"  "+
 			padRight(humanize.Bytes(st.CombinedSize), walColCombined)+"  "+
+			padRight(mu(pct), walRecTypePctW)+"  "+
 			padRight(mu(humanize.Bytes(st.RecordSize)), walColRecord)+"  "+
 			padRight(fpiStr, walColFPI)+"  "+
 			padRight(mu(formatRows(st.Count)), walColCount))
@@ -471,7 +487,8 @@ func (m *Model) renderWALRecordsInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" summary table ") + "  " +
 		mu("the block above the list breaks this rmgr's WAL down per record type") + "\n")
-	b.WriteString("    " + mu("(e.g. INSERT / HOT_UPDATE / LOCK), with combined / record / fpi bytes and a count —") + "\n")
+	b.WriteString("    " + mu("(e.g. INSERT / HOT_UPDATE / LOCK), with combined bytes, its % share of the rmgr's") + "\n")
+	b.WriteString("    " + mu("total, the record / fpi byte split and a count —") + "\n")
 	b.WriteString("    " + mu("the same pg_get_wal_stats source as the overview, but per_record=true.") + "\n\n")
 
 	b.WriteString("  " + mu("Enter drills into the record's block references (which relation/page it touched).") + "\n")

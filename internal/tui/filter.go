@@ -27,7 +27,54 @@ func substringMatch(query, target string) bool {
 	if query == "" {
 		return true
 	}
-	return strings.Contains(strings.ToLower(target), strings.ToLower(query))
+	return containsFold(target, query)
+}
+
+// containsFold reports whether s contains substr case-insensitively, without the
+// per-call allocation of strings.Contains(strings.ToLower(s), …). The filter runs
+// it across every row on every keystroke and the rows (flattened queries) are
+// long, so allocating a lowercased copy of each target per frame dominates the
+// render. When substr is ASCII (the common case for a typed filter) both sides are
+// folded inline: multibyte UTF-8 bytes in s are >= 0x80 and pass through
+// unchanged, and no ASCII needle byte is >= 0x80, so they never spuriously match —
+// the result equals the lowercased-Contains it replaces. A non-ASCII needle falls
+// back to that allocating path so unicode case-folding stays correct.
+func containsFold(s, substr string) bool {
+	if !isASCII(substr) {
+		return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+	}
+	n, m := len(s), len(substr)
+	if m > n {
+		return false
+	}
+	for i := 0; i+m <= n; i++ {
+		j := 0
+		for ; j < m; j++ {
+			if lowerASCII(s[i+j]) != lowerASCII(substr[j]) {
+				break
+			}
+		}
+		if j == m {
+			return true
+		}
+	}
+	return false
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+func lowerASCII(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
 }
 
 // matchFilter applies the active filter to one item's name using the rule that
@@ -43,13 +90,35 @@ func (s *screen) matchFilter(name string) bool {
 	return fuzzyMatch(s.filter, name)
 }
 
+// visKey identifies a cached filtered index slice: it is stale once the filter
+// text, the item-list revision, or the item count changes. Comparable by ==.
+type visKey struct {
+	filter string
+	rev    uint64
+	n      int
+}
+
 // visibleIndexes returns indexes into s.items that pass the active filter,
 // preserving the underlying order. When the filter is empty this is the
 // identity mapping. Callers treat s.cursor and s.offset as indexes into the
 // returned slice; the renderer and the navigation handlers reach into
 // s.items via this indirection so the source list never has to be mutated
-// by filtering.
+// by filtering. The result is cached (see visCache) so repeated calls within a
+// render — and across the many render frames of a scroll — don't re-match every
+// row. Callers must treat the returned slice as read-only.
 func (s *screen) visibleIndexes() []int {
+	key := visKey{s.filter, s.itemsRev, len(s.items)}
+	if s.visCacheOK && s.visCacheKey == key {
+		return s.visCache
+	}
+	out := s.computeVisibleIndexes()
+	s.visCache = out
+	s.visCacheKey = key
+	s.visCacheOK = true
+	return out
+}
+
+func (s *screen) computeVisibleIndexes() []int {
 	if s.filter == "" {
 		out := make([]int, len(s.items))
 		for i := range s.items {
@@ -66,20 +135,14 @@ func (s *screen) visibleIndexes() []int {
 	return out
 }
 
-// visibleLen counts items that pass the current filter without building the
-// index slice. Cheaper than visibleIndexes when callers only need the count
-// (cursor bounds, position label, filter status).
+// visibleLen counts items that pass the current filter. It reuses the
+// visibleIndexes cache so cursor-bound/label/status callers don't trigger a
+// separate full re-match.
 func (s *screen) visibleLen() int {
 	if s.filter == "" {
 		return len(s.items)
 	}
-	n := 0
-	for _, it := range s.items {
-		if s.matchFilter(it.name) {
-			n++
-		}
-	}
-	return n
+	return len(s.visibleIndexes())
 }
 
 // clampCursor pins s.cursor inside the current visible range. Used after

@@ -29,6 +29,17 @@ func TestMainTable(t *testing.T) {
 		"SELECT 1":                             "",
 		"SELECT * FROM (SELECT 1) sub":         "",
 		"WITH c AS (SELECT 1) SELECT * FROM c": "c",
+		// A main FROM that names a CTE resolves through the CTE to the base relation
+		// it reads from — the CTE name is only a stand-in for the real table. The
+		// CTE body here is also riddled with `extract($n FROM col)`, whose FROM must
+		// not be mistaken for the body's own FROM clause.
+		"WITH data AS (SELECT extract($1 from date_start) AS d, queue_id = (SELECT min(queue_id) FROM tw_task_queue WHERE player_id = q.player_id) AS ready FROM tw_task_queue q WHERE task_type = $2) SELECT * FROM data WHERE ready ORDER BY queue_id": "tw_task_queue",
+		// Chained CTE references resolve to the ultimate base relation.
+		"WITH a AS (SELECT id FROM real_t), b AS (SELECT id FROM a) SELECT * FROM b": "real_t",
+		// A RECURSIVE CTE that references itself must not loop forever.
+		"WITH RECURSIVE t AS (SELECT 1 UNION ALL SELECT n FROM t) SELECT * FROM t": "t",
+		// extract(epoch FROM ts) in a plain SELECT list must not be read as the FROM.
+		"SELECT extract(epoch from created_at) FROM events WHERE id = $1": "events",
 		// WITH wrapping a DML statement: the subject is the UPDATE/DELETE/INSERT
 		// target, not the first FROM (which references the CTE). The CTE body's own
 		// keywords are at paren depth > 0 and must be skipped.

@@ -24,7 +24,7 @@ func (m *Model) statementColumns(trackPlanning bool) []pg.DiagColumn {
 // buildStatementItems converts window-delta QueryStats into generic-table rows
 // (item.data = []pg.DiagCell) over the currently visible columns. It returns the
 // items, the projected column descriptors (parallel to each item's cells), the
-// summed window exec time (the %time denominator, also carried to the detail
+// summed window exec time (the time% denominator, also carried to the detail
 // view), and the cells for a pinned "← Sum" footer totalling the whole table
 // (nil when there are no rows).
 func (m *Model) buildStatementItems(rows []pg.QueryStat, trackPlanning bool) ([]item, []stmtColDesc, float64, []pg.DiagCell) {
@@ -48,7 +48,7 @@ func (m *Model) buildStatementItems(rows []pg.QueryStat, trackPlanning bool) ([]
 	}
 	// Build the footer over a summed QueryStat so the ratio columns come out as
 	// true pooled totals for free: mean_ms = Σtotal_ms÷Σcalls, hit% the weighted
-	// ratio, blk/row Σblocks÷Σrows, and %time exactly 100 (Σtotal_ms == windowMs).
+	// ratio, blk/row Σblocks÷Σrows, and time% exactly 100 (Σtotal_ms == windowMs).
 	total := cellsFor(descs, sumQueryStats(rows), ctx)
 	labelStmtFooter(descs, total)
 	return items, descs, windowMs, total
@@ -231,9 +231,9 @@ func (m *Model) renderStatementsInfo(height int) string {
 		b.WriteString("    " + padRight(name, 9) + mu(desc) + "\n")
 	}
 	col("total_ms", "total execution time in the window (the default sort — your hottest queries)")
-	col("%time", "share of the window's total execution time spent in this query")
+	col("time%", "share of the window's total execution time spent in this query")
 	col("mean_ms", "average execution time per call (total_ms ÷ calls)")
-	col("plan_ms", "total planning time — only shown when track_planning is on (hidden otherwise)")
+	col("mean_plan_ms", "average planning time per plan — only shown when track_planning is on (hidden otherwise)")
 	col("calls", "times the query was executed in the window")
 	col("rows", "rows returned / affected across those calls")
 	col("hit", "shared blocks served from cache (shared_blks_hit)")
@@ -249,7 +249,7 @@ func (m *Model) renderStatementsInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" cost colours ") + "  " +
 		mu("lower is better — 0 is ideal") + "\n")
-	b.WriteString("    " + mu("miss, io_ms, wal and blk/row are tinted ") +
+	b.WriteString("    " + mu("total_ms, mean_ms, mean_plan_ms, miss, io_ms, wal and blk/row are tinted ") +
 		costStyleRelative(0, 1).Render("green") + mu(" only at 0, ") +
 		costStyleRelative(1, 10).Render("sage") + mu(" for any low nonzero, ") +
 		costStyleRelative(5, 10).Render("yellow") + mu(" in the middle, ") +

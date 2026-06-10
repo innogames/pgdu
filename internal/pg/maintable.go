@@ -13,26 +13,70 @@ import "strings"
 // which is the driving relation in the common ORM-generated shape. A WITH query
 // is resolved against the statement that follows its CTE definitions (so a
 // data-modifying `WITH … UPDATE t …` points at t, not a CTE named in its FROM).
+// When that statement's FROM names a CTE rather than a base relation
+// (`WITH data AS (SELECT … FROM t …) SELECT * FROM data`), it is resolved through
+// the CTE to the relation the CTE itself reads from (t) — the CTE name is kept
+// only when its body has no useful table (WITH c AS (SELECT 1) …).
 // It returns "" when there's nothing useful to point at: VALUES, a leading
 // subquery (FROM (SELECT …)), or an unrecognised statement. The result keeps any
 // schema qualification (public.t) so to_regclass can resolve it as-is.
 func MainTable(query string) string {
+	if v, ok := mainTableMemo.Load(query); ok {
+		return v.(string)
+	}
+	r := parseMainTable(query)
+	mainTableMemo.Store(query, r)
+	return r
+}
+
+func parseMainTable(query string) string {
 	toks := sqlWords(query)
 	if len(toks) == 0 {
 		return ""
 	}
 	kw := 0
+	var ctes map[string]int
 	// A WITH query's real subject is the statement that runs *after* its CTE
 	// definitions (SELECT/UPDATE/DELETE/INSERT/MERGE), not the first FROM — that
 	// FROM often names a CTE (e.g. UPDATE … FROM cte) rather than a base relation.
-	// Skip past the (parenthesized) CTE bodies to that statement's keyword.
+	// Skip past the (parenthesized) CTE bodies to that statement's keyword, and
+	// record the CTE bodies so a `FROM <cte>` in that statement can be resolved
+	// back to the relation the CTE reads from.
 	if strings.EqualFold(toks[0], "with") {
+		ctes = cteBodies(toks)
 		kw = mainStmtAfterWith(toks)
 		if kw < 0 {
 			return ""
 		}
 	}
-	return tableForStmt(toks, kw)
+	name := tableForStmt(toks, kw)
+	if len(ctes) > 0 {
+		name = resolveThroughCTEs(toks, name, ctes)
+	}
+	return name
+}
+
+// resolveThroughCTEs follows a main-statement relation name that turns out to be
+// a CTE defined in the same WITH clause down to the base relation that CTE reads
+// from, chaining through nested CTE references (b → a → real_t). It stops and
+// returns the current name when it isn't a CTE, when the CTE body yields no table
+// (keep the CTE name as the label), or when a name repeats — the guard against a
+// RECURSIVE CTE that references itself.
+func resolveThroughCTEs(toks []string, name string, ctes map[string]int) string {
+	seen := map[string]bool{}
+	for {
+		key := strings.ToLower(name)
+		body, ok := ctes[key]
+		if !ok || seen[key] {
+			return name
+		}
+		seen[key] = true
+		inner := tableForStmt(toks, body)
+		if inner == "" {
+			return name
+		}
+		name = inner
+	}
 }
 
 // tableForStmt resolves the main relation of the statement whose leading keyword
@@ -48,8 +92,10 @@ func tableForStmt(toks []string, kw int) string {
 		// INSERT INTO <table> … / MERGE INTO <table> …
 		return tableAfter(toks, indexOfAfter(toks, "into", kw))
 	case "select", "delete":
-		// SELECT … FROM <table>, DELETE FROM <table>.
-		return tableAfter(toks, indexOfAfter(toks, "from", kw))
+		// SELECT … FROM <table>, DELETE FROM <table>. indexOfFrom is depth-aware so
+		// a `from` inside a SELECT-list expression (extract(epoch FROM ts)) or a
+		// scalar subquery isn't mistaken for the statement's own FROM clause.
+		return tableAfter(toks, indexOfFrom(toks, kw))
 	case "table":
 		// TABLE <table> has no FROM; its operand is the next word.
 		return cleanTable(toks, kw+1)
@@ -103,15 +149,20 @@ func tableAfter(toks []string, kw int) string {
 		return ""
 	}
 	if kw+1 < len(toks) && toks[kw+1] == "(" {
+		// Descend into the subquery operand and use its own first FROM relation;
+		// indexOfFrom starts just inside the paren and is bounded to this subquery
+		// (it stops at the matching closing paren).
 		return tableAfter(toks, indexOfFrom(toks, kw+2))
 	}
 	// A set-returning function in FROM (unnest(…), generate_series(…),
 	// jsonb_to_recordset(…)) is an identifier immediately followed by "(", not a
 	// base relation. Skip it and use the next FROM relation — the table the query
-	// is really about, commonly inside an EXISTS or JOIN subquery. Guarded to FROM
-	// so an INSERT INTO t (col, …) column list isn't mistaken for a function call.
+	// is really about, commonly inside an EXISTS or JOIN subquery. The relation can
+	// live at any paren depth (inside WHERE EXISTS (…)), so this is a flat scan for
+	// the next "from", not the depth-aware one. Guarded to FROM so an
+	// INSERT INTO t (col, …) column list isn't mistaken for a function call.
 	if strings.EqualFold(toks[kw], "from") && kw+2 < len(toks) && toks[kw+2] == "(" {
-		return tableAfter(toks, indexOfFrom(toks, kw+2))
+		return tableAfter(toks, indexOfAfter(toks, "from", kw+2))
 	}
 	return cleanTable(toks, kw+1)
 }
@@ -145,10 +196,88 @@ func indexOfAfter(toks []string, word string, start int) int {
 	return -1
 }
 
-// indexOfFrom returns the position of the first "from" token at or after start,
-// or -1. Used to descend into a subquery operand (FROM (SELECT … FROM t …)).
+// indexOfFrom returns the position of a statement's own FROM clause — the first
+// "from" token at or after start that sits at the paren depth start begins at
+// (treated as depth 0). A "from" nested in a SELECT-list expression
+// (extract(epoch FROM ts)) or a scalar subquery is at a deeper depth and skipped,
+// so the result is the FROM that introduces the statement's relation. A closing
+// paren seen at depth 0 means the surrounding (sub)query ended first: returns -1.
+// Used both for a top-level statement (start at its keyword) and to descend into
+// a subquery operand, FROM (SELECT … FROM t …) (start just inside the paren).
 func indexOfFrom(toks []string, start int) int {
-	return indexOfAfter(toks, "from", start)
+	depth := 0
+	for i := start; i < len(toks); i++ {
+		switch {
+		case toks[i] == "(":
+			depth++
+		case toks[i] == ")":
+			if depth == 0 {
+				return -1
+			}
+			depth--
+		case depth == 0 && strings.EqualFold(toks[i], "from"):
+			return i
+		}
+	}
+	return -1
+}
+
+// cteBodies maps each CTE name defined in a WITH clause (lowercased, unquoted) to
+// the token index of the keyword that opens its body — the token right after the
+// "(" following AS. It lets a main statement whose FROM names a CTE
+// (SELECT … FROM data) be resolved back to the relation the CTE reads from.
+// CTE definitions live at paren depth 0 between WITH and the main statement;
+// sqlWords drops the commas between them, so each definition runs until the next
+// depth-0 token that is a main statement keyword (the WITH's subject) — anything
+// else there starts the next CTE.
+func cteBodies(toks []string) map[string]int {
+	bodies := map[string]int{}
+	i := 1 // past "with"
+	if i < len(toks) && strings.EqualFold(toks[i], "recursive") {
+		i++
+	}
+	for i < len(toks) && !isMainKeyword(toks[i]) {
+		name := strings.ToLower(strings.ReplaceAll(toks[i], `"`, ""))
+		i++
+		// Optional column-list: name (col, …) AS — skip the parenthesized group.
+		if i < len(toks) && toks[i] == "(" {
+			i = skipParens(toks, i)
+		}
+		if i >= len(toks) || !strings.EqualFold(toks[i], "as") {
+			break // malformed; give up rather than mis-parse the rest
+		}
+		i++
+		// Optional NOT MATERIALIZED / MATERIALIZED between AS and the body.
+		for i < len(toks) && (strings.EqualFold(toks[i], "not") || strings.EqualFold(toks[i], "materialized")) {
+			i++
+		}
+		if i >= len(toks) || toks[i] != "(" {
+			break
+		}
+		if i+1 < len(toks) {
+			bodies[name] = i + 1
+		}
+		i = skipParens(toks, i)
+	}
+	return bodies
+}
+
+// skipParens returns the index just past the ")" that matches the "(" at open.
+// An unbalanced run consumes the rest of the tokens.
+func skipParens(toks []string, open int) int {
+	depth := 0
+	for i := open; i < len(toks); i++ {
+		switch toks[i] {
+		case "(":
+			depth++
+		case ")":
+			depth--
+			if depth == 0 {
+				return i + 1
+			}
+		}
+	}
+	return len(toks)
 }
 
 // sqlWords tokenizes a normalized statement into identifier words plus bare "("

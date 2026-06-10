@@ -14,7 +14,7 @@ type stmtColID string
 
 const (
 	colTotalMs     stmtColID = "total_ms"
-	colPctTime     stmtColID = "%time"
+	colPctTime     stmtColID = "time%"
 	colMeanMs      stmtColID = "mean_ms"
 	colPlanMs      stmtColID = "plan_ms"
 	colMeanPlanMs  stmtColID = "mean_plan_ms"
@@ -39,7 +39,7 @@ const (
 )
 
 // stmtCtx carries the per-build inputs a column's cell builder needs beyond the
-// QueryStat row itself: the window's total exec time (the %time denominator) and
+// QueryStat row itself: the window's total exec time (the time% denominator) and
 // whether planning-time collection is on (gates the plan columns).
 type stmtCtx struct {
 	windowMs      float64
@@ -70,10 +70,10 @@ type stmtColDesc struct {
 func stmtColumnRegistry() []stmtColDesc {
 	planningOnly := func(ctx stmtCtx) bool { return ctx.trackPlanning }
 	return []stmtColDesc{
-		{id: colTotalMs, name: "total_ms", kind: pg.DiagFloat, defaultOn: true,
+		{id: colTotalMs, name: "total_ms", kind: pg.DiagCostGraded, defaultOn: true,
 			desc: "total execution time in the window",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return diagNum(fmtMs(q.TotalExecTime), q.TotalExecTime) }},
-		{id: colPctTime, name: "%time", kind: pg.DiagPercent, defaultOn: true,
+		{id: colPctTime, name: "time%", kind: pg.DiagPercent, defaultOn: true,
 			desc: "share of the window's total execution time",
 			cell: func(q pg.QueryStat, ctx stmtCtx) pg.DiagCell {
 				pct := 0.0
@@ -82,13 +82,13 @@ func stmtColumnRegistry() []stmtColDesc {
 				}
 				return diagNum(fmt1(pct), pct)
 			}},
-		{id: colMeanMs, name: "mean_ms", kind: pg.DiagFloat, defaultOn: true,
+		{id: colMeanMs, name: "mean_ms", kind: pg.DiagCostGraded, defaultOn: true,
 			desc: "average execution time per call",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return diagNum(fmtMs(q.MeanTime()), q.MeanTime()) }},
-		{id: colPlanMs, name: "plan_ms", kind: pg.DiagFloat, defaultOn: true, available: planningOnly,
+		{id: colPlanMs, name: "plan_ms", kind: pg.DiagFloat, available: planningOnly,
 			desc: "total planning time (needs track_planning)",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return diagNum(fmtMs(q.TotalPlanTime), q.TotalPlanTime) }},
-		{id: colMeanPlanMs, name: "mean_plan_ms", kind: pg.DiagFloat, available: planningOnly,
+		{id: colMeanPlanMs, name: "mean_plan_ms", kind: pg.DiagCostGraded, defaultOn: true, available: planningOnly,
 			desc: "average planning time per plan (needs track_planning)",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
 				if q.Plans <= 0 {

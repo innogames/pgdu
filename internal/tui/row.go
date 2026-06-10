@@ -374,6 +374,15 @@ func (m *Model) renderBufferList(s *screen, height int, rankByOID map[uint32]int
 
 	barW := m.barWidth(s)
 
+	// Grade the dirty column relative to the biggest dirty footprint visible, so
+	// the heaviest write-pressure tables read red at a glance (costStyleRelative).
+	var maxDirty int64
+	for _, vi := range vis {
+		if st, ok := s.items[vi].data.(pg.TableBufferStat); ok && st.DirtyBytes > maxDirty {
+			maxDirty = st.DirtyBytes
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString(renderBufferHeader(s.sort, s.sortDesc, barW))
 	b.WriteString("\n")
@@ -384,7 +393,7 @@ func (m *Model) renderBufferList(s *screen, height int, rankByOID map[uint32]int
 		if idx, ok := rankByOID[st.OID]; ok && idx < len(bufferSlicePalette) {
 			barStyle = bufferSliceStyle(idx)
 		}
-		b.WriteString(renderBufferRow(it, st, max, barW, vi == s.cursor, barStyle))
+		b.WriteString(renderBufferRow(it, st, max, maxDirty, barW, vi == s.cursor, barStyle))
 		b.WriteString("\n")
 	}
 	for i := end - s.offset; i < rowsH; i++ {
@@ -409,14 +418,14 @@ func renderBufferHeader(sort sortMode, sortDesc bool, barW int) string {
 	cachedLabel := mark("cached", sort == sortByCached)
 	hitLabel := mark("hit", sort == sortByHitRatio)
 	nameLabel := mark("table", sort == sortByName)
-	// Pad: cursor (2) + bar slot (barW+2) + "  " then columns. "dirty" carries
-	// no sort arrow — it's informational (no sortMode), unlike the others.
+	dirtyLabel := mark("dirty", sort == sortByDirty)
+	// Pad: cursor (2) + bar slot (barW+2) + "  " then columns.
 	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
 		padRight(bufLabel, bufColBuffered) + "  " +
 		padRight(totalLabel, bufColTotal) + "  " +
 		padRight(cachedLabel, bufColCached) + "  " +
 		padRight(hitLabel, bufColHit) + "  " +
-		padRight("dirty", bufColDirty) + "  " +
+		padRight(dirtyLabel, bufColDirty) + "  " +
 		nameLabel
 	return styleMuted.Render(line)
 }
@@ -458,7 +467,7 @@ func renderTablesHeader(s *screen, barW int) string {
 	return styleMuted.Render(line)
 }
 
-func renderBufferRow(it item, st pg.TableBufferStat, maxSize int64, barW int, selected bool, barStyle lipgloss.Style) string {
+func renderBufferRow(it item, st pg.TableBufferStat, maxSize, maxDirty int64, barW int, selected bool, barStyle lipgloss.Style) string {
 	bar := renderSolidBar(it.size, maxSize, barW, barStyle)
 	cursor := "  "
 	if selected {
@@ -482,7 +491,7 @@ func renderBufferRow(it item, st pg.TableBufferStat, maxSize int64, barW int, se
 	}
 	dirtyStr := styleMuted.Render("—")
 	if st.DirtyBytes > 0 {
-		dirtyStr = styleDirty.Render(humanize.Bytes(st.DirtyBytes))
+		dirtyStr = costStyleRelative(float64(st.DirtyBytes), float64(maxDirty)).Render(humanize.Bytes(st.DirtyBytes))
 	}
 	return cursor + bar + "  " +
 		padRight(bufStr, bufColBuffered) + "  " +
