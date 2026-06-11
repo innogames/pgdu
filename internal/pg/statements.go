@@ -260,7 +260,7 @@ func parseQueryKind(query string) string {
 		return "?"
 	}
 	switch fields[0] {
-	case "select", "table", "values", "with":
+	case "select", "table", "values", "with", "copy":
 		switch {
 		case isAdvisoryLock(lower):
 			return "L"
@@ -277,7 +277,8 @@ func parseQueryKind(query string) string {
 		return "D"
 	case "merge":
 		return "M"
-	case "begin", "commit":
+	case "begin", "commit", "rollback":
+		// transactions
 		return "T"
 	default:
 		return "?"
@@ -704,6 +705,78 @@ func BuildSampleCall(query string, params []ParamType, real map[int]string) stri
 		out = strings.ReplaceAll(out, placeholder, lit)
 	}
 	return out
+}
+
+// MapQualConstants picks, for each $n placeholder it can tie to a column, the
+// pg_qualstats constant captured for that column — the most-frequent one, since
+// samples arrive occurrences-DESC (sqlQualstatsSamples). Best-effort: ordinals
+// with no resolvable column or no matching captured qual are simply absent.
+// ConstValue is already a cast-carrying literal (e.g. `'{…}'::text[]`,
+// `true::boolean`), so the result splices straight into the sample call — an
+// array constant lands inside a `col = ANY($n)` form unchanged. Pure (no DB).
+func MapQualConstants(query string, params []ParamType, samples []QualSample) map[int]string {
+	cols := paramColumns(query)
+	if len(cols) == 0 || len(samples) == 0 {
+		return nil
+	}
+	// First value wins per column (samples are occurrences-DESC), matched
+	// case-insensitively to the parsed column the same way SampleParamValues does.
+	byCol := make(map[string]string, len(samples))
+	for _, s := range samples {
+		if s.Column == "" || s.ConstValue == "" {
+			continue
+		}
+		k := strings.ToLower(s.Column)
+		if _, seen := byCol[k]; !seen {
+			byCol[k] = s.ConstValue
+		}
+	}
+	out := map[int]string{}
+	for _, p := range params {
+		if col, ok := cols[p.Ordinal]; ok {
+			if lit, ok := byCol[strings.ToLower(col)]; ok {
+				out[p.Ordinal] = lit
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// ResolveSampleParams decides the literal and source for each $n placeholder,
+// applying precedence EXTRACT field > pg_qualstats > live-table > synthesized.
+// It returns the per-ordinal literals for the non-synthesized slots (to hand to
+// BuildSampleCall) and the full per-parameter breakdown for the verbose table.
+// EXTRACT slots get 'epoch' (a bare field literal every temporal type accepts);
+// synthesized slots get sampleLiteral(type). Pure (no DB access).
+func ResolveSampleParams(query string, params []ParamType, qual, live map[int]string, extractOrds []int) (map[int]string, []SampleParam) {
+	cols := paramColumns(query)
+	extract := make(map[int]bool, len(extractOrds))
+	for _, o := range extractOrds {
+		extract[o] = true
+	}
+	real := map[int]string{}
+	breakdown := make([]SampleParam, 0, len(params))
+	for _, p := range params {
+		sp := SampleParam{Ordinal: p.Ordinal, Type: p.Type, Column: cols[p.Ordinal]}
+		switch {
+		case extract[p.Ordinal]:
+			sp.Source, sp.Value = ParamExtractField, "'epoch'"
+		case qual[p.Ordinal] != "":
+			sp.Source, sp.Value = ParamQualstats, qual[p.Ordinal]
+		case live[p.Ordinal] != "":
+			sp.Source, sp.Value = ParamLiveData, live[p.Ordinal]
+		default:
+			sp.Source, sp.Value = ParamSynthesized, sampleLiteral(p.Type)
+		}
+		if sp.Source != ParamSynthesized {
+			real[p.Ordinal] = sp.Value
+		}
+		breakdown = append(breakdown, sp)
+	}
+	return real, breakdown
 }
 
 // sampleLiteral returns a plausible, type-cast literal for a regtype name. The

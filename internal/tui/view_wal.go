@@ -492,7 +492,7 @@ func (m *Model) renderWALRecordsInfo(height int) string {
 	b.WriteString("    " + mu("the same pg_get_wal_stats source as the overview, but per_record=true.") + "\n\n")
 
 	b.WriteString("  " + mu("Enter drills into the record's block references (which relation/page it touched).") + "\n")
-	b.WriteString("  " + styleBadge.Render("s") + mu(" cycles sort (size / fpi / type); the window is fixed to the overview's LSN range.") + "\n")
+	b.WriteString("  " + styleBadge.Render("←") + mu("/") + styleBadge.Render("→") + mu(" switch sort (size / fpi / type); the window is fixed to the overview's LSN range.") + "\n")
 
 	return padInfo(&b, height)
 }

@@ -168,13 +168,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s.cursor = max(s.visibleLen()-1, 0)
 	case key.Matches(msg, m.keys.ShowQuery):
 		// Pop up the executed SQL for the current diagnostic so it can be
-		// selected/copied. Enabled only on levelDiagnosticResult (applyContext),
-		// where it shadows the Sort binding on the shared "s" key.
+		// selected/copied. Enabled only on levelDiagnosticResult (applyContext);
+		// sort cycling lives on the ←/→ arrows, so the two no longer share a key.
 		if s.diag != nil {
 			m.showDiagQuery = true
 		}
-	case key.Matches(msg, m.keys.Sort):
-		m.cycleSort(s)
+	case key.Matches(msg, m.keys.SortNext):
+		m.cycleSort(s, +1)
+	case key.Matches(msg, m.keys.SortPrev):
+		m.cycleSort(s, -1)
 	case key.Matches(msg, m.keys.ReverseSort):
 		s.sortDesc = !s.sortDesc
 		m.applySort(s)
@@ -264,6 +266,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.stack = append(m.stack, next)
 			return m, m.loadStatementResultCmd(s.db, s.statDetail.Query, s.statSampleCall)
 		}
+	case key.Matches(msg, m.keys.Verbose):
+		// Toggle the verbose detail view (parameter table + extra metric rows).
+		// Scoped to the detail level; the body re-renders in place and reflows
+		// through scrollWindow, so no offset reset is needed.
+		if s.level == levelStatementDetail {
+			s.statVerbose = !s.statVerbose
+		}
 	case key.Matches(msg, m.keys.Export):
 		// Write the current table/view to pgdu-<tool>-<datetime>.csv. Returns nil
 		// (→ a hint) on screens with nothing tabular to export.
@@ -318,9 +327,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.resolveDiskTableCmd(t.db, t.tableName)
 	case key.Matches(msg, m.keys.Back):
 		// Esc is shared with Back; when an overlay/filter is up, Esc closes
-		// that instead of unwinding the stack. Other Back keys (←/h/
-		// backspace) always navigate back so muscle memory for "go up a
-		// level" is preserved.
+		// that instead of unwinding the stack. `q` always navigates back so
+		// muscle memory for "go up a level" is preserved.
 		if msg.Type == tea.KeyEsc && m.showInfo {
 			m.showInfo = false
 			break

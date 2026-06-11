@@ -225,7 +225,8 @@ func (m *Model) renderStatementsInfo(height int) string {
 	b.WriteString("    " + mu("press ") + styleBadge.Render("R") + mu(" to drop the baseline and restart the window. Stats are scoped to the current database.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" columns ") + "  " +
-		mu("all sortable — ") + styleBadge.Render("s") + mu(" cycles the column, ") + styleBadge.Render("r") +
+		mu("all sortable — ") + styleBadge.Render("←") + mu("/") + styleBadge.Render("→") +
+		mu(" switch the column, ") + styleBadge.Render("r") +
 		mu(" reverses, ") + styleBadge.Render("C") + mu(" chooses which columns show (and opt-in metrics)") + "\n")
 	col := func(name, desc string) {
 		b.WriteString("    " + padRight(name, 9) + mu(desc) + "\n")
@@ -420,6 +421,31 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	if t := pg.MainTable(q.Query); t != "" {
 		metrics = append(metrics, [2]string{"table", t})
 	}
+	// Verbose extras: counters/timings that the compact view collapses or omits.
+	// All read straight off the window-delta QueryStat (no extrema — those are
+	// cumulative-only and meaningless in a delta).
+	if s.statVerbose {
+		metrics = append(metrics,
+			[2]string{"I/O breakdown", fmt.Sprintf("shared %s/%s · local %s/%s · temp %s/%s ms",
+				fmtMs(q.SharedBlkReadTime), fmtMs(q.SharedBlkWriteTime),
+				fmtMs(q.LocalBlkReadTime), fmtMs(q.LocalBlkWriteTime),
+				fmtMs(q.TempBlkReadTime), fmtMs(q.TempBlkWriteTime)) + mu("  (read/write)")},
+			[2]string{"local blocks", fmt.Sprintf("%s hit · %s read (miss) · %s dirtied · %s written",
+				formatRows(q.LocalBlksHit), formatRows(q.LocalBlksRead),
+				formatRows(q.LocalBlksDirtied), formatRows(q.LocalBlksWritten))},
+		)
+		if q.Calls > 0 {
+			c := float64(q.Calls)
+			metrics = append(metrics, [2]string{"per call", fmt.Sprintf("%s WAL · %s shared blocks · %s plans",
+				humanize.Bytes(int64(float64(q.WALBytes)/c)),
+				fmtFloat(float64(q.SharedBlksHit+q.SharedBlksRead)/c), fmtFloat(float64(q.Plans)/c))})
+		}
+		planDetail := formatRows(q.Plans) + " plans"
+		if q.Plans > 0 {
+			planDetail += mu(fmt.Sprintf("  (%s ms mean)", fmtMs(q.TotalPlanTime/float64(q.Plans))))
+		}
+		metrics = append(metrics, [2]string{"plan detail", planDetail})
+	}
 	labelW := 0
 	for _, kv := range metrics {
 		if n := lipgloss.Width(kv[0]); n > labelW {
@@ -447,6 +473,10 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 		switch {
 		case s.statSampleReal:
 			hint = "real values · pg_qualstats"
+		case s.statSampleFromQual && s.statSampleFromData:
+			hint = "values from pg_qualstats + live table data"
+		case s.statSampleFromQual:
+			hint = "values from pg_qualstats (per predicate)"
 		case s.statSampleFromData:
 			hint = "values sampled from live table data"
 		case s.statQualstats:
@@ -469,6 +499,9 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 		}
 	default:
 		b.WriteString("    " + mu("inferring parameters…") + "\n")
+	}
+	if s.statVerbose && explainable {
+		m.renderSampleParams(&b, s)
 	}
 
 	// --- explain ---
@@ -515,10 +548,80 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 			mu(" to browse the real values pg_qualstats captured for this query") + "\n")
 	}
 
+	verbHint := " to show verbose details (parameter sources, full metrics)"
+	if s.statVerbose {
+		verbHint = " to hide verbose details"
+	}
+	b.WriteString("    " + mu("press ") + styleBadge.Render("v") + mu(verbHint) + "\n")
+	// The u jump only resolves when the statement has a parseable main table —
+	// mirror that here so we don't advertise a no-op (see the DiskUsage handler).
+	if pg.MainTable(q.Query) != "" {
+		b.WriteString("    " + mu("press ") + styleBadge.Render("u") +
+			mu(" to jump to this table's disk usage") + "\n")
+	}
+
 	// The detail panel has no list to page through, so it scrolls as a single
 	// body: s.offset is the first visible line. Long sample calls / EXPLAIN
 	// output overflow short terminals otherwise, hiding the header off-screen.
 	return scrollWindow(b.String(), &s.offset, height)
+}
+
+// renderSampleParams writes the verbose per-parameter breakdown under the sample
+// call: one aligned row per $n placeholder (ordinal · predicate column · type ·
+// where its value came from · the literal). For a real pg_qualstats example the
+// whole call is captured rather than built from $n (statSampleParams is nil), so
+// it points at the captured-values browser instead.
+func (m *Model) renderSampleParams(b *strings.Builder, s *screen) {
+	mu := styleMuted.Render
+	if s.statSampleReal {
+		b.WriteString("\n    " + mu("parameters") + "\n")
+		b.WriteString("    " + mu("all values captured by pg_qualstats — press ") +
+			styleBadge.Render("p") + mu(" to browse each predicate's real constants") + "\n")
+		return
+	}
+	if len(s.statSampleParams) == 0 {
+		return
+	}
+	b.WriteString("\n    " + mu("parameters") + "\n")
+	// Pre-pad the fixed-width columns to their widest cell; the value column is
+	// last so it needs no padding (and carries its own accent style).
+	type row struct{ ord, col, typ, src, val string }
+	rows := make([]row, len(s.statSampleParams))
+	var ordW, colW, typW, srcW int
+	for i, p := range s.statSampleParams {
+		col := p.Column
+		if col == "" {
+			col = "—"
+		}
+		rows[i] = row{"$" + strconv.Itoa(p.Ordinal), col, p.Type, paramSourceLabel(p.Source), p.Value}
+		ordW = max(ordW, displayWidth(rows[i].ord))
+		colW = max(colW, displayWidth(rows[i].col))
+		typW = max(typW, displayWidth(rows[i].typ))
+		srcW = max(srcW, displayWidth(rows[i].src))
+	}
+	for _, r := range rows {
+		b.WriteString("      " +
+			mu(padRight(r.ord, ordW)) + "  " +
+			padRight(r.col, colW) + "  " +
+			mu(padRight(r.typ, typW)) + "  " +
+			mu(padRight(r.src, srcW)) + "  " +
+			styleBarAlt.Render(r.val) + "\n")
+	}
+}
+
+// paramSourceLabel names where a sample parameter's literal came from, for the
+// verbose parameter table's source column.
+func paramSourceLabel(src pg.ParamSource) string {
+	switch src {
+	case pg.ParamLiveData:
+		return "live table data"
+	case pg.ParamQualstats:
+		return "pg_qualstats"
+	case pg.ParamExtractField:
+		return "EXTRACT field"
+	default:
+		return "synthesized"
+	}
 }
 
 // scrollWindow renders a height-line slice of body starting at *offset, clamping

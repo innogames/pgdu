@@ -42,7 +42,9 @@ type Config struct {
 	QueriesRefresh time.Duration
 
 	// SnapshotDir is where top-queries snapshots are written (S) and read (L).
-	// Defaults to $XDG_STATE_HOME/pgdu/snapshots (~/.local/state/pgdu/snapshots).
+	// Defaults to a shared directory under the system temp dir
+	// ($TMPDIR/pgdu-snapshots, i.e. /tmp/pgdu-snapshots) so snapshots taken by
+	// one user can be read and deleted by any other user on the same host.
 	SnapshotDir string
 }
 
@@ -189,19 +191,13 @@ func (c Config) Target() string {
 	return host + ":" + strconv.Itoa(port)
 }
 
-// defaultSnapshotDir is $XDG_STATE_HOME/pgdu/snapshots, falling back to
-// ~/.local/state/pgdu/snapshots (the XDG default base dir) and finally a
-// relative path when even the home directory can't be resolved.
+// defaultSnapshotDir is a single shared directory under the system temp dir
+// ($TMPDIR, or /tmp). It is deliberately NOT per-user: snapshots are meant to be
+// readable and deletable across users on the same host, so every user resolves
+// to the same path. SaveSnapshot widens the directory's permissions to make that
+// sharing actually work (see SaveSnapshot).
 func defaultSnapshotDir() string {
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return filepath.Join(".pgdu", "snapshots")
-		}
-		base = filepath.Join(home, ".local", "state")
-	}
-	return filepath.Join(base, "pgdu", "snapshots")
+	return filepath.Join(os.TempDir(), "pgdu-snapshots")
 }
 
 func envOr(key, def string) string {

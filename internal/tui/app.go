@@ -532,14 +532,17 @@ type screen struct {
 	// statExplain text is.
 	statDetail         *pg.QueryStat
 	statSampleCall     string
-	statSampleReal     bool // statSampleCall is a real pg_qualstats example, not synthesized
-	statSampleFromData bool // statSampleCall is synthesized but uses real values sampled from the live table
-	statQualstats      bool // pg_qualstats is installed in db (drives source hint + captured-values key)
+	statSampleParams   []pg.SampleParam // per-$n breakdown behind statSampleCall (verbose table)
+	statSampleReal     bool             // statSampleCall is a real pg_qualstats example, not synthesized
+	statSampleFromData bool             // statSampleCall is synthesized but uses real values sampled from the live table
+	statSampleFromQual bool             // statSampleCall is synthesized but ≥1 placeholder uses a per-predicate pg_qualstats constant
+	statQualstats      bool             // pg_qualstats is installed in db (drives source hint + captured-values key)
 	statSampleErr      error
 	statExplain        string
 	statExplainErr     error
 	statExplaining     bool
 	statExplainAnalyze bool
+	statVerbose        bool // v toggles the verbose detail view (parameter table + extra metric rows)
 }
 
 // reindexBloatThreshold is the bloat % above which the parts view offers an

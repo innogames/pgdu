@@ -155,7 +155,7 @@ func itemRows(it item) (int64, bool) {
 // validSorts declares which sort modes are meaningful at each level. Keys
 // outside the returned set are silently ignored in handleKey, so adding a new
 // level here is the single source of truth for "which sort keys do what".
-// validSorts is also the cycle order for the `s` key — the first entry is
+// validSorts is also the cycle order for the ←/→ keys — the first entry is
 // the default sort for a freshly opened screen.
 func validSorts(l level) []sortMode {
 	switch l {
@@ -188,16 +188,18 @@ func validSorts(l level) []sortMode {
 	}
 }
 
-// cycleSort advances s.sort to the next entry in validSorts(s.level) and
-// resets the direction to that column's natural default. Single-entry sort
-// lists (e.g. levelTools) become a no-op. For levelDiagnosticResult the
-// generic column set is cycled instead of sortMode.
-func (m *Model) cycleSort(s *screen) {
+// cycleSort steps s.sort by dir (+1 = next column via →, -1 = prev via ←)
+// through validSorts(s.level), wrapping at both ends, and resets the direction
+// to that column's natural default. Single-entry sort lists (e.g. levelTools)
+// become a no-op. For levelDiagnosticResult the generic column set is cycled
+// instead of sortMode.
+func (m *Model) cycleSort(s *screen, dir int) {
 	if s.diagCols != nil {
-		if len(s.diagCols) < 2 {
+		n := len(s.diagCols)
+		if n < 2 {
 			return
 		}
-		s.diagSortCol = (s.diagSortCol + 1) % len(s.diagCols)
+		s.diagSortCol = ((s.diagSortCol+dir)%n + n) % n
 		// Numeric columns default to descending (biggest first);
 		// text columns default to ascending (alphabetical).
 		switch s.diagCols[s.diagSortCol].Kind {
@@ -217,7 +219,8 @@ func (m *Model) cycleSort(s *screen) {
 	}
 
 	opts := validSorts(s.level)
-	if len(opts) < 2 {
+	n := len(opts)
+	if n < 2 {
 		return
 	}
 	idx := 0
@@ -227,7 +230,7 @@ func (m *Model) cycleSort(s *screen) {
 			break
 		}
 	}
-	next := opts[(idx+1)%len(opts)]
+	next := opts[((idx+dir)%n+n)%n]
 	s.sort = next
 	s.sortDesc = next.defaultDesc()
 	m.applySort(s)

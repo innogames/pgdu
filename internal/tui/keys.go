@@ -7,7 +7,8 @@ type keyMap struct {
 	PageUp, PageDown key.Binding
 	Top, Bottom      key.Binding
 	Enter, Back      key.Binding
-	Sort             key.Binding
+	SortNext         key.Binding
+	SortPrev         key.Binding
 	ShowQuery        key.Binding
 	ReverseSort      key.Binding
 	Refresh          key.Binding
@@ -19,6 +20,7 @@ type keyMap struct {
 	ToggleRefresh    key.Binding
 	Params           key.Binding
 	Execute          key.Binding
+	Verbose          key.Binding
 	Export           key.Binding
 	SaveSnapshot     key.Binding
 	Snapshots        key.Binding
@@ -39,7 +41,8 @@ func defaultKeys() keyMap {
 		Bottom:         key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom")),
 		Enter:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("↵", "drill in")),
 		Back:           key.NewBinding(key.WithKeys("esc", "q"), key.WithHelp("q/esc", "back")),
-		Sort:           key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sort: cycle column")),
+		SortNext:       key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "next column")),
+		SortPrev:       key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "prev column")),
 		ShowQuery:      key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "show SQL")),
 		ReverseSort:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reverse sort")),
 		Refresh:        key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "refresh")),
@@ -51,6 +54,7 @@ func defaultKeys() keyMap {
 		ToggleRefresh:  key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "refresh cadence")),
 		Params:         key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "captured values")),
 		Execute:        key.NewBinding(key.WithKeys("E"), key.WithHelp("E", "execute query")),
+		Verbose:        key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "verbose")),
 		Export:         key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "export csv")),
 		SaveSnapshot:   key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "save snapshot")),
 		Snapshots:      key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "load snapshot")),
@@ -75,11 +79,11 @@ func (k *keyMap) applyContext(s *screen) {
 	snapshots := s.level == levelSnapshots
 	diagResult := s.level == levelDiagnosticResult
 
-	// On a diagnostic result `s` shows the executed SQL (to copy out) instead of
-	// cycling the sort column — the two share the physical "s" key, so scope them
-	// to be mutually exclusive here rather than rely on switch ordering.
+	// `s` shows the executed SQL (to copy out) only on a diagnostic result. Sort
+	// cycling moved to the ←/→ arrows (SortNext/SortPrev), which stay globally
+	// enabled — so even the diagnostic-result table is sortable, with no clash
+	// against the show-SQL key.
 	k.ShowQuery.SetEnabled(diagResult)
-	k.Sort.SetEnabled(!diagResult)
 
 	k.Rebaseline.SetEnabled(stmtTable)
 	k.Snapshots.SetEnabled(stmtTable)
@@ -89,6 +93,7 @@ func (k *keyMap) applyContext(s *screen) {
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
 	k.Params.SetEnabled(stmtDetail)
 	k.Execute.SetEnabled(stmtDetail)
+	k.Verbose.SetEnabled(stmtDetail)
 	k.DeleteSnapshot.SetEnabled(snapshots)
 	// Install is only actionable when the screen offers an installable extension
 	// (the prompt renders its own `i` hint); keep it out of the footer otherwise.
@@ -96,16 +101,16 @@ func (k *keyMap) applyContext(s *screen) {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Enter, k.Back, k.Filter, k.Sort, k.ReverseSort, k.Refresh}
+	return []key.Binding{k.Up, k.Down, k.Enter, k.Back, k.Filter, k.SortPrev, k.SortNext, k.ReverseSort, k.Refresh}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Top, k.Bottom},
 		{k.Enter, k.Back},
-		{k.Filter, k.Sort, k.ShowQuery, k.ReverseSort},
+		{k.Filter, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
 		{k.Refresh, k.ToggleBloat, k.Install, k.Describe, k.DiskUsage},
-		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Export},
+		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns},
 		{k.Help, k.Quit},
 	}

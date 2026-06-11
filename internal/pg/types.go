@@ -867,6 +867,28 @@ type ParamType struct {
 	Type    string
 }
 
+// ParamSource records where the literal substituted for a $n placeholder in a
+// sample call came from — drives the verbose parameter table's source column.
+type ParamSource int
+
+const (
+	ParamSynthesized  ParamSource = iota // generic typed literal (sampleLiteral)
+	ParamLiveData                        // real value sampled from the live table
+	ParamQualstats                       // real constant captured per-predicate by pg_qualstats
+	ParamExtractField                    // EXTRACT($n FROM …) field slot ('epoch')
+)
+
+// SampleParam describes how one $n placeholder was filled when building the
+// sample call: its inferred type, the predicate column it compares against (if
+// any), the literal substituted, and where that literal came from.
+type SampleParam struct {
+	Ordinal int
+	Type    string // inferred regtype, e.g. "integer", "event_ids", "integer[]"
+	Column  string // predicate column it compares against ("" if not column-tied)
+	Value   string // the literal substituted into the sample call
+	Source  ParamSource
+}
+
 // QualSample is one real predicate constant captured by pg_qualstats for a
 // given queryid (with pg_qualstats.track_constants on, each distinct value is
 // a separate row). ConstValue is a ready-to-use, cast-carrying literal as

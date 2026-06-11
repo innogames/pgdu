@@ -6,8 +6,8 @@ import "strings"
 // writes to — the relation the query is "about", used to label the top-queries
 // row and to drive its `d` (describe) and `u` (disk usage) actions. It is a
 // deliberately shallow parse, not a full SQL grammar: it finds the keyword that
-// introduces the first base relation (FROM / UPDATE / INTO) and returns the
-// following identifier.
+// introduces the first base relation (FROM / UPDATE / INTO / COPY) and returns
+// the following identifier.
 //
 // For a multi-table query (joins, subqueries) it returns the first FROM table,
 // which is the driving relation in the common ORM-generated shape. A WITH query
@@ -99,6 +99,11 @@ func tableForStmt(toks []string, kw int) string {
 	case "table":
 		// TABLE <table> has no FROM; its operand is the next word.
 		return cleanTable(toks, kw+1)
+	case "copy":
+		// COPY <table> [(cols)] FROM/TO … — the relation is the next word. The
+		// COPY (SELECT … FROM t …) TO … form has a "(" there instead, so tableAfter
+		// descends into the subquery and uses its first FROM relation (t).
+		return tableAfter(toks, kw)
 	default:
 		return ""
 	}

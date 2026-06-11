@@ -94,10 +94,19 @@ func (c *Client) CaptureSnapshot(ctx context.Context, db string) (*Snapshot, err
 // SaveSnapshot writes s to dir as gzip-compressed pretty JSON and returns the
 // file path. The filename is <sanitized-db>-<UTC timestamp>.json.gz so
 // snapshots sort and read chronologically. The directory is created if missing.
+//
+// The directory and file are made world readable/writable so snapshots are
+// shared across users on the same host: any user can list, load and delete any
+// other user's snapshots. The directory is created mode 0o777 *without* the
+// sticky bit (which a shared /tmp normally carries) so non-owners can unlink
+// files in it; the explicit Chmod defeats a restrictive umask. Both Chmods are
+// best-effort — they only succeed for whoever owns the path, but the first
+// writer sets the permissions correctly for everyone that follows.
 func SaveSnapshot(dir string, s *Snapshot) (string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o777); err != nil {
 		return "", fmt.Errorf("create snapshot dir %q: %w", dir, err)
 	}
+	_ = os.Chmod(dir, 0o777)
 	name := fmt.Sprintf("%s-%s%s", sanitizeDB(s.Database), s.CapturedAt.UTC().Format("20060102T150405Z"), snapshotExt)
 	path := filepath.Join(dir, name)
 	data, err := json.MarshalIndent(s, "", "  ")
@@ -112,9 +121,10 @@ func SaveSnapshot(dir string, s *Snapshot) (string, error) {
 	if err := gz.Close(); err != nil {
 		return "", fmt.Errorf("compress snapshot: %w", err)
 	}
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(path, buf.Bytes(), 0o666); err != nil {
 		return "", fmt.Errorf("write snapshot %q: %w", path, err)
 	}
+	_ = os.Chmod(path, 0o666)
 	return path, nil
 }
 

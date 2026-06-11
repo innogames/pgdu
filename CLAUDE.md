@@ -65,9 +65,11 @@ make deb         # Debian package (debian-pkg/, pgdu_<ver>_<arch>.deb)
 `pgdu` defaults match `psql`: no `-h` → Unix socket + peer auth. `PGPASSWORD`
 is read directly; `~/.pgpass` is honoured by libpq at connect time.
 
-Top-queries snapshots are written to `--snapshot-dir` (default
-`$XDG_STATE_HOME/pgdu/snapshots`, i.e. `~/.local/state/pgdu/snapshots`;
-`PGDU_SNAPSHOT_DIR` overrides) as one timestamped JSON file each (`pg.Snapshot`).
+Top-queries snapshots are written to `--snapshot-dir` (default a shared
+`$TMPDIR/pgdu-snapshots`, i.e. `/tmp/pgdu-snapshots`; `PGDU_SNAPSHOT_DIR`
+overrides) as one timestamped gzip-JSON file each (`pg.Snapshot`). The directory
+is intentionally shared and world-writable (created 0o777, no sticky bit, files
+0o666) so any user on the host can list/load/delete another user's snapshots.
 
 ## Things to know before touching code
 

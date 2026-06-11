@@ -215,12 +215,17 @@ type statementSampleLoadedMsg struct {
 	sample    string
 	real      bool // sample is a real captured example (pg_qualstats), not synthesized
 	fromData  bool // synthesized, but ≥1 placeholder was filled with a real value sampled from the live table
+	fromQual  bool // synthesized, but ≥1 placeholder was filled with a per-predicate pg_qualstats constant
 	qualstats bool // pg_qualstats is installed in db (drives the source hint / captured-values affordance)
 	// installable is true when pg_qualstats is absent but already in
 	// shared_preload_libraries, so a one-key CREATE EXTENSION would enable real
 	// values. Drives the detail view's optional install hint.
 	installable bool
-	err         error
+	// params is the per-placeholder breakdown behind sample (type, predicate
+	// column, value, source) for the verbose detail view. Nil on the real
+	// pg_qualstats path (the whole call is captured, not built from $n).
+	params []pg.SampleParam
+	err    error
 }
 type statementExplainLoadedMsg struct {
 	db      string
@@ -627,6 +632,21 @@ func (m *Model) cycleStatRefresh() {
 // literals from the inferred $n types (BuildSampleCall). The qualstats flag is
 // reported either way so the detail view can label the source and offer the
 // captured-values list only when there's real data behind it.
+// paramsWithout returns params whose ordinal is not already resolved in cover,
+// so live-table sampling skips placeholders a higher-precedence source filled.
+func paramsWithout(params []pg.ParamType, cover map[int]string) []pg.ParamType {
+	if len(cover) == 0 {
+		return params
+	}
+	out := make([]pg.ParamType, 0, len(params))
+	for _, p := range params {
+		if cover[p.Ordinal] == "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func (m *Model) loadStatementSampleCmd(db string, queryID int64, queryText string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		qualstats := m.client.EnsureQualstats(ctx, db) == nil
@@ -648,25 +668,27 @@ func (m *Model) loadStatementSampleCmd(db string, queryID int64, queryText strin
 		if err != nil {
 			return statementSampleLoadedMsg{db: db, query: queryText, err: err, qualstats: qualstats, installable: installable}
 		}
-		// Pull real values for the predicate columns from the live table so the
-		// synthesized call uses constants that actually exist in the data; any
-		// ordinal it can't resolve falls back to a generic typed literal.
-		real := m.client.SampleParamValues(ctx, db, queryText, params)
-		fromData := len(real) > 0 // genuine live-table values, before the EXTRACT fills below
-		// EXTRACT($n FROM …): the field slot is not a real parameter, so fill it
-		// with a valid bare field literal ('epoch' is accepted for every temporal
-		// type EXTRACT takes) rather than a typed value — keeps the sample call
-		// parseable and runnable.
-		if ords := pg.ExtractFieldOrdinals(queryText); len(ords) > 0 {
-			if real == nil {
-				real = make(map[int]string)
-			}
-			for _, ord := range ords {
-				real[ord] = "'epoch'"
+		// Even when the whole-statement example is unusable, pg_qualstats may hold
+		// per-predicate constants for individual placeholders (the same data the `p`
+		// browser shows). Map those to their $n; they're real values that actually
+		// appeared in real calls, so they take precedence over live-table samples.
+		var qual map[int]string
+		if qualstats {
+			if samples, err := m.client.QualstatsSamples(ctx, db, queryID); err == nil {
+				qual = pg.MapQualConstants(queryText, params, samples)
 			}
 		}
+		// Pull live-table values only for the placeholders qualstats didn't cover, so
+		// the synthesized call uses constants that actually exist in the data; any
+		// ordinal still unresolved falls back to a generic typed literal.
+		live := m.client.SampleParamValues(ctx, db, queryText, paramsWithout(params, qual))
+		// EXTRACT($n FROM …): the field slot is not a real parameter; ResolveSampleParams
+		// fills it with a bare field literal ('epoch', accepted for every temporal type
+		// EXTRACT takes) so the sample call stays parseable and runnable.
+		real, breakdown := pg.ResolveSampleParams(queryText, params, qual, live, pg.ExtractFieldOrdinals(queryText))
 		return statementSampleLoadedMsg{db: db, query: queryText, sample: pg.BuildSampleCall(queryText, params, real),
-			fromData: fromData, qualstats: qualstats, installable: installable}
+			fromData: len(live) > 0, fromQual: len(qual) > 0, qualstats: qualstats, installable: installable,
+			params: breakdown}
 	})
 }
 

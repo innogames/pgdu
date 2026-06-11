@@ -1,6 +1,7 @@
 package pg
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -353,6 +354,88 @@ func TestBuildSampleCall(t *testing.T) {
 				t.Errorf("BuildSampleCall()\n got: %s\nwant: %s", got, c.want)
 			}
 		})
+	}
+}
+
+func TestResolveSampleParams(t *testing.T) {
+	cases := []struct {
+		name       string
+		query      string
+		params     []ParamType
+		qual       map[int]string
+		live       map[int]string
+		extractOrd []int
+		wantReal   map[int]string
+		want       []SampleParam
+	}{
+		{
+			// Precedence: qualstats beats live beats synthesized.
+			name:  "qualstats over live over synthesized",
+			query: "SELECT * FROM t WHERE a = $1 AND b = $2 AND c = $3",
+			params: []ParamType{
+				{Ordinal: 1, Type: "bigint"},
+				{Ordinal: 2, Type: "text"},
+				{Ordinal: 3, Type: "integer"},
+			},
+			qual:     map[int]string{1: "849819134::bigint"},
+			live:     map[int]string{2: "'germany'::text"},
+			wantReal: map[int]string{1: "849819134::bigint", 2: "'germany'::text"},
+			want: []SampleParam{
+				{Ordinal: 1, Type: "bigint", Column: "a", Value: "849819134::bigint", Source: ParamQualstats},
+				{Ordinal: 2, Type: "text", Column: "b", Value: "'germany'::text", Source: ParamLiveData},
+				{Ordinal: 3, Type: "integer", Column: "c", Value: "1::integer", Source: ParamSynthesized},
+			},
+		},
+		{
+			// An EXTRACT field slot outranks every value source.
+			name:       "extract field slot wins",
+			query:      "SELECT EXTRACT($1 FROM created) FROM t WHERE n = $2",
+			params:     []ParamType{{Ordinal: 1, Type: "text"}, {Ordinal: 2, Type: "integer"}},
+			qual:       map[int]string{1: "'should-be-ignored'"},
+			extractOrd: []int{1},
+			wantReal:   map[int]string{1: "'epoch'"},
+			want: []SampleParam{
+				{Ordinal: 1, Type: "text", Column: "EXTRACT", Value: "'epoch'", Source: ParamExtractField},
+				{Ordinal: 2, Type: "integer", Column: "n", Value: "1::integer", Source: ParamSynthesized},
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotReal, got := ResolveSampleParams(c.query, c.params, c.qual, c.live, c.extractOrd)
+			if !reflect.DeepEqual(gotReal, c.wantReal) {
+				t.Errorf("ResolveSampleParams() real\n got: %+v\nwant: %+v", gotReal, c.wantReal)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("ResolveSampleParams() breakdown\n got: %+v\nwant: %+v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestMapQualConstants(t *testing.T) {
+	// The user's array-predicate example: pg_qualstats has captured constants for
+	// all three columns, even though the whole-statement example is unusable.
+	query := "SELECT tech_id FROM game_player_technologies WHERE player_id = $1 AND is_paid = $2 AND tech_id = ANY($3)"
+	params := []ParamType{
+		{Ordinal: 1, Type: "bigint"},
+		{Ordinal: 2, Type: "boolean"},
+		{Ordinal: 3, Type: "text[]"},
+	}
+	samples := []QualSample{
+		// occurrences-DESC; the first per column wins.
+		{Column: "player_id", ConstValue: "849819134::bigint", Occurrences: 5},
+		{Column: "player_id", ConstValue: "850067449::bigint", Occurrences: 3},
+		{Column: "tech_id", ConstValue: "'{elves_barracks_ch18}'::text[]", Occurrences: 4},
+		{Column: "is_paid", ConstValue: "true::boolean", Occurrences: 9},
+	}
+	want := map[int]string{
+		1: "849819134::bigint",
+		2: "true::boolean",
+		3: "'{elves_barracks_ch18}'::text[]",
+	}
+	if got := MapQualConstants(query, params, samples); !reflect.DeepEqual(got, want) {
+		t.Errorf("MapQualConstants()\n got: %+v\nwant: %+v", got, want)
 	}
 }
 

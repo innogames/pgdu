@@ -299,8 +299,10 @@ func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
 		return nil
 	}
 	s.statSampleCall = msg.sample
+	s.statSampleParams = msg.params
 	s.statSampleReal = msg.real
 	s.statSampleFromData = msg.fromData
+	s.statSampleFromQual = msg.fromQual
 	s.statQualstats = msg.qualstats
 	s.statSampleErr = msg.err
 	// Offer a one-key install when pg_qualstats is absent but already preloaded —
