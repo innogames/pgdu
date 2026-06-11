@@ -237,6 +237,7 @@ func (m *Model) renderStatementsInfo(height int) string {
 	col("mean_plan_ms", "average planning time per plan — only shown when track_planning is on (hidden otherwise)")
 	col("calls", "times the query was executed in the window")
 	col("rows", "rows returned / affected across those calls")
+	col("rows/call", "average rows per call (rows ÷ calls); opt-in — ‘—’ when no calls")
 	col("hit", "shared blocks served from cache (shared_blks_hit)")
 	col("miss", "shared blocks read from disk/OS (shared_blks_read)")
 	col("hit%", "cache hit ratio: hit ÷ (hit+miss); ‘—’ when the query touched no blocks")

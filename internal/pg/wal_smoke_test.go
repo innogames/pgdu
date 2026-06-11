@@ -11,7 +11,7 @@ import (
 // Temporary smoke test for the WAL inspector client methods against a live
 // local server (peer auth over the unix socket). Run with:
 //
-//	PGDU_SMOKE_DB=matze go test ./internal/pg -run TestWALSmoke -v
+//	PGDU_SMOKE_DB=pgdu_test go test ./internal/pg -run TestWALSmoke -v
 func TestWALSmoke(t *testing.T) {
 	db := os.Getenv("PGDU_SMOKE_DB")
 	if db == "" {

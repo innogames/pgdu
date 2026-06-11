@@ -21,6 +21,7 @@ const (
 	colPlans       stmtColID = "plans"
 	colCalls       stmtColID = "calls"
 	colRows        stmtColID = "rows"
+	colRowsPerCall stmtColID = "rows/call"
 	colHit         stmtColID = "hit"
 	colMiss        stmtColID = "miss"
 	colHitPct      stmtColID = "hit%"
@@ -106,6 +107,15 @@ func stmtColumnRegistry() []stmtColDesc {
 		{id: colRows, name: "rows", kind: pg.DiagInt, defaultOn: true,
 			desc: "rows returned / affected across those calls",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return diagNum(formatRows(q.Rows), float64(q.Rows)) }},
+		{id: colRowsPerCall, name: "rows/call", kind: pg.DiagFloat,
+			desc: "average rows returned / affected per call (rows ÷ calls)",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				if q.Calls <= 0 {
+					return pg.DiagCell{Display: "—"}
+				}
+				v := q.RowsPerCall()
+				return diagNum(fmtFloat(v), v)
+			}},
 		{id: colHit, name: "hit", kind: pg.DiagInt, defaultOn: true,
 			desc: "shared blocks served from cache",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {

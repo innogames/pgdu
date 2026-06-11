@@ -11,33 +11,88 @@ what's living in `shared_buffers`.
 
 ### Disk usage
 
-Drill from tables into a single relation and down to its columns.
+The default view. Every relation is a bar scaled to its on-disk size, with heap,
+index, and TOAST shown as colored segments — so the biggest consumers float to
+the top at a glance, ncdu-style.
 
 ![Tables view](docs/tables.png)
 
+Drill into a relation (`↵`) to see its **parts** — the heap plus each index
+broken out separately, with per-part bloat estimates, dead-tuple counts, and the
+last vacuum/analyze times. Index parts are labelled by access method (btree,
+GIN, …) and primary/unique. From here you can arm a `REINDEX` on a bloated index.
+
 ![Table detail](docs/table.png)
 
-![Columns view](docs/columns.png)
+One level deeper are the **columns**: each attribute sized by the storage it
+occupies, with its type, average width, and null fraction — handy for spotting a
+wide column or an under-used nullable one.
+
+![Columns view](docs/table_columns.png)
+
+
+### Top queries
+
+A workload analyzer in the spirit of [PoWA](https://powa.readthedocs.io/) (the
+web-based PostgreSQL Workload Analyzer) — but living entirely in your terminal,
+no web server or collector daemon to deploy. It reads `pg_stat_statements` and
+ranks statements by total time, calls, rows, cache-hit ratio, WAL bytes, and
+more. Columns are configurable (`C`), and snapshots can be captured (`S`) and
+diffed over a time window (`L`) so you can see what changed between two points
+instead of only cumulative totals.
+
+![Top queries](docs/top_queries.png)
 
 ### Shared buffers
 
-Inspect what's occupying `shared_buffers` — per relation, per page, and per tuple.
+Inspect what's actually living in `shared_buffers` right now — one bar per
+relation showing how much of it is buffered, the cache hit ratio, how many pages
+are dirty, and a per-relation "temperature" derived from buffer usage counts.
+The header summarises the whole buffer pool: used vs. free, this database's
+share, and the cold→hot distribution.
 
-![Shared buffers](docs/shared_buffer.png)
+![Shared buffers](docs/shared_buffers.png)
+
+Drill into a relation for its **buffer detail**: cache footprint (how much of the
+table is cached, the hit ratio, dirty bytes, average usage count) plus a
+temperature histogram from cold (evictable) to hot (frequently reused), with the
+dirty portion of each band marked.
+
+![Shared buffer detail](docs/shared_buffer_details.png)
+
+### Physical layout (Pages / Tuples)
+
+Drill past a heap into its **pages**: per-page space used, live/dead tuple
+counts, and the dead-tuple percentage — a direct look at fragmentation and where
+vacuum has work to do.
 
 ![Heap pages](docs/pages.png)
 
+The same drill on an index shows its **index tuples** — every entry's `ctid`,
+key, and flags, page by page.
+
 ![Index pages](docs/pages_index.png)
 
-![Tuples](docs/tuples.png)
+And one level below a heap page are the raw **heap tuples**: line-pointer flags
+(normal/dead/redirect), `xmin`/`xmax`, `ctid`, and the decoded `infomask` bits
+(`HEAP_ONLY`, `UPDATED`, frozen, …) — `heap_page_items` made browsable.
 
-### Diagnostics
+![Tuples](docs/page_tuples.png)
 
-Built-in diagnostic queries for live activity, WAL, and index health.
+### WAL Inspector
 
-![Running queries](docs/tool_running_querries.png)
+Built-in diagnostic queries for WAL activity and index health.
+
+The **WAL inspector** breaks down recently generated WAL by record type / resource
+manager — bytes, full-page images, and record counts per category — with the
+individual records listed alongside, so you can see exactly what is driving WAL
+volume.
 
 ![WAL inspector](docs/wal_inspector.png)
+
+**Index sizes** lists every index ranked by size, and **index bloat** estimates
+wasted space per index (bloat %, bloat MB vs. index/table size, and scan counts)
+to surface unused or bloated indexes that are candidates for a `REINDEX` or drop.
 
 ![Index sizes](docs/tool_index_size.png)
 
@@ -46,8 +101,7 @@ Built-in diagnostic queries for live activity, WAL, and index health.
 ## Install
 
 Grab a pre-built binary for your platform from the
-[Releases](https://github.com/innogames/pgdu/releases) page (Linux, macOS and
-Windows; amd64 and arm64).
+[Releases](https://github.com/innogames/pgdu/releases) page (Linux, macOS; amd64 and arm64).
 
 Debian/Ubuntu — download the `.deb` from the same page and:
 
@@ -77,19 +131,16 @@ Honors the usual libpq environment: `PGHOST`, `PGPORT`, `PGUSER`,
 
 ## Keys
 
-| Key            | Action                |
-|----------------|-----------------------|
-| `↑`/`k` `↓`/`j`| move                  |
-| `↵`/`l`        | drill in              |
-| `←`/`h`/`esc`  | back                  |
-| `/`            | filter                |
-| `s` / `r`      | sort column / reverse |
-| `space`        | refresh               |
-| `e`            | export view to CSV    |
-| `b`            | toggle bloat stats    |
-| `i`            | install extension     |
-| `?`            | help                  |
-| `q`            | quit                  |
+| Key             | Action                |
+|-----------------|-----------------------|
+| `↑`/`k` `↓`/`j` | move                  |
+| `↵`/`l`         | drill in              |
+| `q`/`esc`       | back                  |
+| `/`             | filter                |
+| `s` / `r`       | sort column / reverse | # todo <- and -> 
+| `space`         | refresh               |
+| `e`             | export view to CSV    |
+| `?`             | help                  |
 
 ## Sample data
 

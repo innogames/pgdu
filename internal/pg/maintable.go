@@ -90,7 +90,7 @@ func tableForStmt(toks []string, kw int) string {
 		return tableAfter(toks, kw)
 	case "insert", "merge":
 		// INSERT INTO <table> … / MERGE INTO <table> …
-		return tableAfter(toks, indexOfAfter(toks, "into", kw))
+		return tableAfter(toks, indexOfAfter(toks, "into", kw, len(toks)))
 	case "select", "delete":
 		// SELECT … FROM <table>, DELETE FROM <table>. indexOfFrom is depth-aware so
 		// a `from` inside a SELECT-list expression (extract(epoch FROM ts)) or a
@@ -157,7 +157,16 @@ func tableAfter(toks []string, kw int) string {
 		// Descend into the subquery operand and use its own first FROM relation;
 		// indexOfFrom starts just inside the paren and is bounded to this subquery
 		// (it stops at the matching closing paren).
-		return tableAfter(toks, indexOfFrom(toks, kw+2))
+		if t := tableAfter(toks, indexOfFrom(toks, kw+2)); t != "" {
+			return t
+		}
+		// The subquery has no FROM clause of its own — its real relation is buried
+		// in a function argument or scalar subquery, e.g. FROM (SELECT
+		// generate_series((SELECT max(id) FROM t …)) AS x). Fall back to the first
+		// FROM relation anywhere inside this subquery. Bounded to the subquery (via
+		// skipParens) so an unrelated table in the outer WHERE — a NOT IN / EXISTS
+		// probe — isn't mistaken for the subject.
+		return tableAfter(toks, indexOfAfter(toks, "from", kw+2, skipParens(toks, kw+1)))
 	}
 	// A set-returning function in FROM (unnest(…), generate_series(…),
 	// jsonb_to_recordset(…)) is an identifier immediately followed by "(", not a
@@ -167,7 +176,7 @@ func tableAfter(toks []string, kw int) string {
 	// the next "from", not the depth-aware one. Guarded to FROM so an
 	// INSERT INTO t (col, …) column list isn't mistaken for a function call.
 	if strings.EqualFold(toks[kw], "from") && kw+2 < len(toks) && toks[kw+2] == "(" {
-		return tableAfter(toks, indexOfAfter(toks, "from", kw+2))
+		return tableAfter(toks, indexOfAfter(toks, "from", kw+2, len(toks)))
 	}
 	return cleanTable(toks, kw+1)
 }
@@ -190,10 +199,14 @@ func cleanTable(toks []string, i int) string {
 }
 
 // indexOfAfter returns the position of the first token equal (case-insensitively)
-// to word at or after start, or -1. The "(" / ")" markers never match a keyword,
-// so a paren near the keyword can't be confused for it.
-func indexOfAfter(toks []string, word string, start int) int {
-	for i := start; i < len(toks); i++ {
+// to word in [start, end), or -1. Pass len(toks) for end to scan to the end;
+// a smaller end bounds the search to a subquery. The "(" / ")" markers never
+// match a keyword, so a paren near the keyword can't be confused for it.
+func indexOfAfter(toks []string, word string, start, end int) int {
+	if end > len(toks) {
+		end = len(toks)
+	}
+	for i := start; i < end; i++ {
 		if strings.EqualFold(toks[i], word) {
 			return i
 		}

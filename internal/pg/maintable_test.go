@@ -52,8 +52,12 @@ func TestMainTable(t *testing.T) {
 		// base relation: skip it to the real table in the EXISTS/JOIN subquery.
 		"SELECT wanted.id FROM unnest('{}'::integer[]::int[]) AS wanted(id) WHERE EXISTS ( SELECT 'sample'::text FROM game_great_buildings_construction g WHERE g.owner_player_id = wanted.id )": "game_great_buildings_construction",
 		"SELECT * FROM generate_series(1, 10)": "",
-		"SET search_path = $1":                 "",
-		"":                                     "",
+		// Leading subquery with no FROM of its own (SELECT generate_series(…)): the
+		// real relation is buried in a function-arg scalar subquery. Resolve to it,
+		// bounded to the subquery so the outer NOT IN probe doesn't win by accident.
+		"SELECT unit_id FROM ( SELECT generate_series( $1, ( SELECT max(unit_id) FROM game_army_units WHERE player_id = $2 ) + $3 ) AS unit_id ) AS series WHERE series.unit_id NOT IN(SELECT unit_id FROM game_army_units WHERE player_id = $4) LIMIT $5": "game_army_units",
+		"SET search_path = $1": "",
+		"":                     "",
 		// Leading ORM comments must be skipped, not parsed as the statement.
 		"/* TechnologyRepository.findAllByPlayerId */ SELECT * FROM technology WHERE id = $1": "technology",
 		"/* update for com.example.Battle */update battle set modified = $1 where id = $2":    "battle",
