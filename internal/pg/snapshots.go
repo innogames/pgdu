@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,7 +39,10 @@ type Snapshot struct {
 	CapturedAt    time.Time
 	StatsReset    time.Time // pg_stat_statements_info.stats_reset at capture (zero = unknown)
 	TrackPlanning bool
-	Stats         []QueryStat
+	// QueryCount is len(Stats), persisted *before* Stats so ListSnapshots can read
+	// it from the header and stop without decompressing the (large) Stats array.
+	QueryCount int
+	Stats      []QueryStat
 }
 
 // SnapshotMeta is the lightweight listing form of a Snapshot: everything the
@@ -109,6 +113,11 @@ func SaveSnapshot(dir string, s *Snapshot) (string, error) {
 	_ = os.Chmod(dir, 0o777)
 	name := fmt.Sprintf("%s-%s%s", sanitizeDB(s.Database), s.CapturedAt.UTC().Format("20060102T150405Z"), snapshotExt)
 	path := filepath.Join(dir, name)
+	// Stamp the row count so ListSnapshots can read it from the header (it is
+	// serialized before Stats) without decompressing the array. SaveSnapshot is
+	// the only writer, so this keeps the on-disk count authoritative regardless
+	// of how the caller built the Snapshot.
+	s.QueryCount = len(s.Stats)
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("encode snapshot: %w", err)
@@ -144,10 +153,31 @@ func readSnapshotFile(path string) ([]byte, error) {
 	return io.ReadAll(gz)
 }
 
+// metaCache memoizes parsed SnapshotMeta keyed by path. Snapshot files are
+// immutable once written (SaveSnapshot uses a unique timestamped name and never
+// rewrites), so a (modTime,size) match means the cached metadata is still valid.
+// This makes re-opening the browser or re-listing after a delete ~free: only
+// new/changed files are read from disk.
+var (
+	metaCacheMu sync.Mutex
+	metaCache   = map[string]cachedMeta{}
+)
+
+type cachedMeta struct {
+	modTime time.Time
+	size    int64
+	meta    SnapshotMeta
+}
+
 // ListSnapshots returns the metadata of every readable *.json.gz snapshot in
 // dir, newest capture first. A missing directory is not an error (no snapshots
 // yet); unreadable or undecodable files are skipped so one bad file doesn't hide
 // the rest. Pre-compression plain *.json files are ignored.
+//
+// Metadata is read by streaming only the leading header fields and stopping at
+// the Stats array, so listing never decompresses the bulk of a file. Results are
+// cached per path (validated by mod time + size), so repeat listings cost a stat
+// per file rather than a full read.
 func ListSnapshots(dir string) ([]SnapshotMeta, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -156,44 +186,174 @@ func ListSnapshots(dir string) ([]SnapshotMeta, error) {
 		}
 		return nil, fmt.Errorf("read snapshot dir %q: %w", dir, err)
 	}
+
+	metaCacheMu.Lock()
+	defer metaCacheMu.Unlock()
+
 	var out []SnapshotMeta
+	seen := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), snapshotExt) {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
-		data, err := readSnapshotFile(path)
+		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		// Decode into a header struct that mirrors Snapshot but counts (and then
-		// drops) the Stats array — json reads the whole file but retains only the
-		// row count, keeping listing cheap on memory.
-		var hdr struct {
-			Version       int
-			Target        string
-			Database      string
-			CapturedAt    time.Time
-			StatsReset    time.Time
-			TrackPlanning bool
-			Stats         []json.RawMessage
-		}
-		if err := json.Unmarshal(data, &hdr); err != nil {
+		seen[path] = struct{}{}
+		if c, ok := metaCache[path]; ok && c.modTime.Equal(info.ModTime()) && c.size == info.Size() {
+			out = append(out, c.meta)
 			continue
 		}
-		out = append(out, SnapshotMeta{
-			Path:          path,
-			Version:       hdr.Version,
-			Target:        hdr.Target,
-			Database:      hdr.Database,
-			CapturedAt:    hdr.CapturedAt,
-			StatsReset:    hdr.StatsReset,
-			TrackPlanning: hdr.TrackPlanning,
-			QueryCount:    len(hdr.Stats),
-		})
+		meta, err := readSnapshotMeta(path)
+		if err != nil {
+			continue
+		}
+		metaCache[path] = cachedMeta{modTime: info.ModTime(), size: info.Size(), meta: meta}
+		out = append(out, meta)
 	}
+	// Drop cache entries for files in this dir that disappeared (deleted
+	// snapshots) so the cache tracks the directory rather than growing without
+	// bound. Entries from other directories are left untouched.
+	for path := range metaCache {
+		if _, ok := seen[path]; !ok && filepath.Dir(path) == filepath.Clean(dir) {
+			delete(metaCache, path)
+		}
+	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].CapturedAt.After(out[j].CapturedAt) })
 	return out, nil
+}
+
+// readSnapshotMeta extracts a SnapshotMeta from a snapshot file without decoding
+// its Stats array. It streams the JSON header field by field; the moment it
+// reaches the "Stats" key it stops, so for files carrying QueryCount (written
+// before Stats) the large array is never decompressed. Files predating
+// QueryCount fall back to counting array elements via the token stream, which
+// still avoids unmarshalling each row into a struct.
+func readSnapshotMeta(path string) (SnapshotMeta, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return SnapshotMeta{}, err
+	}
+	defer func() { _ = f.Close() }()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return SnapshotMeta{}, err
+	}
+	defer func() { _ = gz.Close() }()
+
+	dec := json.NewDecoder(gz)
+	if tok, err := dec.Token(); err != nil {
+		return SnapshotMeta{}, err
+	} else if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return SnapshotMeta{}, fmt.Errorf("snapshot %q: expected JSON object", path)
+	}
+
+	meta := SnapshotMeta{Path: path}
+	haveCount := false
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return SnapshotMeta{}, err
+		}
+		key, _ := keyTok.(string)
+		var dst any
+		switch key {
+		case "Version":
+			dst = &meta.Version
+		case "Target":
+			dst = &meta.Target
+		case "Database":
+			dst = &meta.Database
+		case "CapturedAt":
+			dst = &meta.CapturedAt
+		case "StatsReset":
+			dst = &meta.StatsReset
+		case "TrackPlanning":
+			dst = &meta.TrackPlanning
+		case "QueryCount":
+			dst = &meta.QueryCount
+			haveCount = true
+		case "Stats":
+			if haveCount {
+				return meta, nil // header carried the count; skip the array entirely
+			}
+			n, err := countArrayElements(dec)
+			if err != nil {
+				return SnapshotMeta{}, err
+			}
+			meta.QueryCount = n
+			return meta, nil
+		default:
+			if err := skipValue(dec); err != nil { // tolerate unknown fields
+				return SnapshotMeta{}, err
+			}
+			continue
+		}
+		if err := dec.Decode(dst); err != nil {
+			return SnapshotMeta{}, err
+		}
+	}
+	return meta, nil
+}
+
+// countArrayElements consumes a JSON array from dec (positioned just before the
+// opening '[') and returns its element count without materialising the values.
+func countArrayElements(dec *json.Decoder) (int, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return 0, err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '[' {
+		return 0, nil // null or non-array: treat as empty
+	}
+	n := 0
+	for dec.More() {
+		if err := skipValue(dec); err != nil {
+			return 0, err
+		}
+		n++
+	}
+	if _, err := dec.Token(); err != nil { // closing ']'
+		return 0, err
+	}
+	return n, nil
+}
+
+// skipValue consumes exactly one JSON value from dec — scalar, object or array,
+// recursing through nested containers — without allocating a destination for it.
+func skipValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	d, ok := tok.(json.Delim)
+	if !ok {
+		return nil // scalar already consumed
+	}
+	switch d {
+	case '{':
+		for dec.More() {
+			if _, err := dec.Token(); err != nil { // key
+				return err
+			}
+			if err := skipValue(dec); err != nil { // value
+				return err
+			}
+		}
+	case '[':
+		for dec.More() {
+			if err := skipValue(dec); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := dec.Token(); err != nil { // closing '}' or ']'
+		return err
+	}
+	return nil
 }
 
 // LoadSnapshot reads and decodes a single gzip-compressed snapshot file.
