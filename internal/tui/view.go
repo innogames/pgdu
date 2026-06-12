@@ -56,8 +56,9 @@ func (m *Model) View() string {
 
 	// Non-blocking prompts (hints) render above the list and consume one
 	// line of the content area. Blocking prompts take over the whole
-	// content area in the switch below.
-	if s.extPrompt != nil && !s.extPrompt.blocking {
+	// content area in the switch below. levelDescribe is excluded: it renders
+	// the pg_buffercache install affordance inside its cache-footprint section.
+	if s.extPrompt != nil && !s.extPrompt.blocking && s.level != levelDescribe {
 		b.WriteString(m.renderExtHint(s))
 		b.WriteString("\n")
 		contentHeight--

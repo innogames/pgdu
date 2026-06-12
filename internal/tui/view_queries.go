@@ -620,6 +620,8 @@ func paramSourceLabel(src pg.ParamSource) string {
 		return "pg_qualstats"
 	case pg.ParamExtractField:
 		return "EXTRACT field"
+	case pg.ParamIntervalLiteral:
+		return "INTERVAL literal"
 	default:
 		return "synthesized"
 	}

@@ -372,11 +372,56 @@ func QualstatsExampleUsable(normalized, example string) bool {
 	if hasParamPlaceholder(example) {
 		return false
 	}
+	// A truncated example is cut mid-statement, leaving unbalanced parentheses or
+	// an unterminated string literal; EXPLAINing it then fails with a syntax
+	// error (often "at or near \";\""). The suffix anchor below can't catch this
+	// when the normalized query ends at its last $n (empty tail) — common for the
+	// `… LIMIT $n OFFSET $n` shape, which is long yet anchorless — so reject any
+	// structurally-unbalanced example up front regardless of the anchor.
+	if !balancedDelimiters(example) {
+		return false
+	}
 	tail := strings.TrimSpace(normalizedTailAfterLastParam(normalized))
 	if tail == "" {
 		return true
 	}
 	return strings.HasSuffix(collapseSpaces(example), collapseSpaces(tail))
+}
+
+// balancedDelimiters reports whether s has balanced parentheses and terminated
+// single-quoted string literals — a necessary condition for a complete SQL
+// statement, used to spot a pg_qualstats example truncated at
+// track_activity_query_size before it reaches EXPLAIN. Handles the SQL `”`
+// in-string quote escape; dollar-quoting and E'…\” backslash escapes are rare
+// in normalized statements and not modelled (worst case a usable example is
+// rejected and the caller falls back to the synthesized sample).
+func balancedDelimiters(s string) bool {
+	depth := 0
+	inStr := false
+	for i := 0; i < len(s); i++ {
+		if inStr {
+			if s[i] == '\'' {
+				if i+1 < len(s) && s[i+1] == '\'' {
+					i++ // doubled '' is an escaped quote — stay in the string
+					continue
+				}
+				inStr = false
+			}
+			continue
+		}
+		switch s[i] {
+		case '\'':
+			inStr = true
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0 && !inStr
 }
 
 // hasParamPlaceholder reports whether s contains a $n placeholder (a '$'
@@ -443,11 +488,11 @@ func (c *Client) ExplainGeneric(ctx context.Context, db, query string) (string, 
 	}
 	defer conn.Release()
 
-	// Rewrite EXTRACT($n FROM …) pseudo-parameters to the bindable function-call
-	// form; otherwise GENERIC_PLAN fails to parse the verbatim normalized text
-	// (see rewriteExtractFieldParams). The remaining $n stay placeholders for
+	// Rewrite EXTRACT($n FROM …) and INTERVAL $n pseudo-parameters to bindable
+	// forms; otherwise GENERIC_PLAN fails to parse the verbatim normalized text
+	// (see rewriteNormalizedParams). The remaining $n stay placeholders for
 	// GENERIC_PLAN to plan without values.
-	sql := "BEGIN READ ONLY;\nEXPLAIN (GENERIC_PLAN, FORMAT TEXT) " + rewriteExtractFieldParams(query) + ";\nROLLBACK;"
+	sql := "BEGIN READ ONLY;\nEXPLAIN (GENERIC_PLAN, FORMAT TEXT) " + rewriteNormalizedParams(query) + ";\nROLLBACK;"
 	results, err := conn.Conn().PgConn().Exec(ctx, sql).ReadAll()
 	if err != nil {
 		return "", fmt.Errorf("explain in %q: %w", db, err)
@@ -646,6 +691,41 @@ func ExtractFieldOrdinals(query string) []int {
 	return out
 }
 
+// intervalParamRe matches an INTERVAL $n typed-literal whose value slot is a $n
+// placeholder. pg_stat_statements normalizes the string in `INTERVAL '1 day'` to
+// a $n, yielding `INTERVAL $1` — but the SQL grammar's INTERVAL-literal form
+// requires a string constant in that slot, not a bind parameter, so the verbatim
+// normalized text is neither PREPARE-able nor EXPLAIN-able (both fail with
+// "syntax error at or near $n"). The pattern is case-insensitive and tolerates
+// whitespace; it captures the ordinal so callers can map it back to the original.
+var intervalParamRe = regexp.MustCompile(`(?i)\binterval\s+\$(\d+)`)
+
+// rewriteNormalizedParams makes a pg_stat_statements-normalized query parseable
+// with its $n placeholders intact, fixing the spots where normalization drops a
+// $n where the grammar forbids one: EXTRACT(field FROM …) and INTERVAL value.
+// INTERVAL $n becomes the equivalent cast $n::interval — a bindable expression of
+// the same type. Ordinals are preserved throughout, so inferred parameter types
+// and sampled values still map back to the original query by number.
+func rewriteNormalizedParams(query string) string {
+	q := rewriteExtractFieldParams(query)
+	return intervalParamRe.ReplaceAllString(q, "$$${1}::interval")
+}
+
+// IntervalParamOrdinals returns the $n ordinals that sit in the value slot of an
+// INTERVAL $n typed-literal in a normalized query. Substituting a synthesized
+// typed literal there would produce `INTERVAL '1 day'::interval` — still a syntax
+// error — so BuildSampleCall must fill these with a bare interval string instead.
+func IntervalParamOrdinals(query string) []int {
+	matches := intervalParamRe.FindAllStringSubmatch(query, -1)
+	var out []int
+	for _, m := range matches {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // InferParams discovers the types of a normalized query's $n placeholders by
 // PREPAREing it and reading pg_prepared_statements.parameter_types. Best-effort:
 // utility statements and queries whose text was truncated by
@@ -666,10 +746,10 @@ func (c *Client) InferParams(ctx context.Context, db, query string) ([]ParamType
 	// against a leftover from a prior aborted call on the same pooled conn.
 	const name = "pgdu_infer_params"
 	_, _ = conn.Exec(ctx, "DEALLOCATE "+name)
-	// EXTRACT($n FROM …) pseudo-parameters would make PREPARE fail with a syntax
-	// error; rewrite them to the bindable function-call form first (ordinals are
+	// EXTRACT($n FROM …) and INTERVAL $n pseudo-parameters would make PREPARE fail
+	// with a syntax error; rewrite them to bindable forms first (ordinals are
 	// preserved, so the returned ParamType ordinals still match the original $n).
-	if _, err := conn.Exec(ctx, "PREPARE "+name+" AS "+rewriteExtractFieldParams(query)); err != nil {
+	if _, err := conn.Exec(ctx, "PREPARE "+name+" AS "+rewriteNormalizedParams(query)); err != nil {
 		return nil, fmt.Errorf("infer parameters: %w", err)
 	}
 	defer func() { _, _ = conn.Exec(ctx, "DEALLOCATE "+name) }()
@@ -746,16 +826,22 @@ func MapQualConstants(query string, params []ParamType, samples []QualSample) ma
 }
 
 // ResolveSampleParams decides the literal and source for each $n placeholder,
-// applying precedence EXTRACT field > pg_qualstats > live-table > synthesized.
+// applying precedence EXTRACT/INTERVAL slot > pg_qualstats > live-table > synthesized.
 // It returns the per-ordinal literals for the non-synthesized slots (to hand to
 // BuildSampleCall) and the full per-parameter breakdown for the verbose table.
-// EXTRACT slots get 'epoch' (a bare field literal every temporal type accepts);
-// synthesized slots get sampleLiteral(type). Pure (no DB access).
-func ResolveSampleParams(query string, params []ParamType, qual, live map[int]string, extractOrds []int) (map[int]string, []SampleParam) {
+// EXTRACT slots get 'epoch' (a bare field literal every temporal type accepts)
+// and INTERVAL slots get a bare '1 day' string (so `INTERVAL $n` stays parseable
+// rather than becoming `INTERVAL '…'::interval`); synthesized slots get
+// sampleLiteral(type). Pure (no DB access).
+func ResolveSampleParams(query string, params []ParamType, qual, live map[int]string, extractOrds, intervalOrds []int) (map[int]string, []SampleParam) {
 	cols := paramColumns(query)
 	extract := make(map[int]bool, len(extractOrds))
 	for _, o := range extractOrds {
 		extract[o] = true
+	}
+	interval := make(map[int]bool, len(intervalOrds))
+	for _, o := range intervalOrds {
+		interval[o] = true
 	}
 	real := map[int]string{}
 	breakdown := make([]SampleParam, 0, len(params))
@@ -764,6 +850,11 @@ func ResolveSampleParams(query string, params []ParamType, qual, live map[int]st
 		switch {
 		case extract[p.Ordinal]:
 			sp.Source, sp.Value = ParamExtractField, "'epoch'"
+		case interval[p.Ordinal]:
+			// `INTERVAL $n` parses with "INTERVAL" as the preceding token, which
+			// paramColumns picks up as a bogus predicate column — it's the typed-
+			// literal keyword, not a column. Clear it.
+			sp.Source, sp.Value, sp.Column = ParamIntervalLiteral, "'1 day'", ""
 		case qual[p.Ordinal] != "":
 			sp.Source, sp.Value = ParamQualstats, qual[p.Ordinal]
 		case live[p.Ordinal] != "":

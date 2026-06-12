@@ -139,3 +139,59 @@ LEFT   JOIN pg_statio_user_tables s ON s.relid = c.oid
 WHERE  n.nspname = $1 AND c.relkind IN ('r','m','p')
 ORDER  BY buffered_bytes DESC, c.relname
 `
+
+// sqlBufferStatByOID is sqlBufferStats scoped to a single relation by OID
+// instead of a whole schema — the natural shape for the describe-table view,
+// which has the OID but wants only that one table's cache footprint. The
+// filenodes CTEs and final SELECT filter on c.oid = $1; the rest matches
+// sqlBufferStats so the scanned column list is identical.
+const sqlBufferStatByOID = `
+WITH bc AS (
+  SELECT relfilenode,
+         COUNT(*)                        AS bufs,
+         COUNT(*) FILTER (WHERE isdirty)  AS dirty_bufs,
+         SUM(usagecount)::bigint          AS usage_sum
+  FROM   pg_buffercache
+  WHERE  reldatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
+  GROUP  BY relfilenode
+),
+filenodes AS (
+  SELECT c.oid AS tab_oid, pg_relation_filenode(c.oid) AS fn
+  FROM   pg_class c
+  WHERE  c.oid = $1 AND c.relkind IN ('r','m','p')
+  UNION ALL
+  SELECT c.oid, pg_relation_filenode(c.reltoastrelid)
+  FROM   pg_class c
+  WHERE  c.oid = $1 AND c.relkind IN ('r','m','p') AND c.reltoastrelid <> 0
+  UNION ALL
+  SELECT c.oid, pg_relation_filenode(i.indexrelid)
+  FROM   pg_class c
+  JOIN   pg_index i ON i.indrelid = c.oid
+  WHERE  c.oid = $1 AND c.relkind IN ('r','m','p')
+),
+buffered AS (
+  SELECT f.tab_oid,
+         COALESCE(SUM(bc.bufs), 0)::bigint        AS bufs,
+         COALESCE(SUM(bc.dirty_bufs), 0)::bigint  AS dirty_bufs,
+         COALESCE(SUM(bc.usage_sum), 0)::bigint   AS usage_sum
+  FROM   filenodes f
+  LEFT   JOIN bc ON bc.relfilenode = f.fn
+  GROUP  BY f.tab_oid
+)
+SELECT c.oid,
+       n.nspname,
+       c.relname,
+       COALESCE(b.bufs, 0) * current_setting('block_size')::int      AS buffered_bytes,
+       pg_total_relation_size(c.oid)                                 AS total_bytes,
+       COALESCE(s.heap_blks_hit, 0) + COALESCE(s.idx_blks_hit, 0)    AS hits,
+       COALESCE(s.heap_blks_read, 0) + COALESCE(s.idx_blks_read, 0)  AS reads,
+       COALESCE(b.dirty_bufs, 0) * current_setting('block_size')::int AS dirty_bytes,
+       CASE WHEN COALESCE(b.bufs, 0) > 0
+            THEN b.usage_sum::float8 / b.bufs
+            ELSE 0 END                                               AS usage_avg
+FROM   pg_class c
+JOIN   pg_namespace n ON n.oid = c.relnamespace
+LEFT   JOIN buffered b ON b.tab_oid = c.oid
+LEFT   JOIN pg_statio_user_tables s ON s.relid = c.oid
+WHERE  c.oid = $1 AND c.relkind IN ('r','m','p')
+`

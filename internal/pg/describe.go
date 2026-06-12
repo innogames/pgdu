@@ -41,9 +41,9 @@ func (e *MissingRelationError) Error() string {
 }
 
 // DescribeTable fetches a psql-\d-style description of a table: its columns
-// (with types, NOT NULL, and defaults), its indexes (full CREATE INDEX text),
-// and its constraints (pg_get_constraintdef). Size and row-count come from
-// the Table struct passed in — no extra round-trip for those.
+// (with types, NOT NULL, and defaults) and its indexes (full CREATE INDEX
+// text). Size and row-count come from the Table struct passed in — no extra
+// round-trip for those.
 func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, error) {
 	pool, err := c.PoolFor(ctx, t.DB)
 	if err != nil {
@@ -93,23 +93,6 @@ func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, erro
 		return nil, fmt.Errorf("describe indexes for %q.%q: %w", t.Schema, t.Name, err)
 	}
 	idxRows.Close()
-
-	// Constraints
-	conRows, err := pool.Query(ctx, sqlDescribeConstraints, t.OID)
-	if err != nil {
-		return nil, fmt.Errorf("describe constraints for %q.%q: %w", t.Schema, t.Name, err)
-	}
-	defer conRows.Close()
-	for conRows.Next() {
-		var con DescribeConstraint
-		if err := conRows.Scan(&con.Name, &con.Def); err != nil {
-			return nil, fmt.Errorf("describe constraints for %q.%q: %w", t.Schema, t.Name, err)
-		}
-		d.Constraints = append(d.Constraints, con)
-	}
-	if err := conRows.Err(); err != nil {
-		return nil, fmt.Errorf("describe constraints for %q.%q: %w", t.Schema, t.Name, err)
-	}
 
 	return d, nil
 }

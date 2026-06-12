@@ -610,27 +610,19 @@ type DescribeIndexDef struct {
 	Clustered bool // pg_index.indisclustered: table is CLUSTERed on this index
 }
 
-// DescribeConstraint is one row from pg_constraint in the describe-table view.
-type DescribeConstraint struct {
-	Name string
-	Def  string // pg_get_constraintdef output
-}
-
 // Description is the fully-loaded \d-style payload for one object.
 // Kind discriminates which fields are populated: DescribeTable uses
-// Columns/Indexes/Constraints/SizeBytes/EstRows; DescribeIndex uses the
-// Index* fields.
+// Columns/Indexes/SizeBytes/EstRows; DescribeIndex uses the Index* fields.
 type Description struct {
 	Kind  DescribeKind
 	OID   uint32 // target relation oid; used to guard the loaded message
 	Title string // qualified object name for the panel header
 
 	// Table describe fields.
-	Columns     []DescribeColumn
-	Indexes     []DescribeIndexDef
-	Constraints []DescribeConstraint
-	SizeBytes   int64
-	EstRows     int64
+	Columns   []DescribeColumn
+	Indexes   []DescribeIndexDef
+	SizeBytes int64
+	EstRows   int64
 
 	// Index describe fields.
 	IndexDef     string // pg_get_indexdef(oid) — full CREATE INDEX statement
@@ -872,10 +864,11 @@ type ParamType struct {
 type ParamSource int
 
 const (
-	ParamSynthesized  ParamSource = iota // generic typed literal (sampleLiteral)
-	ParamLiveData                        // real value sampled from the live table
-	ParamQualstats                       // real constant captured per-predicate by pg_qualstats
-	ParamExtractField                    // EXTRACT($n FROM …) field slot ('epoch')
+	ParamSynthesized     ParamSource = iota // generic typed literal (sampleLiteral)
+	ParamLiveData                           // real value sampled from the live table
+	ParamQualstats                          // real constant captured per-predicate by pg_qualstats
+	ParamExtractField                       // EXTRACT($n FROM …) field slot ('epoch')
+	ParamIntervalLiteral                    // INTERVAL $n value slot ('1 day')
 )
 
 // SampleParam describes how one $n placeholder was filled when building the

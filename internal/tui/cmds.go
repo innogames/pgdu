@@ -144,6 +144,12 @@ type describeLoadedMsg struct {
 	desc *pg.Description
 	err  error
 }
+type describeBuffersLoadedMsg struct {
+	db   string
+	oid  uint32
+	stat pg.TableBufferStat
+	err  error
+}
 type diagnosticLoadedMsg struct {
 	key    string // Diagnostic.Key for stale-message rejection
 	result *pg.DiagResult
@@ -332,6 +338,16 @@ func (m *Model) loadBufferDetailCmd(db string, oid uint32) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		counts, blockSize, err := m.client.TableBufferUsageCounts(ctx, db, oid)
 		return bufferDetailLoadedMsg{db: db, oid: oid, counts: counts, blockSize: blockSize, err: err}
+	})
+}
+
+// loadDescribeBuffersCmd fetches the single-table cache-footprint stat for the
+// describe-table view. Runs separately from the describe load so a missing
+// pg_buffercache (or any buffer error) never breaks the columns panel.
+func (m *Model) loadDescribeBuffersCmd(db string, oid uint32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		stat, err := m.client.TableBufferStatByOID(ctx, db, oid)
+		return describeBuffersLoadedMsg{db: db, oid: oid, stat: stat, err: err}
 	})
 }
 
@@ -682,10 +698,10 @@ func (m *Model) loadStatementSampleCmd(db string, queryID int64, queryText strin
 		// the synthesized call uses constants that actually exist in the data; any
 		// ordinal still unresolved falls back to a generic typed literal.
 		live := m.client.SampleParamValues(ctx, db, queryText, paramsWithout(params, qual))
-		// EXTRACT($n FROM …): the field slot is not a real parameter; ResolveSampleParams
-		// fills it with a bare field literal ('epoch', accepted for every temporal type
-		// EXTRACT takes) so the sample call stays parseable and runnable.
-		real, breakdown := pg.ResolveSampleParams(queryText, params, qual, live, pg.ExtractFieldOrdinals(queryText))
+		// EXTRACT($n FROM …) field slots and INTERVAL $n value slots aren't real
+		// parameters; ResolveSampleParams fills them with bare literals ('epoch' /
+		// '1 day') so the sample call stays parseable and runnable.
+		real, breakdown := pg.ResolveSampleParams(queryText, params, qual, live, pg.ExtractFieldOrdinals(queryText), pg.IntervalParamOrdinals(queryText))
 		return statementSampleLoadedMsg{db: db, query: queryText, sample: pg.BuildSampleCall(queryText, params, real),
 			fromData: len(live) > 0, fromQual: len(qual) > 0, qualstats: qualstats, installable: installable,
 			params: breakdown}

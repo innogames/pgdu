@@ -261,6 +261,46 @@ func (m *Model) onDescribeLoaded(msg describeLoadedMsg) tea.Cmd {
 	s.loaded = true
 	s.err = msg.err
 	s.describe = msg.desc
+	// (Re)load the cache-footprint section for table describes. Triggering here
+	// — rather than at push time — covers every entry point uniformly (the `d`
+	// push, the name-resolved push from top-queries, and Refresh), and gives us
+	// the resolved OID even when the screen was pushed by table name. Reset the
+	// prior section state first so a refresh doesn't show stale figures.
+	s.descBuf = nil
+	s.descBufErr = nil
+	if msg.err == nil && msg.desc != nil && msg.desc.Kind == pg.DescribeTable && msg.desc.OID != 0 {
+		return m.loadDescribeBuffersCmd(s.db, msg.desc.OID)
+	}
+	return nil
+}
+
+// onDescribeBuffersLoaded fills the describe-table screen's cache-footprint
+// section. It's independent of onDescribeLoaded (which owns loading/loaded), so
+// a missing pg_buffercache or a buffer error degrades only the section, never
+// the columns. A missing extension becomes a non-blocking install prompt that
+// the generic `i` key acts on; the section renders the affordance inline.
+func (m *Model) onDescribeBuffersLoaded(msg describeBuffersLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelDescribe)
+	// Match on the loaded description's OID (not s.table, which is unset on the
+	// name-resolved push path) to reject stale results.
+	if s == nil || s.db != msg.db || s.describe == nil || s.describe.OID != msg.oid {
+		return nil
+	}
+	if ext := asMissingExt(msg.err); ext != nil {
+		s.extPrompt = &extPrompt{
+			name:        ext.Extension,
+			db:          ext.DB,
+			installable: ext.Installable,
+			reason:      extPromptReasonBufferCache,
+			blocking:    false,
+		}
+		return nil
+	}
+	s.descBufErr = msg.err
+	if msg.err == nil {
+		stat := msg.stat
+		s.descBuf = &stat
+	}
 	return nil
 }
 

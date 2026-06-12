@@ -117,21 +117,16 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 			}
 		}
 
-		// --- constraints ---
-		if len(d.Constraints) > 0 {
-			b.WriteString("\n  " + styleHeader.Render(" constraints ") + "\n")
-			for _, con := range d.Constraints {
-				b.WriteString("    " + con.Name + "\n")
-				b.WriteString("      " + mu(truncLine(con.Def)) + "\n")
-			}
-		}
-
 		// --- summary ---
 		b.WriteString("\n  " + mu(fmt.Sprintf(
 			"%s total · ~%s rows",
 			humanize.Bytes(d.SizeBytes),
 			formatRows(d.EstRows),
 		)) + "\n")
+
+		// --- cache footprint (shared_buffers occupancy of this table) ---
+		b.WriteString("\n  " + styleHeader.Render(" cache footprint ") + "\n")
+		b.WriteString(m.renderDescribeBufferRows(s))
 
 	case pg.DescribeIndex:
 		b.WriteString("  " + styleSelected.Render(d.Title) + "\n\n")
@@ -159,6 +154,71 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 	rendered := strings.Count(b.String(), "\n")
 	for i := rendered; i < height; i++ {
 		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// renderDescribeBufferRows renders the body of the describe-table cache-footprint
+// section from s.descBuf, mirroring the figures of the buffer-detail screen
+// (renderBufferDetail) but without the temperature histogram. It degrades
+// gracefully: a missing pg_buffercache shows an inline install affordance (the
+// generic `i` key acts on the non-blocking extPrompt set in onDescribeBuffersLoaded),
+// a load error shows a muted line, and the in-flight state shows a placeholder.
+func (m *Model) renderDescribeBufferRows(s *screen) string {
+	mu := styleMuted.Render
+
+	// Missing pg_buffercache: offer the install inline, mirroring renderExtHint.
+	if p := s.extPrompt; p != nil {
+		switch {
+		case s.installing:
+			return "    " + mu(m.spinner.View()+" installing "+p.name+"…") + "\n"
+		case p.err != nil:
+			return "    " + styleErr.Render("install "+p.name+" failed: "+p.err.Error()) + "  " +
+				mu("(press i to retry)") + "\n"
+		case !p.installable:
+			return "    " + mu(p.name+" not installed and not available on this server") + "\n"
+		default:
+			return "    " + mu(p.name+" not installed — press ") +
+				styleBadge.Render("i") + mu(" to install") + "\n"
+		}
+	}
+	if s.descBufErr != nil {
+		return "    " + styleErr.Render(s.descBufErr.Error()) + "\n"
+	}
+	st := s.descBuf
+	if st == nil {
+		return "    " + mu("…") + "\n"
+	}
+
+	barW := bufferDetailBarWidth(m.width)
+	cachedVal := "—"
+	if st.TotalBytes > 0 {
+		pct := float64(st.BufferedBytes) / float64(st.TotalBytes) * 100
+		cachedVal = percentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct)) +
+			"  " + renderSolidBar(st.BufferedBytes, st.TotalBytes, barW, percentStyle(pct))
+	}
+	hitVal := "—"
+	if hr := st.HitRatio(); hr >= 0 {
+		pct := hr * 100
+		hitVal = gradedPercentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct))
+	}
+	rows := [][2]string{
+		{"buffered", humanize.Bytes(st.BufferedBytes)},
+		{"table size", humanize.Bytes(st.TotalBytes)},
+		{"cached", cachedVal},
+		{"hit ratio", hitVal},
+		{"dirty", humanize.Bytes(st.DirtyBytes)},
+		{"avg usage", fmt.Sprintf("%.1f / 5", st.UsageAvg)},
+	}
+	labelW := 0
+	for _, kv := range rows {
+		if n := len(kv[0]); n > labelW {
+			labelW = n
+		}
+	}
+	var b strings.Builder
+	for _, kv := range rows {
+		b.WriteString("    " + mu(padRight(kv[0], labelW)) + "  " + kv[1] + "\n")
 	}
 	return b.String()
 }

@@ -2,6 +2,7 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -115,6 +116,33 @@ func (c *Client) TableBufferStats(ctx context.Context, db, schema string) ([]Tab
 				&s.Hits, &s.Reads, &s.DirtyBytes, &s.UsageAvg)
 			return s, err
 		})
+}
+
+// TableBufferStatByOID returns the shared-buffer footprint (buffered/total/
+// dirty bytes, cumulative hits/reads, mean usagecount) for one relation by OID,
+// summing its heap, toast and indexes — the cache-footprint figures for the
+// describe-table view. A relation with no buffered pages (or one that no longer
+// exists) yields a zero-value stat and no error, so callers can render "not
+// cached" without special-casing pgx.ErrNoRows.
+func (c *Client) TableBufferStatByOID(ctx context.Context, db string, oid uint32) (TableBufferStat, error) {
+	if err := c.EnsureBufferCache(ctx, db); err != nil {
+		return TableBufferStat{}, err
+	}
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return TableBufferStat{}, err
+	}
+	s := TableBufferStat{DB: db, OID: oid}
+	err = pool.QueryRow(ctx, sqlBufferStatByOID, oid).Scan(
+		&s.OID, &s.Schema, &s.Name, &s.BufferedBytes, &s.TotalBytes,
+		&s.Hits, &s.Reads, &s.DirtyBytes, &s.UsageAvg)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return TableBufferStat{DB: db, OID: oid}, nil
+	}
+	if err != nil {
+		return TableBufferStat{}, fmt.Errorf("table buffer stat for oid %d in %q: %w", oid, db, err)
+	}
+	return s, nil
 }
 
 // TableBufferUsageCounts returns the per-table clock-sweep temperature

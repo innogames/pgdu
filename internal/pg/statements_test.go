@@ -262,6 +262,40 @@ func TestQualstatsExampleUsable(t *testing.T) {
 	if QualstatsExampleUsable(leftover, leftover) {
 		t.Errorf("example with a leftover $n placeholder wrongly accepted:\n%s", leftover)
 	}
+	// A long query ending in its last $n (empty tail → no suffix to anchor on)
+	// whose example pg_qualstats truncated mid-subquery: unbalanced parens. The
+	// suffix check optimistically accepts it, so the structural check must reject.
+	endsInParam := "SELECT c.id FROM cp JOIN (SELECT x FROM t WHERE n = $1) AS c WHERE (cp.player_id = $2 OR cp.guild_id = $3) LIMIT $4 OFFSET $5"
+	truncExample := "SELECT c.id FROM cp JOIN (SELECT x FROM t WHERE n = '42') AS c WHERE (cp.player_id = '849882129' OR"
+	if QualstatsExampleUsable(endsInParam, truncExample) {
+		t.Errorf("truncated anchorless example wrongly accepted:\n%s", truncExample)
+	}
+	// The complete denormalization of the same query is balanced and accepted.
+	fullExample := "SELECT c.id FROM cp JOIN (SELECT x FROM t WHERE n = '42') AS c WHERE (cp.player_id = '849882129' OR cp.guild_id = '7') LIMIT '50' OFFSET '0'"
+	if !QualstatsExampleUsable(endsInParam, fullExample) {
+		t.Errorf("complete anchorless example wrongly rejected:\n%s", fullExample)
+	}
+}
+
+func TestBalancedDelimiters(t *testing.T) {
+	cases := []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"trivial", "SELECT 1", true},
+		{"balanced parens", "SELECT (a + b) FROM t", true},
+		{"doubled-quote escape", "SELECT 'it''s ok' FROM t", true},
+		{"paren inside string ignored", "SELECT * FROM t WHERE x = '(' ", true},
+		{"unclosed paren", "SELECT * FROM (SELECT 1", false},
+		{"unterminated string", "SELECT * FROM t WHERE x = '849", false},
+		{"extra close paren", "SELECT 1) FROM t", false},
+	}
+	for _, c := range cases {
+		if got := balancedDelimiters(c.s); got != c.want {
+			t.Errorf("balancedDelimiters(%q) = %v, want %v", c.s, got, c.want)
+		}
+	}
 }
 
 func TestQueryStatHitRatioAndDerived(t *testing.T) {
@@ -359,14 +393,15 @@ func TestBuildSampleCall(t *testing.T) {
 
 func TestResolveSampleParams(t *testing.T) {
 	cases := []struct {
-		name       string
-		query      string
-		params     []ParamType
-		qual       map[int]string
-		live       map[int]string
-		extractOrd []int
-		wantReal   map[int]string
-		want       []SampleParam
+		name        string
+		query       string
+		params      []ParamType
+		qual        map[int]string
+		live        map[int]string
+		extractOrd  []int
+		intervalOrd []int
+		wantReal    map[int]string
+		want        []SampleParam
 	}{
 		{
 			// Precedence: qualstats beats live beats synthesized.
@@ -399,10 +434,23 @@ func TestResolveSampleParams(t *testing.T) {
 				{Ordinal: 2, Type: "integer", Column: "n", Value: "1::integer", Source: ParamSynthesized},
 			},
 		},
+		{
+			// An INTERVAL value slot gets a bare '1 day' (not a ::interval cast) so
+			// `INTERVAL $1` stays parseable, and it outranks the synthesized literal.
+			name:        "interval value slot wins",
+			query:       "SELECT * FROM t WHERE created >= NOW() - INTERVAL $1 AND n = $2",
+			params:      []ParamType{{Ordinal: 1, Type: "interval"}, {Ordinal: 2, Type: "integer"}},
+			intervalOrd: []int{1},
+			wantReal:    map[int]string{1: "'1 day'"},
+			want: []SampleParam{
+				{Ordinal: 1, Type: "interval", Value: "'1 day'", Source: ParamIntervalLiteral},
+				{Ordinal: 2, Type: "integer", Column: "n", Value: "1::integer", Source: ParamSynthesized},
+			},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			gotReal, got := ResolveSampleParams(c.query, c.params, c.qual, c.live, c.extractOrd)
+			gotReal, got := ResolveSampleParams(c.query, c.params, c.qual, c.live, c.extractOrd, c.intervalOrd)
 			if !reflect.DeepEqual(gotReal, c.wantReal) {
 				t.Errorf("ResolveSampleParams() real\n got: %+v\nwant: %+v", gotReal, c.wantReal)
 			}
@@ -492,6 +540,58 @@ func TestExtractFieldOrdinals(t *testing.T) {
 	}
 	if n := ExtractFieldOrdinals("SELECT * FROM t WHERE id = $1"); len(n) != 0 {
 		t.Errorf("ExtractFieldOrdinals(no extract) = %v, want empty", n)
+	}
+}
+
+func TestRewriteNormalizedParams(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			// The bug report: INTERVAL '1 day' normalizes to INTERVAL $1, which is a
+			// syntax error to PREPARE/EXPLAIN. The cast form keeps $1 a bind param.
+			name:  "interval value rewritten to cast",
+			query: "SELECT COUNT(*) FROM t WHERE created >= NOW() - INTERVAL $1 AND world_id = $2",
+			want:  "SELECT COUNT(*) FROM t WHERE created >= NOW() - $1::interval AND world_id = $2",
+		},
+		{
+			name:  "case and whitespace insensitive",
+			query: "SELECT NOW() - INTERVAL   $1",
+			want:  "SELECT NOW() - $1::interval",
+		},
+		{
+			// A non-normalized literal interval is left alone.
+			name:  "literal interval untouched",
+			query: "SELECT NOW() - INTERVAL '1 day'",
+			want:  "SELECT NOW() - INTERVAL '1 day'",
+		},
+		{
+			// Both rewrites compose, real value params stay put.
+			name:  "extract and interval together",
+			query: "SELECT extract($1 FROM ts) FROM t WHERE created >= NOW() - INTERVAL $2 AND n = $3",
+			want:  "SELECT extract($1, ts) FROM t WHERE created >= NOW() - $2::interval AND n = $3",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := rewriteNormalizedParams(c.query); got != c.want {
+				t.Errorf("rewriteNormalizedParams()\n got: %s\nwant: %s", got, c.want)
+			}
+		})
+	}
+}
+
+func TestIntervalParamOrdinals(t *testing.T) {
+	q := "SELECT * FROM t WHERE a >= NOW() - INTERVAL $2 AND b < NOW() + interval $4 AND n = $1"
+	got := IntervalParamOrdinals(q)
+	want := []int{2, 4}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("IntervalParamOrdinals() = %v, want %v", got, want)
+	}
+	if n := IntervalParamOrdinals("SELECT * FROM t WHERE id = $1"); len(n) != 0 {
+		t.Errorf("IntervalParamOrdinals(no interval) = %v, want empty", n)
 	}
 }
 

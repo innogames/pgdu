@@ -432,6 +432,12 @@ type screen struct {
 	// describe holds the loaded \d-style description for levelDescribe screens.
 	// Nil until the async load completes.
 	describe *pg.Description
+	// descBuf is the cache-footprint stat for the describe-table screen's
+	// shared-buffers section, loaded asynchronously and independently of
+	// describe (nil until loaded; descBufErr non-nil on a non-extension error).
+	// A missing pg_buffercache is carried by extPrompt instead.
+	descBuf    *pg.TableBufferStat
+	descBufErr error
 
 	// WAL-inspector state. walSummary is the header snapshot rendered above
 	// the rmgr list on levelWAL (nil until loaded; walSummaryErr non-nil when

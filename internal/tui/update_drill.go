@@ -412,7 +412,9 @@ func (m *Model) loadCurrent() tea.Cmd {
 	case levelDescribe:
 		// Re-issue the right loader on Refresh. On first push s.describe is nil
 		// so we identify the target from s.table (table describe) or s.index
-		// (index describe — s.table.OID is 0 for index targets).
+		// (index describe — s.table.OID is 0 for index targets). The
+		// cache-footprint section is (re)loaded from onDescribeLoaded once the
+		// describe result lands, so all push paths and refresh share one trigger.
 		if s.describe != nil {
 			switch s.describe.Kind {
 			case pg.DescribeIndex:

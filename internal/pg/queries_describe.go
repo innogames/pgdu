@@ -48,16 +48,6 @@ WHERE  idx.indrelid = $1
 ORDER  BY idx.indisprimary DESC, i.relname
 `
 
-// sqlDescribeConstraints lists a table's constraints (PK, FK, unique, check)
-// rendered by pg_get_constraintdef. $1 = table oid.
-const sqlDescribeConstraints = `
-SELECT conname,
-       pg_get_constraintdef(oid, true) AS def
-FROM   pg_constraint
-WHERE  conrelid = $1
-ORDER  BY contype, conname
-`
-
 // sqlDescribeIndex returns the definition and metadata for a single index.
 // indpred is COALESCE'd to ” so it's never NULL. $1 = index oid. PG 12+.
 const sqlDescribeIndex = `
