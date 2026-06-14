@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 
+	"pgdu/internal/humanize"
 	"pgdu/internal/pg"
 )
 
@@ -29,12 +29,18 @@ const (
 	actColBackendXid  actColID = "xid"
 	actColBackendXmin actColID = "xmin"
 	actColQuery       actColID = "query"
+	// OS-level proc columns (Linux only, local server; show — otherwise).
+	actColRSS      actColID = "rss"
+	actColCPU      actColID = "cpu%"
+	actColReadBps  actColID = "read/s"
+	actColWriteBps actColID = "write/s"
 )
 
 // actCtx carries per-build inputs the activity column cells need beyond the row
-// itself: the per-screen resolved hostname map.
+// itself. Both maps may be nil (non-Linux host, remote connection, first sample).
 type actCtx struct {
-	hosts map[string]string // IP → resolved hostname (from actHosts on screen)
+	hosts map[string]string     // IP → resolved hostname (from actHosts on screen)
+	proc  map[int32]procDerived // PID → /proc-derived stats; nil = unavailable
 }
 
 // actColDesc describes one Activity tool column: stable id, header label, render
@@ -101,30 +107,29 @@ func actColumnRegistry() []actColDesc {
 				w = strings.Trim(w, "/")
 				return pg.DiagCell{Display: w}
 			}},
-		{id: actColQueryAge, name: "query_age", kind: pg.DiagCostGraded, defaultOn: true,
+		{id: actColQueryAge, name: "query_age", kind: pg.DiagDuration, defaultOn: true,
 			desc: "elapsed time since the current statement started (now() - query_start)",
 			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell {
 				if r.QueryAgeMs <= 0 {
 					return pg.DiagCell{Display: "—"}
 				}
-				return pg.DiagCell{Display: fmtMs(r.QueryAgeMs), Num: r.QueryAgeMs, HasNum: true}
+				return pg.DiagCell{Display: fmtAge(r.QueryAgeMs), Num: r.QueryAgeMs, HasNum: true}
 			}},
-		{id: actColXactAge, name: "xact_age", kind: pg.DiagCostGraded,
+		{id: actColXactAge, name: "xact_age", kind: pg.DiagDuration,
 			desc: "elapsed time since the current transaction started (now() - xact_start)",
 			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell {
 				if r.XactAgeMs <= 0 {
 					return pg.DiagCell{Display: "—"}
 				}
-				return pg.DiagCell{Display: fmtMs(r.XactAgeMs), Num: r.XactAgeMs, HasNum: true}
+				return pg.DiagCell{Display: fmtAge(r.XactAgeMs), Num: r.XactAgeMs, HasNum: true}
 			}},
-		{id: actColStateAge, name: "state_age", kind: pg.DiagFloat,
+		{id: actColStateAge, name: "state_age", kind: pg.DiagDuration,
 			desc: "elapsed time since the state last changed (now() - state_change)",
 			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell {
 				if r.StateAgeMs <= 0 {
 					return pg.DiagCell{Display: "—"}
 				}
-				d := time.Duration(r.StateAgeMs * float64(time.Millisecond))
-				return pg.DiagCell{Display: relativeAge(d), Num: r.StateAgeMs, HasNum: true}
+				return pg.DiagCell{Display: fmtAge(r.StateAgeMs), Num: r.StateAgeMs, HasNum: true}
 			}},
 		{id: actColBackendXid, name: "xid", kind: pg.DiagText,
 			desc: "transaction ID held by this backend (backend_xid); empty when not in a transaction",
@@ -135,6 +140,45 @@ func actColumnRegistry() []actColDesc {
 		{id: actColQuery, name: "query", kind: pg.DiagText, defaultOn: true, mandatory: true,
 			desc: "current or last query (always shown)",
 			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: r.Query} }},
+
+		// OS-level columns sourced from /proc — opt-in, show — on non-Linux or
+		// remote connections where the local /proc PIDs don't match.
+		{id: actColRSS, name: "rss", kind: pg.DiagFloat,
+			desc: "resident set size from /proc/<pid>/status (Linux, local server only)",
+			cell: func(r pg.ActivityRow, ctx actCtx) pg.DiagCell {
+				d, ok := ctx.proc[r.PID]
+				if !ok || d.RSSBytes <= 0 {
+					return pg.DiagCell{Display: "—"}
+				}
+				return pg.DiagCell{Display: humanize.Bytes(d.RSSBytes), Num: float64(d.RSSBytes), HasNum: true}
+			}},
+		{id: actColCPU, name: "cpu%", kind: pg.DiagCostGraded,
+			desc: "CPU usage sampled per refresh interval from /proc/<pid>/stat (Linux, local server only)",
+			cell: func(r pg.ActivityRow, ctx actCtx) pg.DiagCell {
+				d, ok := ctx.proc[r.PID]
+				if !ok || d.CPUPct < 0 {
+					return pg.DiagCell{Display: "—"}
+				}
+				return pg.DiagCell{Display: fmt.Sprintf("%.1f%%", d.CPUPct), Num: d.CPUPct, HasNum: true}
+			}},
+		{id: actColReadBps, name: "read/s", kind: pg.DiagFloat,
+			desc: "storage read throughput from /proc/<pid>/io (Linux, same UID as postgres or root)",
+			cell: func(r pg.ActivityRow, ctx actCtx) pg.DiagCell {
+				d, ok := ctx.proc[r.PID]
+				if !ok || d.ReadBps < 0 {
+					return pg.DiagCell{Display: "—"}
+				}
+				return pg.DiagCell{Display: humanize.Bytes(int64(d.ReadBps)) + "/s", Num: d.ReadBps, HasNum: true}
+			}},
+		{id: actColWriteBps, name: "write/s", kind: pg.DiagFloat,
+			desc: "storage write throughput from /proc/<pid>/io (Linux, same UID as postgres or root)",
+			cell: func(r pg.ActivityRow, ctx actCtx) pg.DiagCell {
+				d, ok := ctx.proc[r.PID]
+				if !ok || d.WriteBps < 0 {
+					return pg.DiagCell{Display: "—"}
+				}
+				return pg.DiagCell{Display: humanize.Bytes(int64(d.WriteBps)) + "/s", Num: d.WriteBps, HasNum: true}
+			}},
 	}
 }
 
@@ -196,11 +240,11 @@ func actCellsFor(descs []actColDesc, r pg.ActivityRow, ctx actCtx) []pg.DiagCell
 	return cells
 }
 
-// buildActivityItems converts ActivityRows into generic-table rows. It returns
-// the items and the projected column descriptors (parallel to each item's cells).
-func (m *Model) buildActivityItems(rows []pg.ActivityRow, hosts map[string]string) ([]item, []actColDesc) {
+// buildActivityItems converts ActivityRows into generic-table rows using the
+// supplied context (resolved hostnames + proc stats). Returns items and the
+// projected column descriptors (parallel to each item's cells).
+func (m *Model) buildActivityItems(rows []pg.ActivityRow, ctx actCtx) ([]item, []actColDesc) {
 	descs := m.visibleActCols()
-	ctx := actCtx{hosts: hosts}
 	items := make([]item, len(rows))
 	for i, r := range rows {
 		cells := actCellsFor(descs, r, ctx)
@@ -217,6 +261,56 @@ func (m *Model) buildActivityItems(rows []pg.ActivityRow, hosts map[string]strin
 		}
 	}
 	return items, descs
+}
+
+// isAuxBackend reports whether the backend_type is an evergreen auxiliary
+// process that runs even when no client is connected. These are hidden by
+// default (verbose=false) because they carry no query text, clutter the list,
+// and never indicate user-visible problems.
+// Client-facing types (client backend, parallel worker, autovacuum worker,
+// walsender, walreceiver, background worker) are always shown.
+func isAuxBackend(backendType string) bool {
+	switch backendType {
+	case "walwriter", "checkpointer", "background writer",
+		"autovacuum launcher", "logical replication launcher",
+		"io worker", "startup", "archiver", "walsummarizer",
+		"slotsync worker":
+		return true
+	}
+	return false
+}
+
+// visibleActRows filters rows for the current verbose setting. When verbose is
+// true every row is kept; when false auxiliary/background-only backends are
+// dropped so the list focuses on client-visible activity.
+func visibleActRows(rows []pg.ActivityRow, verbose bool) []pg.ActivityRow {
+	if verbose {
+		return rows
+	}
+	out := rows[:0:0] // reuse backing array only after append
+	for _, r := range rows {
+		if !isAuxBackend(r.BackendType) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// rebuildActivityItems rebuilds the generic-table items for the activity screen
+// from its cached actRows, applying the current verbose filter. Call this
+// whenever actVerbose changes or a fresh snapshot arrives so the two code paths
+// share exactly the same projection + sort logic.
+func (m *Model) rebuildActivityItems(s *screen) {
+	rows := visibleActRows(s.actRows, s.actVerbose)
+	ctx := actCtx{hosts: s.actHosts, proc: m.actProcStats}
+	items, descs := m.buildActivityItems(rows, ctx)
+	s.actCols = descs
+	s.diagCols = actDiagColumnsFrom(descs)
+	s.diagBarCol = -1 // no headline bar on the activity table
+	m.syncActSort(s, descs)
+	s.items = items
+	s.diagMetricsDirty = true
+	m.applySort(s)
 }
 
 // syncActSort maps the stable actSortColID to the projected index diagSortCol.

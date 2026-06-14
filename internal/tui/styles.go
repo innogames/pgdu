@@ -166,6 +166,23 @@ func costStyleRelative(v, max float64) lipgloss.Style {
 	}
 }
 
+// durationStyle colours an elapsed-time cell by ABSOLUTE magnitude so the unit
+// itself carries the signal: sub-second is green (fresh/fast), seconds yellow,
+// minutes red-orange, an hour or more solid red (a long-running query/xact worth
+// investigating). Unlike costStyleRelative this never scales against other rows.
+func durationStyle(ms float64) lipgloss.Style {
+	switch {
+	case ms < 1000: // sub-second
+		return lipgloss.NewStyle().Foreground(colorOK)
+	case ms < 60*1000: // seconds
+		return lipgloss.NewStyle().Foreground(colorAccent)
+	case ms < 60*60*1000: // minutes
+		return lipgloss.NewStyle().Foreground(colorBloat)
+	default: // an hour or more
+		return lipgloss.NewStyle().Foreground(colorError)
+	}
+}
+
 // cmdTypeStyle colours the top-queries `T` command-type tag: green for a plain
 // read-only SELECT ("S"), red for everything else — writes (I/U/D/M), locking
 // SELECTs (SL/L) and transaction-control (T) — so a glance separates the queries

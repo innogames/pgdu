@@ -317,7 +317,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.actColCfgCursor = 0
 		}
 	case key.Matches(msg, m.keys.ToggleRefresh):
-		// Cycle the live window's auto-refresh cadence: 2s → 60s → off → 2s.
+		// Cycle the live window's auto-refresh cadence (activity: 500ms → 1s → 2s → 5s → 10s → off).
 		if s.level == levelStatements || s.level == levelStatementDetail {
 			m.cycleStatRefresh()
 			// Cycling back on restarts the self-rescheduling loop if it stopped.
@@ -381,6 +381,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				break
 			}
 			s.pendingVacuum = true
+		}
+		// On the activity table, `v` toggles visibility of evergreen auxiliary
+		// backends (walwriter, checkpointer, launchers, io workers, …). The rebuild
+		// uses the cached actRows so no DB round-trip is needed.
+		if s.level == levelActivity {
+			s.actVerbose = !s.actVerbose
+			m.rebuildActivityItems(s)
 		}
 	case key.Matches(msg, m.keys.Export):
 		// Write the current table/view to pgdu-<tool>-<datetime>.csv. Returns nil
@@ -531,6 +538,7 @@ func (m *Model) handleColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 		m.ensureStmtColsInit()
 		m.stmtColsVisible[d.id] = !m.stmtColEnabled(d.id, d.defaultOn)
 		m.rebuildStatementItems(s)
+		m.saveColPrefs(colPrefsQueries, colVisToStrings(m.stmtColsVisible))
 	}
 	return nil
 }
@@ -934,16 +942,10 @@ func (m *Model) handleActColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 		}
 		m.ensureActColsInit()
 		m.actColsVisible[d.id] = !m.actColEnabled(d.id, d.defaultOn)
-		// Rebuild items from cached rows — no DB round-trip needed.
 		if s.actRows != nil {
-			items, descs := m.buildActivityItems(s.actRows, s.actHosts)
-			s.actCols = descs
-			s.diagCols = actDiagColumnsFrom(descs)
-			m.syncActSort(s, descs)
-			s.items = items
-			s.diagMetricsDirty = true
-			m.applySort(s)
+			m.rebuildActivityItems(s)
 		}
+		m.saveColPrefs(colPrefsActivity, colVisToStrings(m.actColsVisible))
 	}
 	return nil
 }

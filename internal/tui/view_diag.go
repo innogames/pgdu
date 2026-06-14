@@ -511,9 +511,10 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			display := truncateDiagCell(raw, colW[i])
 			graded := i < nCols && cols[i].Kind == pg.DiagPercentGraded
 			costGraded := i < nCols && cols[i].Kind == pg.DiagCostGraded
+			duration := i < nCols && cols[i].Kind == pg.DiagDuration
 			isNumeric := cell.HasNum || (i < nCols && (cols[i].Kind == pg.DiagInt ||
 				cols[i].Kind == pg.DiagFloat || cols[i].Kind == pg.DiagPercent ||
-				cols[i].Kind == pg.DiagBytes || graded || costGraded))
+				cols[i].Kind == pg.DiagBytes || graded || costGraded || duration))
 
 			// Grade "higher is better" percent cells green→red so the eye can
 			// triage hit ratios without reading digits. Skipped on the selected
@@ -525,6 +526,11 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			// green, worst-in-window red. Same selected-row suppression.
 			if costGraded && cell.HasNum && !selected {
 				display = costStyleRelative(cell.Num, costMax[i]).Render(display)
+			}
+			// Colour elapsed-time cells by absolute magnitude band (ms→green,
+			// s→yellow, min→red) so the unit itself reads at a glance.
+			if duration && cell.HasNum && !selected {
+				display = durationStyle(cell.Num).Render(display)
 			}
 			// Command-type tag: green for read-only S, red for writing/locking ones.
 			if i < nCols && cols[i].Kind == pg.DiagCmdType && !selected {

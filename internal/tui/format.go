@@ -122,6 +122,8 @@ func levelLabel(l level) string {
 		return "query-result"
 	case levelSnapshots:
 		return "snapshots"
+	case levelActivity:
+		return "activity"
 	}
 	return "?"
 }

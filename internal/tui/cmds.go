@@ -917,9 +917,15 @@ func (m *Model) activityTick() tea.Cmd {
 	})
 }
 
-// cycleActivityRefresh steps the live-reload cadence: 2s → 5s → 10s → off → 2s.
+// cycleActivityRefresh steps the live-reload cadence:
+// 500ms → 1s → 2s → 5s → 10s → off → 500ms.
+// Sub-second intervals are useful when watching a server under active load.
 func (m *Model) cycleActivityRefresh() {
 	switch m.activityRefresh {
+	case 500 * time.Millisecond:
+		m.activityRefresh = 1 * time.Second
+	case 1 * time.Second:
+		m.activityRefresh = 2 * time.Second
 	case 2 * time.Second:
 		m.activityRefresh = 5 * time.Second
 	case 5 * time.Second:
@@ -927,7 +933,7 @@ func (m *Model) cycleActivityRefresh() {
 	case 10 * time.Second:
 		m.activityRefresh = 0
 	default:
-		m.activityRefresh = 2 * time.Second
+		m.activityRefresh = 500 * time.Millisecond
 	}
 }
 

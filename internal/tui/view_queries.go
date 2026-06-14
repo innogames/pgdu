@@ -133,6 +133,25 @@ func fmtMs(ms float64) string {
 	return fmt1(ms)
 }
 
+// fmtAge formats an elapsed time (in ms) as an age with an explicit, scale-
+// appropriate unit so values never read ambiguously: "850ms", "31.1s", "11.2m",
+// "3.1h", "2.4d". Unlike fmtMs the unit is always present, which is what lets the
+// reader tell 105ms from 105s at a glance (paired with durationStyle colouring).
+func fmtAge(ms float64) string {
+	switch {
+	case ms < 1000:
+		return fmt.Sprintf("%.0fms", ms)
+	case ms < 60*1000:
+		return fmt1(ms/1000) + "s"
+	case ms < 60*60*1000:
+		return fmt1(ms/(60*1000)) + "m"
+	case ms < 24*60*60*1000:
+		return fmt1(ms/(60*60*1000)) + "h"
+	default:
+		return fmt1(ms/(24*60*60*1000)) + "d"
+	}
+}
+
 // --- window-status header (levelStatements) ---
 
 func (m *Model) renderStatementsHeader(s *screen) string {

@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
+	"pgdu/internal/prefs"
 )
 
 type level int
@@ -354,13 +355,16 @@ type screen struct {
 	// actHosts maps client_addr → resolved hostname (built incrementally by the
 	// background resolver and merged into items on arrival).
 	// actFilter is the current backend-filter mode (active+waiting / non-idle / all).
+	// actVerbose shows all backends including evergreen auxiliary processes when
+	// true; false hides walwriter/checkpointer/launchers/io workers/etc by default.
 	// actCols is the projected column descriptor slice, kept so the C picker and
 	// sort cycling can map column indices back to stable actColIDs.
-	actRows   []pg.ActivityRow
-	actErr    error
-	actHosts  map[string]string
-	actFilter pg.ActivityFilter
-	actCols   []actColDesc
+	actRows    []pg.ActivityRow
+	actErr     error
+	actHosts   map[string]string
+	actFilter  pg.ActivityFilter
+	actVerbose bool
+	actCols    []actColDesc
 
 	// pendingBackendAction is the PID of the backend the user pressed k/x on,
 	// waiting for a y/Y confirmation.  action is "cancel" or "terminate".
@@ -472,6 +476,13 @@ type Model struct {
 	showActColumnConfig bool
 	actColCfgCursor     int
 
+	// actProcPrev holds the previous /proc sample per PID, used to compute CPU%
+	// and I/O byte-rate deltas between consecutive samples.
+	actProcPrev map[int32]procRaw
+	// actProcStats holds the derived per-PID display values (RSS, CPU%, read/s,
+	// write/s) from the most recent sample pair. nil = not yet sampled.
+	actProcStats map[int32]procDerived
+
 	// activityTicking is true while a self-rescheduling refresh tick is running
 	// for the Activity tool, so re-entering levelActivity doesn't spawn a second
 	// loop.
@@ -497,6 +508,10 @@ type Model struct {
 
 	// snapshotDir is where top-queries snapshots are saved (S) and listed (L).
 	snapshotDir string
+
+	// colPrefs persists per-user column-picker selections across sessions. It is
+	// always non-nil (prefs.Load never fails); a save error is best-effort.
+	colPrefs *prefs.Prefs
 
 	// pendingDeleteSnap holds the path of the snapshot the user pressed D on in
 	// the browser; the next key confirms (y/Y) or cancels — mirrors pendingReindex.
@@ -533,7 +548,7 @@ func (m *Model) vacuumPaneVisible(s *screen) bool {
 		m.vacuum.table.OID == s.table.OID
 }
 
-func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir string) *Model {
+func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir string, colPrefs *prefs.Prefs) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	m := &Model{
@@ -545,7 +560,19 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 		statRefresh:     queriesRefresh,
 		activityRefresh: 2 * time.Second,
 		snapshotDir:     snapshotDir,
+		colPrefs:        colPrefs,
 		target:          client.Target(),
+	}
+	// Seed in-memory column visibility from persisted selections. A partial map
+	// is fine: actColEnabled/stmtColEnabled fall back to registry defaults for any
+	// id the user never touched, so columns added in a later build still appear.
+	if colPrefs != nil {
+		if v := colPrefs.Columns(colPrefsActivity); len(v) > 0 {
+			m.actColsVisible = colVisFromStrings[actColID](v)
+		}
+		if v := colPrefs.Columns(colPrefsQueries); len(v) > 0 {
+			m.stmtColsVisible = colVisFromStrings[stmtColID](v)
+		}
 	}
 	m.stack = []*screen{{
 		level:    levelTools,

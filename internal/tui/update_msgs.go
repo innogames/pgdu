@@ -491,30 +491,26 @@ func (m *Model) onActivityLoaded(msg activityLoadedMsg) tea.Cmd {
 	s.actErr = nil
 	s.actRows = msg.rows
 
-	// Build the generic-table items + column schema.
 	if s.actHosts == nil {
 		s.actHosts = make(map[string]string)
 	}
-	items, descs := m.buildActivityItems(msg.rows, s.actHosts)
-	s.actCols = descs
-	s.diagCols = actDiagColumnsFrom(descs)
-	s.diagBarCol = -1 // no headline bar on the activity table
-	m.syncActSort(s, descs)
-	s.items = items
-	s.diagMetricsDirty = true
-	m.applySort(s)
+	m.rebuildActivityItems(s)
 
-	// Collect IPs that haven't been resolved yet and kick a background DNS pass.
+	// Collect PIDs for proc sampling and IPs for DNS resolution, both in background.
+	pids := make([]int32, len(msg.rows))
 	var unresolved []string
-	for _, r := range msg.rows {
-		if r.ClientAddr == "" {
-			continue
-		}
-		if _, ok := s.actHosts[r.ClientAddr]; !ok {
-			unresolved = append(unresolved, r.ClientAddr)
+	for i, r := range msg.rows {
+		pids[i] = r.PID
+		if r.ClientAddr != "" {
+			if _, ok := s.actHosts[r.ClientAddr]; !ok {
+				unresolved = append(unresolved, r.ClientAddr)
+			}
 		}
 	}
-	return m.resolveActivityHostsCmd(unresolved)
+	return tea.Batch(
+		m.resolveActivityHostsCmd(unresolved),
+		m.sampleProcStatsCmd(pids),
+	)
 }
 
 func (m *Model) onActivityTick() tea.Cmd {
@@ -544,14 +540,8 @@ func (m *Model) onActivityHosts(msg activityHostsMsg) tea.Cmd {
 		s.actHosts = make(map[string]string)
 	}
 	maps.Copy(s.actHosts, msg.hosts)
-	// Rebuild items in place with the newly resolved names — no DB round-trip.
-	if s.actCols != nil && s.actRows != nil {
-		items, descs := m.buildActivityItems(s.actRows, s.actHosts)
-		s.actCols = descs
-		s.diagCols = actDiagColumnsFrom(descs)
-		s.items = items
-		s.diagMetricsDirty = true
-		m.applySort(s)
+	if s.actRows != nil {
+		m.rebuildActivityItems(s)
 	}
 	return nil
 }

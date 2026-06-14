@@ -25,6 +25,7 @@ const (
 	DiagPercentGraded                       // 0–100 % where higher is better: cell text graded green→red (e.g. cache hit ratio)
 	DiagCostGraded                          // numeric, lower is better: 0 = green, nonzero graded green→red relative to the per-column window max
 	DiagCmdType                             // statement command-type tag (QueryKind): green for read-only S, red for writing/locking ones
+	DiagDuration                            // elapsed time in ms (Num): right-aligned, coloured by absolute magnitude band (ms→green, s→yellow, min→red)
 )
 
 // DiagColumn describes one column of a diagnostic result set.

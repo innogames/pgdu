@@ -123,6 +123,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onActivityTick()
 	case activityHostsMsg:
 		return m, m.onActivityHosts(msg)
+	case activityProcMsg:
+		return m, m.onActivityProc(msg)
 	case backendActionMsg:
 		return m, m.onBackendAction(msg)
 	case activityStatementMsg:

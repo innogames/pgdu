@@ -71,6 +71,15 @@ overrides) as one timestamped gzip-JSON file each (`pg.Snapshot`). The directory
 is intentionally shared and world-writable (created 0o777, no sticky bit, files
 0o666) so any user on the host can list/load/delete another user's snapshots.
 
+Per-user UI preferences (currently just C-picker column visibility, per table)
+persist to `~/.config/pgdu/prefs.json` via `internal/prefs` (`os.UserConfigDir`,
+`PGDU_CONFIG_DIR` overrides; dir 0o700, file 0o600, atomic temp+rename). The
+schema (`prefs.Prefs` → `Tables[key].Columns`) is extensible — add sort/refresh
+fields later with no migration. `prefs.Load` never fails (missing/corrupt →
+empty prefs). The TUI seeds `actColsVisible`/`stmtColsVisible` from it in
+`NewModel` and writes back via `saveColPrefs` in the two C-toggle handlers; a new
+table just needs a `colPrefs<Name>` key + one `saveColPrefs` call.
+
 ## Things to know before touching code
 
 - `screen.table` is the source of truth at `levelParts`/`levelColumns` — there

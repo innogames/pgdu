@@ -133,6 +133,8 @@ func (m *Model) View() string {
 		b.WriteString(m.renderStatementsInfo(contentHeight))
 	case m.showInfo && (s.level == levelMaintenance || s.level == levelSettings):
 		b.WriteString(m.renderMaintenanceInfo(contentHeight))
+	case m.showInfo && s.level == levelActivity:
+		b.WriteString(m.renderActivityInfo(contentHeight))
 	case s.extPrompt != nil && s.extPrompt.blocking:
 		b.WriteString(m.renderExtPrompt(s, contentHeight))
 	case s.loading || !s.loaded:

@@ -23,7 +23,7 @@ func keyMsg(s string) tea.KeyMsg {
 // renderModel builds a Model with a given screen on top and renders it. The
 // client is never used by the render path, so a non-connecting one is fine.
 func renderModel(top *screen) string {
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil)
 	m.width, m.height = 200, 40
 	m.stack = append(m.stack, top)
 	return m.View()
@@ -44,7 +44,7 @@ func TestRenderStatementsTable(t *testing.T) {
 		{QueryID: 1, Query: "select * from t where id = $1", Calls: 100, Rows: 100, TotalExecTime: 500, SharedBlksHit: 900, SharedBlksRead: 100, WALBytes: 4096},
 		{QueryID: 2, Query: "update t set x = $1 where id = $2", Calls: 10, Rows: 10, TotalExecTime: 50, SharedBlksHit: 5, SharedBlksRead: 5},
 	}
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil)
 	items, descs, windowMs, total := m.buildStatementItems(rows, true)
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
@@ -69,7 +69,7 @@ func TestStatementsTotalRow(t *testing.T) {
 		{QueryID: 1, Query: "select 1", Calls: 100, Rows: 100, TotalExecTime: 500, SharedBlksHit: 900, SharedBlksRead: 100, WALBytes: 4096},
 		{QueryID: 2, Query: "select 2", Calls: 10, Rows: 10, TotalExecTime: 50, SharedBlksHit: 5, SharedBlksRead: 5},
 	}
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil)
 	_, descs, _, total := m.buildStatementItems(rows, true)
 	if total == nil {
 		t.Fatal("expected a total row for a non-empty table")
@@ -105,7 +105,7 @@ func TestRenderStatementsTrackPlanningOff(t *testing.T) {
 	rows := []pg.QueryStat{
 		{QueryID: 1, Query: "select * from t where id = $1", Calls: 100, Rows: 100, TotalExecTime: 500, SharedBlksHit: 900, SharedBlksRead: 100},
 	}
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil)
 	items, descs, windowMs, total := m.buildStatementItems(rows, false)
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
@@ -133,7 +133,7 @@ func TestRenderStatementsTrackPlanningOff(t *testing.T) {
 // When pg_stat_statements isn't installed the table is replaced by a blocking
 // install prompt — no table, instructions on how to install instead.
 func TestStatementsMissingExtension(t *testing.T) {
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil)
 	m.width, m.height = 120, 30
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
@@ -202,7 +202,7 @@ func TestRenderStatementDetailAndInfo(t *testing.T) {
 	}
 
 	// The ? info overlay must render without panicking and cover the columns.
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil)
 	m.width, m.height = 200, 50
 	m.stack = append(m.stack, s)
 	m.showInfo = true
@@ -326,7 +326,7 @@ func TestUniqueParams(t *testing.T) {
 // same length and order regardless of which columns are visible — the generic
 // renderer walks them strictly in parallel by index.
 func TestStatementColumnProjectionParallel(t *testing.T) {
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil)
 	rows := []pg.QueryStat{{QueryID: 1, Query: "select 1", Calls: 1, TotalExecTime: 1}}
 
 	check := func(label string) {
@@ -363,7 +363,7 @@ func TestStatementColumnProjectionParallel(t *testing.T) {
 // Planning columns are unavailable when track_planning is off, even if the user
 // enabled them — they'd always read zero.
 func TestStatementColumnsTrackPlanningGate(t *testing.T) {
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil)
 	m.ensureStmtColsInit()
 	m.stmtColsVisible[colPlanMs] = true
 	m.stmtColsVisible[colMeanPlanMs] = true
@@ -384,7 +384,7 @@ func TestStatementColumnsTrackPlanningGate(t *testing.T) {
 // When the sorted column is no longer visible, syncStmtSort re-pins the sort to
 // total_ms (the default) rather than dangling at a stale index.
 func TestSyncStmtSortFallback(t *testing.T) {
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil)
 	s := &screen{level: levelStatements}
 	m.stmtSortColID = colPlans // opt-in + planning-gated, so absent from the defaults
 	descs := m.visibleStmtCols(stmtCtx{trackPlanning: true})
@@ -403,7 +403,7 @@ func TestSyncStmtSortFallback(t *testing.T) {
 // Opening the C overlay and toggling a column rebuilds the table from the cached
 // window and reflects in the rendered output, without a DB round-trip.
 func TestColumnConfigToggleRebuilds(t *testing.T) {
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil)
 	m.width, m.height = 200, 40
 	rows := []pg.QueryStat{{QueryID: 1, Query: "select 1", Calls: 1, TotalExecTime: 1, TempBlksRead: 7}}
 	items, descs, windowMs, total := m.buildStatementItems(rows, true)
@@ -456,7 +456,7 @@ func TestSampleLabel(t *testing.T) {
 // An empty window (no activity since baseline) must render the header without
 // tripping the generic table's no-rows path.
 func TestRenderStatementsEmptyWindow(t *testing.T) {
-	mb := NewModel(pg.New(cli.Config{}), 2*time.Second, "")
+	mb := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil)
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
 		loaded: true, diagCols: mb.statementColumns(true), diagBarCol: -1, diagSortCol: 0,
