@@ -26,3 +26,23 @@ func collect[T any](ctx context.Context, pool *pgxpool.Pool, op, sql string, arg
 	}
 	return out, nil
 }
+
+// collectBestEffort is the swallow-errors sibling of collect, used by best-effort
+// multi-row probes (like the Maintenance dashboard) where a query failure should
+// degrade gracefully rather than surface an error to the user. scan receives the
+// live pgx.Rows cursor on each row and returns (value, true) on success or
+// (zero, false) to skip the row. Any query error causes it to return nil.
+func collectBestEffort[T any](ctx context.Context, pool *pgxpool.Pool, sql string, args []any, scan func(pgx.Rows) (T, bool)) []T {
+	rows, err := pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []T
+	for rows.Next() {
+		if v, ok := scan(rows); ok {
+			out = append(out, v)
+		}
+	}
+	return out
+}

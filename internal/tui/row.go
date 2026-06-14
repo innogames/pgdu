@@ -57,18 +57,12 @@ func renderRow(r row) string {
 		bar = renderBar(r.size, r.bloat, r.maxSize, w)
 	}
 	sizeStr := humanize.Bytes(r.size)
-	name := r.name
-	if r.selected {
-		name = styleSelected.Render(name)
-	}
+	name := highlightName(r.name, r.selected)
 	detail := ""
 	if r.detail != "" {
 		detail = "  " + styleMuted.Render(r.detail)
 	}
-	cursor := "  "
-	if r.selected {
-		cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-	}
+	cursor := selectedCursor(r.selected)
 	bloatStr := ""
 	if r.hasBloat {
 		pct := 0
@@ -314,6 +308,75 @@ func padRight(s string, n int) string {
 	return s + strings.Repeat(" ", n-w)
 }
 
+// sortMark appends the active-sort arrow to label when active is true. The
+// arrow points up for ascending order, down for descending. Replaces the
+// repeated inline "arrow := … mark := func …" preamble in every list header.
+func sortMark(label string, active, sortDesc bool) string {
+	if !active {
+		return label
+	}
+	if sortDesc {
+		return label + "↓"
+	}
+	return label + "↑"
+}
+
+// styleAccentCursor is the "▶ " row-selection indicator, allocated once so
+// every render*Row call doesn't allocate a fresh lipgloss style.
+var styleAccentCursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
+
+// selectedCursor returns the two-cell cursor prefix: "▶ " (accented) when
+// selected, "  " otherwise. Replaces the repeated inline cursor-build block.
+func selectedCursor(selected bool) string {
+	if selected {
+		return styleAccentCursor
+	}
+	return "  "
+}
+
+// highlightName wraps name in styleSelected when selected; otherwise returns it
+// unchanged. Replaces the repeated inline `if selected { name = styleSelected.Render(name) }`.
+func highlightName(name string, selected bool) string {
+	if selected {
+		return styleSelected.Render(name)
+	}
+	return name
+}
+
+// headerIndent returns the fixed-width prefix that aligns a list header with
+// the rows below it: cursor slot (2) + bar+brackets slot (barW+2) + gap (2).
+// Every render*Header that precedes a barred list must use this so its column
+// labels sit directly above their values.
+func headerIndent(barW int) string {
+	return strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  "
+}
+
+// renderRowList is the shared list-render scaffold used by the per-entity list
+// views. It clamps the viewport with viewportRange, writes header+newline, loops
+// over visible rows calling rowFn(item, selected), and pads to rowsH lines. The
+// caller provides any pre-computed per-list values (e.g. maxSize, rankByOID)
+// via the rowFn closure.
+func (m *Model) renderRowList(s *screen, height int, header string, rowFn func(it item, selected bool) string) string {
+	vis := s.visibleIndexes()
+	rowsH := max(height-1, 0)
+	if rowsH > 0 {
+		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
+	}
+	end := min(s.offset+rowsH, len(vis))
+
+	var b strings.Builder
+	b.WriteString(header)
+	b.WriteString("\n")
+	for vi := s.offset; vi < end; vi++ {
+		b.WriteString(rowFn(s.items[vis[vi]], vi == s.cursor))
+		b.WriteString("\n")
+	}
+	for i := end - s.offset; i < rowsH; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // displayWidth is lipgloss.Width with a fast path for pure printable-ASCII
 // strings, whose display width is simply their byte length. This avoids
 // lipgloss's grapheme-cluster segmentation, which dominated CPU while scrolling
@@ -360,18 +423,7 @@ const (
 // bar above.
 func (m *Model) renderBufferList(s *screen, height int, rankByOID map[uint32]int) string {
 	vis := s.visibleIndexes()
-	max := maxItemSize(s.items, vis)
-
-	// Header consumes one line; clamp the row budget to what's left.
-	rowsH := height - 1
-	if rowsH < 0 {
-		rowsH = 0
-	}
-	if rowsH > 0 {
-		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
-	}
-	end := min(s.offset+rowsH, len(vis))
-
+	maxSz := maxItemSize(s.items, vis)
 	barW := m.barWidth(s)
 
 	// Grade the dirty column relative to the biggest dirty footprint visible, so
@@ -383,65 +435,30 @@ func (m *Model) renderBufferList(s *screen, height int, rankByOID map[uint32]int
 		}
 	}
 
-	var b strings.Builder
-	b.WriteString(renderBufferHeader(s.sort, s.sortDesc, barW))
-	b.WriteString("\n")
-	for vi := s.offset; vi < end; vi++ {
-		it := s.items[vis[vi]]
-		st, _ := it.data.(pg.TableBufferStat)
-		barStyle := styleBar
-		if idx, ok := rankByOID[st.OID]; ok && idx < len(bufferSlicePalette) {
-			barStyle = bufferSliceStyle(idx)
-		}
-		b.WriteString(renderBufferRow(it, st, max, maxDirty, barW, vi == s.cursor, barStyle))
-		b.WriteString("\n")
-	}
-	for i := end - s.offset; i < rowsH; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return m.renderRowList(s, height, renderBufferHeader(s.sort, s.sortDesc, barW),
+		func(it item, selected bool) string {
+			st, _ := it.data.(pg.TableBufferStat)
+			barStyle := styleBar
+			if idx, ok := rankByOID[st.OID]; ok && idx < len(bufferSlicePalette) {
+				barStyle = bufferSliceStyle(idx)
+			}
+			return renderBufferRow(it, st, maxSz, maxDirty, barW, selected, barStyle)
+		})
 }
 
 func renderBufferHeader(sort sortMode, sortDesc bool, barW int) string {
-	arrow := "↑"
-	if sortDesc {
-		arrow = "↓"
-	}
-	mark := func(label string, active bool) string {
-		if active {
-			return label + arrow
-		}
-		return label
-	}
-	bufLabel := mark("buffered", sort == sortBySize)
-	totalLabel := mark("total", sort == sortByTotal)
-	cachedLabel := mark("cached", sort == sortByCached)
-	hitLabel := mark("hit", sort == sortByHitRatio)
-	nameLabel := mark("table", sort == sortByName)
-	dirtyLabel := mark("dirty", sort == sortByDirty)
 	// Pad: cursor (2) + bar slot (barW+2) + "  " then columns.
-	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
-		padRight(bufLabel, bufColBuffered) + "  " +
-		padRight(totalLabel, bufColTotal) + "  " +
-		padRight(cachedLabel, bufColCached) + "  " +
-		padRight(hitLabel, bufColHit) + "  " +
-		padRight(dirtyLabel, bufColDirty) + "  " +
-		nameLabel
+	line := headerIndent(barW) +
+		padRight(sortMark("buffered", sort == sortBySize, sortDesc), bufColBuffered) + "  " +
+		padRight(sortMark("total", sort == sortByTotal, sortDesc), bufColTotal) + "  " +
+		padRight(sortMark("cached", sort == sortByCached, sortDesc), bufColCached) + "  " +
+		padRight(sortMark("hit", sort == sortByHitRatio, sortDesc), bufColHit) + "  " +
+		padRight(sortMark("dirty", sort == sortByDirty, sortDesc), bufColDirty) + "  " +
+		sortMark("table", sort == sortByName, sortDesc)
 	return styleMuted.Render(line)
 }
 
 func renderTablesHeader(s *screen, barW int) string {
-	arrow := "↑"
-	if s.sortDesc {
-		arrow = "↓"
-	}
-	mark := func(label string, active bool) string {
-		if active {
-			return label + arrow
-		}
-		return label
-	}
-
 	anyBloat := false
 	for _, it := range s.items {
 		if it.hasBloat {
@@ -452,9 +469,9 @@ func renderTablesHeader(s *screen, barW int) string {
 
 	// Indent: cursor (2) + bar slot (barW+2) + "  " gap — mirrors renderRow's
 	// prefix so each label sits directly above its value column.
-	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
-		padRight(mark("size", s.sort == sortBySize), 10) + "  " +
-		padRight(mark("~rows", s.sort == sortByRows), rowsColW) + "  "
+	line := headerIndent(barW) +
+		padRight(sortMark("size", s.sort == sortBySize, s.sortDesc), 10) + "  " +
+		padRight(sortMark("~rows", s.sort == sortByRows, s.sortDesc), rowsColW) + "  "
 
 	if s.tool == toolPageInspect {
 		line += padRight("pages", pagesColW) + "  "
@@ -462,21 +479,15 @@ func renderTablesHeader(s *screen, barW int) string {
 		line += padRight("bloat", 12) + "  "
 	}
 	// 2-cell placeholder for the childMark ("+ " / "  ") before the name.
-	line += "  " + mark("table", s.sort == sortByName)
+	line += "  " + sortMark("table", s.sort == sortByName, s.sortDesc)
 
 	return styleMuted.Render(line)
 }
 
 func renderBufferRow(it item, st pg.TableBufferStat, maxSize, maxDirty int64, barW int, selected bool, barStyle lipgloss.Style) string {
 	bar := renderSolidBar(it.size, maxSize, barW, barStyle)
-	cursor := "  "
-	if selected {
-		cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-	}
-	name := it.name
-	if selected {
-		name = styleSelected.Render(name)
-	}
+	cursor := selectedCursor(selected)
+	name := highlightName(it.name, selected)
 	bufStr := humanize.Bytes(st.BufferedBytes)
 	totStr := humanize.Bytes(st.TotalBytes)
 	cachedStr := "—"

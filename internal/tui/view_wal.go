@@ -101,52 +101,25 @@ func (m *Model) renderWALList(s *screen, height int) string {
 	vis := s.visibleIndexes()
 	maxSz := maxItemSize(s.items, vis)
 	barW := m.barWidth(s)
-	rowsH := max(height-1, 0)
-	if rowsH > 0 {
-		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
-	}
-	end := min(s.offset+rowsH, len(vis))
-
-	var b strings.Builder
-	b.WriteString(renderWALHeader(s.sort, s.sortDesc, barW))
-	b.WriteString("\n")
-	for vi := s.offset; vi < end; vi++ {
-		it := s.items[vis[vi]]
-		st, _ := it.data.(pg.WALRmgrStat)
-		b.WriteString(renderWALRmgrRow(it, st, maxSz, barW, vi == s.cursor))
-		b.WriteString("\n")
-	}
-	for i := end - s.offset; i < rowsH; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return m.renderRowList(s, height, renderWALHeader(s.sort, s.sortDesc, barW),
+		func(it item, selected bool) string {
+			st, _ := it.data.(pg.WALRmgrStat)
+			return renderWALRmgrRow(it, st, maxSz, barW, selected)
+		})
 }
 
 func renderWALHeader(sort sortMode, sortDesc bool, barW int) string {
-	arrow := "↑"
-	if sortDesc {
-		arrow = "↓"
-	}
-	mark := func(label string, active bool) string {
-		if active {
-			return label + arrow
-		}
-		return label
-	}
-	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
-		padRight(mark("combined", sort == sortBySize), walColCombined) + "  " +
+	line := headerIndent(barW) +
+		padRight(sortMark("combined", sort == sortBySize, sortDesc), walColCombined) + "  " +
 		padRight("record", walColRecord) + "  " +
-		padRight(mark("fpi", sort == sortByFPI), walColFPI) + "  " +
-		padRight(mark("count", sort == sortByCount), walColCount) + "  " +
-		"  " + mark("resource manager", sort == sortByName)
+		padRight(sortMark("fpi", sort == sortByFPI, sortDesc), walColFPI) + "  " +
+		padRight(sortMark("count", sort == sortByCount, sortDesc), walColCount) + "  " +
+		"  " + sortMark("resource manager", sort == sortByName, sortDesc)
 	return styleMuted.Render(line)
 }
 
 func renderWALRmgrRow(it item, st pg.WALRmgrStat, maxSize int64, barW int, selected bool) string {
-	cursor := "  "
-	if selected {
-		cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-	}
+	cursor := selectedCursor(selected)
 	bar := renderWALBar(st.RecordSize, st.FPISize, maxSize, barW)
 	fpiStr := "—"
 	if st.FPISize > 0 {
@@ -156,10 +129,7 @@ func renderWALRmgrRow(it item, st pg.WALRmgrStat, maxSize int64, barW int, selec
 	if it.hasChildren {
 		childMark = styleMuted.Render("+ ")
 	}
-	name := it.name
-	if selected {
-		name = styleSelected.Render(name)
-	}
+	name := highlightName(it.name, selected)
 	return cursor + bar + "  " +
 		padRight(humanize.Bytes(st.CombinedSize), walColCombined) + "  " +
 		padRight(styleMuted.Render(humanize.Bytes(st.RecordSize)), walColRecord) + "  " +
@@ -254,61 +224,31 @@ func (m *Model) renderWALRecordsList(s *screen, height int) string {
 	vis := s.visibleIndexes()
 	maxSz := maxItemSize(s.items, vis)
 	barW := m.barWidth(s)
-	rowsH := max(height-1, 0)
-	if rowsH > 0 {
-		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
-	}
-	end := min(s.offset+rowsH, len(vis))
-
-	var b strings.Builder
-	b.WriteString(renderWALRecordsHeader(s.sort, s.sortDesc, barW))
-	b.WriteString("\n")
-	for vi := s.offset; vi < end; vi++ {
-		it := s.items[vis[vi]]
-		r, _ := it.data.(pg.WALRecord)
-		b.WriteString(renderWALRecordRow(it, r, maxSz, barW, vi == s.cursor))
-		b.WriteString("\n")
-	}
-	for i := end - s.offset; i < rowsH; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return m.renderRowList(s, height, renderWALRecordsHeader(s.sort, s.sortDesc, barW),
+		func(it item, selected bool) string {
+			r, _ := it.data.(pg.WALRecord)
+			return renderWALRecordRow(it, r, maxSz, barW, selected)
+		})
 }
 
 func renderWALRecordsHeader(sort sortMode, sortDesc bool, barW int) string {
-	arrow := "↑"
-	if sortDesc {
-		arrow = "↓"
-	}
-	mark := func(label string, active bool) string {
-		if active {
-			return label + arrow
-		}
-		return label
-	}
-	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
-		padRight(mark("size", sort == sortBySize), walRecSizeColW) + "  " +
-		padRight(mark("fpi", sort == sortByFPI), walRecFPIColW) + "  " +
+	line := headerIndent(barW) +
+		padRight(sortMark("size", sort == sortBySize, sortDesc), walRecSizeColW) + "  " +
+		padRight(sortMark("fpi", sort == sortByFPI, sortDesc), walRecFPIColW) + "  " +
 		padRight("lsn", walRecLSNColW) + "  " +
-		"  " + mark("record_type", sort == sortByName) + "  " + styleMuted.Render("· description")
+		"  " + sortMark("record_type", sort == sortByName, sortDesc) + "  " + styleMuted.Render("· description")
 	return styleMuted.Render(line)
 }
 
 func renderWALRecordRow(it item, r pg.WALRecord, maxSize int64, barW int, selected bool) string {
-	cursor := "  "
-	if selected {
-		cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-	}
+	cursor := selectedCursor(selected)
 	bar := renderWALBar(int64(r.RecordLength), int64(r.FPILength), maxSize, barW)
 	fpiStr := styleMuted.Render("—")
 	if r.FPILength > 0 {
 		fpiStr = styleBarAlt.Render(humanize.Bytes(int64(r.FPILength)))
 	}
 	childMark := styleMuted.Render("+ ")
-	name := r.RecordType
-	if selected {
-		name = styleSelected.Render(name)
-	}
+	name := highlightName(r.RecordType, selected)
 	xid := ""
 	if r.Xid != "" && r.Xid != "0" {
 		xid = styleMuted.Render("xid "+r.Xid) + " "
@@ -332,50 +272,23 @@ func (m *Model) renderWALBlocksList(s *screen, height int) string {
 	vis := s.visibleIndexes()
 	maxSz := maxItemSize(s.items, vis)
 	barW := m.barWidth(s)
-	rowsH := max(height-1, 0)
-	if rowsH > 0 {
-		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
-	}
-	end := min(s.offset+rowsH, len(vis))
-
-	var b strings.Builder
-	b.WriteString(renderWALBlocksHeader(s.sort, s.sortDesc, barW))
-	b.WriteString("\n")
-	for vi := s.offset; vi < end; vi++ {
-		it := s.items[vis[vi]]
-		blk, _ := it.data.(pg.WALBlockRef)
-		b.WriteString(renderWALBlockRow(it, blk, maxSz, barW, vi == s.cursor))
-		b.WriteString("\n")
-	}
-	for i := end - s.offset; i < rowsH; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return m.renderRowList(s, height, renderWALBlocksHeader(s.sort, s.sortDesc, barW),
+		func(it item, selected bool) string {
+			blk, _ := it.data.(pg.WALBlockRef)
+			return renderWALBlockRow(it, blk, maxSz, barW, selected)
+		})
 }
 
 func renderWALBlocksHeader(sort sortMode, sortDesc bool, barW int) string {
-	arrow := "↑"
-	if sortDesc {
-		arrow = "↓"
-	}
-	mark := func(label string, active bool) string {
-		if active {
-			return label + arrow
-		}
-		return label
-	}
-	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
-		padRight(mark("fpi", sort == sortBySize), walBlkFPIColW) + "  " +
+	line := headerIndent(barW) +
+		padRight(sortMark("fpi", sort == sortBySize, sortDesc), walBlkFPIColW) + "  " +
 		padRight("data", walBlkDataColW) + "  " +
-		mark("block reference", sort == sortByName) + "  " + styleMuted.Render("· db / fpi-info")
+		sortMark("block reference", sort == sortByName, sortDesc) + "  " + styleMuted.Render("· db / fpi-info")
 	return styleMuted.Render(line)
 }
 
 func renderWALBlockRow(it item, blk pg.WALBlockRef, maxSize int64, barW int, selected bool) string {
-	cursor := "  "
-	if selected {
-		cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-	}
+	cursor := selectedCursor(selected)
 	// Bar is the FPI byte count alone — the visual cue for which block refs
 	// dragged a full 8 KiB page image into the WAL stream.
 	bar := renderSolidBar(int64(blk.FPILength), maxSize, barW, styleBarAlt)
@@ -383,10 +296,7 @@ func renderWALBlockRow(it item, blk pg.WALBlockRef, maxSize int64, barW int, sel
 	if blk.FPILength > 0 {
 		fpiStr = styleBarAlt.Render(humanize.Bytes(int64(blk.FPILength)))
 	}
-	name := it.name
-	if selected {
-		name = styleSelected.Render(name)
-	}
+	name := highlightName(it.name, selected)
 	dbLabel := fmt.Sprintf("db %d", blk.RelDatabase)
 	if blk.DBName != "" {
 		dbLabel = "db " + blk.DBName

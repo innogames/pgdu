@@ -131,66 +131,36 @@ func (m *Model) renderIndexTuplesInfo(height int) string {
 func (m *Model) renderRelationsList(s *screen, height int) string {
 	vis := s.visibleIndexes()
 	maxSize := maxItemSize(s.items, vis)
-	rowsH := max(height-1, 0)
-	if rowsH > 0 {
-		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
-	}
-	end := min(s.offset+rowsH, len(vis))
 	barW := m.barWidth(s)
-
-	var b strings.Builder
-	b.WriteString(renderRelationsHeader(s.sort, s.sortDesc, barW))
-	b.WriteString("\n")
-	for vi := s.offset; vi < end; vi++ {
-		it := s.items[vis[vi]]
-		r, _ := it.data.(pg.Relation)
-		style := styleHeapSeg
-		switch r.Kind {
-		case pg.RelBTreeIndex:
-			style = styleIndexSeg
-		case pg.RelToast:
-			style = styleToastSeg
-		}
-		b.WriteString(renderRelationRow(it, r, maxSize, barW, vi == s.cursor, style))
-		b.WriteString("\n")
-	}
-	for i := end - s.offset; i < rowsH; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return m.renderRowList(s, height, renderRelationsHeader(s.sort, s.sortDesc, barW),
+		func(it item, selected bool) string {
+			r, _ := it.data.(pg.Relation)
+			style := styleHeapSeg
+			switch r.Kind {
+			case pg.RelBTreeIndex:
+				style = styleIndexSeg
+			case pg.RelToast:
+				style = styleToastSeg
+			}
+			return renderRelationRow(it, r, maxSize, barW, selected, style)
+		})
 }
 
 func renderRelationsHeader(sort sortMode, sortDesc bool, barW int) string {
-	arrow := "↑"
-	if sortDesc {
-		arrow = "↓"
-	}
-	mark := func(label string, active bool) string {
-		if active {
-			return label + arrow
-		}
-		return label
-	}
 	// Offset matches the row: cursor(2) + bar+brackets(barW+2) + sep(2).
-	line := strings.Repeat(" ", colCursor) + strings.Repeat(" ", barW+colBrackets) + "  " +
-		padRight(mark("size", sort == sortBySize), 10) + "  " +
-		padRight(mark("~rows", sort == sortByRows), rowsColW) + "  " +
+	line := headerIndent(barW) +
+		padRight(sortMark("size", sort == sortBySize, sortDesc), 10) + "  " +
+		padRight(sortMark("~rows", sort == sortByRows, sortDesc), rowsColW) + "  " +
 		padRight("pages", pagesColW) + "  " +
 		"  " + // child mark column ("+ ")
-		mark("name", sort == sortByName)
+		sortMark("name", sort == sortByName, sortDesc)
 	return styleMuted.Render(line)
 }
 
 func renderRelationRow(it item, r pg.Relation, maxSize int64, barW int, selected bool, style lipgloss.Style) string {
 	bar := renderSolidBar(it.size, maxSize, barW, style)
-	cursor := "  "
-	if selected {
-		cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-	}
-	name := it.name
-	if selected {
-		name = styleSelected.Render(name)
-	}
+	cursor := selectedCursor(selected)
+	name := highlightName(it.name, selected)
 	sizeStr := humanize.Bytes(it.size)
 	rowsStr := styleMuted.Render(padRight("~"+formatRows(it.rows), rowsColW)) + "  "
 	pagesStr := styleMuted.Render(padRight(formatRows(it.pages)+"p", pagesColW)) + "  "
@@ -207,47 +177,22 @@ func renderRelationRow(it item, r pg.Relation, maxSize int64, barW int, selected
 // as the heap-pages view. Per-page columns: type (leaf/intr/root/del),
 // level (0 = leaf), used bytes, live/dead item counts, free %.
 func (m *Model) renderIndexPagesList(s *screen, height int) string {
-	vis := s.visibleIndexes()
-	rowsH := max(height-1, 0)
-	if rowsH > 0 {
-		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
-	}
-	end := min(s.offset+rowsH, len(vis))
 	barW := m.barWidth(s)
-
-	var b strings.Builder
-	b.WriteString(renderIndexPagesHeader(s.sort, s.sortDesc, barW))
-	b.WriteString("\n")
-	for vi := s.offset; vi < end; vi++ {
-		it := s.items[vis[vi]]
-		p, _ := it.data.(pg.IndexPageStat)
-		b.WriteString(renderIndexPageRow(it, p, barW, vi == s.cursor))
-		b.WriteString("\n")
-	}
-	for i := end - s.offset; i < rowsH; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return m.renderRowList(s, height, renderIndexPagesHeader(s.sort, s.sortDesc, barW),
+		func(it item, selected bool) string {
+			p, _ := it.data.(pg.IndexPageStat)
+			return renderIndexPageRow(it, p, barW, selected)
+		})
 }
 
 func renderIndexPagesHeader(sort sortMode, sortDesc bool, barW int) string {
-	arrow := "↑"
-	if sortDesc {
-		arrow = "↓"
-	}
-	mark := func(label string, active bool) string {
-		if active {
-			return label + arrow
-		}
-		return label
-	}
-	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
+	line := headerIndent(barW) +
 		padRight("type", idxPageTypeColW) + "  " +
-		padRight(mark("level", sort == sortByLevel), idxPageLevelColW) + "  " +
-		padRight(mark("used", sort == sortBySize), idxPageUsedColW) + "  " +
+		padRight(sortMark("level", sort == sortByLevel, sortDesc), idxPageLevelColW) + "  " +
+		padRight(sortMark("used", sort == sortBySize, sortDesc), idxPageUsedColW) + "  " +
 		padRight("live/dead", idxPageItemsColW) + "  " +
-		padRight(mark("free", sort == sortByFreeSpace), idxPageFreeColW) + "  " +
-		mark("page", sort == sortByBlkno)
+		padRight(sortMark("free", sort == sortByFreeSpace, sortDesc), idxPageFreeColW) + "  " +
+		sortMark("page", sort == sortByBlkno, sortDesc)
 	return styleMuted.Render(line)
 }
 
@@ -269,10 +214,7 @@ func indexPageTypeLabel(t string) string {
 }
 
 func renderIndexPageRow(it item, p pg.IndexPageStat, barW int, selected bool) string {
-	cursor := "  "
-	if selected {
-		cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-	}
+	cursor := selectedCursor(selected)
 	bar := renderIndexPageBar(p, barW)
 	typ := indexPageTypeLabel(p.Type)
 	lvl := fmt.Sprintf("L%d", p.BtpoLevel)
@@ -283,10 +225,7 @@ func renderIndexPageRow(it item, p pg.IndexPageStat, barW int, selected bool) st
 		pct := float64(p.FreeSize) * 100 / float64(p.PageSize)
 		free = fmt.Sprintf("%.0f%%", pct)
 	}
-	name := it.name
-	if selected {
-		name = styleSelected.Render(name)
-	}
+	name := highlightName(it.name, selected)
 	return cursor + bar + "  " +
 		padRight(typ, idxPageTypeColW) + "  " +
 		padRight(lvl, idxPageLevelColW) + "  " +
@@ -338,13 +277,6 @@ func renderIndexPageBar(p pg.IndexPageStat, width int) string {
 // offset, itemlen, nulls/vars flags, ctid (heap tid on leaf pages,
 // downlink on internal pages), and the decoded key data.
 func (m *Model) renderIndexTuplesList(s *screen, height int) string {
-	vis := s.visibleIndexes()
-	rowsH := max(height-1, 0)
-	if rowsH > 0 {
-		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
-	}
-	end := min(s.offset+rowsH, len(vis))
-
 	// Distinguish leaf vs. internal pages for the ctid label: on leaf
 	// pages it's a heap tid; on internal pages it's a downlink. The page
 	// type comes from the parent screen's items via the stack so the
@@ -353,36 +285,17 @@ func (m *Model) renderIndexTuplesList(s *screen, height int) string {
 	keyW := max(m.width-(colCursor+idxTupleOffColW+colGutter+
 		idxTupleLenColW+colGutter+idxTupleFlagsColW+colGutter+
 		idxTupleCtidColW+colGutter+4), 16)
-
-	var b strings.Builder
-	b.WriteString(renderIndexTuplesHeader(s.sort, s.sortDesc))
-	b.WriteString("\n")
-	for vi := s.offset; vi < end; vi++ {
-		it := s.items[vis[vi]]
-		t, _ := it.data.(pg.IndexTuple)
-		selected := vi == s.cursor
-		b.WriteString(renderIndexTupleRow(t, s.indexPageType, keyW, selected))
-		b.WriteString("\n")
-	}
-	for i := end - s.offset; i < rowsH; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	pageType := s.indexPageType
+	return m.renderRowList(s, height, renderIndexTuplesHeader(s.sort, s.sortDesc),
+		func(it item, selected bool) string {
+			t, _ := it.data.(pg.IndexTuple)
+			return renderIndexTupleRow(t, pageType, keyW, selected)
+		})
 }
 
 func renderIndexTuplesHeader(sort sortMode, sortDesc bool) string {
-	arrow := "↑"
-	if sortDesc {
-		arrow = "↓"
-	}
-	mark := func(label string, active bool) string {
-		if active {
-			return label + arrow
-		}
-		return label
-	}
-	line := "  " + padRight(mark("off", sort == sortByLP), idxTupleOffColW) + "  " +
-		padRight(mark("len", sort == sortBySize), idxTupleLenColW) + "  " +
+	line := "  " + padRight(sortMark("off", sort == sortByLP, sortDesc), idxTupleOffColW) + "  " +
+		padRight(sortMark("len", sort == sortBySize, sortDesc), idxTupleLenColW) + "  " +
 		padRight("flags", idxTupleFlagsColW) + "  " +
 		padRight("ctid", idxTupleCtidColW) + "  " +
 		"key"
@@ -390,10 +303,7 @@ func renderIndexTuplesHeader(sort sortMode, sortDesc bool) string {
 }
 
 func renderIndexTupleRow(t pg.IndexTuple, pageType string, keyW int, selected bool) string {
-	cursor := "  "
-	if selected {
-		cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-	}
+	cursor := selectedCursor(selected)
 	off := fmt.Sprintf("#%04d", t.ItemOffset)
 	if selected {
 		off = styleSelected.Render(off)

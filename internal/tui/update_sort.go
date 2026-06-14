@@ -210,9 +210,12 @@ func (m *Model) cycleSort(s *screen, dir int) {
 		}
 		// On the top-queries table, remember the chosen column by stable id so a
 		// later column hide/show re-pins the sort to the same column (see
-		// syncStmtSort). Other diagnostic tables don't carry stmtCols.
+		// syncStmtSort). Same logic for the Activity table's actCols.
 		if s.stmtCols != nil && s.diagSortCol < len(s.stmtCols) {
 			m.stmtSortColID = s.stmtCols[s.diagSortCol].id
+		}
+		if s.actCols != nil && s.diagSortCol < len(s.actCols) {
+			m.actSortColID = s.actCols[s.diagSortCol].id
 		}
 		m.applySort(s)
 		return

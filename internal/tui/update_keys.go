@@ -64,6 +64,28 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s.pendingReindex = ""
 		return m, nil
 	}
+	// VACUUM confirmation on levelParts: `v` armed it, y/Y executes, any other key cancels.
+	if s.pendingVacuum {
+		s.pendingVacuum = false
+		if msg.String() == "y" || msg.String() == "Y" {
+			return m, m.vacuumTableCmd(s.table)
+		}
+		return m, nil
+	}
+	// Maintenance stats reset confirmation — same y/n pattern as reindex.
+	if s.pendingReset != "" {
+		which := s.pendingReset
+		s.pendingReset = ""
+		if msg.String() == "y" || msg.String() == "Y" {
+			switch which {
+			case "statements":
+				return m, m.resetStatementsCmd(s.db)
+			case "qualstats":
+				return m, m.resetQualstatsCmd(s.db)
+			}
+		}
+		return m, nil
+	}
 	// Snapshot delete confirmation, same y/n arming as reindex.
 	if m.pendingDeleteSnap != "" {
 		path := m.pendingDeleteSnap
@@ -72,6 +94,27 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.deleteSnapshotCmd(path, m.snapshotDir, s.db)
 		}
 		return m, nil
+	}
+	// Backend cancel/terminate confirmation — same y/n pattern as reindex.
+	if s.pendingBackendAction != "" {
+		action := s.pendingBackendAction
+		pid := s.pendingBackendPID
+		s.pendingBackendAction = ""
+		s.pendingBackendPID = 0
+		if msg.String() == "y" || msg.String() == "Y" {
+			switch action {
+			case "cancel":
+				return m, m.cancelBackendCmd(s.db, pid)
+			case "terminate":
+				return m, m.terminateBackendCmd(s.db, pid)
+			}
+		}
+		return m, nil
+	}
+	// The activity column-config overlay is modal — mirrors showColumnConfig for
+	// the top-queries table.
+	if m.showActColumnConfig && s.level == levelActivity {
+		return m, m.handleActColumnConfigKey(s, msg)
 	}
 	// The column-config overlay is modal: while open (only on the top-queries
 	// table) it captures navigation and toggle keys instead of the normal list
@@ -100,7 +143,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.level == levelHeapPages || s.level == levelHeapTuples ||
 			s.level == levelIndexPages || s.level == levelIndexTuples ||
 			s.level == levelWAL || s.level == levelWALRecords || s.level == levelWALBlocks ||
-			s.level == levelStatements || s.level == levelStatementDetail || s.level == levelSnapshots {
+			s.level == levelStatements || s.level == levelStatementDetail || s.level == levelSnapshots ||
+			s.level == levelMaintenance || s.level == levelSettings ||
+			s.level == levelActivity {
 			m.showInfo = !m.showInfo
 			break
 		}
@@ -112,6 +157,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.offset++ // clamped to the last screen by scrollWindow
 			break
 		}
+		if s.level == levelMaintenance {
+			// ↑↓ moves the extension capacity cursor (2 rows: statements, qualstats).
+			s.maintCursor = min(s.maintCursor+1, 1)
+			break
+		}
 		if s.cursor < s.visibleLen()-1 {
 			s.cursor++
 		}
@@ -120,12 +170,20 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.offset = max(s.offset-1, 0)
 			break
 		}
+		if s.level == levelMaintenance {
+			s.maintCursor = max(s.maintCursor-1, 0)
+			break
+		}
 		if s.cursor > 0 {
 			s.cursor--
 		}
 	case key.Matches(msg, m.keys.PageDown):
 		if s.level == levelStatementDetail {
 			s.offset += m.pageStep() // clamped by scrollWindow
+			break
+		}
+		if s.level == levelMaintenance {
+			s.offset += m.pageStep()
 			break
 		}
 		// On levelHeapPages / levelIndexPages PageDown shifts the load
@@ -144,6 +202,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s.cursor = max(min(s.cursor+m.pageStep(), s.visibleLen()-1), 0)
 	case key.Matches(msg, m.keys.PageUp):
 		if s.level == levelStatementDetail {
+			s.offset = max(s.offset-m.pageStep(), 0)
+			break
+		}
+		if s.level == levelMaintenance {
 			s.offset = max(s.offset-m.pageStep(), 0)
 			break
 		}
@@ -210,20 +272,49 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.stack = append(m.stack, next)
 			return m, m.loadCurrent()
 		}
-	case key.Matches(msg, m.keys.Columns):
-		// Open the htop-style column picker over the top-queries table.
-		if s.level == levelStatements {
-			m.ensureStmtColsInit()
-			m.showInfo = false // don't stack the picker under the ? reference overlay
-			m.showColumnConfig = true
-			m.colCfgCursor = 0
-		}
 	case key.Matches(msg, m.keys.DeleteSnapshot):
 		// Arm the y/n delete confirmation for the highlighted snapshot.
 		if s.level == levelSnapshots {
 			if meta, ok := s.selectedSnapshot(); ok {
 				m.pendingDeleteSnap = meta.Path
 			}
+		}
+	case key.Matches(msg, m.keys.ActivityFilter):
+		if s.level == levelActivity {
+			s.actFilter = s.actFilter.Next()
+			// Reload immediately with the new filter.
+			return m, m.loadActivityCmd(s.db, s.actFilter)
+		}
+	case key.Matches(msg, m.keys.CancelBackend):
+		if s.level == levelActivity {
+			// Arm the two-step confirmation for pg_cancel_backend.
+			if pid := activitySelectedPID(s); pid != 0 {
+				s.pendingBackendPID = pid
+				s.pendingBackendAction = "cancel"
+			}
+		}
+	case key.Matches(msg, m.keys.TerminateBackend):
+		if s.level == levelActivity {
+			// Arm the two-step confirmation for pg_terminate_backend.
+			if pid := activitySelectedPID(s); pid != 0 {
+				s.pendingBackendPID = pid
+				s.pendingBackendAction = "terminate"
+			}
+		}
+	case key.Matches(msg, m.keys.Columns):
+		// Open the htop-style column picker — on the top-queries table or on
+		// the activity table.
+		if s.level == levelStatements {
+			m.ensureStmtColsInit()
+			m.showInfo = false
+			m.showColumnConfig = true
+			m.colCfgCursor = 0
+		}
+		if s.level == levelActivity {
+			m.ensureActColsInit()
+			m.showInfo = false
+			m.showActColumnConfig = true
+			m.actColCfgCursor = 0
 		}
 	case key.Matches(msg, m.keys.ToggleRefresh):
 		// Cycle the live window's auto-refresh cadence: 2s → 60s → off → 2s.
@@ -233,6 +324,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.statRefresh > 0 && !m.statTicking {
 				if tick := m.statementsTick(); tick != nil {
 					m.statTicking = true
+					return m, tick
+				}
+			}
+			return m, nil
+		}
+		if s.level == levelActivity {
+			m.cycleActivityRefresh()
+			if m.activityRefresh > 0 && !m.activityTicking {
+				if tick := m.activityTick(); tick != nil {
+					m.activityTicking = true
 					return m, tick
 				}
 			}
@@ -272,6 +373,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// through scrollWindow, so no offset reset is needed.
 		if s.level == levelStatementDetail {
 			s.statVerbose = !s.statVerbose
+		}
+		// On the parts level, `v` arms the VACUUM VERBOSE confirmation.
+		if s.level == levelParts && s.table.OID != 0 {
+			if m.vacuum.running {
+				// A vacuum is already running; ignore.
+				break
+			}
+			s.pendingVacuum = true
 		}
 	case key.Matches(msg, m.keys.Export):
 		// Write the current table/view to pgdu-<tool>-<datetime>.csv. Returns nil
@@ -345,6 +454,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Enter):
 		if cmd := m.handleReindexEnter(s); cmd != nil {
 			return m, cmd
+		}
+		if s.level == levelMaintenance {
+			// Arm the reset confirmation for the highlighted extension capacity row.
+			switch s.maintCursor {
+			case 0:
+				s.pendingReset = "statements"
+			case 1:
+				s.pendingReset = "qualstats"
+			}
+			return m, nil
 		}
 		if s.level == levelStatementDetail {
 			// The detail view doesn't drill further; Enter (not l/→) confirms an
@@ -751,4 +870,80 @@ func (m *Model) triggerInstall(s *screen) tea.Cmd {
 		return m.upgradeExtensionCmd(s.extPrompt.db, s.extPrompt.name)
 	}
 	return m.installExtensionCmd(s.extPrompt.db, s.extPrompt.name)
+}
+
+// activitySelectedPID returns the PID of the currently highlighted backend in
+// the Activity table, or 0 when no row is selected or the data doesn't carry a
+// PID. item.statQueryID reuses the queryid field; the PID lives in the first
+// DiagCell of the row (the "pid" column, actColPID, which is always first in
+// the registry and always enabled since it's rendered first).
+func activitySelectedPID(s *screen) int32 {
+	if s.level != levelActivity || len(s.items) == 0 {
+		return 0
+	}
+	vis := s.visibleIndexes()
+	if s.cursor < 0 || s.cursor >= len(vis) {
+		return 0
+	}
+	it := s.items[vis[s.cursor]]
+	cells, ok := it.data.([]pg.DiagCell)
+	if !ok || len(cells) == 0 {
+		return 0
+	}
+	// The pid column is the first one in actColumnRegistry and is always
+	// visible (defaultOn=true), but we can't assume index 0 = pid without
+	// checking the column config. Look for a numeric cell whose Num fits
+	// int32 range — since PID is the only DiagInt column with HasNum=true
+	// that's always first. Simpler: match by screen.actRows by QueryID
+	// stored in statQueryID, which may be 0, so fall back to parsing the
+	// pid column display value.
+	if !cells[0].HasNum {
+		return 0
+	}
+	return int32(cells[0].Num)
+}
+
+// handleActColumnConfigKey drives the modal column-config overlay for the
+// Activity tool (C on levelActivity). Mirrors handleColumnConfigKey.
+func (m *Model) handleActColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+	reg := actColumnRegistry()
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return tea.Quit
+	case key.Matches(msg, m.keys.Columns), msg.Type == tea.KeyEsc:
+		m.showActColumnConfig = false
+	case key.Matches(msg, m.keys.Up):
+		if m.actColCfgCursor > 0 {
+			m.actColCfgCursor--
+		}
+	case key.Matches(msg, m.keys.Down):
+		if m.actColCfgCursor < len(reg)-1 {
+			m.actColCfgCursor++
+		}
+	case key.Matches(msg, m.keys.Top):
+		m.actColCfgCursor = 0
+	case key.Matches(msg, m.keys.Bottom):
+		m.actColCfgCursor = len(reg) - 1
+	case key.Matches(msg, m.keys.Refresh), key.Matches(msg, m.keys.Enter):
+		if m.actColCfgCursor < 0 || m.actColCfgCursor >= len(reg) {
+			break
+		}
+		d := reg[m.actColCfgCursor]
+		if d.mandatory {
+			break
+		}
+		m.ensureActColsInit()
+		m.actColsVisible[d.id] = !m.actColEnabled(d.id, d.defaultOn)
+		// Rebuild items from cached rows — no DB round-trip needed.
+		if s.actRows != nil {
+			items, descs := m.buildActivityItems(s.actRows, s.actHosts)
+			s.actCols = descs
+			s.diagCols = actDiagColumnsFrom(descs)
+			m.syncActSort(s, descs)
+			s.items = items
+			s.diagMetricsDirty = true
+			m.applySort(s)
+		}
+	}
+	return nil
 }

@@ -155,56 +155,28 @@ func heapPageWindowLabel(s *screen) string {
 // rather than "how big is it compared to siblings", which is what you want
 // when scanning a heap for hotspots.
 func (m *Model) renderHeapPagesList(s *screen, height int) string {
-	vis := s.visibleIndexes()
-	rowsH := max(height-1, 0)
-	if rowsH > 0 {
-		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
-	}
-	end := min(s.offset+rowsH, len(vis))
 	barW := m.barWidth(s)
-
-	var b strings.Builder
-	b.WriteString(renderHeapPagesHeader(s.sort, s.sortDesc, barW))
-	b.WriteString("\n")
-	for vi := s.offset; vi < end; vi++ {
-		it := s.items[vis[vi]]
-		p, _ := it.data.(pg.HeapPageStat)
-		b.WriteString(renderHeapPageRow(it, p, barW, vi == s.cursor))
-		b.WriteString("\n")
-	}
-	for i := end - s.offset; i < rowsH; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return m.renderRowList(s, height, renderHeapPagesHeader(s.sort, s.sortDesc, barW),
+		func(it item, selected bool) string {
+			p, _ := it.data.(pg.HeapPageStat)
+			return renderHeapPageRow(it, p, barW, selected)
+		})
 }
 
 func renderHeapPagesHeader(sort sortMode, sortDesc bool, barW int) string {
-	arrow := "↑"
-	if sortDesc {
-		arrow = "↓"
-	}
-	mark := func(label string, active bool) string {
-		if active {
-			return label + arrow
-		}
-		return label
-	}
 	// Header indent matches the row: cursor (2) + bar slot (barW+2) + "  "
 	// before the flag column starts.
-	line := strings.Repeat(" ", 2) + strings.Repeat(" ", barW+2) + "  " +
+	line := headerIndent(barW) +
 		padRight("!", heapPageFlagColW) + "  " +
-		padRight(mark("used", sort == sortBySize), heapPageUsedColW) + "  " +
+		padRight(sortMark("used", sort == sortBySize, sortDesc), heapPageUsedColW) + "  " +
 		padRight("live/R/dead", heapPageLPColW) + "  " +
-		padRight(mark("dead%", sort == sortByDeadRatio), heapPageDeadColW) + "  " +
-		mark("page", sort == sortByBlkno)
+		padRight(sortMark("dead%", sort == sortByDeadRatio, sortDesc), heapPageDeadColW) + "  " +
+		sortMark("page", sort == sortByBlkno, sortDesc)
 	return styleMuted.Render(line)
 }
 
 func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool) string {
-	cursor := "  "
-	if selected {
-		cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-	}
+	cursor := selectedCursor(selected)
 	bar := renderHeapPageBar(p.LiveBytes, p.DeadBytes, barW)
 
 	flag := " "
@@ -223,10 +195,7 @@ func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool) stri
 	if df := p.DeadFrac(); df >= 0 {
 		deadPct = percentStyle(100 - df*100).Render(fmt.Sprintf("%.0f%%", df*100))
 	}
-	name := it.name
-	if selected {
-		name = styleSelected.Render(name)
-	}
+	name := highlightName(it.name, selected)
 	return cursor + bar + "  " +
 		padRight(flag, heapPageFlagColW) + "  " +
 		padRight(used, heapPageUsedColW) + "  " +
@@ -273,21 +242,11 @@ func (m *Model) renderHeapTuplesList(s *screen, height int) string {
 }
 
 func renderHeapTuplesHeader(sort sortMode, sortDesc bool) string {
-	arrow := "↑"
-	if sortDesc {
-		arrow = "↓"
-	}
-	mark := func(label string, active bool) string {
-		if active {
-			return label + arrow
-		}
-		return label
-	}
 	// Indentation matches the row: cursor (2) + "#NNNN" idx col (5) + gap.
 	// The "● " dot+space takes 2 cells before the flag-name column.
-	line := "  " + padRight(mark("lp", sort == sortByLP), 5) + "  " +
+	line := "  " + padRight(sortMark("lp", sort == sortByLP, sortDesc), 5) + "  " +
 		padRight("lp_flags", 2+tupleFlagColW) + "  " +
-		padRight(mark("len", sort == sortBySize), tupleLenColW) + "  " +
+		padRight(sortMark("len", sort == sortBySize, sortDesc), tupleLenColW) + "  " +
 		padRight("xmin", tupleXidColW) + "  " +
 		padRight("xmax", tupleXidColW) + "  " +
 		padRight("ctid", tupleCtidColW) + "  " +
@@ -296,15 +255,9 @@ func renderHeapTuplesHeader(sort sortMode, sortDesc bool) string {
 }
 
 func renderHeapTupleHeadline(t pg.HeapTuple, selected bool) string {
-	cursor := "  "
-	if selected {
-		cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-	}
+	cursor := selectedCursor(selected)
 	dot, flagName := lpFlagDecoration(t.LPFlags)
-	idx := fmt.Sprintf("#%04d", t.LP)
-	if selected {
-		idx = styleSelected.Render(idx)
-	}
+	idx := highlightName(fmt.Sprintf("#%04d", t.LP), selected)
 	xmin := xidString(t.Xmin)
 	xmax := xidString(t.Xmax)
 	ctid := "—"
@@ -398,40 +351,15 @@ func previewBytes(b []byte, n int) string {
 // the terminal so wide jsonb / bytea columns don't blow up the layout —
 // the user can still tell what they're looking at and how long it is.
 func (m *Model) renderTupleRowList(s *screen, height int) string {
-	vis := s.visibleIndexes()
-	rowsH := max(height-1, 0)
-	if rowsH > 0 {
-		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
-	}
-	end := min(s.offset+rowsH, len(vis))
-
 	// Value column gets every remaining cell.
 	valW := max(m.width-(colCursor+tupleRowNameColW+colGutter+colGutter), 16)
-
-	var b strings.Builder
-	header := "  " + padRight("column", tupleRowNameColW) + "  " + "value"
-	b.WriteString(styleMuted.Render(header))
-	b.WriteString("\n")
-	for vi := s.offset; vi < end; vi++ {
-		it := s.items[vis[vi]]
-		c, _ := it.data.(pg.TupleCell)
-		selected := vi == s.cursor
-		cursor := "  "
-		if selected {
-			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-		}
-		name := c.Name
-		if selected {
-			name = styleSelected.Render(name)
-		}
-		value := truncateValue(c.Value, valW)
-		b.WriteString(cursor + padRight(name, tupleRowNameColW) + "  " + value)
-		b.WriteString("\n")
-	}
-	for i := end - s.offset; i < rowsH; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	header := styleMuted.Render("  " + padRight("column", tupleRowNameColW) + "  " + "value")
+	return m.renderRowList(s, height, header,
+		func(it item, selected bool) string {
+			c, _ := it.data.(pg.TupleCell)
+			value := truncateValue(c.Value, valW)
+			return selectedCursor(selected) + padRight(highlightName(c.Name, selected), tupleRowNameColW) + "  " + value
+		})
 }
 
 // truncateValue renders a column value for the row-detail view: NULL gets

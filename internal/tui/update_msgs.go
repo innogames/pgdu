@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -38,6 +39,12 @@ func (m *Model) onSchemasLoaded(msg schemasLoadedMsg) tea.Cmd {
 		s.items = append(s.items, item{name: sc.Name, size: sc.SizeBytes, hasChildren: true, detail: schemaDetail(sc), data: sc})
 	}
 	m.applySort(s)
+	// Single-schema fast path: skip the one-row schema picker by replacing it
+	// in-place. Back/Esc then returns to the database list, not a dead-end schema view.
+	if msg.err == nil && len(msg.schemas) == 1 && s == m.top() {
+		m.stack[len(m.stack)-1] = schemaChildScreen(s.tool, msg.schemas[0])
+		return m.loadCurrent()
+	}
 	return nil
 }
 
@@ -363,4 +370,227 @@ func errText(err error) string {
 		return "unknown error"
 	}
 	return err.Error()
+}
+
+func (m *Model) onMaintLoaded(msg maintLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelMaintenance)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if msg.err != nil {
+		s.maintErr = msg.err
+		return nil
+	}
+	s.maintErr = nil
+	s.maint = msg.info
+	return nil
+}
+
+func (m *Model) onSettingsLoaded(msg settingsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelSettings)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if msg.err != nil {
+		s.err = msg.err
+		return nil
+	}
+	s.settingRows = msg.rows
+	s.items = make([]item, len(msg.rows))
+	for i, r := range msg.rows {
+		detail := r.Category
+		if r.ShortDesc != "" {
+			detail = r.ShortDesc
+		}
+		s.items[i] = item{name: r.Name, detail: detail, data: r}
+	}
+	return nil
+}
+
+func (m *Model) onMaintResetDone(msg maintResetDoneMsg) tea.Cmd {
+	s := m.findLevel(levelMaintenance)
+	if s == nil {
+		return nil
+	}
+	s.pendingReset = ""
+	if msg.err != nil {
+		// Surface the error as a transient notice so the dashboard stays visible.
+		m.notice = fmt.Sprintf("reset %s failed: %s", msg.which, msg.err)
+		return nil
+	}
+	m.notice = fmt.Sprintf("%s stats reset", msg.which)
+	// Reload the maintenance view so the updated capacity numbers are visible.
+	return m.loadCurrent()
+}
+
+func (m *Model) onTableStatsLoaded(msg tableStatsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelParts)
+	if s == nil || s.table.OID != msg.table.OID {
+		return nil
+	}
+	s.tableStatsErr = msg.err
+	if msg.err == nil {
+		s.tableStats = msg.stats
+	}
+	return nil
+}
+
+func (m *Model) onVacuumStarted(msg vacuumStartedMsg) tea.Cmd {
+	s := m.findLevel(levelParts)
+	if s == nil {
+		return nil
+	}
+	s.pendingVacuum = false
+	m.vacuum = vacuumState{
+		table:   msg.table,
+		running: true,
+		follow:  true,
+	}
+	return waitVacuumLineCmd(msg.lineCh, msg.doneCh)
+}
+
+func (m *Model) onVacuumLine(msg vacuumLineMsg) tea.Cmd {
+	if !m.vacuum.running {
+		return nil
+	}
+	m.vacuum.buf = append(m.vacuum.buf, msg.line)
+	if m.vacuum.follow {
+		m.vacuum.offset = len(m.vacuum.buf)
+	}
+	return waitVacuumLineCmd(msg.lineCh, msg.doneCh)
+}
+
+func (m *Model) onVacuumDone(msg vacuumDoneMsg) tea.Cmd {
+	m.vacuum.running = false
+	m.vacuum.err = msg.err
+	s := m.findLevel(levelParts)
+	if s == nil {
+		return nil
+	}
+	// Reload table stats now that vacuum has finished so the row counts are fresh.
+	return m.loadTableStatsCmd(s.table)
+}
+
+// ── Activity handlers ─────────────────────────────────────────────────────────
+
+func (m *Model) onActivityLoaded(msg activityLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelActivity)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if msg.err != nil {
+		s.actErr = msg.err
+		return nil
+	}
+	s.actErr = nil
+	s.actRows = msg.rows
+
+	// Build the generic-table items + column schema.
+	if s.actHosts == nil {
+		s.actHosts = make(map[string]string)
+	}
+	items, descs := m.buildActivityItems(msg.rows, s.actHosts)
+	s.actCols = descs
+	s.diagCols = actDiagColumnsFrom(descs)
+	s.diagBarCol = -1 // no headline bar on the activity table
+	m.syncActSort(s, descs)
+	s.items = items
+	s.diagMetricsDirty = true
+	m.applySort(s)
+
+	// Collect IPs that haven't been resolved yet and kick a background DNS pass.
+	var unresolved []string
+	for _, r := range msg.rows {
+		if r.ClientAddr == "" {
+			continue
+		}
+		if _, ok := s.actHosts[r.ClientAddr]; !ok {
+			unresolved = append(unresolved, r.ClientAddr)
+		}
+	}
+	return m.resolveActivityHostsCmd(unresolved)
+}
+
+func (m *Model) onActivityTick() tea.Cmd {
+	// Keep the tick alive while the user is anywhere in the activity tool (the
+	// table is the only level). Stop when they navigate fully away so re-entry
+	// can start a fresh loop.
+	top := m.top()
+	if top.level != levelActivity {
+		m.activityTicking = false
+		return nil
+	}
+	next := m.activityTick()
+	if next == nil {
+		// Refresh was cycled off while the tool was open.
+		m.activityTicking = false
+		return nil
+	}
+	return tea.Batch(m.loadActivityCmd(top.db, top.actFilter), next)
+}
+
+func (m *Model) onActivityHosts(msg activityHostsMsg) tea.Cmd {
+	s := m.findLevel(levelActivity)
+	if s == nil {
+		return nil
+	}
+	if s.actHosts == nil {
+		s.actHosts = make(map[string]string)
+	}
+	maps.Copy(s.actHosts, msg.hosts)
+	// Rebuild items in place with the newly resolved names — no DB round-trip.
+	if s.actCols != nil && s.actRows != nil {
+		items, descs := m.buildActivityItems(s.actRows, s.actHosts)
+		s.actCols = descs
+		s.diagCols = actDiagColumnsFrom(descs)
+		s.items = items
+		s.diagMetricsDirty = true
+		m.applySort(s)
+	}
+	return nil
+}
+
+func (m *Model) onBackendAction(msg backendActionMsg) tea.Cmd {
+	s := m.findLevel(levelActivity)
+	if s == nil {
+		return nil
+	}
+	s.pendingBackendAction = ""
+	s.pendingBackendPID = 0
+	switch {
+	case msg.err != nil:
+		m.notice = fmt.Sprintf("%s %d failed: %s", msg.action, msg.pid, msg.err)
+	case !msg.ok:
+		m.notice = fmt.Sprintf("%s %d: backend not found or permission denied", msg.action, msg.pid)
+	default:
+		m.notice = fmt.Sprintf("%s sent to backend %d", msg.action, msg.pid)
+	}
+	// Refresh the list so the terminated/cancelled backend disappears or changes state.
+	return m.loadActivityCmd(s.db, s.actFilter)
+}
+
+func (m *Model) onActivityStatement(msg activityStatementMsg) tea.Cmd {
+	s := m.findLevel(levelActivity)
+	if s == nil {
+		return nil
+	}
+	if msg.err != nil {
+		m.notice = fmt.Sprintf("load query detail: %s", msg.err)
+		return nil
+	}
+	next := &screen{
+		level:      levelStatementDetail,
+		title:      "query",
+		tool:       s.tool,
+		db:         msg.db,
+		statDetail: msg.qs,
+	}
+	m.stack = append(m.stack, next)
+	return m.loadCurrent()
 }

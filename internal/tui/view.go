@@ -54,6 +54,13 @@ func (m *Model) View() string {
 		contentHeight -= strings.Count(hdr, "\n") + 1
 	}
 
+	if s.level == levelActivity && s.loaded && s.actErr == nil {
+		hdr := m.renderActivityHeader(s)
+		b.WriteString(hdr)
+		b.WriteString("\n")
+		contentHeight -= strings.Count(hdr, "\n") + 1
+	}
+
 	// Non-blocking prompts (hints) render above the list and consume one
 	// line of the content area. Blocking prompts take over the whole
 	// content area in the switch below. levelDescribe is excluded: it renders
@@ -70,6 +77,20 @@ func (m *Model) View() string {
 		contentHeight--
 	}
 
+	if banner := m.renderVacuumBanner(s); banner != "" {
+		b.WriteString(banner)
+		b.WriteString("\n")
+		contentHeight--
+	}
+
+	if s.level == levelActivity {
+		if banner := activityPendingBanner(s); banner != "" {
+			b.WriteString(banner)
+			b.WriteString("\n")
+			contentHeight--
+		}
+	}
+
 	if line := m.renderFilterLine(s); line != "" {
 		b.WriteString(line)
 		b.WriteString("\n")
@@ -84,6 +105,8 @@ func (m *Model) View() string {
 	}
 
 	switch {
+	case m.showActColumnConfig && s.level == levelActivity:
+		b.WriteString(m.renderActColumnConfig(s, contentHeight))
 	case m.showColumnConfig && s.level == levelStatements:
 		b.WriteString(m.renderColumnConfig(s, contentHeight))
 	case m.showDiagQuery && s.level == levelDiagnosticResult && s.diag != nil:
@@ -108,6 +131,8 @@ func (m *Model) View() string {
 		b.WriteString(m.renderWALBlocksInfo(contentHeight))
 	case m.showInfo && (s.level == levelStatements || s.level == levelStatementDetail || s.level == levelStatementSamples || s.level == levelStatementResult || s.level == levelSnapshots):
 		b.WriteString(m.renderStatementsInfo(contentHeight))
+	case m.showInfo && (s.level == levelMaintenance || s.level == levelSettings):
+		b.WriteString(m.renderMaintenanceInfo(contentHeight))
 	case s.extPrompt != nil && s.extPrompt.blocking:
 		b.WriteString(m.renderExtPrompt(s, contentHeight))
 	case s.loading || !s.loaded:
@@ -123,7 +148,8 @@ func (m *Model) View() string {
 	case len(s.items) == 0 && s.level != levelDescribe && s.level != levelDiagnosticResult &&
 		s.level != levelStatements && s.level != levelStatementDetail &&
 		s.level != levelStatementResult && s.level != levelSnapshots &&
-		s.level != levelBufferDetail:
+		s.level != levelBufferDetail && s.level != levelMaintenance && s.level != levelSettings &&
+		s.level != levelActivity:
 		// levelDescribe never populates items — it renders from s.describe.
 		// levelDiagnosticResult and levelStatementResult with 0 items mean the
 		// query returned no rows, which is valid; fall through to the renderer
@@ -178,6 +204,16 @@ func (m *Model) View() string {
 			b.WriteString(m.renderDiagResult(s, contentHeight))
 		case levelSnapshots:
 			b.WriteString(m.renderStatementSnapshots(s, contentHeight))
+		case levelParts:
+			b.WriteString(m.renderPartsLevel(s, contentHeight))
+		case levelMaintenance:
+			b.WriteString(m.renderMaintenance(s, contentHeight))
+		case levelSettings:
+			b.WriteString(m.renderSettingsList(s, contentHeight))
+		case levelActivity:
+			// The activity table is a generic diagnostic-style table — same
+			// renderer as levelStatements and levelDiagnosticResult.
+			b.WriteString(m.renderDiagResult(s, contentHeight))
 		default:
 			b.WriteString(m.renderList(s, contentHeight))
 		}
@@ -378,6 +414,8 @@ func (m *Model) breadcrumb() string {
 			parts = append(parts, sc.walRmgr)
 		case levelWALBlocks:
 			parts = append(parts, "rec "+shortLSN(sc.walRecLSN))
+		case levelActivity:
+			parts = append(parts, "activity")
 		case levelStatements:
 			// The parent databases level already shows "queries" (the tool
 			// name); show the chosen database here instead of repeating it.

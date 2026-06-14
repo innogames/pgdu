@@ -36,6 +36,26 @@ func (m *Model) drillIn() tea.Cmd {
 			m.stack = append(m.stack, next)
 			return m.loadCurrent()
 		}
+		if t == toolMaintenance {
+			// Maintenance dashboard is cluster-wide: skip the database picker.
+			next := &screen{level: levelMaintenance, title: "maintenance", tool: toolMaintenance, db: m.client.DefaultDB()}
+			m.stack = append(m.stack, next)
+			return m.loadCurrent()
+		}
+		if t == toolActivity {
+			// Activity tool is cluster-wide: skip the database picker and go
+			// directly to the live pg_stat_activity list.
+			next := &screen{
+				level:     levelActivity,
+				title:     "activity",
+				tool:      toolActivity,
+				db:        m.client.DefaultDB(),
+				actFilter: pg.ActivityActiveWaiting,
+				actHosts:  make(map[string]string),
+			}
+			m.stack = append(m.stack, next)
+			return m.loadCurrent()
+		}
 		// toolQueries falls through to the database picker like the disk/buffers
 		// tools: pg_stat_statements is read from whichever database you pick
 		// (its dbid filter scopes the snapshot to that connection's database).
@@ -67,16 +87,7 @@ func (m *Model) drillIn() tea.Cmd {
 		return m.loadCurrent()
 	case levelSchemas:
 		sc := cur.data.(pg.Schema)
-		var next *screen
-		switch s.tool {
-		case toolBuffers:
-			next = &screen{level: levelBufferTables, title: "buffers", tool: s.tool, db: sc.DB, schema: sc.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
-		case toolPageInspect:
-			next = &screen{level: levelRelations, title: "relations", tool: s.tool, db: sc.DB, schema: sc.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
-		default:
-			next = &screen{level: levelTables, title: "tables", tool: s.tool, db: sc.DB, schema: sc.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
-		}
-		m.stack = append(m.stack, next)
+		m.stack = append(m.stack, schemaChildScreen(s.tool, sc))
 		return m.loadCurrent()
 	case levelTables:
 		t := cur.data.(pg.Table)
@@ -289,6 +300,40 @@ func (m *Model) drillIn() tea.Cmd {
 		return m.loadCurrent()
 	case levelSnapshots:
 		return m.loadSelectedSnapshot(s, cur)
+	case levelMaintenance:
+		// Enter on the maintenance dashboard opens the pg_settings browser.
+		next := &screen{level: levelSettings, title: "settings", tool: toolMaintenance, db: s.db}
+		m.stack = append(m.stack, next)
+		return m.loadCurrent()
+	case levelActivity:
+		// Enter drills into the top-queries detail view for the highlighted
+		// backend's query (requires pg_stat_statements; a soft hint is shown
+		// when query_id is zero). The item's statQueryID reuses the same field
+		// that levelStatements uses for the same purpose.
+		if cur.statQueryID == 0 {
+			m.notice = "no query_id — pg_stat_statements not tracking this query"
+			return nil
+		}
+		// Need the query text to build a sample call; it lives in the ActivityRow
+		// stored in screen.actRows, matched by PID embedded in the item (we use
+		// the pid cell display as the lookup key).  Resolve it via actRows directly.
+		if len(s.actRows) == 0 {
+			return nil
+		}
+		// Find the ActivityRow by QueryID (first match).
+		var queryText string
+		var backendPID int32
+		for _, r := range s.actRows {
+			if r.QueryID == cur.statQueryID {
+				queryText = r.Query
+				backendPID = r.PID
+				break
+			}
+		}
+		// Push a loading placeholder while we fetch the QueryStat snapshot.
+		next := &screen{level: levelStatementDetail, title: "query", tool: s.tool, db: s.db, loading: true}
+		m.stack = append(m.stack, next)
+		return m.loadActivityStatementCmd(s.db, backendPID, cur.statQueryID, queryText)
 	case levelParts:
 		// Only the heap row drills further — into per-column space estimates.
 		// Toast and index rows have no meaningful sub-breakdown.
@@ -387,10 +432,13 @@ func (m *Model) loadCurrent() tea.Cmd {
 		// Probe pgstattuple alongside the parts load. The probe is cheap
 		// (one pg_extension / pg_available_extensions lookup) and lets the
 		// view offer an install when exact bloat would be measurable but
-		// the extension isn't there yet.
+		// the extension isn't there yet. Also fetch per-table maintenance
+		// stats (autovacuum triggers, live/dead tuples, scan history) for
+		// the maintenance panel shown alongside the parts list.
 		return tea.Batch(
 			m.loadPartsCmd(s.table),
 			m.probeExtensionCmd(s.db, extPgStatTuple),
+			m.loadTableStatsCmd(s.table),
 		)
 	case levelColumns:
 		return m.loadColumnsCmd(s.table)
@@ -462,8 +510,36 @@ func (m *Model) loadCurrent() tea.Cmd {
 		return tea.Batch(cmds...)
 	case levelSnapshots:
 		return m.listSnapshotsCmd(m.snapshotDir, s.db)
+	case levelMaintenance:
+		return m.loadMaintenanceCmd(s.db)
+	case levelSettings:
+		return m.loadSettingsCmd(s.db)
+	case levelActivity:
+		// Kick an immediate snapshot and, unless one is already running, start
+		// the self-rescheduling refresh tick. Pattern mirrors levelStatements.
+		cmds := []tea.Cmd{m.loadActivityCmd(s.db, s.actFilter)}
+		if !m.activityTicking {
+			if tick := m.activityTick(); tick != nil {
+				m.activityTicking = true
+				cmds = append(cmds, tick)
+			}
+		}
+		return tea.Batch(cmds...)
 	}
 	return nil
+}
+
+// schemaChildScreen builds the next screen when drilling into a schema, varying
+// by tool. Used by drillIn and the single-schema fast path in onSchemasLoaded.
+func schemaChildScreen(t tool, sc pg.Schema) *screen {
+	switch t {
+	case toolBuffers:
+		return &screen{level: levelBufferTables, title: "buffers", tool: t, db: sc.DB, schema: sc.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
+	case toolPageInspect:
+		return &screen{level: levelRelations, title: "relations", tool: t, db: sc.DB, schema: sc.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
+	default:
+		return &screen{level: levelTables, title: "tables", tool: t, db: sc.DB, schema: sc.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
+	}
 }
 
 // loadSelectedSnapshot acts on Enter in the snapshots browser. The browser is a

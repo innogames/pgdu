@@ -763,3 +763,248 @@ func (m *Model) loadStatementResultCmd(db, matchQuery, sampleCall string) tea.Cm
 		return statementResultLoadedMsg{query: matchQuery, result: result, truncated: truncated, err: err}
 	})
 }
+
+// ── Maintenance message types ─────────────────────────────────────────────────
+
+type maintLoadedMsg struct {
+	db   string
+	info *pg.MaintenanceInfo
+	err  error
+}
+
+type settingsLoadedMsg struct {
+	db   string
+	rows []pg.SettingRow
+	err  error
+}
+
+type maintResetDoneMsg struct {
+	which string // "statements" or "qualstats"
+	err   error
+}
+
+type tableStatsLoadedMsg struct {
+	table pg.Table
+	stats *pg.TableMaintStats
+	err   error
+}
+
+type vacuumStartedMsg struct {
+	table  pg.Table
+	lineCh <-chan string
+	doneCh <-chan error
+}
+
+type vacuumLineMsg struct {
+	line   string
+	lineCh <-chan string
+	doneCh <-chan error
+}
+
+type vacuumDoneMsg struct {
+	err error
+}
+
+// ── Maintenance commands ──────────────────────────────────────────────────────
+
+func (m *Model) loadMaintenanceCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		info, err := m.client.Maintenance(ctx, db)
+		return maintLoadedMsg{db: db, info: info, err: err}
+	})
+}
+
+func (m *Model) loadSettingsCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		rows, err := m.client.ListSettings(ctx, db)
+		return settingsLoadedMsg{db: db, rows: rows, err: err}
+	})
+}
+
+func (m *Model) resetStatementsCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		err := m.client.ResetStatements(ctx, db)
+		return maintResetDoneMsg{which: "statements", err: err}
+	})
+}
+
+func (m *Model) resetQualstatsCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		err := m.client.ResetQualstats(ctx, db)
+		return maintResetDoneMsg{which: "qualstats", err: err}
+	})
+}
+
+func (m *Model) loadTableStatsCmd(t pg.Table) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		s, err := m.client.TableMaintStats(ctx, t)
+		return tableStatsLoadedMsg{table: t, stats: s, err: err}
+	})
+}
+
+// vacuumTableCmd starts a streaming VACUUM on t and returns a running tea.Cmd
+// that delivers vacuumLineMsg for each notice line and vacuumDoneMsg when done.
+// It uses tea.ExecProcess-style sequencing via a channelled approach: the outer
+// goroutine launches the vacuum and a ticker delivers lines via waitVacuumLineCmd.
+func (m *Model) vacuumTableCmd(t pg.Table) tea.Cmd {
+	lineCh := make(chan string, 64)
+	doneCh := make(chan error, 1)
+	go func() {
+		err := m.client.VacuumTable(context.Background(), t, func(line string) {
+			lineCh <- line
+		})
+		doneCh <- err
+		close(lineCh)
+		close(doneCh)
+	}()
+	return func() tea.Msg {
+		return vacuumStartedMsg{table: t, lineCh: lineCh, doneCh: doneCh}
+	}
+}
+
+// ── Activity message types ────────────────────────────────────────────────────
+
+type activityLoadedMsg struct {
+	db   string
+	rows []pg.ActivityRow
+	err  error
+}
+
+type activityTickMsg struct{}
+
+// activityHostsMsg delivers newly resolved hostnames from the background DNS
+// resolver so they can be merged into the activity table without a DB round-trip.
+type activityHostsMsg struct {
+	hosts map[string]string // IP → hostname
+}
+
+// backendActionMsg is the result of pg_cancel_backend / pg_terminate_backend.
+type backendActionMsg struct {
+	action string // "cancel" | "terminate"
+	pid    int32
+	ok     bool
+	err    error
+}
+
+// activityStatementMsg carries a QueryStat fetched by queryid so the activity
+// tool can drill into the existing top-queries detail view.
+type activityStatementMsg struct {
+	db  string
+	pid int32 // used to stale-guard (row might be gone after load)
+	qs  *pg.QueryStat
+	err error
+}
+
+// ── Activity commands ─────────────────────────────────────────────────────────
+
+func (m *Model) loadActivityCmd(db string, mode pg.ActivityFilter) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		rows, err := m.client.ListActivity(ctx, db, mode)
+		return activityLoadedMsg{db: db, rows: rows, err: err}
+	})
+}
+
+// activityTick schedules the next Activity re-sample, or returns nil when
+// auto-refresh is off (m.activityRefresh == 0). Returning nil stops the
+// self-rescheduling loop; cycling refresh back on or re-entering the tool
+// restarts it.
+func (m *Model) activityTick() tea.Cmd {
+	if m.activityRefresh <= 0 {
+		return nil
+	}
+	return tea.Tick(m.activityRefresh, func(time.Time) tea.Msg {
+		return activityTickMsg{}
+	})
+}
+
+// cycleActivityRefresh steps the live-reload cadence: 2s → 5s → 10s → off → 2s.
+func (m *Model) cycleActivityRefresh() {
+	switch m.activityRefresh {
+	case 2 * time.Second:
+		m.activityRefresh = 5 * time.Second
+	case 5 * time.Second:
+		m.activityRefresh = 10 * time.Second
+	case 10 * time.Second:
+		m.activityRefresh = 0
+	default:
+		m.activityRefresh = 2 * time.Second
+	}
+}
+
+// resolveActivityHostsCmd resolves each unresolved IP in ips via reverse DNS
+// and delivers the results as activityHostsMsg. Run on a background goroutine
+// so DNS round-trips don't block the TUI.
+func (m *Model) resolveActivityHostsCmd(ips []string) tea.Cmd {
+	if len(ips) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		resolved := make(map[string]string, len(ips))
+		for _, ip := range ips {
+			if ip == "" {
+				continue
+			}
+			h, _ := m.client.ResolveAddr(ip)
+			resolved[ip] = h
+		}
+		return activityHostsMsg{hosts: resolved}
+	}
+}
+
+// cancelBackendCmd sends pg_cancel_backend($pid) and reports the outcome.
+func (m *Model) cancelBackendCmd(db string, pid int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		ok, err := m.client.CancelBackend(ctx, db, pid)
+		return backendActionMsg{action: "cancel", pid: pid, ok: ok, err: err}
+	})
+}
+
+// terminateBackendCmd sends pg_terminate_backend($pid) and reports the outcome.
+func (m *Model) terminateBackendCmd(db string, pid int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		ok, err := m.client.TerminateBackend(ctx, db, pid)
+		return backendActionMsg{action: "terminate", pid: pid, ok: ok, err: err}
+	})
+}
+
+// loadActivityStatementCmd fetches the QueryStat for a given queryid from a
+// fresh pg_stat_statements snapshot so the Activity tool can drill into the
+// top-queries detail view for a running query.
+func (m *Model) loadActivityStatementCmd(db string, pid int32, queryID int64, queryText string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		rows, err := m.client.StatementSnapshot(ctx, db)
+		if err != nil {
+			// Synthesise a minimal QueryStat so the detail view still shows
+			// the query text and EXPLAIN even when pg_stat_statements is absent.
+			qs := &pg.QueryStat{QueryID: queryID, Query: queryText}
+			return activityStatementMsg{db: db, pid: pid, qs: qs}
+		}
+		for i := range rows {
+			if rows[i].QueryID == queryID {
+				return activityStatementMsg{db: db, pid: pid, qs: &rows[i]}
+			}
+		}
+		// Query ran but isn't in pg_stat_statements yet (too short, or extension
+		// not tracking this type of query) — fall back to the minimal version.
+		qs := &pg.QueryStat{QueryID: queryID, Query: queryText}
+		return activityStatementMsg{db: db, pid: pid, qs: qs}
+	})
+}
+
+// waitVacuumLineCmd waits for the next line from a running vacuum goroutine.
+// It is rescheduled by the msg handler until the done channel closes.
+func waitVacuumLineCmd(lineCh <-chan string, doneCh <-chan error) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case line, ok := <-lineCh:
+			if ok {
+				return vacuumLineMsg{line: line, lineCh: lineCh, doneCh: doneCh}
+			}
+			// Channel closed; drain done.
+			err := <-doneCh
+			return vacuumDoneMsg{err: err}
+		case err := <-doneCh:
+			return vacuumDoneMsg{err: err}
+		}
+	}
+}

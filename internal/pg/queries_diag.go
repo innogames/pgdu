@@ -638,25 +638,6 @@ WHERE acl_base.grantor_oid <> acl_base.grantee_oid
 ORDER BY acl_base.object_schema, acl_base.object_type, acl_base.object_name
 `
 
-// sqlDiagActivityRunning lists non-idle backends ordered by how long the current
-// statement has been running. Excludes this connection's own backend.
-const sqlDiagActivityRunning = `
-SELECT
-    pid,
-    usename,
-    coalesce(host(client_addr), 'local') AS client_addr,
-    state,
-    (EXTRACT(epoch FROM now() - query_start) * 1000)::bigint AS duration_ms,
-    wait_event_type,
-    wait_event,
-    left(regexp_replace(query, '\s+', ' ', 'g'), 300) AS query
-FROM pg_stat_activity
-WHERE state IS NOT NULL
-  AND state <> 'idle'
-  AND pid <> pg_backend_pid()
-ORDER BY now() - query_start DESC NULLS LAST
-`
-
 // sqlDiagConnections aggregates pg_stat_activity into a per-database, per-state
 // connection count — a quick read on pool saturation and idle-in-transaction.
 const sqlDiagConnections = `

@@ -3,7 +3,9 @@ package pg
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -50,6 +52,17 @@ type Client struct {
 	// known before the first snapshot query runs.
 	statStatementsVer      map[string][2]int
 	statStatementsVerKnown map[string]bool
+
+	// pgbouncer probe state: once we've confirmed pgbouncer is absent we skip
+	// the dial on every subsequent refresh. pgbAbsent is only set, never cleared.
+	pgbProbed bool
+	pgbAbsent bool
+
+	// dnsCache is a session-scoped reverse-DNS lookup cache for client_addr
+	// values from pg_stat_activity. It uses its own mutex so net.LookupAddr
+	// (which can block on a network round-trip) never stalls PoolFor.
+	dnsMu    sync.Mutex
+	dnsCache map[string]string
 }
 
 type BloatMode int
@@ -74,7 +87,46 @@ func New(cfg cli.Config) *Client {
 		trackPlanningKnown:     map[string]bool{},
 		statStatementsVer:      map[string][2]int{},
 		statStatementsVerKnown: map[string]bool{},
+		dnsCache:               map[string]string{},
 	}
+}
+
+// ResolveAddr returns the first PTR record for the given IP address, or the
+// raw IP when lookup fails or ip is empty. Results are cached for the session
+// so repeated refreshes don't re-query DNS. The boolean indicates whether a
+// hostname (distinct from ip) was found.
+//
+// A short, dedicated timeout prevents a slow DNS server from stalling the TUI
+// refresh even though the lookup runs on a background goroutine.
+func (c *Client) ResolveAddr(ip string) (string, bool) {
+	if ip == "" {
+		return "", false
+	}
+	c.dnsMu.Lock()
+	if cached, ok := c.dnsCache[ip]; ok {
+		c.dnsMu.Unlock()
+		return cached, cached != ip
+	}
+	c.dnsMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	names, err := net.DefaultResolver.LookupAddr(ctx, ip)
+	result := ip
+	if err == nil && len(names) > 0 {
+		// PTR records end with a trailing dot by convention; strip it.
+		name := names[0]
+		if len(name) > 0 && name[len(name)-1] == '.' {
+			name = name[:len(name)-1]
+		}
+		result = name
+	}
+
+	c.dnsMu.Lock()
+	c.dnsCache[ip] = result
+	c.dnsMu.Unlock()
+
+	return result, result != ip
 }
 
 // PoolFor returns (or creates) a pool against the named database.

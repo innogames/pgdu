@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -39,6 +38,9 @@ const (
 	levelStatementSamples // captured real predicate constants (pg_qualstats) for one query
 	levelStatementResult  // rows returned by executing a query (psql-style result table)
 	levelSnapshots        // on-disk top-queries snapshots browser (load as baseline / A→B)
+	levelMaintenance      // server-health dashboard (toolMaintenance)
+	levelSettings         // pg_settings browser (child of levelMaintenance)
+	levelActivity         // live server activity from pg_stat_activity (toolActivity)
 )
 
 // tool identifies which top-level statistic the user is exploring.
@@ -49,9 +51,11 @@ const (
 	toolDisk tool = iota
 	toolBuffers
 	toolPageInspect
-	toolTools   // diagnostic SQL query runner
-	toolWAL     // write-ahead-log inspector
-	toolQueries // pg_stat_statements top-queries (powa-style)
+	toolTools       // diagnostic SQL query runner
+	toolWAL         // write-ahead-log inspector
+	toolQueries     // pg_stat_statements top-queries (powa-style)
+	toolMaintenance // server-health dashboard + settings browser
+	toolActivity    // live server activity (pg_stat_activity)
 )
 
 func (t tool) Name() string {
@@ -68,218 +72,12 @@ func (t tool) Name() string {
 		return "wal"
 	case toolQueries:
 		return "queries"
+	case toolMaintenance:
+		return "maintenance"
+	case toolActivity:
+		return "activity"
 	}
 	return "?"
-}
-
-type sortMode int
-
-const (
-	sortBySize sortMode = iota
-	sortByName
-	sortByHitRatio
-	sortByCached
-	sortByTotal
-	sortByRows
-	sortByBlkno
-	sortByDeadRatio
-	sortByFreeSpace
-	sortByLP
-	sortByLevel
-	sortByCount // WAL: record count per resource manager
-	sortByFPI   // WAL: full-page-image bytes
-	sortByDirty // buffer-tables: dirty (modified-in-memory) bytes
-)
-
-// defaultDesc is the natural direction for each sort column: bigger-first for
-// numeric "more is more" columns, alphabetical for name, ascending for hit
-// ratio so the worst-cached tables bubble to the top.
-func (sm sortMode) defaultDesc() bool {
-	switch sm {
-	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty:
-		return true
-	case sortByName, sortByHitRatio, sortByBlkno, sortByLP, sortByLevel:
-		return false
-	}
-	return false
-}
-
-// name is the short column label used in the status row and column headers.
-func (sm sortMode) name() string {
-	switch sm {
-	case sortBySize:
-		return "size"
-	case sortByRows:
-		return "~rows"
-	case sortByHitRatio:
-		return "hit"
-	case sortByCached:
-		return "cached"
-	case sortByTotal:
-		return "total"
-	case sortByBlkno:
-		return "blkno"
-	case sortByDeadRatio:
-		return "dead%"
-	case sortByFreeSpace:
-		return "free"
-	case sortByLP:
-		return "lp"
-	case sortByLevel:
-		return "level"
-	case sortByCount:
-		return "count"
-	case sortByFPI:
-		return "fpi"
-	case sortByDirty:
-		return "dirty"
-	default:
-		return "name"
-	}
-}
-
-// label is name plus an arrow indicating the current sort direction.
-func (sm sortMode) label(desc bool) string {
-	arrow := "↑"
-	if desc {
-		arrow = "↓"
-	}
-	return sm.name() + arrow
-}
-
-// less returns true when item a should come before item b *ignoring* the
-// direction flag — applySort applies direction by flipping the result.
-// Items missing the comparator's payload (no rows estimate, no hit ratio)
-// sort below items that have one, so "unknown" stays a distinct bucket from
-// "small".
-func (sm sortMode) less(a, b item) bool {
-	switch sm {
-	case sortBySize:
-		return a.size < b.size
-	case sortByRows:
-		ai, oka := itemRows(a)
-		bi, okb := itemRows(b)
-		if oka != okb {
-			return okb
-		}
-		if !oka {
-			return false
-		}
-		return ai < bi
-	case sortByHitRatio:
-		ai, oka := itemHitRatio(a)
-		bi, okb := itemHitRatio(b)
-		if oka != okb {
-			return okb
-		}
-		if !oka {
-			return false
-		}
-		return ai < bi
-	case sortByCached:
-		ai, oka := itemCachedRatio(a)
-		bi, okb := itemCachedRatio(b)
-		if oka != okb {
-			return okb
-		}
-		if !oka {
-			return false
-		}
-		return ai < bi
-	case sortByTotal:
-		ai, oka := itemTotalBytes(a)
-		bi, okb := itemTotalBytes(b)
-		if oka != okb {
-			return okb
-		}
-		if !oka {
-			return false
-		}
-		return ai < bi
-	case sortByBlkno:
-		ai, oka := itemBlkno(a)
-		bi, okb := itemBlkno(b)
-		if oka != okb {
-			return okb
-		}
-		if !oka {
-			return false
-		}
-		return ai < bi
-	case sortByDeadRatio:
-		ai, oka := itemDeadRatio(a)
-		bi, okb := itemDeadRatio(b)
-		if oka != okb {
-			return okb
-		}
-		if !oka {
-			return false
-		}
-		return ai < bi
-	case sortByFreeSpace:
-		ai, oka := itemFreeSpace(a)
-		bi, okb := itemFreeSpace(b)
-		if oka != okb {
-			return okb
-		}
-		if !oka {
-			return false
-		}
-		return ai < bi
-	case sortByLP:
-		ai, oka := itemLP(a)
-		bi, okb := itemLP(b)
-		if oka != okb {
-			return okb
-		}
-		if !oka {
-			return false
-		}
-		return ai < bi
-	case sortByLevel:
-		ai, oka := itemTreeLevel(a)
-		bi, okb := itemTreeLevel(b)
-		if oka != okb {
-			return okb
-		}
-		if !oka {
-			return false
-		}
-		return ai < bi
-	case sortByCount:
-		ai, oka := itemWALCount(a)
-		bi, okb := itemWALCount(b)
-		if oka != okb {
-			return okb
-		}
-		if !oka {
-			return false
-		}
-		return ai < bi
-	case sortByFPI:
-		ai, oka := itemWALFPI(a)
-		bi, okb := itemWALFPI(b)
-		if oka != okb {
-			return okb
-		}
-		if !oka {
-			return false
-		}
-		return ai < bi
-	case sortByDirty:
-		ai, oka := itemDirtyBytes(a)
-		bi, okb := itemDirtyBytes(b)
-		if oka != okb {
-			return okb
-		}
-		if !oka {
-			return false
-		}
-		return ai < bi
-	case sortByName:
-		return false
-	}
-	return false
 }
 
 // item is the row data the renderer consumes; concrete payload is in `data`.
@@ -549,6 +347,47 @@ type screen struct {
 	statExplaining     bool
 	statExplainAnalyze bool
 	statVerbose        bool // v toggles the verbose detail view (parameter table + extra metric rows)
+
+	// ── Activity tool (levelActivity) ────────────────────────────────────────
+	// actRows is the last fetched pg_stat_activity snapshot.
+	// actErr is non-nil when the load failed (shown instead of the list).
+	// actHosts maps client_addr → resolved hostname (built incrementally by the
+	// background resolver and merged into items on arrival).
+	// actFilter is the current backend-filter mode (active+waiting / non-idle / all).
+	// actCols is the projected column descriptor slice, kept so the C picker and
+	// sort cycling can map column indices back to stable actColIDs.
+	actRows   []pg.ActivityRow
+	actErr    error
+	actHosts  map[string]string
+	actFilter pg.ActivityFilter
+	actCols   []actColDesc
+
+	// pendingBackendAction is the PID of the backend the user pressed k/x on,
+	// waiting for a y/Y confirmation.  action is "cancel" or "terminate".
+	pendingBackendPID    int32
+	pendingBackendAction string // "cancel" | "terminate" | ""
+
+	// ── Maintenance dashboard (levelMaintenance) ─────────────────────────────
+	// maint is the loaded snapshot; maintErr is non-nil when the load failed.
+	maint    *pg.MaintenanceInfo
+	maintErr error
+	// maintCursor is the row within the extension-capacity section that ↑↓ move
+	// over (0 = pg_stat_statements, 1 = pg_qualstats).
+	maintCursor int
+	// pendingReset is set by Enter on a capacity row; y confirms the reset.
+	pendingReset string
+	// settingRows is the full pg_settings list for levelSettings.
+	settingRows []pg.SettingRow
+
+	// ── Table maintenance panel (levelParts) ──────────────────────────────────
+	// tableStats is the maintenance snapshot for the current table, loaded
+	// asynchronously alongside the parts list.
+	tableStats    *pg.TableMaintStats
+	tableStatsErr error
+
+	// pendingVacuum is true when the user has armed the vacuum confirm flow
+	// (pressed `v` on levelParts); y executes, any other key cancels.
+	pendingVacuum bool
 }
 
 // reindexBloatThreshold is the bloat % above which the parts view offers an
@@ -624,6 +463,24 @@ type Model struct {
 	showColumnConfig bool
 	colCfgCursor     int
 
+	// Activity tool column configuration (C key on levelActivity). actColsVisible
+	// is the per-column-id visibility set (nil = registry defaults). actSortColID
+	// tracks the active sort column by stable id across visibility rebuilds.
+	// actColCfgCursor is the C-picker row cursor; showActColumnConfig opens it.
+	actColsVisible      map[actColID]bool
+	actSortColID        actColID
+	showActColumnConfig bool
+	actColCfgCursor     int
+
+	// activityTicking is true while a self-rescheduling refresh tick is running
+	// for the Activity tool, so re-entering levelActivity doesn't spawn a second
+	// loop.
+	activityTicking bool
+
+	// activityRefresh is the Activity tool auto-refresh cadence. Cycled by the t
+	// key: 2s → 10s → off → 2s.
+	activityRefresh time.Duration
+
 	// statTicking is true while a self-rescheduling refresh tick is running for
 	// the top-queries tool, so re-entering levelStatements doesn't spawn a
 	// second tick loop.
@@ -646,20 +503,49 @@ type Model struct {
 	pendingDeleteSnap string
 
 	target string // host:port for header
+
+	// vacuum holds the state for the streaming VACUUM output pane on levelParts.
+	// It is a value type so the pane's scrollWindow can update its offset in
+	// place; vacuumPaneVisible(s) gates whether the pane is rendered at all.
+	vacuum vacuumState
+}
+
+// vacuumState holds the live and completed output of a streaming VACUUM run.
+type vacuumState struct {
+	table    pg.Table
+	started  time.Time
+	finished time.Time
+	running  bool
+	err      error
+	buf      []string // lines received via OnNotice
+	offset   int      // scrollWindow offset into buf
+	follow   bool     // whether to tail-follow new lines
+}
+
+// vacuumPaneVisible returns true when the vacuum output pane should be shown
+// for the given parts screen: either a vacuum is running, or one has finished
+// for this exact table.
+func (m *Model) vacuumPaneVisible(s *screen) bool {
+	if s.level != levelParts {
+		return false
+	}
+	return (m.vacuum.running || !m.vacuum.finished.IsZero()) &&
+		m.vacuum.table.OID == s.table.OID
 }
 
 func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir string) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	m := &Model{
-		client:      client,
-		spinner:     sp,
-		help:        help.New(),
-		keys:        defaultKeys(),
-		fetchBloat:  true,
-		statRefresh: queriesRefresh,
-		snapshotDir: snapshotDir,
-		target:      client.Target(),
+		client:          client,
+		spinner:         sp,
+		help:            help.New(),
+		keys:            defaultKeys(),
+		fetchBloat:      true,
+		statRefresh:     queriesRefresh,
+		activityRefresh: 2 * time.Second,
+		snapshotDir:     snapshotDir,
+		target:          client.Target(),
 	}
 	m.stack = []*screen{{
 		level:    levelTools,
@@ -678,7 +564,9 @@ func toolItems() []item {
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},
+		{name: "Activity", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
 		{name: "Other Tools", detail: "run diagnostic queries — index / table / vacuum / activity / wal / server health", hasChildren: true, data: toolTools},
+		{name: "Maintenance", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
 	}
 }
 
@@ -713,148 +601,4 @@ func (m *Model) findLevel(l level) *screen {
 		}
 	}
 	return nil
-}
-
-// relativeAge formats a duration as a short human-readable age suffix such as
-// "3h ago" or "12d ago". Negative durations (clock skew) read as "0s ago".
-func relativeAge(d time.Duration) string {
-	if d < 0 {
-		d = 0
-	}
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds ago", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	case d < 30*24*time.Hour:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
-	}
-	return fmt.Sprintf("%dmo ago", int(d.Hours()/(24*30)))
-}
-
-// positionLabel reports the cursor's position within the list, e.g.
-// "12/438". Returns "0 items" for empty lists so the status line never
-// shows the misleading "0/0". When a filter is active, the visible count
-// is shown alongside the total ("12/45 of 438") so the user can tell at a
-// glance how many rows were hidden.
-func positionLabel(s *screen) string {
-	total := len(s.items)
-	if total == 0 {
-		return "0 items"
-	}
-	vis := s.visibleLen()
-	if vis == 0 {
-		return fmt.Sprintf("0/0 of %d", total)
-	}
-	if s.filter != "" {
-		return fmt.Sprintf("%d/%d of %d", s.cursor+1, vis, total)
-	}
-	return fmt.Sprintf("%d/%d", s.cursor+1, vis)
-}
-
-// bloatScanLabel returns a short status indicator for the bloat fetch on
-// the parts level. FillBloat is a single round trip that covers every
-// part, so the states are "scanning…" (in flight) or "ready" (done) —
-// any partial scanned count comes from individual rows whose bloat could
-// not be measured (e.g. unsupported index access methods).
-func bloatScanLabel(s *screen) string {
-	if s.level != levelParts || len(s.items) == 0 {
-		return ""
-	}
-	if s.bloatScanning {
-		return "bloat: scanning…"
-	}
-	scanned := 0
-	for _, it := range s.items {
-		if it.hasBloat {
-			scanned++
-		}
-	}
-	if scanned == 0 {
-		return ""
-	}
-	if scanned == len(s.items) {
-		return "bloat: ready"
-	}
-	return fmt.Sprintf("bloat: %d/%d scanned", scanned, len(s.items))
-}
-
-// --- formatting helpers ---
-
-func levelLabel(l level) string {
-	switch l {
-	case levelTools:
-		return "tools"
-	case levelDatabases:
-		return "databases"
-	case levelSchemas:
-		return "schemas"
-	case levelTables:
-		return "tables"
-	case levelBufferTables:
-		return "buffer-tables"
-	case levelBufferDetail:
-		return "buffer-detail"
-	case levelParts:
-		return "parts"
-	case levelColumns:
-		return "columns"
-	case levelHeapPages:
-		return "heap-pages"
-	case levelHeapTuples:
-		return "heap-tuples"
-	case levelTupleRow:
-		return "tuple-row"
-	case levelRelations:
-		return "relations"
-	case levelIndexPages:
-		return "index-pages"
-	case levelIndexTuples:
-		return "index-tuples"
-	case levelDescribe:
-		return "describe"
-	case levelDiagnostics:
-		return "diagnostics"
-	case levelDiagnosticResult:
-		return "diag-result"
-	case levelWAL:
-		return "wal"
-	case levelWALRecords:
-		return "wal-records"
-	case levelWALBlocks:
-		return "wal-blocks"
-	case levelStatements:
-		return "queries"
-	case levelStatementDetail:
-		return "query-detail"
-	case levelStatementResult:
-		return "query-result"
-	case levelSnapshots:
-		return "snapshots"
-	}
-	return "?"
-}
-
-func formatRows(n int64) string {
-	if n < 0 {
-		return "?"
-	}
-	switch {
-	case n >= 1_000_000_000:
-		return fmt.Sprintf("%.1fG", float64(n)/1e9)
-	case n >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(n)/1e6)
-	case n >= 1000:
-		return fmt.Sprintf("%.1fk", float64(n)/1e3)
-	}
-	return fmt.Sprintf("%d", n)
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

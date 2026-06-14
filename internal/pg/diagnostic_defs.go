@@ -164,15 +164,8 @@ var Diagnostics = []Diagnostic{
 		Bar:         "dead_tuples",
 	},
 	// ── activity ──────────────────────────────────────────────────────────
-	{
-		Key:         "activity_running",
-		Title:       "Running queries",
-		Category:    "activity",
-		Description: "non-idle backends with state, wait event and how long the statement has run",
-		SQL:         sqlDiagActivityRunning,
-		Bar:         "",
-		Sort:        "duration_ms",
-	},
+	// Note: the "running queries" view is now the dedicated Activity tool
+	// (toolActivity), which auto-refreshes and has configurable columns.
 	{
 		Key:         "connections",
 		Title:       "Connections",

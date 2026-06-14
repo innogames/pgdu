@@ -102,6 +102,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case exportDoneMsg:
 		return m, m.onExportDone(msg)
 
+	case maintLoadedMsg:
+		return m, m.onMaintLoaded(msg)
+	case settingsLoadedMsg:
+		return m, m.onSettingsLoaded(msg)
+	case maintResetDoneMsg:
+		return m, m.onMaintResetDone(msg)
+	case tableStatsLoadedMsg:
+		return m, m.onTableStatsLoaded(msg)
+	case vacuumStartedMsg:
+		return m, m.onVacuumStarted(msg)
+	case vacuumLineMsg:
+		return m, m.onVacuumLine(msg)
+	case vacuumDoneMsg:
+		return m, m.onVacuumDone(msg)
+
+	case activityLoadedMsg:
+		return m, m.onActivityLoaded(msg)
+	case activityTickMsg:
+		return m, m.onActivityTick()
+	case activityHostsMsg:
+		return m, m.onActivityHosts(msg)
+	case backendActionMsg:
+		return m, m.onBackendAction(msg)
+	case activityStatementMsg:
+		return m, m.onActivityStatement(msg)
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}

@@ -29,6 +29,11 @@ type keyMap struct {
 	Filter           key.Binding
 	Help             key.Binding
 	Quit             key.Binding
+
+	// Activity-tool-specific bindings.
+	ActivityFilter   key.Binding // f: cycle backend filter mode
+	CancelBackend    key.Binding // k: send pg_cancel_backend (SIGINT)
+	TerminateBackend key.Binding // x: send pg_terminate_backend (SIGTERM)
 }
 
 func defaultKeys() keyMap {
@@ -63,6 +68,10 @@ func defaultKeys() keyMap {
 		Filter:         key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		Help:           key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:           key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
+
+		ActivityFilter:   key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "cycle filter")),
+		CancelBackend:    key.NewBinding(key.WithKeys("k"), key.WithHelp("k", "cancel backend")),
+		TerminateBackend: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "terminate backend")),
 	}
 }
 
@@ -78,6 +87,7 @@ func (k *keyMap) applyContext(s *screen) {
 	stmtDetail := s.level == levelStatementDetail
 	snapshots := s.level == levelSnapshots
 	diagResult := s.level == levelDiagnosticResult
+	activity := s.level == levelActivity
 
 	// `s` shows the executed SQL (to copy out) only on a diagnostic result. Sort
 	// cycling moved to the ←/→ arrows (SortNext/SortPrev), which stay globally
@@ -87,17 +97,26 @@ func (k *keyMap) applyContext(s *screen) {
 
 	k.Rebaseline.SetEnabled(stmtTable)
 	k.Snapshots.SetEnabled(stmtTable)
-	k.Columns.SetEnabled(stmtTable)
-	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail)
+	// C (Columns) is the column-config picker on the top-queries table and on the
+	// activity table.
+	k.Columns.SetEnabled(stmtTable || activity)
+	// t (ToggleRefresh) cycles the auto-refresh cadence on top-queries levels and
+	// on the activity level.
+	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity)
 	k.SaveSnapshot.SetEnabled(stmtTable || stmtDetail)
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
 	k.Params.SetEnabled(stmtDetail)
 	k.Execute.SetEnabled(stmtDetail)
-	k.Verbose.SetEnabled(stmtDetail)
+	// v is the verbose toggle on statement detail AND the VACUUM trigger on parts.
+	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts)
 	k.DeleteSnapshot.SetEnabled(snapshots)
 	// Install is only actionable when the screen offers an installable extension
 	// (the prompt renders its own `i` hint); keep it out of the footer otherwise.
 	k.Install.SetEnabled(s.extPrompt != nil && s.extPrompt.installable)
+
+	k.ActivityFilter.SetEnabled(activity)
+	k.CancelBackend.SetEnabled(activity)
+	k.TerminateBackend.SetEnabled(activity)
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
