@@ -46,6 +46,11 @@ type Config struct {
 	// ($TMPDIR/pgdu-snapshots, i.e. /tmp/pgdu-snapshots) so snapshots taken by
 	// one user can be read and deleted by any other user on the same host.
 	SnapshotDir string
+
+	// Tool, when non-empty, names the top-level tool to open directly, skipping
+	// the tool-picker screen. One of the canonical tool names ("disk",
+	// "buffers", "queries", "activity"); empty means start on the picker.
+	Tool string
 }
 
 func Parse(args []string) (Config, error) {
@@ -78,6 +83,14 @@ func Parse(args []string) (Config, error) {
 	var showVersion bool
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
+	// Tool shortcuts: each opens a top-level tool directly, skipping the picker.
+	// They are mutually exclusive — pick at most one.
+	var diskUsage, sharedBuffers, activity, topQueries bool
+	fs.BoolVar(&diskUsage, "disk-usage", false, "start directly in the disk-usage browser")
+	fs.BoolVar(&sharedBuffers, "shared-buffers", false, "start directly in the shared-buffers browser")
+	fs.BoolVar(&activity, "activity", false, "start directly in the activity tool (pg_stat_activity)")
+	fs.BoolVar(&topQueries, "top-queries", false, "start directly in the top-queries tool (pg_stat_statements)")
+
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "pgdu - PostgreSQL disk usage explorer (ncdu-style TUI)\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: pgdu [flags]\n\n")
@@ -92,6 +105,23 @@ func Parse(args []string) (Config, error) {
 
 	if showVersion {
 		return Config{}, ErrVersion
+	}
+
+	// Map the tool shortcut flags onto cfg.Tool, rejecting more than one.
+	tools := map[string]bool{
+		"disk":     diskUsage,
+		"buffers":  sharedBuffers,
+		"activity": activity,
+		"queries":  topQueries,
+	}
+	for name, set := range tools {
+		if !set {
+			continue
+		}
+		if cfg.Tool != "" {
+			return Config{}, fmt.Errorf("only one of --disk-usage/--shared-buffers/--activity/--top-queries may be given")
+		}
+		cfg.Tool = name
 	}
 
 	if cfg.DSN == "" && cfg.User == "" {

@@ -103,6 +103,33 @@ func TestTargetSocket(t *testing.T) {
 	}
 }
 
+func TestParseToolShortcuts(t *testing.T) {
+	t.Setenv("PGUSER", "alice")
+	cases := map[string]string{
+		"--disk-usage":     "disk",
+		"--shared-buffers": "buffers",
+		"--activity":       "activity",
+		"--top-queries":    "queries",
+	}
+	for flag, want := range cases {
+		cfg, err := Parse([]string{flag})
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", flag, err)
+		}
+		if cfg.Tool != want {
+			t.Errorf("%s: Tool = %q, want %q", flag, cfg.Tool, want)
+		}
+	}
+
+	if cfg, err := Parse([]string{}); err != nil || cfg.Tool != "" {
+		t.Errorf("no flag: Tool = %q (err %v), want empty", cfg.Tool, err)
+	}
+
+	if _, err := Parse([]string{"--disk-usage", "--activity"}); err == nil {
+		t.Error("expected error when two tool shortcuts are given")
+	}
+}
+
 func TestParseRequiresUser(t *testing.T) {
 	t.Setenv("PGUSER", "")
 	t.Setenv("USER", "")

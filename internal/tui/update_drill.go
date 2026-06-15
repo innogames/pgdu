@@ -21,46 +21,7 @@ func (m *Model) drillIn() tea.Cmd {
 	switch s.level {
 	case levelTools:
 		t := cur.data.(tool)
-		if t == toolTools {
-			// toolTools goes directly to the flat diagnostic-query list, not
-			// through a database picker — all queries run against the default DB.
-			next := &screen{level: levelDiagnostics, title: "tools", tool: toolTools, sort: sortByName, sortDesc: sortByName.defaultDesc()}
-			m.stack = append(m.stack, next)
-			return m.loadCurrent()
-		}
-		if t == toolWAL {
-			// WAL is cluster-wide, so it skips the database picker too. The
-			// concrete default DB is pinned on the screen (not "") so the
-			// extension-install prompt can name a real database.
-			next := &screen{level: levelWAL, title: "wal", tool: toolWAL, db: m.client.DefaultDB(), sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
-			m.stack = append(m.stack, next)
-			return m.loadCurrent()
-		}
-		if t == toolMaintenance {
-			// Maintenance dashboard is cluster-wide: skip the database picker.
-			next := &screen{level: levelMaintenance, title: "maintenance", tool: toolMaintenance, db: m.client.DefaultDB()}
-			m.stack = append(m.stack, next)
-			return m.loadCurrent()
-		}
-		if t == toolActivity {
-			// Activity tool is cluster-wide: skip the database picker and go
-			// directly to the live pg_stat_activity list.
-			next := &screen{
-				level:     levelActivity,
-				title:     "activity",
-				tool:      toolActivity,
-				db:        m.client.DefaultDB(),
-				actFilter: pg.ActivityActiveWaiting,
-				actHosts:  make(map[string]string),
-			}
-			m.stack = append(m.stack, next)
-			return m.loadCurrent()
-		}
-		// toolQueries falls through to the database picker like the disk/buffers
-		// tools: pg_stat_statements is read from whichever database you pick
-		// (its dbid filter scopes the snapshot to that connection's database).
-		next := &screen{level: levelDatabases, title: "databases", tool: t, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
-		m.stack = append(m.stack, next)
+		m.stack = append(m.stack, m.toolEntryScreen(t))
 		return m.loadCurrent()
 	case levelDiagnostics:
 		d := cur.data.(pg.Diagnostic)
@@ -527,6 +488,41 @@ func (m *Model) loadCurrent() tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 	return nil
+}
+
+// toolEntryScreen builds the screen entered when a top-level tool is chosen on
+// the picker (and when a --<tool> flag opens one directly at startup). The
+// cluster-wide tools (tools/wal/maintenance/activity) drill straight to their
+// leaf; disk/buffers/queries open the database picker first — pg_stat_statements
+// is read from whichever database is picked, so toolQueries goes there too.
+func (m *Model) toolEntryScreen(t tool) *screen {
+	switch t {
+	case toolTools:
+		// toolTools goes directly to the flat diagnostic-query list, not
+		// through a database picker — all queries run against the default DB.
+		return &screen{level: levelDiagnostics, title: "tools", tool: toolTools, sort: sortByName, sortDesc: sortByName.defaultDesc()}
+	case toolWAL:
+		// WAL is cluster-wide, so it skips the database picker too. The
+		// concrete default DB is pinned on the screen (not "") so the
+		// extension-install prompt can name a real database.
+		return &screen{level: levelWAL, title: "wal", tool: toolWAL, db: m.client.DefaultDB(), sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
+	case toolMaintenance:
+		// Maintenance dashboard is cluster-wide: skip the database picker.
+		return &screen{level: levelMaintenance, title: "maintenance", tool: toolMaintenance, db: m.client.DefaultDB()}
+	case toolActivity:
+		// Activity tool is cluster-wide: skip the database picker and go
+		// directly to the live pg_stat_activity list.
+		return &screen{
+			level:     levelActivity,
+			title:     "activity",
+			tool:      toolActivity,
+			db:        m.client.DefaultDB(),
+			actFilter: pg.ActivityActiveWaiting,
+			actHosts:  make(map[string]string),
+		}
+	default:
+		return &screen{level: levelDatabases, title: "databases", tool: t, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
+	}
 }
 
 // schemaChildScreen builds the next screen when drilling into a schema, varying

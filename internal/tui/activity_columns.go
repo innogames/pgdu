@@ -137,10 +137,6 @@ func actColumnRegistry() []actColDesc {
 		{id: actColBackendXmin, name: "xmin", kind: pg.DiagText,
 			desc: "oldest transaction whose row versions this backend may still need (backend_xmin)",
 			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: r.BackendXmin} }},
-		{id: actColQuery, name: "query", kind: pg.DiagText, defaultOn: true, mandatory: true,
-			desc: "current or last query (always shown)",
-			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: r.Query} }},
-
 		// OS-level columns sourced from /proc — opt-in, show — on non-Linux or
 		// remote connections where the local /proc PIDs don't match.
 		{id: actColRSS, name: "rss", kind: pg.DiagFloat,
@@ -179,6 +175,13 @@ func actColumnRegistry() []actColDesc {
 				}
 				return pg.DiagCell{Display: humanize.Bytes(int64(d.WriteBps)) + "/s", Num: d.WriteBps, HasNum: true}
 			}},
+
+		// query must stay the very last column: renderDiagResult grows the final
+		// column into the leftover terminal width (no bar on this table), so the
+		// long query text gets the slack instead of being clipped at diagColWidth.
+		{id: actColQuery, name: "query", kind: pg.DiagText, defaultOn: true, mandatory: true,
+			desc: "current or last query (always shown)",
+			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: r.Query} }},
 	}
 }
 

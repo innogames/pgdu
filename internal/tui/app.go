@@ -553,7 +553,19 @@ func (m *Model) vacuumPaneVisible(s *screen) bool {
 		m.vacuum.table.OID == s.table.OID
 }
 
-func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir string, colPrefs *prefs.Prefs) *Model {
+// toolByName maps a canonical tool name (as produced by tool.Name and accepted
+// by the --<tool> CLI flags) back to the tool enum. The bool is false for an
+// unknown/empty name so the caller can fall back to the tool picker.
+func toolByName(name string) (tool, bool) {
+	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity} {
+		if t.Name() == name {
+			return t, true
+		}
+	}
+	return 0, false
+}
+
+func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir string, colPrefs *prefs.Prefs, initialTool string) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	m := &Model{
@@ -579,12 +591,21 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 			m.stmtColsVisible = colVisFromStrings[stmtColID](v)
 		}
 	}
-	m.stack = []*screen{{
+	root := &screen{
 		level:    levelTools,
 		title:    "tools",
 		sort:     sortByName,
 		sortDesc: sortByName.defaultDesc(),
-	}}
+	}
+	m.stack = []*screen{root}
+	// --<tool> shortcut: open the requested tool directly, but keep the picker as
+	// the stack root so Back/Esc still returns to it. The root is pre-populated
+	// synchronously (toolItems is pure) since Init only loads the top screen.
+	if t, ok := toolByName(initialTool); ok {
+		root.items = toolItems()
+		root.loaded = true
+		m.stack = append(m.stack, m.toolEntryScreen(t))
+	}
 	return m
 }
 
