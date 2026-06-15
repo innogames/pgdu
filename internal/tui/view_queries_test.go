@@ -206,7 +206,12 @@ func TestRenderStatementDetailAndInfo(t *testing.T) {
 	m.width, m.height = 200, 50
 	m.stack = append(m.stack, s)
 	m.showInfo = true
-	info := m.View()
+	if m.View() == "" {
+		t.Fatal("info overlay rendered empty")
+	}
+	// View clips the (scrollable) overlay to the viewport at the current scroll
+	// offset, so assert content coverage against the full unscrolled body.
+	info := m.renderInfoOverlay(s, 200)
 	for _, want := range []string{"Top queries reference", "the window", "columns", "plan_ms", "miss", "blk/row", "cost colours", "GENERIC_PLAN"} {
 		if !strings.Contains(info, want) {
 			t.Errorf("info overlay missing %q", want)
