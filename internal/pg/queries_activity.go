@@ -51,3 +51,34 @@ ORDER BY a.query_start ASC NULLS LAST
 const sqlActivityAll = sqlActivityBase + `
 ORDER BY a.query_start ASC NULLS LAST
 `
+
+// sqlActivitySummary returns one row of server-wide backend counts plus the
+// connection limit, independent of the row filter. "waiting" is restricted to
+// genuine contention wait classes; Client (ClientRead/Write), Activity (idle
+// main loops) and Timeout (throttles like VacuumDelay) are NOT real blocks, so
+// a backend parked on them counts as idle/active, never waiting. This is what
+// keeps idle ClientRead connections out of the red "waiting" total.
+const sqlActivitySummary = `
+SELECT
+    count(*) FILTER (WHERE backend_type = 'client backend')::int AS conns,
+    count(*) FILTER (
+        WHERE state = 'active'
+          AND (wait_event_type IS NULL
+               OR wait_event_type NOT IN ('Lock','LWLock','BufferPin','IO','IPC','Extension'))
+    )::int AS active,
+    count(*) FILTER (
+        WHERE state = 'active'
+          AND wait_event_type IN ('Lock','LWLock','BufferPin','IO','IPC','Extension')
+    )::int AS waiting,
+    count(*) FILTER (WHERE state LIKE 'idle in transaction%')::int AS idle_in_xact,
+    count(*) FILTER (WHERE state = 'idle')::int AS idle,
+    count(*) FILTER (
+        WHERE state IS NOT NULL
+          AND state <> 'active'
+          AND state <> 'idle'
+          AND state NOT LIKE 'idle in transaction%'
+    )::int AS other,
+    current_setting('max_connections')::int AS max_connections
+FROM pg_stat_activity
+WHERE pid <> pg_backend_pid()
+`

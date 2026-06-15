@@ -360,6 +360,7 @@ type screen struct {
 	// actCols is the projected column descriptor slice, kept so the C picker and
 	// sort cycling can map column indices back to stable actColIDs.
 	actRows    []pg.ActivityRow
+	actSummary pg.ActivitySummary // server-wide counts + max_connections for the header
 	actErr     error
 	actHosts   map[string]string
 	actFilter  pg.ActivityFilter
@@ -448,8 +449,12 @@ type Model struct {
 	fetchBloat bool
 
 	// showInfo toggles the buffer-tables info overlay (? key) — a static
-	// explainer for the server-memory and shared_buffers bars.
-	showInfo bool
+	// explainer for the server-memory and shared_buffers bars. infoOffset is the
+	// scroll position within that overlay (some references, e.g. maintenance, are
+	// taller than the screen); it's reset to 0 each time the overlay is opened and
+	// clamped on render by scrollWindow.
+	showInfo   bool
+	infoOffset int
 
 	// showDiagQuery toggles the overlay that prints the executed SQL of the
 	// current diagnostic (s key on levelDiagnosticResult) so it can be copied.
@@ -591,9 +596,9 @@ func toolItems() []item {
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},
-		{name: "Activity", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
-		{name: "Other Tools", detail: "run diagnostic queries — index / table / vacuum / activity / wal / server health", hasChildren: true, data: toolTools},
+		{name: "Current Activity (pg_activity)", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
 		{name: "Maintenance", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
+		{name: "Other Tools", detail: "run diagnostic queries — index / table / vacuum / activity / wal / server health", hasChildren: true, data: toolTools},
 	}
 }
 

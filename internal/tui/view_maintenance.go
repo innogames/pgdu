@@ -38,18 +38,11 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	info := s.maint
 
 	var body strings.Builder
-	body.WriteString(renderMaintServer(info))
-	body.WriteString(renderMaintTransactions(info))
-	body.WriteString(renderMaintReplication(info))
-	body.WriteString(renderMaintPgBouncer(info))
-	body.WriteString(renderMaintMemory(info))
-	body.WriteString(renderMaintAutovacuum(info))
-	body.WriteString(renderMaintWAL(info))
-	body.WriteString(renderMaintIO(info))
-	body.WriteString(renderMaintHealth(info))
 
 	// ── EXTENSION CAPACITY ────────────────────────────────────────────
-	// Kept last because it owns the ↑↓ cursor and reset flow.
+	// Kept first because it owns the ↑↓ cursor and reset flow — the only
+	// actionable rows on this dashboard, so they stay reachable without having
+	// to scroll past the read-only status sections below.
 	body.WriteString("  " + styleHeader.Render(" extension capacity ") + "\n")
 	var stmtsCap, qualsCap pg.ExtCapacity
 	if info != nil {
@@ -59,6 +52,16 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	body.WriteString(m.renderCapacityRow(s, s.db, 0, "pg_stat_statements", stmtsCap) + "\n")
 	body.WriteString(m.renderCapacityRow(s, s.db, 1, "pg_qualstats", qualsCap) + "\n")
 	body.WriteString("\n")
+
+	body.WriteString(renderMaintServer(info))
+	body.WriteString(renderMaintTransactions(info))
+	body.WriteString(renderMaintReplication(info))
+	body.WriteString(renderMaintPgBouncer(info))
+	body.WriteString(renderMaintMemory(info))
+	body.WriteString(renderMaintAutovacuum(info))
+	body.WriteString(renderMaintWAL(info))
+	body.WriteString(renderMaintIO(info))
+	body.WriteString(renderMaintHealth(info))
 
 	hintLine := m.renderMaintHint(s)
 

@@ -35,6 +35,70 @@ func (m *Model) pageStep() int {
 	return step
 }
 
+// mouseWheelLines is how many rows one mouse-wheel notch scrolls — three is the
+// common terminal default and reads well for both list cursors and the
+// text-scroll levels (statement detail, maintenance, the ? overlay).
+const mouseWheelLines = 3
+
+// handleMouse turns mouse-wheel notches into the same up/down handling the
+// arrow keys already drive, so wheel scrolling works everywhere a cursor or
+// offset does — lists, the modal column-config picker, and the ? reference
+// overlay — without duplicating any level-specific logic. Non-wheel events
+// (motion, clicks) are ignored.
+func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	dir := 0
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		dir = -1
+	case tea.MouseButtonWheelDown:
+		dir = +1
+	default:
+		return m, nil
+	}
+	s := m.top()
+	// On the maintenance dashboard ↑↓ moves the capacity-row cursor, not the
+	// panel; scroll the status panel by its offset directly so the wheel reaches
+	// the metrics below the fold. scrollWindow clamps the offset on render.
+	if !m.showInfo && s.level == levelMaintenance {
+		s.offset = max(s.offset+dir*mouseWheelLines, 0)
+		return m, nil
+	}
+	k := tea.KeyMsg{Type: tea.KeyUp}
+	if dir > 0 {
+		k = tea.KeyMsg{Type: tea.KeyDown}
+	}
+	var cmd tea.Cmd
+	for range mouseWheelLines {
+		_, cmd = m.handleKey(k)
+	}
+	return m, cmd
+}
+
+// handleInfoKey drives the modal ? reference overlay: scroll keys move
+// infoOffset (clamped on render by scrollWindow), Help/Back/Quit close it (Quit
+// still quits), and everything else is swallowed so the hidden list stays put.
+func (m *Model) handleInfoKey(msg tea.KeyMsg) tea.Cmd {
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return tea.Quit
+	case key.Matches(msg, m.keys.Help), key.Matches(msg, m.keys.Back):
+		m.showInfo = false
+	case key.Matches(msg, m.keys.Up):
+		m.infoOffset = max(m.infoOffset-1, 0)
+	case key.Matches(msg, m.keys.Down):
+		m.infoOffset++ // clamped by scrollWindow
+	case key.Matches(msg, m.keys.PageUp):
+		m.infoOffset = max(m.infoOffset-m.pageStep(), 0)
+	case key.Matches(msg, m.keys.PageDown):
+		m.infoOffset += m.pageStep() // clamped by scrollWindow
+	case key.Matches(msg, m.keys.Top):
+		m.infoOffset = 0
+	case key.Matches(msg, m.keys.Bottom):
+		m.infoOffset = math.MaxInt32 // clamped by scrollWindow
+	}
+	return nil
+}
+
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := m.top()
 	// Scope tool/level-specific bindings to the current screen so a disabled
@@ -131,6 +195,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showDiagQuery = false
 		return m, nil
 	}
+	// The ? reference overlay is modal: while it's up, scroll keys move it and
+	// the close keys dismiss it; nothing else fires, so the list hidden beneath
+	// it never moves. Closing (Help/Back) is handled inside handleInfoKey.
+	if m.showInfo && m.hasInfoOverlay(s) {
+		return m, m.handleInfoKey(msg)
+	}
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
@@ -147,6 +217,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.level == levelMaintenance || s.level == levelSettings ||
 			s.level == levelActivity {
 			m.showInfo = !m.showInfo
+			if m.showInfo {
+				m.infoOffset = 0 // always open scrolled to the top
+			}
 			break
 		}
 		m.help.ShowAll = !m.help.ShowAll

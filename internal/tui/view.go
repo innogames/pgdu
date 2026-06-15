@@ -111,30 +111,11 @@ func (m *Model) View() string {
 		b.WriteString(m.renderColumnConfig(s, contentHeight))
 	case m.showDiagQuery && s.level == levelDiagnosticResult && s.diag != nil:
 		b.WriteString(m.renderDiagQuery(s, contentHeight))
-	case m.showInfo && s.level == levelBufferTables:
-		b.WriteString(m.renderBufferInfo(contentHeight))
-	case m.showInfo && s.level == levelBufferDetail:
-		b.WriteString(m.renderBufferDetailInfo(contentHeight))
-	case m.showInfo && s.level == levelHeapPages:
-		b.WriteString(m.renderHeapPagesInfo(contentHeight))
-	case m.showInfo && s.level == levelHeapTuples:
-		b.WriteString(m.renderHeapTuplesInfo(contentHeight))
-	case m.showInfo && s.level == levelIndexPages:
-		b.WriteString(m.renderIndexPagesInfo(contentHeight))
-	case m.showInfo && s.level == levelIndexTuples:
-		b.WriteString(m.renderIndexTuplesInfo(contentHeight))
-	case m.showInfo && s.level == levelWAL:
-		b.WriteString(m.renderWALInfo(contentHeight))
-	case m.showInfo && s.level == levelWALRecords:
-		b.WriteString(m.renderWALRecordsInfo(contentHeight))
-	case m.showInfo && s.level == levelWALBlocks:
-		b.WriteString(m.renderWALBlocksInfo(contentHeight))
-	case m.showInfo && (s.level == levelStatements || s.level == levelStatementDetail || s.level == levelStatementSamples || s.level == levelStatementResult || s.level == levelSnapshots):
-		b.WriteString(m.renderStatementsInfo(contentHeight))
-	case m.showInfo && (s.level == levelMaintenance || s.level == levelSettings):
-		b.WriteString(m.renderMaintenanceInfo(contentHeight))
-	case m.showInfo && s.level == levelActivity:
-		b.WriteString(m.renderActivityInfo(contentHeight))
+	case m.showInfo && m.hasInfoOverlay(s):
+		// The ? reference overlays scroll through scrollWindow — some (e.g. the
+		// maintenance reference) are taller than the screen. renderInfoOverlay
+		// dispatches to the per-level body; m.infoOffset is the scroll position.
+		b.WriteString(scrollWindow(m.renderInfoOverlay(s, contentHeight), &m.infoOffset, contentHeight))
 	case s.extPrompt != nil && s.extPrompt.blocking:
 		b.WriteString(m.renderExtPrompt(s, contentHeight))
 	case s.loading || !s.loaded:
@@ -231,6 +212,56 @@ func (m *Model) View() string {
 	m.keys.applyContext(m.top())
 	b.WriteString(styleHelp.Render(m.help.View(m.keys)))
 	return b.String()
+}
+
+// hasInfoOverlay reports whether the current level has a ? reference overlay.
+// Used both to gate the modal key/wheel handling and to pick the View case.
+// Kept in sync with the level set the ? key toggles in handleKey.
+func (m *Model) hasInfoOverlay(s *screen) bool {
+	switch s.level {
+	case levelBufferTables, levelBufferDetail,
+		levelHeapPages, levelHeapTuples,
+		levelIndexPages, levelIndexTuples,
+		levelWAL, levelWALRecords, levelWALBlocks,
+		levelStatements, levelStatementDetail, levelStatementSamples, levelStatementResult, levelSnapshots,
+		levelMaintenance, levelSettings,
+		levelActivity:
+		return true
+	}
+	return false
+}
+
+// renderInfoOverlay returns the full (unscrolled) ? reference body for the
+// current level; View runs it through scrollWindow. Only called when
+// hasInfoOverlay(s) is true.
+func (m *Model) renderInfoOverlay(s *screen, height int) string {
+	switch s.level {
+	case levelBufferTables:
+		return m.renderBufferInfo(height)
+	case levelBufferDetail:
+		return m.renderBufferDetailInfo(height)
+	case levelHeapPages:
+		return m.renderHeapPagesInfo(height)
+	case levelHeapTuples:
+		return m.renderHeapTuplesInfo(height)
+	case levelIndexPages:
+		return m.renderIndexPagesInfo(height)
+	case levelIndexTuples:
+		return m.renderIndexTuplesInfo(height)
+	case levelWAL:
+		return m.renderWALInfo(height)
+	case levelWALRecords:
+		return m.renderWALRecordsInfo(height)
+	case levelWALBlocks:
+		return m.renderWALBlocksInfo(height)
+	case levelStatements, levelStatementDetail, levelStatementSamples, levelStatementResult, levelSnapshots:
+		return m.renderStatementsInfo(height)
+	case levelMaintenance, levelSettings:
+		return m.renderMaintenanceInfo(height)
+	case levelActivity:
+		return m.renderActivityInfo(height)
+	}
+	return ""
 }
 
 // renderLegend returns a one-line colour legend for the current level so

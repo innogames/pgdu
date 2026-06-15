@@ -5,30 +5,17 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"pgdu/internal/pg"
 )
 
 // renderActivityHeader renders the one-line summary bar above the activity list:
-// counts by state (active / waiting / idle-in-transaction / …), the current
-// filter mode, verbose status, and the refresh cadence.
+// server-wide counts by state (active / waiting / idle-in-transaction / idle),
+// connection usage vs max_connections, the current filter mode, verbose status,
+// and the refresh cadence.
 func (m *Model) renderActivityHeader(s *screen) string {
 	mu := styleMuted.Render
-
-	// Count states over the currently visible (filtered) rows so the summary
-	// matches what the table shows, not the raw snapshot.
-	visible := visibleActRows(s.actRows, s.actVerbose)
-	var counts [4]int // 0=active, 1=waiting, 2=idle-in-transaction, 3=other
-	for _, r := range visible {
-		switch {
-		case r.State == "active" && r.WaitEvent == "":
-			counts[0]++
-		case r.WaitEvent != "":
-			counts[1]++
-		case strings.HasPrefix(r.State, "idle in transaction"):
-			counts[2]++
-		default:
-			counts[3]++
-		}
-	}
+	sum := s.actSummary
 
 	var parts []string
 	label := func(n int, name string, style lipgloss.Style) string {
@@ -37,24 +24,59 @@ func (m *Model) renderActivityHeader(s *screen) string {
 		}
 		return style.Render(fmt.Sprintf("%d %s", n, name))
 	}
+	// Counts come from actSummary (the whole server) rather than the rows so
+	// they stay accurate even when idle/background backends are hidden. "active"
+	// and "waiting" already exclude genuinely idle ClientRead backends — those
+	// land in the dedicated idle count below instead of bloating "waiting".
 	parts = append(parts,
-		label(counts[0], "active", styleSelected),
-		label(counts[1], "waiting", styleErr),
-		label(counts[2], "idle-in-xact", styleMuted),
+		label(sum.Active, "active", styleSelected),
+		label(sum.Waiting, "waiting", styleErr),
+		label(sum.IdleInXact, "idle-in-xact", styleMuted),
 	)
-	if counts[3] > 0 {
-		parts = append(parts, mu(fmt.Sprintf("%d other", counts[3])))
+	if sum.Other > 0 {
+		parts = append(parts, mu(fmt.Sprintf("%d other", sum.Other)))
 	}
-	// When auxiliary backends are hidden, show how many are suppressed so the
-	// user knows `v` would reveal more rows.
+
+	// Idle and auxiliary backends: shown inline when present in the list,
+	// otherwise reported with a leading "+" to signal they're suppressed and
+	// `v` (or the "all" filter, for idle) would reveal them.
+	idleHidden := !s.actVerbose && s.actFilter != pg.ActivityAll
+	if sum.Idle > 0 {
+		if idleHidden {
+			parts = append(parts, mu(fmt.Sprintf("+%d idle", sum.Idle)))
+		} else {
+			parts = append(parts, mu(fmt.Sprintf("%d idle", sum.Idle)))
+		}
+	}
 	if !s.actVerbose {
-		hidden := len(s.actRows) - len(visible)
-		if hidden > 0 {
-			parts = append(parts, mu(fmt.Sprintf("+%d background", hidden)))
+		var aux int
+		for _, r := range s.actRows {
+			if isAuxBackend(r.BackendType) {
+				aux++
+			}
+		}
+		if aux > 0 {
+			parts = append(parts, mu(fmt.Sprintf("+%d background", aux)))
 		}
 	}
 
 	summary := strings.Join(parts, mu(" · "))
+
+	// Connection usage vs the server limit. Turns amber past 75% and red past
+	// 90% so an impending "too many connections" is visible at a glance.
+	var conn string
+	if sum.MaxConnections > 0 {
+		text := fmt.Sprintf("%d/%d conn", sum.Conns, sum.MaxConnections)
+		ratio := float64(sum.Conns) / float64(sum.MaxConnections)
+		switch {
+		case ratio >= 0.9:
+			conn = styleErr.Render(text)
+		case ratio >= 0.75:
+			conn = styleSelected.Render(text)
+		default:
+			conn = styleBadge.Render(text)
+		}
+	}
 
 	// Filter mode badge.
 	filter := styleBadge.Render("filter: " + s.actFilter.Label())
@@ -74,7 +96,11 @@ func (m *Model) renderActivityHeader(s *screen) string {
 		refresh = styleMuted.Render("⟳ off")
 	}
 
-	return "  " + summary + "  " + filter + verboseBadge + " " + refresh
+	line := "  " + summary + "  "
+	if conn != "" {
+		line += conn + "  "
+	}
+	return line + filter + verboseBadge + " " + refresh
 }
 
 // renderActColumnConfig draws the htop-style column picker for the Activity
@@ -146,8 +172,10 @@ func (m *Model) renderActivityInfo(height int) string {
 	b.WriteString("    " + mu("    active+waiting  — backends running a query or blocked on a wait event (default)") + "\n")
 	b.WriteString("    " + mu("    non-idle        — everything except plain idle (surfaces idle-in-transaction locks)") + "\n")
 	b.WriteString("    " + mu("    all             — every backend including idle") + "\n")
-	b.WriteString("    " + badge("v") + mu("  show/hide auxiliary backends (walwriter, checkpointer, launchers, io workers…)") + "\n")
-	b.WriteString("    " + mu("    off by default — these run continuously, carry no query text, and rarely indicate problems.") + "\n\n")
+	b.WriteString("    " + badge("v") + mu("  show/hide background noise: auxiliary backends (walwriter, checkpointer, launchers…)") + "\n")
+	b.WriteString("    " + mu("    and genuinely idle client connections (parked on Client/ClientRead). Both are hidden by") + "\n")
+	b.WriteString("    " + mu("    default — they carry no running query and rarely indicate a problem. The header still") + "\n")
+	b.WriteString("    " + mu("    reports the suppressed counts (\"+N idle\", \"+N background\") so nothing is lost.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" backend actions ") + "\n")
 	b.WriteString("    " + badge("k") + mu("  pg_cancel_backend (SIGINT)  — cancels the current statement, leaves the connection open") + "\n")
@@ -176,9 +204,10 @@ func (m *Model) renderActivityInfo(height int) string {
 	b.WriteString("\n")
 
 	b.WriteString("  " + styleHeader.Render(" state colours ") + "\n")
-	b.WriteString("    " + styleSelected.Render("active") + mu("  — executing a query (no wait event)") + "\n")
-	b.WriteString("    " + styleErr.Render("waiting") + mu("  — blocked on a wait event (Lock/…, IO/…, Client/…)") + "\n")
-	b.WriteString("    " + mu("idle-in-xact") + mu("  — holding an open transaction without running a query (lock risk!)") + "\n\n")
+	b.WriteString("    " + styleSelected.Render("active") + mu("  — executing a query (running, or in a Client/Activity/Timeout non-contention wait)") + "\n")
+	b.WriteString("    " + styleErr.Render("waiting") + mu("  — running but blocked on real contention (Lock/LWLock/BufferPin/IO/IPC/Extension)") + "\n")
+	b.WriteString("    " + mu("idle-in-xact") + mu("  — holding an open transaction without running a query (lock risk!)") + "\n")
+	b.WriteString("    " + mu("idle") + mu("  — parked on Client/ClientRead waiting for the next statement (hidden unless v / all)") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" age colours ") + mu("  query_age · xact_age · state_age, by magnitude") + "\n")
 	b.WriteString("    " + durationStyle(1).Render("ms") + mu(" sub-second (fresh) · ") +

@@ -39,6 +39,24 @@ func (c *Client) ListActivity(ctx context.Context, db string, mode ActivityFilte
 		})
 }
 
+// ActivitySummary returns server-wide backend counts and the connection limit
+// for the header, independent of the current row filter.
+func (c *Client) ActivitySummary(ctx context.Context, db string) (ActivitySummary, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return ActivitySummary{}, fmt.Errorf("activity summary in %q: %w", db, err)
+	}
+	var s ActivitySummary
+	err = pool.QueryRow(ctx, sqlActivitySummary).Scan(
+		&s.Conns, &s.Active, &s.Waiting, &s.IdleInXact, &s.Idle, &s.Other,
+		&s.MaxConnections,
+	)
+	if err != nil {
+		return ActivitySummary{}, fmt.Errorf("activity summary in %q: %w", db, err)
+	}
+	return s, nil
+}
+
 // CancelBackend sends pg_cancel_backend to the given PID. Returns true when the
 // signal was delivered, false when the backend no longer exists or the caller
 // lacks permission.

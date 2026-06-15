@@ -490,6 +490,7 @@ func (m *Model) onActivityLoaded(msg activityLoadedMsg) tea.Cmd {
 	}
 	s.actErr = nil
 	s.actRows = msg.rows
+	s.actSummary = msg.summary
 
 	if s.actHosts == nil {
 		s.actHosts = make(map[string]string)

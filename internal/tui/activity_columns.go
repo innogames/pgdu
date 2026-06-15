@@ -281,17 +281,29 @@ func isAuxBackend(backendType string) bool {
 }
 
 // visibleActRows filters rows for the current verbose setting. When verbose is
-// true every row is kept; when false auxiliary/background-only backends are
-// dropped so the list focuses on client-visible activity.
-func visibleActRows(rows []pg.ActivityRow, verbose bool) []pg.ActivityRow {
+// true every row is kept. When false, two kinds of noise are dropped so the
+// list focuses on backends that are actually doing (or blocking) work:
+//   - auxiliary/background-only backends (walwriter, checkpointer, …); and
+//   - genuinely idle client backends (state == "idle"), which are merely parked
+//     on Client/ClientRead waiting for the next statement.
+//
+// The "all" filter is the explicit "show idle too" mode, so idle is kept there
+// regardless of verbose. idle-in-transaction is always shown — it can hold
+// locks. The true idle count is still reported in the header from actSummary.
+func visibleActRows(rows []pg.ActivityRow, verbose bool, filter pg.ActivityFilter) []pg.ActivityRow {
 	if verbose {
 		return rows
 	}
+	hideIdle := filter != pg.ActivityAll
 	out := rows[:0:0] // reuse backing array only after append
 	for _, r := range rows {
-		if !isAuxBackend(r.BackendType) {
-			out = append(out, r)
+		if isAuxBackend(r.BackendType) {
+			continue
 		}
+		if hideIdle && r.State == "idle" {
+			continue
+		}
+		out = append(out, r)
 	}
 	return out
 }
@@ -301,7 +313,7 @@ func visibleActRows(rows []pg.ActivityRow, verbose bool) []pg.ActivityRow {
 // whenever actVerbose changes or a fresh snapshot arrives so the two code paths
 // share exactly the same projection + sort logic.
 func (m *Model) rebuildActivityItems(s *screen) {
-	rows := visibleActRows(s.actRows, s.actVerbose)
+	rows := visibleActRows(s.actRows, s.actVerbose, s.actFilter)
 	ctx := actCtx{hosts: s.actHosts, proc: m.actProcStats}
 	items, descs := m.buildActivityItems(rows, ctx)
 	s.actCols = descs

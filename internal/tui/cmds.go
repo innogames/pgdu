@@ -865,9 +865,10 @@ func (m *Model) vacuumTableCmd(t pg.Table) tea.Cmd {
 // ── Activity message types ────────────────────────────────────────────────────
 
 type activityLoadedMsg struct {
-	db   string
-	rows []pg.ActivityRow
-	err  error
+	db      string
+	rows    []pg.ActivityRow
+	summary pg.ActivitySummary
+	err     error
 }
 
 type activityTickMsg struct{}
@@ -900,7 +901,13 @@ type activityStatementMsg struct {
 func (m *Model) loadActivityCmd(db string, mode pg.ActivityFilter) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		rows, err := m.client.ListActivity(ctx, db, mode)
-		return activityLoadedMsg{db: db, rows: rows, err: err}
+		if err != nil {
+			return activityLoadedMsg{db: db, err: err}
+		}
+		// The summary is a cheap single-row aggregate; failing it should not
+		// blank the list, so a summary error degrades to zero counts.
+		summary, _ := m.client.ActivitySummary(ctx, db)
+		return activityLoadedMsg{db: db, rows: rows, summary: summary}
 	})
 }
 
