@@ -62,6 +62,12 @@ func (m *Model) drillIn() tea.Cmd {
 				sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
 			}
 		default:
+			// Fresh visit to a table: drop a previous run's finished vacuum
+			// output so stale logs don't reappear when the pane is keyed by OID.
+			// Leave a still-running vacuum alone — its pane should stay live.
+			if !m.vacuum.running {
+				m.vacuum = vacuumState{}
+			}
 			next = &screen{
 				level: levelParts, title: "parts", tool: s.tool,
 				db: t.DB, schema: t.Schema, table: t,

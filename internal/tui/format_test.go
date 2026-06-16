@@ -37,6 +37,28 @@ func TestShortLSN(t *testing.T) {
 	}
 }
 
+func TestFmtDuration(t *testing.T) {
+	cases := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"seconds", 45 * time.Second, "45s"},
+		{"minutes and seconds", 13*time.Minute + 12*time.Second, "13m 12s"},
+		{"minutes pad seconds", 13*time.Minute + 2*time.Second, "13m 02s"},
+		{"hours and minutes", 2*time.Hour + 5*time.Minute, "2h 05m"},
+		{"days and hours", 3*24*time.Hour + 4*time.Hour, "3d 4h"},
+		{"rounds to second", 999 * time.Millisecond, "1s"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := fmtDuration(c.d); got != c.want {
+				t.Errorf("fmtDuration(%v) = %q, want %q", c.d, got, c.want)
+			}
+		})
+	}
+}
+
 func TestRelativeAge(t *testing.T) {
 	cases := []struct {
 		name string

@@ -173,15 +173,15 @@ func (m *Model) renderStatementsHeader(s *screen) string {
 		// up to the latest live sample.
 		elapsed := max(s.statSampledAt.Sub(s.statBaselineAt), 0)
 		line = "  " + styleHeader.Render(" queries ") + "  " +
-			mu("window ") + styleSelected.Render(fmtDuration(elapsed)) +
-			mu(" since "+s.statBaselineAt.Format("2006-01-02 15:04:05")+" (snapshot) · live") +
+			mu("over the last ") + styleSelected.Render(fmtDuration(elapsed)) +
+			mu(" (since "+s.statBaselineAt.Format("2006-01-02 15:04:05")+" snapshot) · live") +
 			mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t cadence · C columns · R for live · Enter for detail",
 				len(s.statRows), m.refreshLabel()))
 	default:
 		elapsed := max(s.statSampledAt.Sub(s.statBaselineAt), 0)
 		line = "  " + styleHeader.Render(" queries ") + "  " +
-			mu("window ") + styleSelected.Render(fmtDuration(elapsed)) +
-			mu(" since "+s.statBaselineAt.Format("15:04:05")) +
+			mu("over the last ") + styleSelected.Render(fmtDuration(elapsed)) +
+			mu(" (since "+s.statBaselineAt.Format("15:04:05")+")") +
 			mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t cadence · C columns · R resets · S saves · L loads · Enter for detail",
 				len(s.statRows), m.refreshLabel()))
 	}
@@ -214,16 +214,22 @@ func (m *Model) refreshSentence() string {
 	return "It re-samples every " + m.statRefresh.String() + " — press t to cycle the cadence (2s → 60s → off)."
 }
 
-// fmtDuration renders a window age as H:MM:SS (hours dropped when zero).
+// fmtDuration renders a window span with explicit units — "45s", "13m 12s",
+// "2h 05m", "3d 4h" — so it never reads as a wall-clock time. The old H:MM:SS
+// form made "13:12" ambiguous with a start timestamp, which is the whole reason
+// it sits next to "since 05:56:46".
 func fmtDuration(d time.Duration) string {
 	d = d.Round(time.Second)
-	h := int(d / time.Hour)
-	mn := int(d % time.Hour / time.Minute)
-	sec := int(d % time.Minute / time.Second)
-	if h > 0 {
-		return fmt.Sprintf("%d:%02d:%02d", h, mn, sec)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm %02ds", int(d/time.Minute), int(d%time.Minute/time.Second))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh %02dm", int(d/time.Hour), int(d%time.Hour/time.Minute))
+	default:
+		return fmt.Sprintf("%dd %dh", int(d/(24*time.Hour)), int(d%(24*time.Hour)/time.Hour))
 	}
-	return fmt.Sprintf("%d:%02d", mn, sec)
 }
 
 // renderStatementsInfo is the ? overlay for the top-queries tool: it explains

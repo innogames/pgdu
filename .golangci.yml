@@ -1,3 +1,9 @@
 # Pin the config format so `make lint` and CI behave identically regardless of
 # the golangci-lint version on the runner. Uses the default linter set.
 version: "2"
+run:
+  # go.mod targets 1.26, but released golangci-lint binaries are built with an
+  # older Go and refuse to analyse a module that targets a newer one. Pin the
+  # analysis target to the binary's build Go so lint runs; bump when prebuilt
+  # golangci-lint ships a Go 1.26 build.
+  go: "1.24"

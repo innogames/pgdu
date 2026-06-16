@@ -35,45 +35,6 @@ func (m *Model) pageStep() int {
 	return step
 }
 
-// mouseWheelLines is how many rows one mouse-wheel notch scrolls — three is the
-// common terminal default and reads well for both list cursors and the
-// text-scroll levels (statement detail, maintenance, the ? overlay).
-const mouseWheelLines = 3
-
-// handleMouse turns mouse-wheel notches into the same up/down handling the
-// arrow keys already drive, so wheel scrolling works everywhere a cursor or
-// offset does — lists, the modal column-config picker, and the ? reference
-// overlay — without duplicating any level-specific logic. Non-wheel events
-// (motion, clicks) are ignored.
-func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	dir := 0
-	switch msg.Button {
-	case tea.MouseButtonWheelUp:
-		dir = -1
-	case tea.MouseButtonWheelDown:
-		dir = +1
-	default:
-		return m, nil
-	}
-	s := m.top()
-	// On the maintenance dashboard ↑↓ moves the capacity-row cursor, not the
-	// panel; scroll the status panel by its offset directly so the wheel reaches
-	// the metrics below the fold. scrollWindow clamps the offset on render.
-	if !m.showInfo && s.level == levelMaintenance {
-		s.offset = max(s.offset+dir*mouseWheelLines, 0)
-		return m, nil
-	}
-	k := tea.KeyMsg{Type: tea.KeyUp}
-	if dir > 0 {
-		k = tea.KeyMsg{Type: tea.KeyDown}
-	}
-	var cmd tea.Cmd
-	for range mouseWheelLines {
-		_, cmd = m.handleKey(k)
-	}
-	return m, cmd
-}
-
 // handleInfoKey drives the modal ? reference overlay: scroll keys move
 // infoOffset (clamped on render by scrollWindow), Help/Back/Quit close it (Quit
 // still quits), and everything else is swallowed so the hidden list stays put.

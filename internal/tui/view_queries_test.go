@@ -55,7 +55,7 @@ func TestRenderStatementsTable(t *testing.T) {
 		statTrackPlanning: true,
 	}
 	out := renderModel(s)
-	for _, want := range []string{"total_ms", "hit%", "plan_ms", "miss", "blk/row", "query", "window", "since", "← Sum"} {
+	for _, want := range []string{"total_ms", "hit%", "plan_ms", "miss", "blk/row", "query", "over the last", "since", "← Sum"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("statements table missing %q in output", want)
 		}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -447,6 +448,7 @@ func (m *Model) onVacuumStarted(msg vacuumStartedMsg) tea.Cmd {
 	s.pendingVacuum = false
 	m.vacuum = vacuumState{
 		table:   msg.table,
+		started: time.Now(),
 		running: true,
 		follow:  true,
 	}
@@ -466,6 +468,7 @@ func (m *Model) onVacuumLine(msg vacuumLineMsg) tea.Cmd {
 
 func (m *Model) onVacuumDone(msg vacuumDoneMsg) tea.Cmd {
 	m.vacuum.running = false
+	m.vacuum.finished = time.Now()
 	m.vacuum.err = msg.err
 	s := m.findLevel(levelParts)
 	if s == nil {
