@@ -28,6 +28,7 @@ const (
 	actColStateAge    actColID = "state_age"
 	actColBackendXid  actColID = "xid"
 	actColBackendXmin actColID = "xmin"
+	actColTable       actColID = "table"
 	actColQuery       actColID = "query"
 	// OS-level proc columns (Linux only, local server; show — otherwise).
 	actColRSS      actColID = "rss"
@@ -97,7 +98,7 @@ func actColumnRegistry() []actColDesc {
 		{id: actColBackend, name: "backend", kind: pg.DiagText,
 			desc: "backend_type (client backend, autovacuum worker, walsender, …)",
 			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: r.BackendType} }},
-		{id: actColState, name: "state", kind: pg.DiagText, defaultOn: true,
+		{id: actColState, name: "state", kind: pg.DiagBackendState, defaultOn: true,
 			desc: "backend state: active, idle, idle in transaction, …",
 			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: r.State} }},
 		{id: actColWait, name: "wait", kind: pg.DiagText, defaultOn: true,
@@ -175,6 +176,10 @@ func actColumnRegistry() []actColDesc {
 				}
 				return pg.DiagCell{Display: humanize.Bytes(int64(d.WriteBps)) + "/s", Num: d.WriteBps, HasNum: true}
 			}},
+
+		{id: actColTable, name: "table", kind: pg.DiagText,
+			desc: "main table parsed from the current query (same shallow parse as top-queries)",
+			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: pg.MainTable(r.Query)} }},
 
 		// query must stay the very last column: renderDiagResult grows the final
 		// column into the leftover terminal width (no bar on this table), so the

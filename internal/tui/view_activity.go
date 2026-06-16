@@ -203,11 +203,12 @@ func (m *Model) renderActivityInfo(height int) string {
 	b.WriteString("    " + mu("(needs two readings to compute a delta); it tracks one full core = 100%.") + "\n")
 	b.WriteString("\n")
 
-	b.WriteString("  " + styleHeader.Render(" state colours ") + "\n")
-	b.WriteString("    " + styleSelected.Render("active") + mu("  — executing a query (running, or in a Client/Activity/Timeout non-contention wait)") + "\n")
-	b.WriteString("    " + styleErr.Render("waiting") + mu("  — running but blocked on real contention (Lock/LWLock/BufferPin/IO/IPC/Extension)") + "\n")
-	b.WriteString("    " + mu("idle-in-xact") + mu("  — holding an open transaction without running a query (lock risk!)") + "\n")
-	b.WriteString("    " + mu("idle") + mu("  — parked on Client/ClientRead waiting for the next statement (hidden unless v / all)") + "\n\n")
+	b.WriteString("  " + styleHeader.Render(" state colours ") + mu("  the state column, by value") + "\n")
+	stateClr := func(s string) string { st, _ := stateStyle(s); return st.Render(s) }
+	b.WriteString("    " + stateClr("active") + mu("  — executing a query (the wait column shows real contention: Lock/LWLock/BufferPin/IO/IPC/Extension)") + "\n")
+	b.WriteString("    " + stateClr("idle in transaction") + mu("  — holding an open transaction without running a query (lock/bloat risk!)") + "\n")
+	b.WriteString("    " + stateClr("idle in transaction (aborted)") + mu("  — a failed transaction still open, pinning its snapshot") + "\n")
+	b.WriteString("    " + stateClr("idle") + mu("  — parked on Client/ClientRead waiting for the next statement (hidden unless v / all)") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" age colours ") + mu("  query_age · xact_age · state_age, by magnitude") + "\n")
 	b.WriteString("    " + durationStyle(1).Render("ms") + mu(" sub-second (fresh) · ") +

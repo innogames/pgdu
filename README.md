@@ -43,6 +43,17 @@ instead of only cumulative totals.
 
 ![Top queries](docs/top_queries.png)
 
+### Live activity
+
+A `pg_activity`-style live view of what the server is doing *right now*, read
+from `pg_stat_activity`. Each backend is a row showing its state
+(active / idle-in-transaction / waiting), how long the current query and
+transaction have been running, RSS and CPU, per-backend read/write rates, the
+table it's touching, and the query itself. Sort by any column, and filter by
+state to zero in on long-running or blocked backends.
+
+![Live activity](docs/activity.png)
+
 ### Shared buffers
 
 Inspect what's actually living in `shared_buffers` right now — one bar per

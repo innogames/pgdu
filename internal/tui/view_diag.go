@@ -536,6 +536,13 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			if i < nCols && cols[i].Kind == pg.DiagCmdType && !selected {
 				display = cmdTypeStyle(cell.Display).Render(display)
 			}
+			// Backend state: per-value colour (active green, idle-in-xact yellow,
+			// aborted red, idle muted) so the eye triages the connection list.
+			if i < nCols && cols[i].Kind == pg.DiagBackendState && !selected {
+				if st, ok := stateStyle(cell.Display); ok {
+					display = st.Render(display)
+				}
+			}
 
 			var rendered string
 			if isNumeric {

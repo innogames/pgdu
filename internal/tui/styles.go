@@ -194,6 +194,29 @@ func cmdTypeStyle(tag string) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(colorBloat)
 }
 
+// stateStyle colours a pg_stat_activity state cell by value so the connection
+// list triages at a glance: active is green (running work), idle-in-transaction
+// yellow (holding a transaction open — a lock/bloat risk), its aborted form
+// red-orange (a broken transaction still pinning its snapshot), and plain idle
+// muted (parked on the client, harmless). Anything else (fastpath function call,
+// disabled, empty) keeps the default foreground. The active-but-blocked nuance
+// (the header's "waiting" count) is carried by the separate wait column, which
+// the generic renderer can show alongside this; the state text itself is "active"
+// for both, so it stays green here.
+func stateStyle(state string) (lipgloss.Style, bool) {
+	switch state {
+	case "active":
+		return lipgloss.NewStyle().Foreground(colorOK), true
+	case "idle in transaction":
+		return lipgloss.NewStyle().Foreground(colorAccent), true
+	case "idle in transaction (aborted)":
+		return lipgloss.NewStyle().Foreground(colorBloat), true
+	case "idle":
+		return lipgloss.NewStyle().Foreground(colorMuted), true
+	}
+	return lipgloss.Style{}, false
+}
+
 // blkPerRowStyle grades blocks-per-row in the query-detail view. Unlike the
 // table's costStyleRelative this uses ABSOLUTE thresholds: the detail view shows
 // a single query, so there's no window of other rows to scale against. A few

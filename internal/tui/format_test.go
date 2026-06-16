@@ -80,3 +80,62 @@ func TestRelativeAge(t *testing.T) {
 		})
 	}
 }
+
+func TestPositionLabel(t *testing.T) {
+	items := []item{{name: "users"}, {name: "orders"}, {name: "order_items"}}
+
+	// Empty list never shows the misleading "0/0".
+	if got := positionLabel(&screen{}); got != "0 items" {
+		t.Errorf("empty = %q, want %q", got, "0 items")
+	}
+	// No filter: cursor position over the visible (== total) count.
+	if got := positionLabel(&screen{items: items, cursor: 0}); got != "1/3" {
+		t.Errorf("no filter top = %q, want %q", got, "1/3")
+	}
+	if got := positionLabel(&screen{items: items, cursor: 2}); got != "3/3" {
+		t.Errorf("no filter bottom = %q, want %q", got, "3/3")
+	}
+	// Active filter shows visible/total so hidden rows are accounted for.
+	if got := positionLabel(&screen{items: items, filter: "ord", cursor: 0}); got != "1/2 of 3" {
+		t.Errorf("filtered = %q, want %q", got, "1/2 of 3")
+	}
+	// Filter matching nothing: distinct "0/0 of N", not "0 items".
+	if got := positionLabel(&screen{items: items, filter: "zzz"}); got != "0/0 of 3" {
+		t.Errorf("filter no match = %q, want %q", got, "0/0 of 3")
+	}
+}
+
+func TestBloatScanLabel(t *testing.T) {
+	withBloat := item{hasBloat: true}
+	cases := []struct {
+		name string
+		s    *screen
+		want string
+	}{
+		{"non-parts level", &screen{level: levelTables, items: []item{withBloat}}, ""},
+		{"parts but empty", &screen{level: levelParts}, ""},
+		{"scanning in flight", &screen{level: levelParts, bloatScanning: true, items: []item{{}}}, "bloat: scanning…"},
+		{"all measured", &screen{level: levelParts, items: []item{withBloat, withBloat}}, "bloat: ready"},
+		{"partial", &screen{level: levelParts, items: []item{withBloat, {}}}, "bloat: 1/2 scanned"},
+		{"none measured yet", &screen{level: levelParts, items: []item{{}, {}}}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := bloatScanLabel(c.s); got != c.want {
+				t.Errorf("bloatScanLabel = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestMaxInt(t *testing.T) {
+	if got := maxInt(3, 7); got != 7 {
+		t.Errorf("maxInt(3,7) = %d, want 7", got)
+	}
+	if got := maxInt(7, 3); got != 7 {
+		t.Errorf("maxInt(7,3) = %d, want 7", got)
+	}
+	if got := maxInt(-2, -5); got != -2 {
+		t.Errorf("maxInt(-2,-5) = %d, want -2", got)
+	}
+}
