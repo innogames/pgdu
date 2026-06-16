@@ -44,6 +44,14 @@ func (m *Model) View() string {
 		contentHeight -= strings.Count(stats, "\n") + 1
 	}
 
+	if s.level == levelWALRelations && (s.extPrompt == nil || !s.extPrompt.blocking) &&
+		s.loaded && s.err == nil && len(s.items) > 0 {
+		hdr := m.renderWALRelationsHeader(s)
+		b.WriteString(hdr)
+		b.WriteString("\n")
+		contentHeight -= strings.Count(hdr, "\n") + 1
+	}
+
 	if s.level == levelStatements && (s.extPrompt == nil || !s.extPrompt.blocking) {
 		hdr := m.renderStatementsHeader(s)
 		b.WriteString(hdr)
@@ -172,6 +180,12 @@ func (m *Model) View() string {
 			b.WriteString(m.renderWALRecordsList(s, contentHeight))
 		case levelWALBlocks:
 			b.WriteString(m.renderWALBlocksList(s, contentHeight))
+		case levelWALRelations:
+			b.WriteString(m.renderWALRelationsList(s, contentHeight))
+		case levelWALRelBlocks:
+			// Relation block-refs reuse the per-record block-refs renderer —
+			// the payload is the same pg.WALBlockRef.
+			b.WriteString(m.renderWALBlocksList(s, contentHeight))
 		case levelStatements:
 			// The top-queries table is a generic diagnostic-style table.
 			b.WriteString(m.renderDiagResult(s, contentHeight))
@@ -273,6 +287,10 @@ func walStatusLabel(s *screen) string {
 		return "rmgr: " + s.walRmgr + "  ·  window: " + shortLSN(s.walStart) + "–" + shortLSN(s.walEnd)
 	case levelWALBlocks:
 		return "rmgr: " + s.walRmgr + "  ·  record: " + s.walRecLSN
+	case levelWALRelations:
+		return "window: " + shortLSN(s.walStart) + "–" + shortLSN(s.walEnd)
+	case levelWALRelBlocks:
+		return "relation: " + s.walRelLabel + "  ·  window: " + shortLSN(s.walStart) + "–" + shortLSN(s.walEnd)
 	}
 	return ""
 }
@@ -333,6 +351,10 @@ func (m *Model) breadcrumb() string {
 			parts = append(parts, sc.walRmgr)
 		case levelWALBlocks:
 			parts = append(parts, "rec "+shortLSN(sc.walRecLSN))
+		case levelWALRelations:
+			parts = append(parts, "by relation")
+		case levelWALRelBlocks:
+			parts = append(parts, sc.walRelLabel)
 		case levelActivity:
 			parts = append(parts, "activity")
 		case levelStatements:

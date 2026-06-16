@@ -112,10 +112,15 @@ func barReserve(l level, tl tool) int {
 		return colCursor + colBrackets + walRecSizeColW + colGutter +
 			walRecFPIColW + colGutter + walRecLSNColW + colGutter +
 			colMark + colName + colDetail
-	case levelWALBlocks:
+	case levelWALBlocks, levelWALRelBlocks:
 		// cursor + bar(brackets) + fpi + data + name + detail
 		return colCursor + colBrackets + walBlkFPIColW + colGutter +
 			walBlkDataColW + colGutter + colName + colDetail
+	case levelWALRelations:
+		// cursor + bar(brackets) + combined + fpi + records + pages + mark + name
+		return colCursor + colBrackets + walRelCombinedColW + colGutter +
+			walRelFPIColW + colGutter + walRelRecColW + colGutter +
+			walRelBlkColW + colGutter + colMark + colName
 	}
 	return colCursor + colBrackets + colSize + colMark + colName
 }

@@ -216,3 +216,59 @@ func (m *Model) onWALBlocksLoaded(msg walBlocksLoadedMsg) tea.Cmd {
 	m.applySort(s)
 	return nil
 }
+
+// onWALCheckpointLoaded caches the best-effort checkpoint context for the
+// levelWAL header. Failure is non-fatal and not surfaced — the header's other
+// lines (and the rmgr list) still render; the checkpoint lines just stay hidden.
+func (m *Model) onWALCheckpointLoaded(msg walCheckpointLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelWAL)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	if msg.err != nil {
+		return nil
+	}
+	info := msg.info
+	s.walCheckpoint = &info
+	return nil
+}
+
+func (m *Model) onWALRelationsLoaded(msg walRelationsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelWALRelations)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
+	}
+	s.err = msg.err
+	s.walStart = msg.start
+	s.walEnd = msg.end
+	s.items = s.items[:0]
+	for _, st := range msg.rels {
+		s.items = append(s.items, walRelStatToItem(st))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onWALRelBlocksLoaded(msg walRelBlocksLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelWALRelBlocks)
+	if s == nil || s.db != msg.db || s.walRelFilenode != msg.relfilenode {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
+	}
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, b := range msg.blocks {
+		s.items = append(s.items, walBlockToItem(b))
+	}
+	m.applySort(s)
+	return nil
+}

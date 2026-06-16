@@ -34,6 +34,8 @@ const (
 	levelWAL              // WAL inspector overview: per-resource-manager stats
 	levelWALRecords       // individual WAL records for one resource manager
 	levelWALBlocks        // block references of one WAL record
+	levelWALRelations     // WAL window aggregated per relation (what caused the change)
+	levelWALRelBlocks     // block references of one relation across the window
 	levelStatements       // pg_stat_statements top-queries table (toolQueries)
 	levelStatementDetail  // single query: metrics, sample call, EXPLAIN
 	levelStatementSamples // captured real predicate constants (pg_qualstats) for one query
@@ -257,6 +259,14 @@ type screen struct {
 	// a summary table above the levelWALRecords list. Populated alongside the
 	// record rows; nil/empty until loaded.
 	walRecTypeStats []pg.WALRmgrStat
+	// walCheckpoint is the best-effort checkpoint context rendered in the
+	// levelWAL header (nil until loaded / when the privilege-gated sources
+	// failed). Loaded independently of walSummary so each degrades on its own.
+	walCheckpoint *pg.WALCheckpointInfo
+	// walRelFilenode / walRelLabel identify the relation a levelWALRelBlocks
+	// screen lists (its block references across the carried window).
+	walRelFilenode uint32
+	walRelLabel    string
 
 	// Diagnostic-runner state (levelDiagnostics / levelDiagnosticResult).
 	// diag is the selected query; diagCols is non-nil once the result is

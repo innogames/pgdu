@@ -3,6 +3,7 @@ package pg
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // WALSummary is the header snapshot for the WAL inspector overview: the
@@ -22,12 +23,65 @@ type WALSummary struct {
 	StatRecords  int64
 	StatFPI      int64
 	StatBytes    int64
+	// StatBuffersFull is pg_stat_wal.wal_buffers_full: how often a backend had
+	// to flush WAL because wal_buffers was full. Persistent growth means
+	// wal_buffers is too small.
+	StatBuffersFull int64
 
 	// Window the rmgr stats were computed over (resolved by sqlWALWindow).
 	StartLSN    string
 	EndLSN      string
 	WindowBytes int64
 }
+
+// WALCheckpointInfo is the checkpoint context shown in the WAL header: how much
+// WAL has been generated since the last checkpoint vs max_wal_size, when that
+// checkpoint completed, the timed-checkpoint interval, the cumulative checkpoint
+// counts, and the relevant GUCs. Its sources (pg_control_checkpoint /
+// pg_stat_checkpointer) may need superuser, so the caller loads it best-effort:
+// any field left zero / Settings key absent simply doesn't render.
+type WALCheckpointInfo struct {
+	BytesSinceCheckpoint int64
+	MaxWALBytes          int64
+	CheckpointTime       time.Time
+	CheckpointTimeoutSec int64
+	CheckpointsTimed     int64
+	CheckpointsRequested int64
+	Settings             map[string]string // checkpoint_timeout / completion_target / wal_compression
+}
+
+// NextCheckpointETA returns when the next timed checkpoint is due
+// (CheckpointTime + checkpoint_timeout). ok is false when either input is
+// unknown, so the header can omit the ETA rather than show a bogus time.
+func (c WALCheckpointInfo) NextCheckpointETA() (time.Time, bool) {
+	if c.CheckpointTime.IsZero() || c.CheckpointTimeoutSec <= 0 {
+		return time.Time{}, false
+	}
+	return c.CheckpointTime.Add(time.Duration(c.CheckpointTimeoutSec) * time.Second), true
+}
+
+// WALRelStat is one relation's contribution to the analysed WAL window: the
+// bytes it generated (record data + full-page images), how many records touched
+// it, how many distinct pages those records hit, and how many of the block
+// references landed on a non-main fork (fsm/vm/init). RelName/IsToast/DBName are
+// resolved exactly like WALBlockRef (empty RelName → numeric relfilenode fallback
+// in the UI). Source: sqlWALRelStats over pg_get_wal_block_info (PostgreSQL 16+).
+type WALRelStat struct {
+	RelDatabase    uint32
+	RelFileNode    uint32
+	DataBytes      int64
+	FPIBytes       int64
+	RecCount       int64
+	BlockCount     int64 // distinct (fork, block) pages touched
+	OtherForkCount int64 // block refs on non-main forks (fsm/vm/init)
+	RelName        string
+	IsToast        bool
+	DBName         string
+}
+
+// CombinedSize is record-data plus full-page-image bytes — what the bar in the
+// by-relation view scales against.
+func (s WALRelStat) CombinedSize() int64 { return s.DataBytes + s.FPIBytes }
 
 // WALRmgrStat is one resource-manager row of the WAL overview: how many
 // records that manager wrote in the window and how those bytes split between

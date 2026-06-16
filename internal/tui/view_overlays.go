@@ -14,7 +14,7 @@ func (m *Model) hasInfoOverlay(s *screen) bool {
 	case levelBufferTables, levelBufferDetail,
 		levelHeapPages, levelHeapTuples,
 		levelIndexPages, levelIndexTuples,
-		levelWAL, levelWALRecords, levelWALBlocks,
+		levelWAL, levelWALRecords, levelWALBlocks, levelWALRelations, levelWALRelBlocks,
 		levelStatements, levelStatementDetail, levelStatementSamples, levelStatementResult, levelSnapshots,
 		levelMaintenance, levelSettings,
 		levelActivity:
@@ -44,8 +44,10 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 		return m.renderWALInfo(height)
 	case levelWALRecords:
 		return m.renderWALRecordsInfo(height)
-	case levelWALBlocks:
+	case levelWALBlocks, levelWALRelBlocks:
 		return m.renderWALBlocksInfo(height)
+	case levelWALRelations:
+		return m.renderWALRelationsInfo(height)
 	case levelStatements, levelStatementDetail, levelStatementSamples, levelStatementResult, levelSnapshots:
 		return m.renderStatementsInfo(height)
 	case levelMaintenance, levelSettings:
@@ -96,10 +98,10 @@ func renderLegend(s *screen) string {
 		return "  " + swatch(styleIndexSeg, "live") + sep +
 			swatch(styleBloat, "dead") + sep +
 			styleMuted.Render("░ free")
-	case levelWAL, levelWALRecords:
+	case levelWAL, levelWALRecords, levelWALRelations:
 		return "  " + swatch(styleBar, "record bytes") + sep +
 			swatch(styleBarAlt, "FPI bytes (full-page images)")
-	case levelWALBlocks:
+	case levelWALBlocks, levelWALRelBlocks:
 		return "  " + swatch(styleBarAlt, "FPI bytes") + sep +
 			styleMuted.Render("░ no full-page image")
 	case levelIndexTuples:

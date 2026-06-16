@@ -141,15 +141,21 @@ func (m *Model) loadCurrent() tea.Cmd {
 		// re-reads the snapshot against the now-current write position.
 		s.walSummary = nil
 		s.walSummaryErr = nil
+		s.walCheckpoint = nil
 		return tea.Batch(
 			m.loadWALOverviewCmd(s.db),
 			m.loadWALSummaryCmd(s.db),
+			m.loadWALCheckpointCmd(s.db),
 		)
 	case levelWALRecords:
 		s.walRecTypeStats = nil
 		return m.loadWALRecordsCmd(s.db, s.walStart, s.walEnd, s.walRmgr)
 	case levelWALBlocks:
 		return m.loadWALBlocksCmd(s.db, s.walRecLSN, s.walRecEnd)
+	case levelWALRelations:
+		return m.loadWALRelationsCmd(s.db, s.walStart, s.walEnd)
+	case levelWALRelBlocks:
+		return m.loadWALRelBlocksCmd(s.db, s.walStart, s.walEnd, s.walRelFilenode)
 	case levelStatements:
 		// Kick a snapshot and, unless one is already running, start the
 		// self-rescheduling refresh tick. The first snapshot becomes the

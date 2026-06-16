@@ -34,6 +34,9 @@ type keyMap struct {
 	ActivityFilter   key.Binding // f: cycle backend filter mode
 	CancelBackend    key.Binding // k: send pg_cancel_backend (SIGINT)
 	TerminateBackend key.Binding // x: send pg_terminate_backend (SIGTERM)
+
+	// WAL-inspector binding.
+	WALByRelation key.Binding // w: open the by-relation breakdown of the window
 }
 
 func defaultKeys() keyMap {
@@ -72,6 +75,8 @@ func defaultKeys() keyMap {
 		ActivityFilter:   key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "cycle filter")),
 		CancelBackend:    key.NewBinding(key.WithKeys("k"), key.WithHelp("k", "cancel backend")),
 		TerminateBackend: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "terminate backend")),
+
+		WALByRelation: key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "by relation")),
 	}
 }
 
@@ -118,6 +123,10 @@ func (k *keyMap) applyContext(s *screen) {
 	k.ActivityFilter.SetEnabled(activity)
 	k.CancelBackend.SetEnabled(activity)
 	k.TerminateBackend.SetEnabled(activity)
+
+	// w opens the by-relation WAL breakdown — only from the rmgr overview, so
+	// the physical key stays free for reuse on every other level.
+	k.WALByRelation.SetEnabled(s.level == levelWAL)
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
@@ -131,7 +140,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Filter, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
 		{k.Refresh, k.ToggleBloat, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
-		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns},
+		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation},
 		{k.Help, k.Quit},
 	}
 }

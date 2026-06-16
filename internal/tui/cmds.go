@@ -180,6 +180,24 @@ type walBlocksLoadedMsg struct {
 	blocks []pg.WALBlockRef
 	err    error
 }
+type walCheckpointLoadedMsg struct {
+	db   string
+	info pg.WALCheckpointInfo
+	err  error
+}
+type walRelationsLoadedMsg struct {
+	db    string
+	start string
+	end   string
+	rels  []pg.WALRelStat
+	err   error
+}
+type walRelBlocksLoadedMsg struct {
+	db          string
+	relfilenode uint32
+	blocks      []pg.WALBlockRef
+	err         error
+}
 
 // --- commands ---
 
@@ -462,5 +480,26 @@ func (m *Model) loadWALBlocksCmd(db, recLSN, recEnd string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		blocks, err := m.client.WALBlocks(ctx, db, recLSN, recEnd)
 		return walBlocksLoadedMsg{db: db, recLSN: recLSN, blocks: blocks, err: err}
+	})
+}
+
+func (m *Model) loadWALCheckpointCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		info, err := m.client.WALCheckpoint(ctx, db)
+		return walCheckpointLoadedMsg{db: db, info: info, err: err}
+	})
+}
+
+func (m *Model) loadWALRelationsCmd(db, start, end string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		rels, err := m.client.WALRelStats(ctx, db, start, end)
+		return walRelationsLoadedMsg{db: db, start: start, end: end, rels: rels, err: err}
+	})
+}
+
+func (m *Model) loadWALRelBlocksCmd(db, start, end string, relfilenode uint32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		blocks, err := m.client.WALRelBlocks(ctx, db, start, end, relfilenode)
+		return walRelBlocksLoadedMsg{db: db, relfilenode: relfilenode, blocks: blocks, err: err}
 	})
 }

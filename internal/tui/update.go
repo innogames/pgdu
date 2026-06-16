@@ -79,6 +79,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onWALRecordsLoaded(msg)
 	case walBlocksLoadedMsg:
 		return m, m.onWALBlocksLoaded(msg)
+	case walCheckpointLoadedMsg:
+		return m, m.onWALCheckpointLoaded(msg)
+	case walRelationsLoadedMsg:
+		return m, m.onWALRelationsLoaded(msg)
+	case walRelBlocksLoadedMsg:
+		return m, m.onWALRelBlocksLoaded(msg)
 	case statementsLoadedMsg:
 		return m, m.onStatementsLoaded(msg)
 	case statementsTickMsg:

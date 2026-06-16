@@ -70,6 +70,8 @@ FROM   cur, oldest
 // Uses only built-in functions (no pg_walinspect) so the header renders even
 // when the extension is absent — but pg_ls_waldir / pg_stat_wal still require
 // a sufficiently-privileged role, so the caller treats a failure as non-fatal.
+// wal_buffers_full rides on the same pg_stat_wal read (no extra privilege) — a
+// persistent non-zero value means backends stalled waiting for wal_buffers.
 const sqlWALSummary = `
 SELECT pg_current_wal_insert_lsn()::text                       AS insert_lsn,
        pg_current_wal_lsn()::text                              AS flush_lsn,
@@ -79,8 +81,123 @@ SELECT pg_current_wal_insert_lsn()::text                       AS insert_lsn,
        (SELECT COALESCE(sum(size), 0)::bigint FROM pg_ls_waldir()) AS seg_bytes,
        w.wal_records,
        w.wal_fpi,
-       w.wal_bytes::bigint                                     AS wal_bytes
+       w.wal_bytes::bigint                                     AS wal_bytes,
+       w.wal_buffers_full
 FROM   pg_stat_wal w
+`
+
+// sqlWALCheckpoint is the checkpoint-context block for the WAL header: how much
+// WAL has accumulated since the last checkpoint's REDO point vs max_wal_size
+// (the size-driven-checkpoint trigger), the wall-clock time the last checkpoint
+// completed, and checkpoint_timeout in seconds (for the next-timed-checkpoint
+// ETA). Mirrors sqlMaintWALInFlight. pg_control_checkpoint() typically needs
+// superuser, a higher bar than the pg_monitor sources above, so the caller
+// loads this separately and treats a failure as non-fatal.
+const sqlWALCheckpoint = `
+SELECT (pg_current_wal_insert_lsn() - redo_lsn)::bigint                                            AS bytes_since_chkpt,
+       COALESCE((SELECT setting::bigint * 1048576 FROM pg_settings WHERE name = 'max_wal_size'), 0) AS max_wal_bytes,
+       checkpoint_time,
+       COALESCE((SELECT setting::bigint FROM pg_settings WHERE name = 'checkpoint_timeout'), 0)     AS checkpoint_timeout_secs
+FROM   pg_control_checkpoint()
+`
+
+// sqlWALCheckpointer reads the cumulative checkpoint counters (PG 15+; older
+// clusters error and the caller leaves the counts at zero). A high
+// requested/(timed+requested) ratio signals max_wal_size pressure.
+const sqlWALCheckpointer = `SELECT num_timed, num_requested FROM pg_stat_checkpointer`
+
+// sqlWALSettings reads the human-readable form of the WAL/checkpoint GUCs shown
+// in the header. current_setting(name, true) returns NULL (→ '') for an unknown
+// name rather than erroring, so a missing GUC just renders as "unknown".
+const sqlWALSettings = `
+SELECT name, COALESCE(current_setting(name, true), '')
+FROM   pg_settings
+WHERE  name = ANY($1)
+`
+
+// walSettingsKeys are the GUCs sqlWALSettings fetches for the header. wal_level
+// already comes from sqlWALSummary, so it is not repeated here.
+var walSettingsKeys = []string{"checkpoint_timeout", "checkpoint_completion_target", "wal_compression"}
+
+// sqlWALRelStats aggregates the analysed window by relation: how much WAL each
+// table/index generated (record data + full-page-image bytes), how many records
+// touched it, and how many distinct pages they hit. The window is scanned once
+// and grouped by (reldatabase, reltablespace, relfilenode); the relation name is
+// then resolved once per relation by the same pg_filenode_relation / TOAST-owner
+// / pg_database lateral as sqlWALBlocks. Ordered biggest-combined-first.
+// Requires PostgreSQL 16+ (pg_get_wal_block_info). $1/$2 are start/end LSN.
+const sqlWALRelStats = `
+WITH agg AS (
+  SELECT reldatabase,
+         reltablespace,
+         relfilenode,
+         COALESCE(sum(block_data_length), 0)::bigint     AS data_bytes,
+         COALESCE(sum(block_fpi_length),  0)::bigint     AS fpi_bytes,
+         count(DISTINCT start_lsn)                        AS rec_count,
+         count(DISTINCT (relforknumber, relblocknumber))  AS block_count,
+         count(*) FILTER (WHERE relforknumber <> 0)       AS other_fork_count
+  FROM   pg_get_wal_block_info($1::pg_lsn, $2::pg_lsn, false)
+  GROUP  BY reldatabase, reltablespace, relfilenode
+)
+SELECT a.reldatabase,
+       a.relfilenode,
+       a.data_bytes,
+       a.fpi_bytes,
+       a.rec_count,
+       a.block_count,
+       a.other_fork_count,
+       COALESCE(r.relname, ''),
+       COALESCE(r.is_toast, false),
+       COALESCE((SELECT datname FROM pg_database WHERE oid = a.reldatabase), '')
+FROM   agg a
+LEFT   JOIN LATERAL (
+         SELECT
+           CASE WHEN owner.oid IS NOT NULL
+                THEN owner.oid::regclass::text
+                ELSE f.relid::text
+           END AS relname,
+           owner.oid IS NOT NULL AS is_toast
+         FROM   (SELECT pg_filenode_relation(a.reltablespace, a.relfilenode) AS relid) f
+         LEFT   JOIN pg_class owner ON owner.reltoastrelid = f.relid::oid
+         WHERE  f.relid IS NOT NULL
+       ) r ON true
+ORDER  BY (a.data_bytes + a.fpi_bytes) DESC
+`
+
+// sqlWALRelBlocks lists every block reference of one relation across the window,
+// full-page-image-heaviest first — the drill-down behind a sqlWALRelStats row.
+// It is sqlWALBlocks's body plus a relfilenode filter and a size-first order
+// ($3 = relfilenode). Requires PostgreSQL 16+.
+const sqlWALRelBlocks = `
+SELECT block_id::int,
+       reltablespace,
+       reldatabase,
+       relfilenode,
+       relforknumber::int,
+       relblocknumber,
+       resource_manager,
+       record_type,
+       block_data_length,
+       block_fpi_length,
+       block_fpi_info,
+       COALESCE(description, ''),
+       COALESCE(r.relname, ''),
+       COALESCE(r.is_toast, false),
+       COALESCE((SELECT datname FROM pg_database WHERE oid = b.reldatabase), '')
+FROM   pg_get_wal_block_info($1::pg_lsn, $2::pg_lsn, false) AS b
+LEFT   JOIN LATERAL (
+         SELECT
+           CASE WHEN owner.oid IS NOT NULL
+                THEN owner.oid::regclass::text
+                ELSE f.relid::text
+           END AS relname,
+           owner.oid IS NOT NULL AS is_toast
+         FROM   (SELECT pg_filenode_relation(b.reltablespace, b.relfilenode) AS relid) f
+         LEFT   JOIN pg_class owner ON owner.reltoastrelid = f.relid::oid
+         WHERE  f.relid IS NOT NULL
+       ) r ON true
+WHERE  b.relfilenode = $3::oid
+ORDER  BY block_fpi_length DESC, block_id
 `
 
 // sqlWALRmgrStats aggregates the window by resource manager: count, the bytes

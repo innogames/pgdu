@@ -173,6 +173,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.level == levelHeapPages || s.level == levelHeapTuples ||
 			s.level == levelIndexPages || s.level == levelIndexTuples ||
 			s.level == levelWAL || s.level == levelWALRecords || s.level == levelWALBlocks ||
+			s.level == levelWALRelations || s.level == levelWALRelBlocks ||
 			s.level == levelStatements || s.level == levelStatementDetail || s.level == levelSnapshots ||
 			s.level == levelMaintenance || s.level == levelSettings ||
 			s.level == levelActivity {
@@ -474,6 +475,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.stack = append(m.stack, next)
 		return m, m.resolveDiskTableCmd(t.db, t.tableName)
+	case key.Matches(msg, m.keys.WALByRelation):
+		// From the rmgr overview, open the same window grouped by relation —
+		// "what caused the change". Gated to levelWAL via applyContext; also
+		// require the window to be resolved and no blocking prompt up.
+		if s.level == levelWAL && s.loaded && (s.extPrompt == nil || !s.extPrompt.blocking) {
+			next := &screen{
+				level: levelWALRelations, title: "wal relations", tool: s.tool,
+				db: s.db, walStart: s.walStart, walEnd: s.walEnd,
+				sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
+			}
+			m.stack = append(m.stack, next)
+			return m, m.loadCurrent()
+		}
 	case key.Matches(msg, m.keys.Back):
 		// Esc is shared with Back; when an overlay/filter is up, Esc closes
 		// that instead of unwinding the stack. `q` always navigates back so

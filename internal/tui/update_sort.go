@@ -183,6 +183,10 @@ func validSorts(l level) []sortMode {
 		return []sortMode{sortBySize, sortByFPI, sortByName}
 	case levelWALBlocks:
 		return []sortMode{sortBySize, sortByName}
+	case levelWALRelations:
+		return []sortMode{sortBySize, sortByFPI, sortByCount, sortByName}
+	case levelWALRelBlocks:
+		return []sortMode{sortBySize, sortByName}
 	default:
 		return []sortMode{sortBySize, sortByName}
 	}

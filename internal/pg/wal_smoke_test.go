@@ -32,8 +32,19 @@ func TestWALSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WALOverview: %v", err)
 	}
-	t.Logf("summary: insert=%s seg=%d/%dB recs=%d fpi=%d bytes=%d level=%s",
-		sum.InsertLSN, sum.SegmentFiles, sum.SegmentBytes, sum.StatRecords, sum.StatFPI, sum.StatBytes, sum.WalLevel)
+	t.Logf("summary: insert=%s seg=%d/%dB recs=%d fpi=%d bytes=%d buffers_full=%d level=%s",
+		sum.InsertLSN, sum.SegmentFiles, sum.SegmentBytes, sum.StatRecords, sum.StatFPI, sum.StatBytes, sum.StatBuffersFull, sum.WalLevel)
+
+	// Checkpoint context for the header (best-effort; never errors except on a
+	// pool-acquire failure, so any returned err is fatal here).
+	cp, err := c.WALCheckpoint(ctx, db)
+	if err != nil {
+		t.Fatalf("WALCheckpoint: %v", err)
+	}
+	next, hasNext := cp.NextCheckpointETA()
+	t.Logf("checkpoint: since=%dB max_wal=%dB timed=%d req=%d timeout=%ds next=%v(%v) settings=%v",
+		cp.BytesSinceCheckpoint, cp.MaxWALBytes, cp.CheckpointsTimed, cp.CheckpointsRequested,
+		cp.CheckpointTimeoutSec, next, hasNext, cp.Settings)
 
 	stats, err := c.WALRmgrStats(ctx, db, start, end)
 	if err != nil {
@@ -44,6 +55,24 @@ func TestWALSmoke(t *testing.T) {
 	}
 	for _, s := range stats {
 		t.Logf("rmgr %-12s count=%-6d rec=%-9d fpi=%-9d combined=%d", s.Name, s.Count, s.RecordSize, s.FPISize, s.CombinedSize)
+	}
+
+	// By-relation breakdown of the same window ("what caused the change"), then
+	// drill the busiest relation's block references (PostgreSQL 16+).
+	rels, err := c.WALRelStats(ctx, db, start, end)
+	if err != nil {
+		t.Fatalf("WALRelStats: %v", err)
+	}
+	for _, r := range rels {
+		t.Logf("rel %-24s(%d) data=%-9d fpi=%-9d recs=%-6d pages=%-6d toast=%v db=%q",
+			r.RelName, r.RelFileNode, r.DataBytes, r.FPIBytes, r.RecCount, r.BlockCount, r.IsToast, r.DBName)
+	}
+	if len(rels) > 0 {
+		relBlocks, err := c.WALRelBlocks(ctx, db, start, end, rels[0].RelFileNode)
+		if err != nil {
+			t.Fatalf("WALRelBlocks(%d): %v", rels[0].RelFileNode, err)
+		}
+		t.Logf("relation %q has %d block refs in the window", rels[0].RelName, len(relBlocks))
 	}
 
 	// Per-record-type breakdown of the busiest rmgr (the summary table).

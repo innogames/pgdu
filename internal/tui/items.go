@@ -249,15 +249,38 @@ func walBlockToItem(b pg.WALBlockRef) item {
 	}
 }
 
-// itemWALCount / itemWALFPI extract the record count and FPI bytes from a
-// levelWAL rmgr-stat item. Second return is false for items without that
-// payload so they sort below rows we can rank.
-func itemWALCount(it item) (int64, bool) {
-	s, ok := it.data.(pg.WALRmgrStat)
-	if !ok {
-		return 0, false
+// walRelStatToItem builds one levelWALRelations row. size is the combined byte
+// total (record data + FPI) so the bar scales each relation against its
+// siblings — the busiest relation tops the list ("what caused the change").
+// hasChildren is true when any record touched it, so it drills to that
+// relation's block references across the window.
+func walRelStatToItem(st pg.WALRelStat) item {
+	name := fmt.Sprintf("relfilenode %d", st.RelFileNode)
+	if st.RelName != "" {
+		name = st.RelName
 	}
-	return s.Count, true
+	if st.IsToast {
+		name += " (toast)"
+	}
+	return item{
+		name:        name,
+		size:        st.CombinedSize(),
+		hasChildren: st.RecCount > 0,
+		data:        st,
+	}
+}
+
+// itemWALCount / itemWALFPI extract the record count and FPI bytes from a
+// levelWAL rmgr-stat or levelWALRelations relation-stat item. Second return is
+// false for items without that payload so they sort below rows we can rank.
+func itemWALCount(it item) (int64, bool) {
+	switch v := it.data.(type) {
+	case pg.WALRmgrStat:
+		return v.Count, true
+	case pg.WALRelStat:
+		return v.RecCount, true
+	}
+	return 0, false
 }
 
 func itemWALFPI(it item) (int64, bool) {
@@ -266,6 +289,8 @@ func itemWALFPI(it item) (int64, bool) {
 		return v.FPISize, true
 	case pg.WALRecord:
 		return int64(v.FPILength), true
+	case pg.WALRelStat:
+		return v.FPIBytes, true
 	}
 	return 0, false
 }

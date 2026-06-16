@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
@@ -237,6 +239,28 @@ func (m *Model) drillIn() tea.Cmd {
 		next := &screen{
 			level: levelWALBlocks, title: "wal blocks", tool: s.tool,
 			db: s.db, walRmgr: s.walRmgr, walRecLSN: r.StartLSN, walRecEnd: r.EndLSN,
+			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
+		}
+		m.stack = append(m.stack, next)
+		return m.loadCurrent()
+	case levelWALRelations:
+		st, ok := cur.data.(pg.WALRelStat)
+		if !ok || st.RecCount == 0 {
+			return nil
+		}
+		// The block-refs list is keyed on relfilenode; carry a human label for
+		// the breadcrumb/status row (resolved name, or the numeric fallback).
+		label := st.RelName
+		if label == "" {
+			label = fmt.Sprintf("relfilenode %d", st.RelFileNode)
+		}
+		if st.IsToast {
+			label += " (toast)"
+		}
+		next := &screen{
+			level: levelWALRelBlocks, title: "wal rel blocks", tool: s.tool,
+			db: s.db, walStart: s.walStart, walEnd: s.walEnd,
+			walRelFilenode: st.RelFileNode, walRelLabel: label,
 			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
 		}
 		m.stack = append(m.stack, next)

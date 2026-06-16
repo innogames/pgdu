@@ -114,6 +114,10 @@ func levelLabel(l level) string {
 		return "wal-records"
 	case levelWALBlocks:
 		return "wal-blocks"
+	case levelWALRelations:
+		return "wal-relations"
+	case levelWALRelBlocks:
+		return "wal-rel-blocks"
 	case levelStatements:
 		return "queries"
 	case levelStatementDetail:
