@@ -14,7 +14,7 @@ func TestValidSorts(t *testing.T) {
 		{levelTools, []sortMode{sortByName}},
 		{levelTables, []sortMode{sortBySize, sortByHeap, sortByIndex, sortByRows, sortByName}},
 		{levelParts, []sortMode{sortBySize, sortByBloat, sortByName}},
-		{levelHeapPages, []sortMode{sortByBlkno, sortByDeadRatio, sortByFreeSpace}},
+		{levelHeapPages, []sortMode{sortByBlkno, sortBySize, sortByDeadRatio, sortByFreeSpace}},
 		{levelColumns, []sortMode{sortBySize, sortByName}}, // default fallback
 	}
 	for _, c := range cases {

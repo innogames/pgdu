@@ -33,22 +33,12 @@ func tableToItem(t pg.Table, tl tool) item {
 			pages: pages, hasPages: true,
 		}
 	}
-	// Tables with a tiny TOAST relation (empty or a handful of out-of-line
-	// values) clutter the detail line with a near-zero figure. Hide TOAST
-	// below 1 MiB — the colored bar segment is already 0-width at that scale.
-	const toastShowThreshold = 1 << 20
-	// Tint each byte figure with its bar-segment colour so the detail line reads
-	// as a legend for the segmented bar; the labels/separators stay muted.
-	parts := []string{
-		styleMuted.Render("heap ") + styleHeapSeg.Render(humanize.Bytes(t.HeapBytes)),
-		styleMuted.Render("idx ") + styleIndexSeg.Render(humanize.Bytes(t.IndexesBytes)),
-	}
-	if t.ToastBytes >= toastShowThreshold {
-		parts = append(parts, styleMuted.Render("toast ")+styleToastSeg.Render(humanize.Bytes(t.ToastBytes)))
-	}
+	// heap and idx render as their own (bar-tinted) columns via hasBreakdown;
+	// toast stays visible as the bar's white segment, so the detail line that
+	// used to echo the heap/idx/toast figures would now just be redundant.
 	return item{
 		name: t.Name, size: t.TotalBytes, hasChildren: true,
-		detail: strings.Join(parts, styleMuted.Render(" · ")), detailStyled: true, data: t,
+		data: t,
 		heap: t.HeapBytes, idx: t.IndexesBytes, toast: t.ToastBytes,
 		rows: t.EstRows, hasRows: true,
 	}

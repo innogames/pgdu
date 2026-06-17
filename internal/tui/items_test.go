@@ -229,14 +229,14 @@ func TestTableToItem(t *testing.T) {
 	if !it.hasRows || it.rows != 9 {
 		t.Errorf("tableToItem rows = (%d, hasRows %v), want (9, true)", it.rows, it.hasRows)
 	}
-	// Sub-1MiB TOAST is hidden from the detail line; a larger one is shown.
-	small := tableToItem(pg.Table{Name: "t", ToastBytes: 1 << 19}, toolDisk)
-	if strings.Contains(small.detail, "toast") {
-		t.Errorf("sub-1MiB toast should be hidden, got detail %q", small.detail)
+	// heap/idx/toast render as bar segments + columns, not a detail string —
+	// the breakdown is carried on the item fields and detail stays empty.
+	toasted := tableToItem(pg.Table{Name: "t", ToastBytes: 2 << 20}, toolDisk)
+	if toasted.toast != 2<<20 {
+		t.Errorf("toast bytes = %d, want %d", toasted.toast, 2<<20)
 	}
-	big := tableToItem(pg.Table{Name: "t", ToastBytes: 2 << 20}, toolDisk)
-	if !strings.Contains(big.detail, "toast") {
-		t.Errorf("≥1MiB toast should be shown, got detail %q", big.detail)
+	if toasted.detail != "" {
+		t.Errorf("disk-tool table detail should be empty (breakdown is columnar), got %q", toasted.detail)
 	}
 
 	// Page-inspector tool: sized by heap only, page count rounds up.

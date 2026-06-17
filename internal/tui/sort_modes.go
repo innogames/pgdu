@@ -42,7 +42,7 @@ func (sm sortMode) name() string {
 	case sortBySize:
 		return "size"
 	case sortByRows:
-		return "~rows"
+		return "rows"
 	case sortByHitRatio:
 		return "hit"
 	case sortByCached:

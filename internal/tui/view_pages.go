@@ -161,7 +161,7 @@ func renderRelationsHeader(sort sortMode, sortDesc bool, barW int) string {
 	// Offset matches the row: cursor(2) + bar+brackets(barW+2) + sep(2).
 	line := headerIndent(barW) +
 		padRight(sortMark("size", sort == sortBySize, sortDesc), 10) + "  " +
-		padRight(sortMark("~rows", sort == sortByRows, sortDesc), rowsColW) + "  " +
+		padRight(sortMark("rows", sort == sortByRows, sortDesc), rowsColW) + "  " +
 		padRight("pages", pagesColW) + "  " +
 		"  " + // child mark column ("+ ")
 		sortMark("name", sort == sortByName, sortDesc)
@@ -173,7 +173,7 @@ func renderRelationRow(it item, r pg.Relation, maxSize int64, barW int, selected
 	cursor := selectedCursor(selected)
 	name := highlightName(it.name, selected)
 	sizeStr := humanize.Bytes(it.size)
-	rowsStr := styleMuted.Render(padRight("~"+formatRows(it.rows), rowsColW)) + "  "
+	rowsStr := styleMuted.Render(padRight(formatRows(it.rows), rowsColW)) + "  "
 	pagesStr := styleMuted.Render(padRight(formatRows(it.pages)+"p", pagesColW)) + "  "
 	childMark := styleMuted.Render("+ ")
 	parent := ""

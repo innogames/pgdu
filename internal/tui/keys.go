@@ -37,6 +37,12 @@ type keyMap struct {
 
 	// WAL-inspector binding.
 	WALByRelation key.Binding // w: open the by-relation breakdown of the window
+
+	// columnsInFooter adds the C (configure columns) hint to the footer's short
+	// help. Set per-screen by applyContext: the activity table has no other
+	// advertisement for the picker, whereas the top-queries table already shows
+	// "C columns" in its header, so it stays out of the footer there.
+	columnsInFooter bool
 }
 
 func defaultKeys() keyMap {
@@ -103,8 +109,10 @@ func (k *keyMap) applyContext(s *screen) {
 	k.Rebaseline.SetEnabled(stmtTable)
 	k.Snapshots.SetEnabled(stmtTable)
 	// C (Columns) is the column-config picker on the top-queries table and on the
-	// activity table.
+	// activity table. The picker is hard to find on activity (no header hint), so
+	// surface it in the footer there; the top-queries header already advertises it.
 	k.Columns.SetEnabled(stmtTable || activity)
+	k.columnsInFooter = activity
 	// t (ToggleRefresh) cycles the auto-refresh cadence on top-queries levels and
 	// on the activity level.
 	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity)
@@ -130,7 +138,11 @@ func (k *keyMap) applyContext(s *screen) {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Enter, k.Back, k.Filter, k.SortPrev, k.SortNext, k.ReverseSort, k.Refresh}
+	b := []key.Binding{k.Up, k.Down, k.Enter, k.Back, k.Filter, k.SortPrev, k.SortNext, k.ReverseSort, k.Refresh}
+	if k.columnsInFooter {
+		b = append(b, k.Columns)
+	}
+	return b
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {

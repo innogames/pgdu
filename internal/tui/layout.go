@@ -58,8 +58,10 @@ func barReserve(l level, tl tool) int {
 				(rowsColW + colGutter) + (pagesColW + colGutter) +
 				colMark + colName
 		}
-		// cursor + bar(brackets) + size + rows + bloat + mark + name + detail
-		return colCursor + colBrackets + colSize + (rowsColW + colGutter) + colBloat + colMark + colName + colDetail
+		// cursor + bar(brackets) + size + heap + idx + rows + bloat + mark + name
+		return colCursor + colBrackets + colSize +
+			(breakdownColW + colGutter) + (breakdownColW + colGutter) +
+			(rowsColW + colGutter) + colBloat + colMark + colName
 	case levelParts:
 		// Parts detail strings can be long ("heap · 12k dead (5%) · vac 3h ago
 		// · ana 2d ago" or "index · primary · unique · btree"), so bump the

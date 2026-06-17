@@ -31,6 +31,11 @@ type row struct {
 	// tables level so the composition of each table is visible at a glance.
 	heap, idx, toast int64
 
+	// hasBreakdown renders heap/idx as their own numeric columns (tinted to
+	// match their bar segments) between size and rows — set on the tables level
+	// so the heap/idx sort keys have visible, aligned columns under the header.
+	hasBreakdown bool
+
 	// rows is the estimated row count; only rendered when hasRows is true.
 	rows    int64
 	hasRows bool
@@ -82,9 +87,14 @@ func renderRow(r row) string {
 			bloatStr = bloatPercentStyle(pct).Render(padRight(fmt.Sprintf("%d%% bloat", pct), 12)) + "  "
 		}
 	}
+	breakdownStr := ""
+	if r.hasBreakdown {
+		breakdownStr = styleHeapSeg.Render(padRight(humanize.Bytes(r.heap), breakdownColW)) + "  " +
+			styleIndexSeg.Render(padRight(humanize.Bytes(r.idx), breakdownColW)) + "  "
+	}
 	rowsStr := ""
 	if r.hasRows {
-		rowsStr = styleMuted.Render(padRight("~"+formatRows(r.rows), rowsColW)) + "  "
+		rowsStr = styleMuted.Render(padRight(formatRows(r.rows), rowsColW)) + "  "
 	}
 	pagesStr := ""
 	if r.hasPages {
@@ -94,13 +104,17 @@ func renderRow(r row) string {
 	if r.hasChildren {
 		childMark = styleMuted.Render("+ ")
 	}
-	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + rowsStr + pagesStr + bloatStr + childMark + name + detail
+	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + breakdownStr + rowsStr + pagesStr + bloatStr + childMark + name + detail
 }
 
-// rowsColW is the padded width of the ~rows column on the tables level.
-// formatRows produces at most "999.9M"/"999.9G" (6 chars) + the "~" prefix,
-// so 7 fits every realistic value with one space of slack.
+// rowsColW is the padded width of the rows column on the tables level.
+// formatRows produces at most "999.9M"/"999.9G" (6 chars), so 7 fits every
+// realistic value with one space of slack.
 const rowsColW = 7
+
+// breakdownColW is the width of the heap and idx columns on the tables level;
+// a humanize.Bytes value ("1023.99 MB") fits in 10 cells.
+const breakdownColW = 10
 
 // pagesColW matches rowsColW: formatRows output (max 6 chars) + a "p" suffix.
 const pagesColW = 7
@@ -481,17 +495,56 @@ func renderTablesHeader(s *screen, barW int) string {
 	// Indent: cursor (2) + bar slot (barW+2) + "  " gap — mirrors renderRow's
 	// prefix so each label sits directly above its value column.
 	line := headerIndent(barW) +
-		padRight(sortMark("size", s.sort == sortBySize, s.sortDesc), 10) + "  " +
-		padRight(sortMark("~rows", s.sort == sortByRows, s.sortDesc), rowsColW) + "  "
+		padRight(sortMark("size", s.sort == sortBySize, s.sortDesc), 10) + "  "
 
 	if s.tool == toolPageInspect {
+		// Page-inspector tables size by heap alone and surface a pages column
+		// instead of the heap/idx breakdown — match renderRow's column order.
+		line += padRight(sortMark("rows", s.sort == sortByRows, s.sortDesc), rowsColW) + "  "
 		line += padRight("pages", pagesColW) + "  "
-	} else if anyBloat {
-		line += padRight("bloat", 12) + "  "
+	} else {
+		line += padRight(sortMark("heap", s.sort == sortByHeap, s.sortDesc), breakdownColW) + "  " +
+			padRight(sortMark("idx", s.sort == sortByIndex, s.sortDesc), breakdownColW) + "  " +
+			padRight(sortMark("rows", s.sort == sortByRows, s.sortDesc), rowsColW) + "  "
+		if anyBloat {
+			line += padRight("bloat", 12) + "  "
+		}
 	}
 	// 2-cell placeholder for the childMark ("+ " / "  ") before the name.
 	line += "  " + sortMark("table", s.sort == sortByName, s.sortDesc)
 
+	return styleMuted.Render(line)
+}
+
+// renderPartsHeader is the size/bloat/name column header for the parts level,
+// which renders through the generic renderList (the parts row carries a size
+// bar, an optional bloat column, and a long detail string).
+func renderPartsHeader(s *screen, barW int) string {
+	anyBloat := false
+	for _, it := range s.items {
+		if it.hasBloat {
+			anyBloat = true
+			break
+		}
+	}
+	line := headerIndent(barW) +
+		padRight(sortMark("size", s.sort == sortBySize, s.sortDesc), 10) + "  "
+	if anyBloat {
+		line += padRight(sortMark("bloat", s.sort == sortByBloat, s.sortDesc), 12) + "  "
+	}
+	// 2-cell placeholder for the childMark ("+ " / "  ") before the name.
+	line += "  " + sortMark("name", s.sort == sortByName, s.sortDesc)
+	return styleMuted.Render(line)
+}
+
+// renderGenericHeader is the size/name header for the plain bar-list levels
+// (databases, schemas, columns) whose rows carry only a size bar, a name, and a
+// free-form detail tail. nameLabel is the entity word shown over the name column.
+func renderGenericHeader(s *screen, barW int, nameLabel string) string {
+	// size column (10) + gap, then the 2-cell childMark placeholder before name.
+	line := headerIndent(barW) +
+		padRight(sortMark("size", s.sort == sortBySize, s.sortDesc), 10) + "  " +
+		"  " + sortMark(nameLabel, s.sort == sortByName, s.sortDesc)
 	return styleMuted.Render(line)
 }
 

@@ -456,9 +456,26 @@ func (m *Model) renderList(s *screen, height int) string {
 	rowsH := height
 
 	var b strings.Builder
-	if s.level == levelTables {
+	// Sortable bar-list levels carry a column header so the active sort column is
+	// labelled; the breakdown flag adds heap/idx columns on the tables level.
+	header := ""
+	breakdown := false
+	switch s.level {
+	case levelTables:
+		header = renderTablesHeader(s, barW)
+		breakdown = s.tool != toolPageInspect
+	case levelParts:
+		header = renderPartsHeader(s, barW)
+	case levelDatabases:
+		header = renderGenericHeader(s, barW, "database")
+	case levelSchemas:
+		header = renderGenericHeader(s, barW, "schema")
+	case levelColumns:
+		header = renderGenericHeader(s, barW, "column")
+	}
+	if header != "" {
 		rowsH = max(height-1, 0)
-		b.WriteString(renderTablesHeader(s, barW))
+		b.WriteString(header)
 		b.WriteString("\n")
 	}
 
@@ -471,7 +488,7 @@ func (m *Model) renderList(s *screen, height int) string {
 		b.WriteString(renderRow(row{
 			size: it.size, bloat: it.bloat, hasBloat: it.hasBloat, hasChildren: it.hasChildren, maxSize: maxSz,
 			barW: barW,
-			heap: it.heap, idx: it.idx, toast: it.toast,
+			heap: it.heap, idx: it.idx, toast: it.toast, hasBreakdown: breakdown,
 			rows: it.rows, hasRows: it.hasRows,
 			pages: it.pages, hasPages: it.hasPages,
 			name: it.name, detail: it.detail, detailStyled: it.detailStyled, selected: vi == s.cursor,
