@@ -91,7 +91,11 @@ type item struct {
 	hasBloat    bool // true once bloat has been measured (even if zero)
 	hasChildren bool // true when pressing Enter on this row drills into a submenu
 	detail      string
-	data        any
+	// detailStyled marks detail as carrying its own lipgloss styling (colored
+	// segments). renderRow then prints it verbatim instead of wrapping it in
+	// styleMuted, which would clobber the inner colors after their resets.
+	detailStyled bool
+	data         any
 
 	// Optional heap/index/toast breakdown for the tables level. When any are
 	// non-zero, the bar is rendered as three coloured segments.
@@ -229,6 +233,13 @@ type screen struct {
 	index          pg.Relation
 	indexPageBlkno int32
 	indexPageType  string
+
+	// Deep-dive context for the index page/tuple views, loaded alongside the
+	// page list (best-effort, so a privilege/redefinition failure just hides the
+	// banner). indexKeyCols drives the "keys: (…) include: (…)" banner;
+	// btreeMeta drives the metapage banner (root block, tree height, dedup).
+	indexKeyCols []pg.IndexKeyColumn
+	btreeMeta    *pg.BtreeMeta
 
 	// describe holds the loaded \d-style description for levelDescribe screens.
 	// Nil until the async load completes.

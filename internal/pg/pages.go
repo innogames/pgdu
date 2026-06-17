@@ -296,6 +296,72 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 	return out, nil
 }
 
+// BtreeMeta reads the B-tree metapage for the index page-list banner (root
+// block, tree height, dedup-capable). Best-effort: callers render the page list
+// regardless of whether this succeeds, so a permission/version error here just
+// hides the banner line. Requires pageinspect (already ensured by the page
+// loader that calls this).
+func (c *Client) BtreeMeta(ctx context.Context, r Relation) (BtreeMeta, error) {
+	var m BtreeMeta
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return m, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	if err := pool.QueryRow(ctx, sqlBtreeMeta, regclass).Scan(
+		&m.Magic, &m.Version, &m.Root, &m.Level, &m.FastRoot, &m.FastLevel, &m.AllEqualImage,
+	); err != nil {
+		return m, fmt.Errorf("bt_metap for %q: %w", r.Qualified(), err)
+	}
+	return m, nil
+}
+
+// BtreePageType returns one B-tree page's bt_page_stats type ('l' leaf, 'r'
+// root, 'i' internal, 'd' deleted). Used to resolve a child page's type when
+// the user descends through an internal-page downlink (the parent page only
+// gave us the child's block number, not its role). Best-effort at the call
+// site: a failure leaves the page type unknown and the tuple loader falls back
+// to the raw, non-decoded path.
+func (c *Client) BtreePageType(ctx context.Context, r Relation, blkno int32) (string, error) {
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return "", err
+	}
+	var t string
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	if err := pool.QueryRow(ctx, sqlBtreePageType, regclass, blkno).Scan(&t); err != nil {
+		return "", fmt.Errorf("bt_page_stats type for %q page %d: %w", r.Qualified(), blkno, err)
+	}
+	return t, nil
+}
+
+// IndexKeyColumns returns the index's columns in definition order, split into
+// key vs INCLUDE columns. Used to render the "keys: (…) include: (…)" banner
+// above the index page/tuple views.
+func (c *Client) IndexKeyColumns(ctx context.Context, r Relation) ([]IndexKeyColumn, error) {
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := pool.Query(ctx, sqlIndexKeyColumns, r.OID)
+	if err != nil {
+		return nil, fmt.Errorf("index key columns for %q: %w", r.Qualified(), err)
+	}
+	defer rows.Close()
+	var out []IndexKeyColumn
+	for rows.Next() {
+		var k IndexKeyColumn
+		if err := rows.Scan(&k.Ordinal, &k.Def, &k.IsKey); err != nil {
+			return nil, fmt.Errorf("index key columns for %q: %w", r.Qualified(), err)
+		}
+		out = append(out, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("index key columns for %q: %w", r.Qualified(), err)
+	}
+	return out, nil
+}
+
 // ListHeapTuples returns the line-pointer array for one heap page. The page
 // must exist (caller already saw it in ListHeapPages); a missing block here
 // surfaces as a pageinspect error from the server.

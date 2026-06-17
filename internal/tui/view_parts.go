@@ -129,7 +129,8 @@ func (m *Model) renderMaintPanel(s *screen) string {
 	mu := styleMuted.Render
 	if s.tableStatsErr != nil {
 		return "  " + mu("maintenance stats unavailable: "+s.tableStatsErr.Error()) + "\n" +
-			"  " + mu("hint: press ") + styleBadge.Render("v") + mu(" to run VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) on this table") + "\n"
+			"  " + mu("hint: press ") + styleBadge.Render("v") + mu(" to run VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) on this table") + "\n" +
+			m.maintReindexHint(s) + "\n"
 	}
 	st := s.tableStats
 	var b strings.Builder
@@ -145,7 +146,30 @@ func (m *Model) renderMaintPanel(s *screen) string {
 		b.WriteString("  " + mu(padRight("options", maintLabelW)) + mu(strings.Join(st.RelOptions, " · ")) + "\n")
 	}
 	b.WriteString("  " + mu("hint: press ") + styleBadge.Render("v") + mu(" to run VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) on this table") + "\n")
+	b.WriteString(m.maintReindexHint(s) + "\n")
 	return b.String()
+}
+
+// maintReindexHint returns the per-index REINDEX hint shown beneath the vacuum
+// hint. Unlike vacuum, REINDEX has no always-visible affordance: it only arms
+// when the highlighted row is an index whose *measured* bloat exceeds
+// reindexBloatThreshold. So it silently disappears when bloat measuring is off
+// (the `b` toggle leaves hasBloat false for every row) or once an index drops
+// back under the threshold — which is why it can look like the option vanished.
+// The hint names the index when the current row qualifies and explains the
+// gate otherwise.
+func (m *Model) maintReindexHint(s *screen) string {
+	mu := styleMuted.Render
+	if !m.fetchBloat {
+		return "  " + mu("hint: press ") + styleBadge.Render("b") +
+			mu(" to measure bloat — REINDEX is offered on indexes over 5% bloat")
+	}
+	if cand := reindexCandidate(s); cand != "" {
+		return "  " + mu("hint: press ") + styleBadge.Render("enter") +
+			mu(" to REINDEX "+cand+" CONCURRENTLY")
+	}
+	return "  " + mu("hint: select an index over 5% bloat, then press ") +
+		styleBadge.Render("enter") + mu(" to REINDEX it CONCURRENTLY")
 }
 
 func (m *Model) maintVacuumLine(st *pg.TableMaintStats) string {

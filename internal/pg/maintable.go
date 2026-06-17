@@ -34,6 +34,16 @@ func parseMainTable(query string) string {
 	if len(toks) == 0 {
 		return ""
 	}
+	// An autovacuum worker reports its work in pg_stat_activity as a status line,
+	// not SQL: "autovacuum: VACUUM[ ANALYZE] schema.table[ (to prevent
+	// wraparound)]" or "autovacuum: ANALYZE schema.table". Drop the prefix so the
+	// VACUUM/ANALYZE keyword behind it drives the lookup like a manual command.
+	if strings.EqualFold(toks[0], "autovacuum") {
+		toks = toks[1:]
+		if len(toks) == 0 {
+			return ""
+		}
+	}
 	kw := 0
 	var ctes map[string]int
 	// A WITH query's real subject is the statement that runs *after* its CTE
@@ -104,9 +114,40 @@ func tableForStmt(toks []string, kw int) string {
 		// COPY (SELECT … FROM t …) TO … form has a "(" there instead, so tableAfter
 		// descends into the subquery and uses its first FROM relation (t).
 		return tableAfter(toks, kw)
+	case "vacuum", "analyze":
+		// VACUUM/ANALYZE <table> — manual commands and the autovacuum worker
+		// status line (after its prefix is stripped). Options can sit between the
+		// keyword and the relation, so tableForVacuum skips them.
+		return tableForVacuum(toks, kw)
 	default:
 		return ""
 	}
+}
+
+// tableForVacuum resolves the target relation of a VACUUM or ANALYZE. The table
+// follows the keyword, but options may intervene: a parenthesized list
+// (VACUUM (VERBOSE, ANALYZE) t) or the legacy bare keywords (VACUUM FULL FREEZE
+// VERBOSE ANALYZE t, VACUUM ANALYZE t) — skip both before reading the name. A
+// bare VACUUM/ANALYZE with no relation (the whole-database form) yields "".
+func tableForVacuum(toks []string, kw int) string {
+	i := kw + 1
+	if i < len(toks) && toks[i] == "(" {
+		i = skipParens(toks, i)
+	}
+	for i < len(toks) && isVacuumOption(toks[i]) {
+		i++
+	}
+	return cleanTable(toks, i)
+}
+
+// isVacuumOption reports whether tok is a legacy unparenthesized VACUUM/ANALYZE
+// option keyword that precedes the relation rather than naming it.
+func isVacuumOption(tok string) bool {
+	switch strings.ToLower(tok) {
+	case "full", "freeze", "verbose", "analyze", "skip_locked":
+		return true
+	}
+	return false
 }
 
 // mainStmtAfterWith returns the index of the primary statement keyword following

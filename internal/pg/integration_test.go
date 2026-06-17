@@ -107,4 +107,52 @@ func TestIntegration_FullChain(t *testing.T) {
 	}
 	t.Logf("top column %s (%s) est=%d avg_width=%d null_frac=%.2f",
 		cols[0].Name, cols[0].Type, cols[0].EstBytes, cols[0].AvgWidth, cols[0].NullFrac)
+
+	// B-tree deep-dive: find a btree index in public and exercise the
+	// key-column + metapage queries that back the page-inspector banners.
+	// pageinspect (and superuser, for bt_metap) may be absent on the test DSN,
+	// so those steps log-and-skip rather than fail.
+	rels, err := c.ListRelations(ctx, db, "public")
+	if err != nil {
+		t.Fatalf("ListRelations: %v", err)
+	}
+	var idx *Relation
+	for i := range rels {
+		if rels[i].Kind == RelBTreeIndex {
+			idx = &rels[i]
+			break
+		}
+	}
+	if idx == nil {
+		t.Log("no btree index in public; skipping index deep-dive checks")
+		return
+	}
+
+	// Key columns need no special privilege and must come back for any index.
+	keyCols, err := c.IndexKeyColumns(ctx, *idx)
+	if err != nil {
+		t.Fatalf("IndexKeyColumns(%s): %v", idx.Qualified(), err)
+	}
+	var nKey int
+	for _, k := range keyCols {
+		if k.IsKey {
+			nKey++
+		}
+	}
+	if nKey == 0 {
+		t.Fatalf("expected ≥1 key column for %s, got %+v", idx.Qualified(), keyCols)
+	}
+	t.Logf("index %s key columns: %+v", idx.Qualified(), keyCols)
+
+	// bt_metap requires pageinspect + superuser; a failure is a skip, not a fail.
+	meta, err := c.BtreeMeta(ctx, *idx)
+	if err != nil {
+		t.Logf("BtreeMeta(%s) unavailable (%v); skipping metapage check", idx.Qualified(), err)
+		return
+	}
+	if meta.Level < 0 {
+		t.Fatalf("nonsensical tree height %d for %s", meta.Level, idx.Qualified())
+	}
+	t.Logf("index %s metapage: root blk %d height %d dedup=%v v%d",
+		idx.Qualified(), meta.Root, meta.Level, meta.AllEqualImage, meta.Version)
 }

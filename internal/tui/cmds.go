@@ -130,6 +130,8 @@ type indexPagesLoadedMsg struct {
 	count      int32
 	pages      []pg.IndexPageStat
 	totalPages int32
+	keyCols    []pg.IndexKeyColumn // index key/INCLUDE columns for the banner
+	meta       *pg.BtreeMeta       // metapage banner (nil when bt_metap failed)
 	err        error
 }
 type indexTuplesLoadedMsg struct {
@@ -372,12 +374,30 @@ func (m *Model) loadIndexPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		// RelPages errors are non-fatal: render the page list and accept "?"
 		// for the totals, same approach as the heap-pages Cmd.
 		rp, _ := m.client.RelPages(ctx, pg.Table{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
-		return indexPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp}
+		// Banner data is best-effort decoration over the page list — a metap
+		// or key-column read may fail (privileges, a redefined index) without
+		// dropping the load. keyCols nil → no keys banner; meta nil → no
+		// metapage line.
+		keyCols, _ := m.client.IndexKeyColumns(ctx, r)
+		var meta *pg.BtreeMeta
+		if bm, err := m.client.BtreeMeta(ctx, r); err == nil {
+			meta = &bm
+		}
+		return indexPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta}
 	})
 }
 
 func (m *Model) loadIndexTuplesCmd(r pg.Relation, blkno int32, pageType string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
+		// A downlink descent pushes the child screen with an unknown type;
+		// probe it so the decode-vs-raw choice and further downlink navigation
+		// stay correct as the user walks toward the leaves. Best-effort: on
+		// failure the empty type just takes the raw path.
+		if pageType == "" {
+			if pt, err := m.client.BtreePageType(ctx, r, blkno); err == nil {
+				pageType = pt
+			}
+		}
 		tuples, err := m.client.ListIndexTuples(ctx, r, blkno, pageType)
 		return indexTuplesLoadedMsg{indexOID: r.OID, blkno: blkno, pageType: pageType, tuples: tuples, err: err}
 	})

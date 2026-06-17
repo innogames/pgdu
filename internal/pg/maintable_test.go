@@ -64,6 +64,18 @@ func TestMainTable(t *testing.T) {
 		"-- a note\nUPDATE worker SET x = $1":                                                 "worker",
 		"/* multi\nline\ncomment */ SELECT * FROM hero":                                       "hero",
 		"/* outer /* nested */ still comment */ DELETE FROM session WHERE id = $1":            "session",
+		// Autovacuum worker status lines from pg_stat_activity — point at the table.
+		"autovacuum: VACUUM public.game_battle":                         "public.game_battle",
+		"autovacuum: VACUUM ANALYZE public.game_battle":                 "public.game_battle",
+		"autovacuum: VACUUM public.game_battle (to prevent wraparound)": "public.game_battle",
+		"autovacuum: ANALYZE public.game_battle":                        "public.game_battle",
+		// Manual VACUUM/ANALYZE commands, including option forms.
+		"VACUUM game_battle": "game_battle",
+		"VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) public.parts": "public.parts",
+		"VACUUM FULL FREEZE VERBOSE game_battle":              "game_battle",
+		"ANALYZE public.game_battle":                          "public.game_battle",
+		// A whole-database VACUUM names no relation.
+		"VACUUM": "",
 	}
 	for q, want := range cases {
 		if got := MainTable(q); got != want {

@@ -152,6 +152,35 @@ func itemRows(it item) (int64, bool) {
 	return 0, false
 }
 
+// itemBloatRatio extracts a relation's wasted-space fraction (bloat/size) for
+// the parts level. Returns (0, false) for rows whose bloat hasn't been measured
+// yet (hasBloat == false) so they sort below measured rows; a measured-zero row
+// returns (0, true) and sorts as the least-bloated of the known ones.
+func itemBloatRatio(it item) (float64, bool) {
+	if !it.hasBloat || it.size <= 0 {
+		return 0, false
+	}
+	return float64(it.bloat) / float64(it.size), true
+}
+
+// itemHeapBytes / itemIndexBytes extract the heap and combined-index byte
+// footprints carried on tables-level items. Gated on the pg.Table payload so a
+// row from another level (where these fields are zero) sorts to the bottom
+// rather than tying at zero with a genuinely empty heap/index.
+func itemHeapBytes(it item) (int64, bool) {
+	if _, ok := it.data.(pg.Table); !ok {
+		return 0, false
+	}
+	return it.heap, true
+}
+
+func itemIndexBytes(it item) (int64, bool) {
+	if _, ok := it.data.(pg.Table); !ok {
+		return 0, false
+	}
+	return it.idx, true
+}
+
 // validSorts declares which sort modes are meaningful at each level. Keys
 // outside the returned set are silently ignored in handleKey, so adding a new
 // level here is the single source of truth for "which sort keys do what".
@@ -162,11 +191,13 @@ func validSorts(l level) []sortMode {
 	case levelTools, levelDiagnostics:
 		return []sortMode{sortByName}
 	case levelTables:
-		return []sortMode{sortBySize, sortByRows, sortByName}
+		return []sortMode{sortBySize, sortByHeap, sortByIndex, sortByRows, sortByName}
+	case levelParts:
+		return []sortMode{sortBySize, sortByBloat, sortByName}
 	case levelBufferTables:
 		return []sortMode{sortBySize, sortByTotal, sortByCached, sortByHitRatio, sortByDirty, sortByName}
 	case levelHeapPages:
-		return []sortMode{sortByBlkno, sortByDeadRatio, sortByFreeSpace}
+		return []sortMode{sortByBlkno, sortBySize, sortByDeadRatio, sortByFreeSpace}
 	case levelHeapTuples:
 		return []sortMode{sortByLP, sortBySize}
 	case levelTupleRow:
@@ -174,7 +205,7 @@ func validSorts(l level) []sortMode {
 	case levelRelations:
 		return []sortMode{sortBySize, sortByRows, sortByName}
 	case levelIndexPages:
-		return []sortMode{sortByBlkno, sortByLevel, sortByDeadRatio, sortByFreeSpace}
+		return []sortMode{sortByBlkno, sortByType, sortByLevel, sortBySize, sortByDeadRatio, sortByFreeSpace}
 	case levelIndexTuples:
 		return []sortMode{sortByLP, sortBySize}
 	case levelWAL:

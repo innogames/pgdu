@@ -15,15 +15,16 @@ import (
 // human-readable size, the row's name (highlighted when selected), and a
 // trailing detail string.
 type row struct {
-	size        int64
-	bloat       int64 // 0 when unknown or none
-	hasBloat    bool  // true once bloat has been measured for this row
-	hasChildren bool  // true when this row can be drilled into
-	maxSize     int64 // largest sibling, used to scale the bar
-	barW        int   // bar width in cells; chosen by the caller from terminal width
-	name        string
-	detail      string
-	selected    bool
+	size         int64
+	bloat        int64 // 0 when unknown or none
+	hasBloat     bool  // true once bloat has been measured for this row
+	hasChildren  bool  // true when this row can be drilled into
+	maxSize      int64 // largest sibling, used to scale the bar
+	barW         int   // bar width in cells; chosen by the caller from terminal width
+	name         string
+	detail       string
+	detailStyled bool // detail is pre-styled; render verbatim (see item.detailStyled)
+	selected     bool
 
 	// Optional heap/index/toast breakdown — when any are non-zero, the bar is
 	// drawn as three coloured segments instead of one solid block. Used by the
@@ -60,7 +61,11 @@ func renderRow(r row) string {
 	name := highlightName(r.name, r.selected)
 	detail := ""
 	if r.detail != "" {
-		detail = "  " + styleMuted.Render(r.detail)
+		if r.detailStyled {
+			detail = "  " + r.detail
+		} else {
+			detail = "  " + styleMuted.Render(r.detail)
+		}
 	}
 	cursor := selectedCursor(r.selected)
 	bloatStr := ""
@@ -69,7 +74,13 @@ func renderRow(r row) string {
 		if r.size > 0 {
 			pct = int(float64(r.bloat) * 100.0 / float64(r.size))
 		}
-		bloatStr = styleMuted.Render(padRight(fmt.Sprintf("(%d%% bloat)", pct), 12)) + "  "
+		if pct <= 0 {
+			// Measured, but no (or negligible) waste — a dash reads as "checked,
+			// clean" where a "0% bloat" would draw the eye to a non-problem.
+			bloatStr = styleMuted.Render(padRight("-", 12)) + "  "
+		} else {
+			bloatStr = bloatPercentStyle(pct).Render(padRight(fmt.Sprintf("%d%% bloat", pct), 12)) + "  "
+		}
 	}
 	rowsStr := ""
 	if r.hasRows {

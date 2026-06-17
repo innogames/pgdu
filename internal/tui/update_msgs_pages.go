@@ -103,6 +103,10 @@ func (m *Model) onIndexPagesLoaded(msg indexPagesLoadedMsg) tea.Cmd {
 	}
 	s.err = msg.err
 	s.heapPageCount = msg.totalPages
+	// Banner data rides along with the page list; both are nil on a best-effort
+	// failure, in which case the banner simply isn't drawn.
+	s.indexKeyCols = msg.keyCols
+	s.btreeMeta = msg.meta
 	s.items = s.items[:0]
 	for _, p := range msg.pages {
 		s.items = append(s.items, indexPageToItem(p))
@@ -112,8 +116,12 @@ func (m *Model) onIndexPagesLoaded(msg indexPagesLoadedMsg) tea.Cmd {
 }
 
 func (m *Model) onIndexTuplesLoaded(msg indexTuplesLoadedMsg) tea.Cmd {
+	// Match on (index, block) only — block uniquely identifies the page within
+	// an index. The page type isn't part of the identity: a downlink descent
+	// pushes the screen with an unknown type and the loader resolves it, so the
+	// message's pageType can legitimately differ from the screen's.
 	s := m.findLevel(levelIndexTuples)
-	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno || s.indexPageType != msg.pageType {
+	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno {
 		return nil
 	}
 	s.loading = false
@@ -122,6 +130,9 @@ func (m *Model) onIndexTuplesLoaded(msg indexTuplesLoadedMsg) tea.Cmd {
 		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
 	}
 	s.err = msg.err
+	// Adopt the resolved page type so the renderer's labels (→ blk N / pivot)
+	// and the downlink-drill guard see the child page's real role.
+	s.indexPageType = msg.pageType
 	s.items = s.items[:0]
 	for _, t := range msg.tuples {
 		s.items = append(s.items, indexTupleToItem(t))

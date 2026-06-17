@@ -17,6 +17,10 @@ const (
 	sortByCount // WAL: record count per resource manager
 	sortByFPI   // WAL: full-page-image bytes
 	sortByDirty // buffer-tables: dirty (modified-in-memory) bytes
+	sortByType  // index pages: page type (leaf/intr/root/del)
+	sortByBloat // parts: wasted-space fraction (bloat %)
+	sortByHeap  // tables: heap (main fork) bytes
+	sortByIndex // tables: combined index bytes
 )
 
 // defaultDesc is the natural direction for each sort column: bigger-first for
@@ -24,9 +28,9 @@ const (
 // ratio so the worst-cached tables bubble to the top.
 func (sm sortMode) defaultDesc() bool {
 	switch sm {
-	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty:
+	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty, sortByBloat, sortByHeap, sortByIndex:
 		return true
-	case sortByName, sortByHitRatio, sortByBlkno, sortByLP, sortByLevel:
+	case sortByName, sortByHitRatio, sortByBlkno, sortByLP, sortByLevel, sortByType:
 		return false
 	}
 	return false
@@ -61,6 +65,14 @@ func (sm sortMode) name() string {
 		return "fpi"
 	case sortByDirty:
 		return "dirty"
+	case sortByType:
+		return "type"
+	case sortByBloat:
+		return "bloat"
+	case sortByHeap:
+		return "heap"
+	case sortByIndex:
+		return "idx"
 	default:
 		return "name"
 	}
@@ -110,6 +122,14 @@ func (sm sortMode) less(a, b item) bool {
 		return lessByExtractor(a, b, itemWALFPI)
 	case sortByDirty:
 		return lessByExtractor(a, b, itemDirtyBytes)
+	case sortByType:
+		return lessByExtractor(a, b, itemPageType)
+	case sortByBloat:
+		return lessByExtractor(a, b, itemBloatRatio)
+	case sortByHeap:
+		return lessByExtractor(a, b, itemHeapBytes)
+	case sortByIndex:
+		return lessByExtractor(a, b, itemIndexBytes)
 	}
 	return false
 }

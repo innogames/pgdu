@@ -191,6 +191,8 @@ func (m *Model) drillIn() tea.Cmd {
 		next := &screen{
 			level: levelIndexTuples, title: "index tuples", tool: s.tool,
 			db: s.db, schema: s.schema, index: s.index,
+			indexKeyCols:   s.indexKeyCols, // carry the keys banner; no refetch
+			heapPageCount:  s.heapPageCount,
 			indexPageBlkno: p.Blkno,
 			indexPageType:  p.Type,
 			sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
@@ -199,10 +201,37 @@ func (m *Model) drillIn() tea.Cmd {
 		return m.loadCurrent()
 	case levelIndexTuples:
 		t, ok := cur.data.(pg.IndexTuple)
-		if !ok || t.Ctid == nil || t.Decoded == nil {
-			// Only drillable when a live heap row was projected. Internal
-			// pages and vacuumed entries land here too; both have nothing
-			// to show in the per-column row view.
+		if !ok {
+			return nil
+		}
+		// On an internal page every entry is a downlink: its ctid block names a
+		// child index page. Enter descends one level toward the leaves so the
+		// user can walk the tree structurally. Leaf high-key pivots live on leaf
+		// pages, not here, so this only fires for real downlinks.
+		if s.indexPageType == "i" {
+			child, ok := downlinkChildBlock(t, s.heapPageCount, s.indexPageBlkno)
+			if !ok {
+				return nil
+			}
+			next := &screen{
+				level: levelIndexTuples, title: "index tuples", tool: s.tool,
+				db: s.db, schema: s.schema, index: s.index,
+				indexKeyCols:   s.indexKeyCols,
+				heapPageCount:  s.heapPageCount,
+				indexPageBlkno: child,
+				// Child page type is unknown here; leave it empty and let
+				// loadIndexTuplesCmd probe it (bt_page_stats) so the decode path
+				// and further downlink navigation stay correct mid-descent.
+				indexPageType: "",
+				sort:          sortByLP, sortDesc: sortByLP.defaultDesc(),
+			}
+			m.stack = append(m.stack, next)
+			return m.loadCurrent()
+		}
+		if t.Ctid == nil || t.Decoded == nil {
+			// Leaf entries drill only when a live heap row was projected.
+			// Pivot/posting entries and vacuumed rows land here too; none has a
+			// single heap row to show in the per-column view.
 			return nil
 		}
 		// The parent's schema matches the index's by Postgres rule — indexes
@@ -339,6 +368,23 @@ func (m *Model) drillIn() tea.Cmd {
 		return m.loadCurrent()
 	}
 	return nil
+}
+
+// downlinkChildBlock resolves the child index page an internal-page downlink
+// points at. On internal B-tree pages the item's ctid block IS the child block
+// number (the offset word carries pivot flag bits, which we ignore). Returns
+// false when the ctid doesn't parse, points at the meta page / itself, or — when
+// the index's page count is known — lands past EOF, so a malformed downlink
+// can't send get_raw_page off the end.
+func downlinkChildBlock(t pg.IndexTuple, pageCount, current int32) (int32, bool) {
+	blk, ok := parseCtidBlock(t.Ctid)
+	if !ok || blk <= 0 || blk == current {
+		return 0, false
+	}
+	if pageCount > 0 && blk >= pageCount {
+		return 0, false
+	}
+	return blk, true
 }
 
 // the picker (and when a --<tool> flag opens one directly at startup). The

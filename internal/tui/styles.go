@@ -146,6 +146,21 @@ func gradedPercentStyle(pct float64) lipgloss.Style {
 	}
 }
 
+// bloatPercentStyle grades a relation's wasted-space percentage (lower is
+// better): sage for a little, yellow once a quarter of the relation is dead
+// space, red past half. Zero is rendered as a muted dash by the caller (no
+// bloat to grade), mirroring the genuine-zero handling in costStyleRelative.
+func bloatPercentStyle(pct int) lipgloss.Style {
+	switch {
+	case pct >= 50:
+		return lipgloss.NewStyle().Foreground(colorBloat)
+	case pct >= 25:
+		return lipgloss.NewStyle().Foreground(colorAccent)
+	default:
+		return lipgloss.NewStyle().Foreground(colorCostLow)
+	}
+}
+
 // costStyleRelative grades a "lower is better" cost value (miss/io_ms/wal/…)
 // against the largest value in its column for the current window. Bright green
 // is reserved for a genuine zero (the only "free" row); any nonzero value — even

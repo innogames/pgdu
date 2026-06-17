@@ -98,7 +98,14 @@ func renderLegend(s *screen) string {
 		return "  " + swatch(styleIndexSeg, "live") + sep +
 			swatch(styleBloat, "dead") + sep +
 			styleMuted.Render("░ free")
-	case levelWAL, levelWALRecords, levelWALRelations:
+	case levelWAL:
+		// `w` opens the by-relation breakdown ("what caused the WAL"); it's
+		// bound only on this overview, so surface it here as well as in the
+		// list header — otherwise it's buried in the ? overlay.
+		return "  " + swatch(styleBar, "record bytes") + sep +
+			swatch(styleBarAlt, "FPI bytes (full-page images)") + sep +
+			styleBadge.Render("w") + styleMuted.Render(" by relation")
+	case levelWALRecords, levelWALRelations:
 		return "  " + swatch(styleBar, "record bytes") + sep +
 			swatch(styleBarAlt, "FPI bytes (full-page images)")
 	case levelWALBlocks, levelWALRelBlocks:
@@ -112,9 +119,10 @@ func renderLegend(s *screen) string {
 		// row); and posting-list tuples (PG 13+ dedup — one entry packs
 		// many heap tids for the same key). The latter two have no
 		// single heap row to project, so they show their raw hex data.
-		return "  " + styleLPNormal.Render("●") + " " + styleMuted.Render("leaf entry → heap row") + sep +
-			styleHeapToastTag.Render("pivot") + " " + styleMuted.Render("high-key separator") + sep +
-			styleHeapHot.Render("posting") + " " + styleMuted.Render("packed heap-tid list")
+		return "  " + styleLPNormal.Render("●") + " " + styleMuted.Render("leaf → heap row") + sep +
+			styleIndexSeg.Render("→ blk") + " " + styleMuted.Render("downlink") + sep +
+			styleHeapToastTag.Render("pivot") + " " + styleMuted.Render("high key") + sep +
+			styleHeapHot.Render("posting ×N") + " " + styleMuted.Render("packed tids")
 	}
 	return ""
 }

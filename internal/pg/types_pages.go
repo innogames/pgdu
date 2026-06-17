@@ -148,3 +148,29 @@ type TupleCell struct {
 	Name  string
 	Value *string
 }
+
+// BtreeMeta is the B-tree metapage (block 0) as reported by bt_metap. Surfaced
+// as a one-line banner above the page list so the user can read the tree's
+// shape (root block, height) and whether deduplication is possible
+// (AllEqualImage — the PG13+ flag that gates posting-list dedup) without
+// drilling into block 0 by hand.
+type BtreeMeta struct {
+	Magic         int32
+	Version       int32
+	Root          int32 // root block number
+	Level         int32 // tree height (0 = single-page root)
+	FastRoot      int32
+	FastLevel     int32
+	AllEqualImage bool // dedup-capable (every opclass is "all equal image")
+}
+
+// IndexKeyColumn is one column of an index definition, used for the
+// "keys: (…) include: (…)" banner above the index page/tuple views. Def is the
+// per-column pg_get_indexdef output (a bare column name, or an expression like
+// "lower(email)"). IsKey is false for INCLUDE (covering) columns — those past
+// indnkeyatts that are stored but not part of the search key.
+type IndexKeyColumn struct {
+	Ordinal int32
+	Def     string
+	IsKey   bool
+}

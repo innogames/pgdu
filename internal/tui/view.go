@@ -66,6 +66,18 @@ func (m *Model) View() string {
 		contentHeight -= strings.Count(hdr, "\n") + 1
 	}
 
+	// B-tree page/tuple views carry an index-context banner (key columns, and on
+	// the page list the metapage summary). Suppressed under a blocking
+	// extension prompt, which takes over the whole content area.
+	if (s.level == levelIndexPages || s.level == levelIndexTuples) &&
+		(s.extPrompt == nil || !s.extPrompt.blocking) {
+		if banner := m.renderIndexKeyBanner(s); banner != "" {
+			b.WriteString(banner)
+			b.WriteString("\n")
+			contentHeight -= strings.Count(banner, "\n") + 1
+		}
+	}
+
 	// Non-blocking prompts (hints) render above the list and consume one
 	// line of the content area. Blocking prompts take over the whole
 	// content area in the switch below. levelDescribe is excluded: it renders
@@ -462,7 +474,7 @@ func (m *Model) renderList(s *screen, height int) string {
 			heap: it.heap, idx: it.idx, toast: it.toast,
 			rows: it.rows, hasRows: it.hasRows,
 			pages: it.pages, hasPages: it.hasPages,
-			name: it.name, detail: it.detail, selected: vi == s.cursor,
+			name: it.name, detail: it.detail, detailStyled: it.detailStyled, selected: vi == s.cursor,
 		}))
 		b.WriteString("\n")
 	}

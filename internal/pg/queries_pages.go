@@ -254,6 +254,41 @@ FROM   bt_page_items($1, $2::int) i
 ORDER  BY i.itemoffset
 `
 
+// sqlBtreePageType reports just the bt_page_stats type ('l'/'r'/'i'/'d') for one
+// block. Used to resolve a child page's type when descending through an
+// internal-page downlink, where the type isn't known up front but decides the
+// decode-vs-raw tuple path and whether further downlinks exist. $1 is the index
+// regclass-castable text; $2 the block number.
+const sqlBtreePageType = `
+SELECT type::text FROM bt_page_stats($1, $2::int)
+`
+
+// sqlBtreeMeta reads the B-tree metapage (block 0) via bt_metap. Every column
+// is cast to int so a bigint block number scans into the int32 struct fields
+// (block numbers never approach 2^31 in practice). allequalimage is the PG13+
+// dedup-capable flag. $1 is the index regclass-castable text.
+const sqlBtreeMeta = `
+SELECT magic::int, version::int, root::int, level::int,
+       fastroot::int, fastlevel::int, allequalimage
+FROM   bt_metap($1)
+`
+
+// sqlIndexKeyColumns lists an index's columns in definition order, splitting
+// key columns (k <= indnkeyatts) from INCLUDE/covering columns. Each Def is the
+// per-column pg_get_indexdef projection (a bare name or an expression). The
+// set-returning generate_series is implicitly LATERAL so it can read
+// idx.indnatts from the preceding FROM item. Works for any access method.
+// $1 is the index oid.
+const sqlIndexKeyColumns = `
+SELECT k::int,
+       pg_get_indexdef($1::oid, k::int, false) AS def,
+       (k <= idx.indnkeyatts)                  AS is_key
+FROM   pg_index idx,
+       generate_series(1, idx.indnatts) AS k
+WHERE  idx.indexrelid = $1::oid
+ORDER  BY k
+`
+
 // sqlToastValueChunks returns all chunks for one out-of-line value in a TOAST
 // table, ordered by chunk_seq so the caller can concatenate them in order.
 // %s is the quoted toast regclass; $1 is the chunk_id OID.

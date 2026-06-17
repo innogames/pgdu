@@ -50,6 +50,14 @@ func (m *Model) renderIndexPagesInfo(height int) string {
 	b.WriteString("    " + padRight("free", 8) +
 		mu("free_size as a percent of pagesize; high values on leaf pages signal bloat") + "\n\n")
 
+	b.WriteString("  " + styleHeader.Render(" banner ") + "  " +
+		mu("the lines above the table summarise the whole index") + "\n")
+	b.WriteString("    " + mu("keys: the search columns; ") + styleMuted.Render("include:") +
+		mu(" lists covering (stored-but-not-searched) columns") + "\n")
+	b.WriteString("    " + mu("root blk / height / dedup / version come from the metapage (bt_metap):") + "\n")
+	b.WriteString("    " + mu("height is the tree depth above the leaves; dedup ") + styleBadge.Render("on") +
+		mu(" means posting-list dedup is possible") + "\n\n")
+
 	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+fmt.Sprintf("%d", heapWindowDefault)+" pages per step).") + "\n")
 	b.WriteString("  " + mu("Within a window, j/k or arrows move the cursor; Enter drills into one page's items.") + "\n")
 	b.WriteString("  " + mu("Block 0 is the metapage — skipped here; it carries the root pointer, not a tree page.") + "\n")
@@ -81,15 +89,16 @@ func (m *Model) renderIndexTuplesInfo(height int) string {
 	b.WriteString("    " + strings.Repeat(" ", 18) +
 		mu("and Enter drills into the per-column tuple-row view") + "\n")
 	b.WriteString("    " + styleHeapToastTag.Render("pivot") + strings.Repeat(" ", 14-len("pivot")) + "  " +
-		mu("structural separator: item #1 of every non-rightmost leaf page (the high key),") + "\n")
+		mu("structural separator: item #1 of every non-rightmost leaf page (the high key).") + "\n")
 	b.WriteString("    " + strings.Repeat(" ", 18) +
-		mu("plus every entry on internal pages (downlinks). No heap row, so no decoded") + "\n")
+		mu("On internal pages every entry is a downlink, shown as ") + styleIndexSeg.Render("→ blk N") +
+		mu(" (the child") + "\n")
 	b.WriteString("    " + strings.Repeat(" ", 18) +
-		mu("key — only the raw key bytes; ENTER does nothing.") + "\n")
+		mu("page); ENTER descends into it to walk the tree toward the leaves.") + "\n")
 	b.WriteString("    " + styleHeapHot.Render("posting") + strings.Repeat(" ", 14-len("posting")) + "  " +
-		mu("PG 13+ btree deduplication: one tuple packs many heap tids for the same key.") + "\n")
+		mu("PG 13+ btree deduplication: one tuple packs many heap tids for one key.") + "\n")
 	b.WriteString("    " + strings.Repeat(" ", 18) +
-		mu("Look for big itemlens (40–272 bytes) — INDEX_ALT_TID_MASK is set") + "\n\n")
+		mu("Shown as ") + styleHeapHot.Render("posting ×N") + mu(" — N is the packed heap-tid count.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" columns ") + "  " +
 		mu("one row per bt_page_items entry on the chosen page") + "\n")
@@ -101,20 +110,22 @@ func (m *Model) renderIndexTuplesInfo(height int) string {
 		styleBadge.Render("N") + mu(" = has NULLs in the key  ·  ") +
 		styleBadge.Render("V") + mu(" = has variable-width attributes") + "\n")
 	b.WriteString("    " + padRight("ctid", 8) +
-		mu("heap pointer (regular entries), or ") +
+		mu("heap pointer (leaf entries), ") + styleIndexSeg.Render("→ blk N") +
+		mu(" downlink (internal), or ") +
 		styleHeapToastTag.Render("pivot") + mu(" / ") +
-		styleHeapHot.Render("posting") + mu(" label for alt-tid kinds") + "\n")
+		styleHeapHot.Render("posting ×N") + mu(" labels") + "\n")
 	b.WriteString("    " + padRight("key", 8) +
 		mu("decoded key from the heap when reachable, else dimmed hex of the raw key bytes") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" drilling ") + "  " +
 		mu("which rows respond to Enter — and why others don't") + "\n")
-	b.WriteString("    " + mu("Only leaf entries whose ctid still resolves to a live heap row drill in;") + "\n")
-	b.WriteString("    " + mu("they're marked with the ") + styleMuted.Render("+ ") +
-		mu("indicator. Pivot rows are structural, not data, so") + "\n")
-	b.WriteString("    " + mu("there's nothing to show. Posting rows pack many heap tids — no single row") + "\n")
-	b.WriteString("    " + mu("to land on. Entries whose heap tuple was vacuumed since the page snapshot") + "\n")
-	b.WriteString("    " + mu("also can't drill (the heap projection returned NULL).") + "\n")
+	b.WriteString("    " + mu("Leaf entries whose ctid resolves to a live heap row drill into the per-column") + "\n")
+	b.WriteString("    " + mu("row view. Internal-page downlinks (") + styleIndexSeg.Render("→ blk N") +
+		mu(") descend one level into that child page,") + "\n")
+	b.WriteString("    " + mu("so ENTER walks the tree structurally toward the leaves. Pivot high keys,") + "\n")
+	b.WriteString("    " + mu("posting tuples, and entries whose heap row was vacuumed since the snapshot") + "\n")
+	b.WriteString("    " + mu("don't drill — there's no single heap row to land on.") + "\n\n")
+	b.WriteString("    " + mu("Reading bt_page_items / bt_metap needs a superuser (or pg_read_server_files).") + "\n")
 
 	rendered := strings.Count(b.String(), "\n")
 	for i := rendered; i < height; i++ {
@@ -172,6 +183,68 @@ func renderRelationRow(it item, r pg.Relation, maxSize int64, barW int, selected
 	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + rowsStr + pagesStr + childMark + name + parent
 }
 
+// renderIndexKeyBanner builds the context banner shown above the B-tree page
+// and tuple lists: the index's key columns (with INCLUDE columns split out)
+// and — on the page list only — a metapage summary (root block, tree height,
+// dedup capability, version). Returns "" when nothing has loaded yet so View
+// can skip the line entirely. Both inputs are best-effort, so either half may
+// be absent.
+func (m *Model) renderIndexKeyBanner(s *screen) string {
+	var lines []string
+	if line := indexKeyLine(s.indexKeyCols); line != "" {
+		lines = append(lines, line)
+	}
+	// The metapage describes the whole tree, so it belongs on the page list, not
+	// on a single page's tuple view.
+	if s.level == levelIndexPages {
+		if line := btreeMetaLine(s.btreeMeta); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// indexKeyLine renders "keys: (a, lower(b))  include: (c)" from the index's
+// column definitions. Key columns are tinted in the index hue; INCLUDE columns
+// stay muted to read as "stored but not searched".
+func indexKeyLine(cols []pg.IndexKeyColumn) string {
+	if len(cols) == 0 {
+		return ""
+	}
+	var keys, incl []string
+	for _, c := range cols {
+		if c.IsKey {
+			keys = append(keys, c.Def)
+		} else {
+			incl = append(incl, c.Def)
+		}
+	}
+	out := "  " + styleMuted.Render("keys: ") +
+		styleIndexSeg.Render("("+strings.Join(keys, ", ")+")")
+	if len(incl) > 0 {
+		out += styleMuted.Render("  include: (" + strings.Join(incl, ", ") + ")")
+	}
+	return out
+}
+
+// btreeMetaLine renders the bt_metap summary: root block, tree height (0 = a
+// single-page root), whether deduplication is possible (allequalimage), and the
+// nbtree on-disk version. dedup "on" is badged so an enabled index stands out.
+func btreeMetaLine(meta *pg.BtreeMeta) string {
+	if meta == nil {
+		return ""
+	}
+	mu := styleMuted.Render
+	dedup := mu("off")
+	if meta.AllEqualImage {
+		dedup = styleBadge.Render("on")
+	}
+	return "  " + mu(fmt.Sprintf("root blk %d", meta.Root)) + mu("  ·  ") +
+		mu(fmt.Sprintf("height %d", meta.Level)) + mu("  ·  ") +
+		mu("dedup ") + dedup + mu("  ·  ") +
+		mu(fmt.Sprintf("v%d", meta.Version))
+}
+
 // renderIndexPagesList draws one row per B-tree page in the loaded window.
 // Bar shows live/dead/free packed against BLCKSZ — same fixed-scale story
 // as the heap-pages view. Per-page columns: type (leaf/intr/root/del),
@@ -187,10 +260,10 @@ func (m *Model) renderIndexPagesList(s *screen, height int) string {
 
 func renderIndexPagesHeader(sort sortMode, sortDesc bool, barW int) string {
 	line := headerIndent(barW) +
-		padRight("type", idxPageTypeColW) + "  " +
+		padRight(sortMark("type", sort == sortByType, sortDesc), idxPageTypeColW) + "  " +
 		padRight(sortMark("level", sort == sortByLevel, sortDesc), idxPageLevelColW) + "  " +
 		padRight(sortMark("used", sort == sortBySize, sortDesc), idxPageUsedColW) + "  " +
-		padRight("live/dead", idxPageItemsColW) + "  " +
+		padRight(sortMark("live/dead", sort == sortByDeadRatio, sortDesc), idxPageItemsColW) + "  " +
 		padRight(sortMark("free", sort == sortByFreeSpace, sortDesc), idxPageFreeColW) + "  " +
 		sortMark("page", sort == sortByBlkno, sortDesc)
 	return styleMuted.Render(line)
@@ -213,17 +286,65 @@ func indexPageTypeLabel(t string) string {
 	return t
 }
 
+// indexPageTypeRank orders page types for sortByType: leaf → internal → root →
+// deleted. Unknown codes sort last.
+func indexPageTypeRank(t string) int {
+	switch t {
+	case "l":
+		return 0
+	case "i":
+		return 1
+	case "r":
+		return 2
+	case "d":
+		return 3
+	}
+	return 4
+}
+
+// indexPageTypeStyle tints the page-type tag by role so the structural pages
+// stand out from the sea of leaves: leaf stays muted (the common case),
+// internal/root take the accent hue, and a deleted page reads red.
+func indexPageTypeStyle(t string) lipgloss.Style {
+	switch t {
+	case "i", "r":
+		return styleBarAlt
+	case "d":
+		return styleBloat
+	}
+	return styleMuted
+}
+
 func renderIndexPageRow(it item, p pg.IndexPageStat, barW int, selected bool) string {
 	cursor := selectedCursor(selected)
 	bar := renderIndexPageBar(p, barW)
-	typ := indexPageTypeLabel(p.Type)
+	typ := indexPageTypeStyle(p.Type).Render(indexPageTypeLabel(p.Type))
 	lvl := fmt.Sprintf("L%d", p.BtpoLevel)
 	used := humanize.Bytes(it.size)
-	items := fmt.Sprintf("%3dL %3dD", p.LiveItems, p.DeadItems)
-	free := "—"
+
+	// live/dead echo the bar's colours: live stays plain, dead turns the bloat
+	// red whenever a page is carrying reclaimable items so it pops at a glance.
+	deadStr := fmt.Sprintf("%3dD", p.DeadItems)
+	if p.DeadItems > 0 {
+		deadStr = styleBloat.Render(deadStr)
+	} else {
+		deadStr = styleMuted.Render(deadStr)
+	}
+	items := fmt.Sprintf("%3dL ", p.LiveItems) + deadStr
+
+	free := styleMuted.Render("—")
 	if p.PageSize > 0 {
 		pct := float64(p.FreeSize) * 100 / float64(p.PageSize)
-		free = fmt.Sprintf("%.0f%%", pct)
+		freeStr := fmt.Sprintf("%.0f%%", pct)
+		// High free on a leaf/root (data) page reads as bloat — grade it like the
+		// heap view's dead% column: packed pages stay cool, sparse pages go red.
+		// Internal/deleted pages legitimately have free space, so keep those
+		// muted to avoid a false bloat signal.
+		if p.Type == "l" || p.Type == "r" {
+			free = percentStyle(100 - pct).Render(freeStr)
+		} else {
+			free = styleMuted.Render(freeStr)
+		}
 	}
 	name := highlightName(it.name, selected)
 	return cursor + bar + "  " +
@@ -324,9 +445,22 @@ func renderIndexTupleRow(t pg.IndexTuple, pageType string, keyW int, selected bo
 	var ctidLabel string
 	switch kind {
 	case idxTuplePivot:
-		ctidLabel = styleHeapToastTag.Render("pivot")
+		// On an internal page the ctid block is a downlink to a child page —
+		// far more useful than "pivot", and it mirrors what ENTER will drill
+		// into. The leaf high-key (item #1 of a non-rightmost leaf) is a real
+		// separator with no child, so it keeps the "pivot" tag.
+		if blk, ok := parseCtidBlock(t.Ctid); ok && pageType == "i" {
+			ctidLabel = styleIndexSeg.Render(fmt.Sprintf("→ blk %d", blk))
+		} else {
+			ctidLabel = styleHeapToastTag.Render("pivot")
+		}
 	case idxTuplePosting:
-		ctidLabel = styleHeapHot.Render("posting")
+		// Surface how many heap tids this one tuple packs (PG13+ dedup).
+		if n := postingTupleCount(t.Ctid); n > 0 {
+			ctidLabel = styleHeapHot.Render(fmt.Sprintf("posting ×%d", n))
+		} else {
+			ctidLabel = styleHeapHot.Render("posting")
+		}
 	default:
 		if t.Ctid != nil {
 			ctidLabel = *t.Ctid
@@ -383,7 +517,40 @@ const (
 const (
 	btIndexAltTIDMask  = 0x2000 // INDEX_ALT_TID_MASK   — posting-list entry (PG 13+)
 	btPivotHeapTIDAttr = 0x1000 // BT_PIVOT_HEAP_TID_ATTR — pivot with heap-tid attr
+	btOffsetMask       = 0x0FFF // BT_OFFSET_MASK — low bits of a posting tuple's
+	// ctid offset word hold its heap-tid count (BTreeTupleGetNPosting).
 )
+
+// parseCtidBlock extracts the block number from a "(blk,off)" ctid text. On a
+// B-tree internal page this block is the downlink to a child index page; on a
+// leaf page it's the heap block. Returns false when ctid is nil/unparseable.
+func parseCtidBlock(ctid *string) (int32, bool) {
+	if ctid == nil {
+		return 0, false
+	}
+	var blk, off int
+	if _, err := fmt.Sscanf(*ctid, "(%d,%d)", &blk, &off); err != nil {
+		return 0, false
+	}
+	_ = off
+	return int32(blk), true
+}
+
+// postingTupleCount decodes how many heap tids a posting-list tuple packs. The
+// count lives in the low bits of the tuple's ctid offset word (ip_posid):
+// INDEX_ALT_TID_MASK marks it a posting tuple and BT_OFFSET_MASK selects the
+// count (BTreeTupleGetNPosting). Returns 0 when the ctid doesn't parse.
+func postingTupleCount(ctid *string) int {
+	if ctid == nil {
+		return 0
+	}
+	var blk, off int
+	if _, err := fmt.Sscanf(*ctid, "(%d,%d)", &blk, &off); err != nil {
+		return 0
+	}
+	_ = blk
+	return off & btOffsetMask
+}
 
 func classifyIndexTuple(t pg.IndexTuple, pageType string) indexTupleKind {
 	if t.Ctid != nil {

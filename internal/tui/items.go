@@ -37,16 +37,18 @@ func tableToItem(t pg.Table, tl tool) item {
 	// values) clutter the detail line with a near-zero figure. Hide TOAST
 	// below 1 MiB — the colored bar segment is already 0-width at that scale.
 	const toastShowThreshold = 1 << 20
+	// Tint each byte figure with its bar-segment colour so the detail line reads
+	// as a legend for the segmented bar; the labels/separators stay muted.
 	parts := []string{
-		"heap " + humanize.Bytes(t.HeapBytes),
-		"idx " + humanize.Bytes(t.IndexesBytes),
+		styleMuted.Render("heap ") + styleHeapSeg.Render(humanize.Bytes(t.HeapBytes)),
+		styleMuted.Render("idx ") + styleIndexSeg.Render(humanize.Bytes(t.IndexesBytes)),
 	}
 	if t.ToastBytes >= toastShowThreshold {
-		parts = append(parts, "toast "+humanize.Bytes(t.ToastBytes))
+		parts = append(parts, styleMuted.Render("toast ")+styleToastSeg.Render(humanize.Bytes(t.ToastBytes)))
 	}
 	return item{
 		name: t.Name, size: t.TotalBytes, hasChildren: true,
-		detail: strings.Join(parts, " · "), data: t,
+		detail: strings.Join(parts, styleMuted.Render(" · ")), detailStyled: true, data: t,
 		heap: t.HeapBytes, idx: t.IndexesBytes, toast: t.ToastBytes,
 		rows: t.EstRows, hasRows: true,
 	}
@@ -157,6 +159,17 @@ func itemTreeLevel(it item) (int64, bool) {
 		return 0, false
 	}
 	return int64(p.BtpoLevel), true
+}
+
+// itemPageType ranks a B-tree page by its type so sortByType groups leaf →
+// internal → root → deleted pages together (the name tiebreaker then orders by
+// block within a group). Second return is false for non-index-page items.
+func itemPageType(it item) (int64, bool) {
+	p, ok := it.data.(pg.IndexPageStat)
+	if !ok {
+		return 0, false
+	}
+	return int64(indexPageTypeRank(p.Type)), true
 }
 
 // relationToItem builds the levelRelations row for one mixed relation entry.
