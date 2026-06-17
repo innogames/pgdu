@@ -469,7 +469,7 @@ func (m *Model) renderList(s *screen, height int) string {
 	case levelDatabases:
 		header = renderGenericHeader(s, barW, "database")
 	case levelSchemas:
-		header = renderGenericHeader(s, barW, "schema")
+		header = renderSchemasHeader(s, barW)
 	case levelColumns:
 		header = renderGenericHeader(s, barW, "column")
 	}
@@ -491,6 +491,7 @@ func (m *Model) renderList(s *screen, height int) string {
 			heap: it.heap, idx: it.idx, toast: it.toast, hasBreakdown: breakdown,
 			rows: it.rows, hasRows: it.hasRows,
 			pages: it.pages, hasPages: it.hasPages,
+			tableCount: it.tableCount, hasTableCount: it.hasTableCount,
 			name: it.name, detail: it.detail, detailStyled: it.detailStyled, selected: vi == s.cursor,
 		}))
 		b.WriteString("\n")

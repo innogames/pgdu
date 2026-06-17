@@ -112,6 +112,12 @@ type item struct {
 	pages    int64
 	hasPages bool
 
+	// tableCount is the number of tables in a schema; only meaningful when
+	// hasTableCount is true (the schemas level). Rendered as its own column
+	// between size and the schema name.
+	tableCount    int64
+	hasTableCount bool
+
 	// statQueryID carries the pg_stat_statements queryid on levelStatements
 	// rows (whose .data is []pg.DiagCell for the generic table renderer) so a
 	// drill can look the full QueryStat back up from screen.statRows.
@@ -638,7 +644,7 @@ func toolItems() []item {
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},
-		{name: "Current Activity (pg_activity)", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
+		{name: "Current Activity", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
 		{name: "Maintenance", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
 		{name: "Other Tools", detail: "run diagnostic queries — index / table / vacuum / activity / wal / server health", hasChildren: true, data: toolTools},
 	}

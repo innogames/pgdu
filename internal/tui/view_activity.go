@@ -196,9 +196,10 @@ func (m *Model) renderActivityInfo(height int) string {
 		col(d.name, d.desc)
 	}
 	b.WriteString("\n")
-	b.WriteString("  " + styleHeader.Render(" OS metrics (rss / cpu% / read/s / write/s) ") + "\n")
+	b.WriteString("  " + styleHeader.Render(" OS metrics (mem / cpu% / read/s / write/s) ") + "\n")
 	b.WriteString("    " + mu("Sourced from /proc/<pid>/{status,stat,io} — only available on Linux when pgdu runs on the same host.") + "\n")
-	b.WriteString("    " + mu("rss and cpu% are readable as any user. read/s and write/s require the same UID as the postgres") + "\n")
+	b.WriteString("    " + mu("mem is the backend's resident set size (physical RAM, VmRSS). mem and cpu% are readable as any user;") + "\n")
+	b.WriteString("    " + mu("read/s and write/s require the same UID as the postgres") + "\n")
 	b.WriteString("    " + mu("process (or root); they show — when permission is denied. cpu% shows — on the first sample") + "\n")
 	b.WriteString("    " + mu("(needs two readings to compute a delta); it tracks one full core = 100%.") + "\n")
 	b.WriteString("\n")

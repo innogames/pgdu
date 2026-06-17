@@ -140,8 +140,8 @@ func actColumnRegistry() []actColDesc {
 			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: r.BackendXmin} }},
 		// OS-level columns sourced from /proc — opt-in, show — on non-Linux or
 		// remote connections where the local /proc PIDs don't match.
-		{id: actColRSS, name: "rss", kind: pg.DiagFloat,
-			desc: "resident set size from /proc/<pid>/status (Linux, local server only)",
+		{id: actColRSS, name: "mem", kind: pg.DiagFloat,
+			desc: "resident memory (RSS = physical RAM held by the backend process) from /proc/<pid>/status (Linux, local server only)",
 			cell: func(r pg.ActivityRow, ctx actCtx) pg.DiagCell {
 				d, ok := ctx.proc[r.PID]
 				if !ok || d.RSSBytes <= 0 {

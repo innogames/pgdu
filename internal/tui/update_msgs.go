@@ -37,7 +37,10 @@ func (m *Model) onSchemasLoaded(msg schemasLoadedMsg) tea.Cmd {
 	s.err = msg.err
 	s.items = s.items[:0]
 	for _, sc := range msg.schemas {
-		s.items = append(s.items, item{name: sc.Name, size: sc.SizeBytes, hasChildren: true, detail: schemaDetail(sc), data: sc})
+		s.items = append(s.items, item{
+			name: sc.Name, size: sc.SizeBytes, hasChildren: true,
+			tableCount: sc.TableCount, hasTableCount: true, data: sc,
+		})
 	}
 	m.applySort(s)
 	// Single-schema fast path: skip the one-row schema picker by replacing it

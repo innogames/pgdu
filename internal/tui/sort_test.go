@@ -14,8 +14,8 @@ func TestValidSorts(t *testing.T) {
 		{levelTools, []sortMode{sortByName}},
 		{levelTables, []sortMode{sortBySize, sortByHeap, sortByIndex, sortByRows, sortByName}},
 		{levelParts, []sortMode{sortBySize, sortByBloat, sortByName}},
-		{levelHeapPages, []sortMode{sortByBlkno, sortBySize, sortByDeadRatio, sortByFreeSpace}},
-		{levelColumns, []sortMode{sortBySize, sortByName}}, // default fallback
+		{levelHeapPages, []sortMode{sortByBlkno, sortBySize, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByDeadRatio, sortByFreeSpace}},
+		{levelColumns, []sortMode{sortBySize, sortByAvgWidth, sortByColType, sortByName}},
 	}
 	for _, c := range cases {
 		got := validSorts(c.level)
@@ -85,6 +85,63 @@ func TestItemRows(t *testing.T) {
 			got, ok := itemRows(c.it)
 			if got != c.want || ok != c.wantOK {
 				t.Errorf("itemRows = (%d, %v), want (%d, %v)", got, ok, c.want, c.wantOK)
+			}
+		})
+	}
+}
+
+func TestHeapPageLPExtractors(t *testing.T) {
+	p := item{data: pg.HeapPageStat{LiveLP: 26, RedirectLP: 2, DeadLP: 4}}
+	other := item{data: pg.Table{}}
+
+	for _, c := range []struct {
+		name    string
+		extract func(item) (int64, bool)
+		want    int64
+	}{
+		{"live", itemLiveLP, 26},
+		{"redirect", itemRedirectLP, 2},
+		{"dead", itemDeadLP, 4},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got, ok := c.extract(p); !ok || got != c.want {
+				t.Errorf("%s = (%d, %v), want (%d, true)", c.name, got, ok, c.want)
+			}
+			if _, ok := c.extract(other); ok {
+				t.Errorf("%s should be false for non-heap-page items", c.name)
+			}
+		})
+	}
+}
+
+func TestHeapTupleState(t *testing.T) {
+	const (
+		xminCmt  = pg.HeapXminCommitted
+		xminInv  = pg.HeapXminInvalid
+		xmaxCmt  = pg.HeapXmaxCommitted
+		xmaxInv  = pg.HeapXmaxInvalid
+		xmaxMult = pg.HeapXmaxIsMulti
+	)
+	xid := func(v uint32) *uint32 { return &v }
+	cases := []struct {
+		name string
+		t    pg.HeapTuple
+		want string
+	}{
+		{"live", pg.HeapTuple{LPFlags: pg.LPNormal, Infomask: xminCmt | xmaxInv, Xmax: xid(0)}, "live"},
+		{"frozen", pg.HeapTuple{LPFlags: pg.LPNormal, Infomask: xminCmt | xminInv | xmaxInv}, "frozen"},
+		{"dead (deleted+committed)", pg.HeapTuple{LPFlags: pg.LPNormal, Infomask: xminCmt | xmaxCmt, Xmax: xid(1043)}, "dead"},
+		{"deleting (xmax uncommitted)", pg.HeapTuple{LPFlags: pg.LPNormal, Infomask: xminCmt, Xmax: xid(1043)}, "deleting"},
+		{"locked (multixact)", pg.HeapTuple{LPFlags: pg.LPNormal, Infomask: xminCmt | xmaxMult, Xmax: xid(7)}, "locked"},
+		{"aborted inserter", pg.HeapTuple{LPFlags: pg.LPNormal, Infomask: xminInv}, "aborted"},
+		{"dead line pointer", pg.HeapTuple{LPFlags: pg.LPDead}, "dead"},
+		{"redirect", pg.HeapTuple{LPFlags: pg.LPRedirect}, "redirect"},
+		{"unused", pg.HeapTuple{LPFlags: pg.LPUnused}, "unused"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got, _ := heapTupleState(c.t); got != c.want {
+				t.Errorf("heapTupleState = %q, want %q", got, c.want)
 			}
 		})
 	}

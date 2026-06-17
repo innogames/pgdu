@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -115,7 +117,13 @@ func (m *Model) renderIndexTuplesInfo(height int) string {
 		styleHeapToastTag.Render("pivot") + mu(" / ") +
 		styleHeapHot.Render("posting ×N") + mu(" labels") + "\n")
 	b.WriteString("    " + padRight("key", 8) +
-		mu("decoded key from the heap when reachable, else dimmed hex of the raw key bytes") + "\n\n")
+		mu("decoded key from the heap when reachable, else dimmed hex of the raw key bytes") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 8) +
+		mu("on internal pages this becomes a ") + styleIndexSeg.Render("low … high") +
+		mu(" range: the keys that child block holds") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 8) +
+		mu("(") + styleIndexSeg.Render("−∞") + mu(" = leftmost child, ") +
+		styleIndexSeg.Render("+∞") + mu(" = rightmost; the range runs to the next downlink's key)") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" drilling ") + "  " +
 		mu("which rows respond to Enter — and why others don't") + "\n")
@@ -407,23 +415,34 @@ func (m *Model) renderIndexTuplesList(s *screen, height int) string {
 		idxTupleLenColW+colGutter+idxTupleFlagsColW+colGutter+
 		idxTupleCtidColW+colGutter+4), 16)
 	pageType := s.indexPageType
-	return m.renderRowList(s, height, renderIndexTuplesHeader(s.sort, s.sortDesc),
+	// On an internal page each entry is a downlink whose key is the *lowest*
+	// key in that child block; the block therefore covers [thisKey, nextKey).
+	// Precompute that range per item so the key column can show what range of
+	// keys lives behind each "→ blk N", rather than the bare separator key.
+	ranges := internalDownlinkRanges(s.items, pageType, keyW)
+	return m.renderRowList(s, height, renderIndexTuplesHeader(s.sort, s.sortDesc, pageType),
 		func(it item, selected bool) string {
 			t, _ := it.data.(pg.IndexTuple)
-			return renderIndexTupleRow(t, pageType, keyW, selected)
+			return renderIndexTupleRow(t, pageType, ranges[t.ItemOffset], keyW, selected)
 		})
 }
 
-func renderIndexTuplesHeader(sort sortMode, sortDesc bool) string {
+func renderIndexTuplesHeader(sort sortMode, sortDesc bool, pageType string) string {
+	keyCol := "key"
+	if pageType == "i" {
+		// Internal-page entries are downlinks; the column shows the key range
+		// each child block covers, not a single heap key.
+		keyCol = "key range (covered by child block)"
+	}
 	line := "  " + padRight(sortMark("off", sort == sortByLP, sortDesc), idxTupleOffColW) + "  " +
 		padRight(sortMark("len", sort == sortBySize, sortDesc), idxTupleLenColW) + "  " +
 		padRight("flags", idxTupleFlagsColW) + "  " +
 		padRight("ctid", idxTupleCtidColW) + "  " +
-		"key"
+		keyCol
 	return styleMuted.Render(line)
 }
 
-func renderIndexTupleRow(t pg.IndexTuple, pageType string, keyW int, selected bool) string {
+func renderIndexTupleRow(t pg.IndexTuple, pageType, blockRange string, keyW int, selected bool) string {
 	cursor := selectedCursor(selected)
 	off := fmt.Sprintf("#%04d", t.ItemOffset)
 	if selected {
@@ -475,6 +494,11 @@ func renderIndexTupleRow(t pg.IndexTuple, pageType string, keyW int, selected bo
 	deadTag := styleBloat.Render("dead") + " "
 	var key string
 	switch {
+	case blockRange != "":
+		// Internal-page downlink: show the key range this child block covers
+		// (precomputed from the neighbouring separators) instead of the bare
+		// lower-bound separator key.
+		key = blockRange
 	case t.Decoded != nil:
 		key = truncateValue(t.Decoded, keyW)
 	case t.Data != nil && kind == idxTupleNormal:
@@ -534,6 +558,139 @@ func parseCtidBlock(ctid *string) (int32, bool) {
 	}
 	_ = off
 	return int32(blk), true
+}
+
+// internalDownlinkRanges computes, for each downlink on a B-tree internal
+// page, the key range its child block covers: [thisSeparator, nextSeparator).
+// nbtree stores downlinks in key order by offset, with two structural
+// exceptions handled here: item #1 (offset 1) of a non-rightmost page is the
+// page high key — the page's own upper bound, not a child range — and the
+// leftmost downlink's key is truncated to "minus infinity" (no key bytes).
+// The result is keyed by ItemOffset so the renderer can look each row up
+// regardless of the active display sort. Returns nil for non-internal pages.
+func internalDownlinkRanges(items []item, pageType string, keyW int) map[int32]string {
+	if pageType != "i" {
+		return nil
+	}
+	type entry struct {
+		off    int32
+		text   string
+		hasKey bool
+	}
+	var all []entry
+	for _, it := range items {
+		t, ok := it.data.(pg.IndexTuple)
+		if !ok {
+			continue
+		}
+		text, hasKey := indexKeyText(t)
+		all = append(all, entry{t.ItemOffset, text, hasKey})
+	}
+	if len(all) == 0 {
+		return nil
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].off < all[j].off })
+
+	// The page high key sits at offset 1 and carries a real key; the leftmost
+	// (minus-infinity) downlink carries none. So offset 1 is the high key only
+	// when it has a key AND some keyless downlink follows it — on a rightmost
+	// page there's no high key and offset 1 is the minus-infinity downlink, so
+	// the range simply runs up to +∞.
+	pageUpper := "+∞"
+	downlinks := all
+	if all[0].hasKey {
+		for _, e := range all[1:] {
+			if !e.hasKey {
+				pageUpper = all[0].text
+				downlinks = all[1:]
+				break
+			}
+		}
+	}
+
+	side := max((keyW-5)/2, 6) // the "  …  " separator eats ~5 cols
+	clip := func(s string) string { return truncateToWidth(s, side) }
+
+	out := make(map[int32]string, len(downlinks))
+	for i, d := range downlinks {
+		lower := "−∞"
+		if d.hasKey {
+			lower = clip(d.text)
+		}
+		upper := pageUpper
+		switch {
+		case i+1 < len(downlinks):
+			upper = clip(downlinks[i+1].text) // next separator (always keyed)
+		case upper != "+∞":
+			upper = clip(upper)
+		}
+		out[d.off] = styleMuted.Render(lower + "  …  " + upper)
+	}
+	return out
+}
+
+// indexKeyText returns a readable form of a tuple's key and whether it carries
+// one at all. A decoded heap projection wins; otherwise the raw hex `data` is
+// decoded to text when it looks like a printable key (see decodeHexKey), else
+// kept verbatim. An empty/absent key — the minus-infinity leftmost downlink —
+// reports hasKey == false.
+func indexKeyText(t pg.IndexTuple) (string, bool) {
+	if t.Decoded != nil && *t.Decoded != "" {
+		return *t.Decoded, true
+	}
+	if t.Data == nil {
+		return "", false
+	}
+	if s, ok := decodeHexKey(*t.Data); ok {
+		return s, true
+	}
+	if raw := strings.TrimSpace(*t.Data); raw != "" {
+		return raw, true
+	}
+	return "", false
+}
+
+// decodeHexKey turns pageinspect's space-separated hex `data`
+// (e.g. "2f 75 73 65 72") into readable text for the common single-text-column
+// key. It strips a leading 1-byte short-varlena length header and trailing NUL
+// padding, then accepts the result only when every remaining byte is printable
+// ASCII; otherwise ok == false so the caller keeps the raw hex (int, composite
+// and binary keys stay hex). A pageinspect "…" truncation marker ends parsing.
+func decodeHexKey(hex string) (string, bool) {
+	var b []byte
+	for _, f := range strings.Fields(hex) {
+		if strings.ContainsRune(f, '…') {
+			break
+		}
+		if len(f) != 2 {
+			return "", false
+		}
+		v, err := strconv.ParseUint(f, 16, 8)
+		if err != nil {
+			return "", false
+		}
+		b = append(b, byte(v))
+	}
+	if len(b) == 0 {
+		return "", false
+	}
+	// Short varlena: the low bit of the first byte marks a 1-byte length header
+	// (VARATT_IS_1B); drop it so the length isn't rendered as a character.
+	if b[0]&1 == 1 && b[0] > 1 {
+		b = b[1:]
+	}
+	for len(b) > 0 && b[len(b)-1] == 0x00 {
+		b = b[:len(b)-1]
+	}
+	if len(b) == 0 {
+		return "", false
+	}
+	for _, c := range b {
+		if c < 0x20 || c > 0x7e {
+			return "", false
+		}
+	}
+	return string(b), true
 }
 
 // postingTupleCount decodes how many heap tids a posting-list tuple packs. The
@@ -600,6 +757,11 @@ func boolFlag(letter string, b *bool) string {
 // tupleInfomaskBadges renders the decoded infomask/infomask2 bits as a
 // bracketed sequence. Categories: commit-state (green), invalid (muted),
 // HOT (magenta), external (toast yellow), structural (default).
+//
+// Superseded on the heap-tuples headline by the higher-signal `state` verdict
+// (heapTupleState) + lifecycle sentence; kept here, disabled, in case a future
+// "raw bits" detail toggle wants the full badge decode back.
+/*
 func tupleInfomaskBadges(infomask, infomask2 int32) string {
 	im := uint16(infomask)
 	im2 := uint16(infomask2)
@@ -644,3 +806,4 @@ func tupleInfomaskBadges(infomask, infomask2 int32) string {
 	}
 	return strings.Join(parts, "")
 }
+*/

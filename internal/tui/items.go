@@ -129,6 +129,34 @@ func itemFreeSpace(it item) (int64, bool) {
 	return 0, false
 }
 
+// itemLiveLP / itemRedirectLP / itemDeadLP extract a heap page's per-state
+// line-pointer counts so each can be sorted on independently. Gated on the
+// pg.HeapPageStat payload so rows from other levels sort to the bottom rather
+// than tying at zero with a genuinely empty page.
+func itemLiveLP(it item) (int64, bool) {
+	p, ok := it.data.(pg.HeapPageStat)
+	if !ok {
+		return 0, false
+	}
+	return int64(p.LiveLP), true
+}
+
+func itemRedirectLP(it item) (int64, bool) {
+	p, ok := it.data.(pg.HeapPageStat)
+	if !ok {
+		return 0, false
+	}
+	return int64(p.RedirectLP), true
+}
+
+func itemDeadLP(it item) (int64, bool) {
+	p, ok := it.data.(pg.HeapPageStat)
+	if !ok {
+		return 0, false
+	}
+	return int64(p.DeadLP), true
+}
+
 // itemLP extracts the line-pointer index for heap-tuple items, or the
 // itemoffset for index-tuple items (same concept — a per-page slot index).
 func itemLP(it item) (int64, bool) {

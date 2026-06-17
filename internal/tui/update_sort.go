@@ -181,6 +181,35 @@ func itemIndexBytes(it item) (int64, bool) {
 	return it.idx, true
 }
 
+// itemColType / itemColAvgWidth extract the data type and pg_stats avg_width
+// of a per-column-space row. Gated on the pg.Column payload so rows from other
+// levels (where these are absent) sort to the bottom rather than tying.
+func itemColType(it item) (string, bool) {
+	c, ok := it.data.(pg.Column)
+	if !ok {
+		return "", false
+	}
+	return c.Type, true
+}
+
+func itemColAvgWidth(it item) (int64, bool) {
+	c, ok := it.data.(pg.Column)
+	if !ok {
+		return 0, false
+	}
+	return int64(c.AvgWidth), true
+}
+
+// itemSchemaTables extracts a schema's table count for the schemas level.
+// Gated on the pg.Schema payload so rows from other levels sort to the bottom.
+func itemSchemaTables(it item) (int64, bool) {
+	sc, ok := it.data.(pg.Schema)
+	if !ok {
+		return 0, false
+	}
+	return sc.TableCount, true
+}
+
 // validSorts declares which sort modes are meaningful at each level. Keys
 // outside the returned set are silently ignored in handleKey, so adding a new
 // level here is the single source of truth for "which sort keys do what".
@@ -194,10 +223,14 @@ func validSorts(l level) []sortMode {
 		return []sortMode{sortBySize, sortByHeap, sortByIndex, sortByRows, sortByName}
 	case levelParts:
 		return []sortMode{sortBySize, sortByBloat, sortByName}
+	case levelColumns:
+		return []sortMode{sortBySize, sortByAvgWidth, sortByColType, sortByName}
+	case levelSchemas:
+		return []sortMode{sortBySize, sortByTables, sortByName}
 	case levelBufferTables:
 		return []sortMode{sortBySize, sortByTotal, sortByCached, sortByHitRatio, sortByDirty, sortByName}
 	case levelHeapPages:
-		return []sortMode{sortByBlkno, sortBySize, sortByDeadRatio, sortByFreeSpace}
+		return []sortMode{sortByBlkno, sortBySize, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByDeadRatio, sortByFreeSpace}
 	case levelHeapTuples:
 		return []sortMode{sortByLP, sortBySize}
 	case levelTupleRow:

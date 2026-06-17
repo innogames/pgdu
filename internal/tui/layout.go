@@ -72,9 +72,11 @@ func barReserve(l level, tl tool) int {
 	case levelColumns, levelDatabases, levelSchemas:
 		return colCursor + colBrackets + colSize + colMark + colName + colDetail
 	case levelHeapPages:
-		// cursor + bar(brackets) + flag + used + live/dead + dead% + page name
+		// cursor + bar(brackets) + flag + used + live + R + dead + dead% + name
 		return colCursor + colBrackets + heapPageFlagColW + colGutter +
-			heapPageUsedColW + colGutter + heapPageLPColW + colGutter +
+			heapPageUsedColW + colGutter +
+			heapPageLiveColW + colGutter + heapPageRedirColW + colGutter +
+			heapPageDeadLPColW + colGutter +
 			heapPageDeadColW + colGutter + heapPageNameColW
 	case levelHeapTuples:
 		// cursor + dot + lp idx + flag word + len + xmin + xmax + ctid + slack
@@ -132,9 +134,12 @@ func barReserve(l level, tl tool) int {
 const (
 	heapPageFlagColW = 1
 	heapPageUsedColW = 10
-	heapPageLPColW   = 12 // "###L ##R ##D"
-	heapPageDeadColW = 7
-	heapPageNameColW = 16
+	// live / R / dead line-pointer counts, each its own sortable column.
+	heapPageLiveColW   = 5 // up to ~291 tuples/page + sort arrow
+	heapPageRedirColW  = 4
+	heapPageDeadLPColW = 5
+	heapPageDeadColW   = 7
+	heapPageNameColW   = 16
 )
 
 // Column widths for the heap-tuples header and rows. Same rationale.

@@ -28,7 +28,7 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 	b.WriteString("    " + sw(styleBloat) + "  " + mu("dead      bytes occupied by tuples awaiting VACUUM (lp_flags = DEAD)") + "\n")
 	b.WriteString("    " + mu("░  free      empty space between pd_lower and pd_upper inside the page") + "\n")
 	b.WriteString("    " + mu("         REDIRECT (HOT hop) slots have no tuple bytes so they don't appear in the bar;") + "\n")
-	b.WriteString("    " + mu("         their count shows as the R column in live/R/dead") + "\n\n")
+	b.WriteString("    " + mu("         their count shows in the R column (each of live / R / dead sorts on its own)") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" page flag ") + "  " +
 		mu("one glyph per page summarising its tuple-mix state") + "\n")
@@ -57,10 +57,10 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 }
 
 // renderHeapTuplesInfo draws a static explainer for the per-tuple drill view:
-// the meaning of each column (lp, lp_flags, len, xmin/xmax, ctid) and a
-// decoded glossary of the infomask/infomask2 badges. Sized to fill `height`
-// lines so the help row stays pinned to the bottom; shown when the user
-// toggles `?` on levelHeapTuples.
+// the meaning of each column (lp, lp_flags, len, xmin/xmax, ctid, state), the
+// visibility verdicts and structural-flag icons, and the three expanded-row
+// lines. Sized to fill `height` lines so the help row stays pinned to the
+// bottom; shown when the user toggles `?` on levelHeapTuples.
 func (m *Model) renderHeapTuplesInfo(height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
@@ -79,40 +79,40 @@ func (m *Model) renderHeapTuplesInfo(height int) string {
 	b.WriteString("    " + padRight("len", 12) + mu("lp_len — tuple length in bytes (header + nulls bitmap + data)") + "\n")
 	b.WriteString("    " + padRight("xmin", 12) + mu("inserting transaction id (visible only to xacts after xmin commits)") + "\n")
 	b.WriteString("    " + padRight("xmax", 12) + mu("deleting / locking xid; 0 means \"no xmax set\" — the tuple is still live") + "\n")
-	b.WriteString("    " + padRight("ctid", 12) + mu("forward pointer: own (block,offset) for NORMAL · → #NNNN target lp for REDIRECT") + "\n\n")
+	b.WriteString("    " + padRight("ctid", 12) + mu("forward pointer: own (block,offset) for NORMAL · → #NNNN target lp for REDIRECT") + "\n")
+	b.WriteString("    " + padRight("state", 12) + mu("visibility verdict decoded from xmin/xmax + commit bits (see below)") + "\n\n")
 
-	b.WriteString("  " + styleHeader.Render(" infomask flags ") + "  " +
-		mu("decoded bits of t_infomask / t_infomask2 — what's true about this tuple") + "\n")
-	b.WriteString("    " + styleMuted.Render("[HASNULL]") + "      " +
-		mu("at least one column is SQL NULL (a null bitmap follows the header)") + "\n")
-	b.WriteString("    " + styleMuted.Render("[VARWIDTH]") + "     " +
-		mu("at least one column is variable-width (text/bytea/numeric/…)") + "\n")
-	b.WriteString("    " + styleHeapToastTag.Render("[HASEXTERNAL]") + "  " +
-		mu("at least one column value lives out-of-line in the TOAST relation") + "\n")
-	b.WriteString("    " + styleBadge.Render("[XMIN_CMT]") + "     " +
-		mu("HEAP_XMIN_COMMITTED hint — xmin is known committed (fast-path visibility)") + "\n")
-	b.WriteString("    " + styleMuted.Render("[XMIN_INV]") + "     " +
-		mu("HEAP_XMIN_INVALID hint — xmin aborted, or xmin is frozen") + "\n")
-	b.WriteString("    " + styleBadge.Render("[XMAX_CMT]") + "     " +
-		mu("HEAP_XMAX_COMMITTED hint — xmax is known committed (tuple is dead)") + "\n")
-	b.WriteString("    " + styleMuted.Render("[XMAX_INV]") + "     " +
-		mu("HEAP_XMAX_INVALID — xmax aborted or never set; tuple is still live") + "\n")
-	b.WriteString("    " + lipgloss.NewStyle().Foreground(colorAccent).Render("[XMAX_MULTI]") + "   " +
-		mu("xmax holds a MultiXactId — multiple locks/updates rather than a single xid") + "\n")
-	b.WriteString("    " + styleMuted.Render("[UPDATED]") + "      " +
-		mu("HEAP_UPDATED — this tuple was UPDATEd (a newer version may exist via ctid)") + "\n")
-	b.WriteString("    " + styleHeapHot.Render("[HOT]") + "          " +
-		mu("HEAP_HOT_UPDATED — the next version is on the same page (no index update)") + "\n")
-	b.WriteString("    " + styleHeapHot.Render("[HEAP_ONLY]") + "    " +
-		mu("HEAP_ONLY_TUPLE — this version is reachable only via a HOT chain hop") + "\n\n")
+	b.WriteString("  " + styleHeader.Render(" state ") + "  " +
+		mu("the infomask/xmin/xmax bits collapse to one verdict instead of a raw badge dump") + "\n")
+	b.WriteString("    " + styleLPNormal.Render(padRight("live", 10)) +
+		mu("inserter committed, no (committed) deleter — visible to current transactions") + "\n")
+	b.WriteString("    " + styleLPNormal.Render(padRight("frozen", 10)) +
+		mu("HEAP_XMIN_FROZEN — permanently visible, xmin no longer matters for wraparound") + "\n")
+	b.WriteString("    " + styleBloat.Render(padRight("dead", 10)) +
+		mu("deleted by a committed xmax (or a DEAD line pointer) — reclaimable by VACUUM") + "\n")
+	b.WriteString("    " + styleBarAlt.Render(padRight("deleting", 10)) +
+		mu("xmax set but not yet committed — an in-flight DELETE/UPDATE") + "\n")
+	b.WriteString("    " + styleBarAlt.Render(padRight("locked", 10)) +
+		mu("xmax is a MultiXactId — row is locked/updated by several transactions") + "\n")
+	b.WriteString("    " + styleMuted.Render(padRight("aborted", 10)) +
+		mu("inserting transaction aborted — the tuple was never visible to anyone") + "\n")
+	b.WriteString("    " + styleMuted.Render(padRight("unused", 10)) +
+		mu("free line pointer (UNUSED) — no tuple body") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" flags ") + "  " +
+		mu("compact icons trail the verdict only when these structural bits are set") + "\n")
+	b.WriteString("    " + styleHeapHot.Render(padRight("↟HOT", 10)) +
+		mu("HEAP_HOT_UPDATED — the next row version is on the same page (no index update)") + "\n")
+	b.WriteString("    " + styleHeapHot.Render(padRight("◦only", 10)) +
+		mu("HEAP_ONLY_TUPLE — this version is reachable only via a HOT chain hop") + "\n")
+	b.WriteString("    " + styleHeapToastTag.Render(padRight("⇲toast", 10)) +
+		mu("HEAP_HASEXTERNAL — at least one value lives out-of-line in the TOAST relation") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" expanded row ") + "  " +
-		mu("the selected row expands to show internals not visible in the table") + "\n")
-	b.WriteString("    " + padRight("data:", 12) + mu("first bytes of t_data in hex — header offsets are described by hoff/bits") + "\n")
-	b.WriteString("    " + padRight("infomask", 12) + mu("raw infomask + infomask2 hex words and the null bitmap, when present") + "\n")
-	b.WriteString("    " + padRight("hoff", 12) + mu("t_hoff — bytes from tuple start to user data (header + nulls bitmap, aligned)") + "\n")
-	b.WriteString("    " + padRight("bits", 12) + mu("null bitmap: 1 = column has a value, 0 = SQL NULL (LSB = column 1)") + "\n")
-	b.WriteString("    " + padRight("lp_off", 12) + mu("byte offset of the tuple from the start of the page") + "\n")
+		mu("the selected row expands to three lines decoding its internals") + "\n")
+	b.WriteString("    " + padRight("data:", 12) + mu("first bytes of t_data in hex, tagged with the payload byte count") + "\n")
+	b.WriteString("    " + padRight("lifecycle:", 12) + mu("MVCC story — who inserted it (and if that committed), then deleted/locked/live") + "\n")
+	b.WriteString("    " + padRight("layout:", 12) + mu("header vs payload bytes (split at t_hoff) with a bar, plus the page byte span") + "\n")
 
 	rendered := strings.Count(b.String(), "\n")
 	for i := rendered; i < height; i++ {
@@ -169,7 +169,9 @@ func renderHeapPagesHeader(sort sortMode, sortDesc bool, barW int) string {
 	line := headerIndent(barW) +
 		padRight("!", heapPageFlagColW) + "  " +
 		padRight(sortMark("used", sort == sortBySize, sortDesc), heapPageUsedColW) + "  " +
-		padRight("live/R/dead", heapPageLPColW) + "  " +
+		padRight(sortMark("live", sort == sortByLiveLP, sortDesc), heapPageLiveColW) + "  " +
+		padRight(sortMark("R", sort == sortByRedirectLP, sortDesc), heapPageRedirColW) + "  " +
+		padRight(sortMark("dead", sort == sortByDeadLP, sortDesc), heapPageDeadLPColW) + "  " +
 		padRight(sortMark("dead%", sort == sortByDeadRatio, sortDesc), heapPageDeadColW) + "  " +
 		sortMark("page", sort == sortByBlkno, sortDesc)
 	return styleMuted.Render(line)
@@ -190,7 +192,18 @@ func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool) stri
 	}
 
 	used := humanize.Bytes(it.size)
-	lpStr := fmt.Sprintf("%3dL %2dR %2dD", p.LiveLP, p.RedirectLP, p.DeadLP)
+	// Each count echoes its colour from the page bar / flag glyphs: live in the
+	// heap-segment hue, REDIRECT in the HOT-hop accent, dead in bloat-red (only
+	// when non-zero, so a clean page stays quiet).
+	liveStr := styleHeapSeg.Render(fmt.Sprintf("%d", p.LiveLP))
+	redirStr := styleMuted.Render(fmt.Sprintf("%d", p.RedirectLP))
+	if p.RedirectLP > 0 {
+		redirStr = styleLPRedirect.Render(fmt.Sprintf("%d", p.RedirectLP))
+	}
+	deadStr := styleMuted.Render(fmt.Sprintf("%d", p.DeadLP))
+	if p.DeadLP > 0 {
+		deadStr = styleBloat.Render(fmt.Sprintf("%d", p.DeadLP))
+	}
 	deadPct := "—"
 	if df := p.DeadFrac(); df >= 0 {
 		deadPct = percentStyle(100 - df*100).Render(fmt.Sprintf("%.0f%%", df*100))
@@ -199,7 +212,9 @@ func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool) stri
 	return cursor + bar + "  " +
 		padRight(flag, heapPageFlagColW) + "  " +
 		padRight(used, heapPageUsedColW) + "  " +
-		padRight(lpStr, heapPageLPColW) + "  " +
+		padRight(liveStr, heapPageLiveColW) + "  " +
+		padRight(redirStr, heapPageRedirColW) + "  " +
+		padRight(deadStr, heapPageDeadLPColW) + "  " +
 		padRight(deadPct, heapPageDeadColW) + "  " +
 		name
 }
@@ -250,7 +265,7 @@ func renderHeapTuplesHeader(sort sortMode, sortDesc bool) string {
 		padRight("xmin", tupleXidColW) + "  " +
 		padRight("xmax", tupleXidColW) + "  " +
 		padRight("ctid", tupleCtidColW) + "  " +
-		"infomask flags"
+		"state"
 	return styleMuted.Render(line)
 }
 
@@ -269,7 +284,13 @@ func renderHeapTupleHeadline(t pg.HeapTuple, selected bool) string {
 		// is readable without dropping into the expanded detail block.
 		ctid = fmt.Sprintf("→ #%04d", t.LPOff)
 	}
-	badges := tupleInfomaskBadges(t.Infomask, t.Infomask2)
+	// The infomask/xmin/xmax bits collapse to a single visibility verdict
+	// ("live"/"dead"/…) — far higher signal than the per-row badge dump, which
+	// read identically on every tuple of a page. Only the genuinely varying
+	// structural flags (HOT / heap-only / external) trail as compact icons.
+	stateLabel, stateStyle := heapTupleState(t)
+	state := stateStyle.Render(stateLabel)
+	icons := heapTupleFlagIcons(t)
 	chunkInfo := ""
 	if t.ChunkID != nil && t.ChunkSeq != nil {
 		// TOAST chunk: append muted chunk_id / seq so the user can identify
@@ -282,30 +303,200 @@ func renderHeapTupleHeadline(t pg.HeapTuple, selected bool) string {
 		padRight(xmin, tupleXidColW) + "  " +
 		padRight(xmax, tupleXidColW) + "  " +
 		padRight(ctid, tupleCtidColW) + "  " +
-		badges + chunkInfo
+		state + icons + chunkInfo
 }
 
+// heapTupleState collapses a line pointer's slot flag plus the tuple's
+// xmin/xmax commit bits into a one-word visibility verdict and its tint.
+// Slot state wins first (UNUSED/DEAD/REDIRECT line pointers carry no tuple
+// body); for a NORMAL pointer the verdict is derived from the inserting and
+// deleting transactions' commit fate as recorded in t_infomask.
+func heapTupleState(t pg.HeapTuple) (string, lipgloss.Style) {
+	switch t.LPFlags {
+	case pg.LPUnused:
+		return "unused", styleMuted
+	case pg.LPDead:
+		return "dead", styleBloat
+	case pg.LPRedirect:
+		return "redirect", styleLPRedirect
+	}
+	im := uint16(t.Infomask)
+	xminCommitted := im&pg.HeapXminCommitted != 0
+	xminInvalid := im&pg.HeapXminInvalid != 0
+	// An aborted inserter means the tuple was never visible to anyone.
+	if xminInvalid && !xminCommitted {
+		return "aborted", styleMuted
+	}
+	// xmax names a deleter/locker; HEAP_XMAX_INVALID (or a zero xmax) means the
+	// row was never deleted.
+	deleted := t.Xmax != nil && *t.Xmax != 0 && im&pg.HeapXmaxInvalid == 0
+	if deleted {
+		switch {
+		case im&pg.HeapXmaxIsMulti != 0:
+			return "locked", styleBarAlt
+		case im&pg.HeapXmaxCommitted != 0:
+			return "dead", styleBloat
+		default:
+			return "deleting", styleBarAlt
+		}
+	}
+	// HEAP_XMIN_FROZEN is encoded as both committed+invalid set together.
+	if xminCommitted && xminInvalid {
+		return "frozen", styleLPNormal
+	}
+	return "live", styleLPNormal
+}
+
+// heapTupleFlagIcons renders the structural infomask bits that actually vary
+// from row to row — HOT-updated, heap-only, and has-external (TOAST pointer) —
+// as a compact icon cluster. Returns "" (no leading gap) when none are set, so
+// the common case stays clean.
+func heapTupleFlagIcons(t pg.HeapTuple) string {
+	im := uint16(t.Infomask)
+	im2 := uint16(t.Infomask2)
+	var parts []string
+	if im2&pg.HeapHotUpdated2 != 0 {
+		parts = append(parts, styleHeapHot.Render("↟HOT"))
+	}
+	if im2&pg.HeapOnlyTuple2 != 0 {
+		parts = append(parts, styleHeapHot.Render("◦only"))
+	}
+	if im&pg.HeapHasExternal != 0 {
+		parts = append(parts, styleHeapToastTag.Render("⇲toast"))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "  " + strings.Join(parts, " ")
+}
+
+// renderHeapTupleExpand turns the selected line pointer's raw page internals
+// into readable lines: a data preview, a plain-English lifecycle sentence
+// (replacing the old infomask/xmin/xmax hex), and a byte-anatomy breakdown with
+// a tiny overhead-vs-payload bar (replacing the bare lp_off/raw_len numbers).
+// Line pointers with no tuple body — REDIRECT/DEAD/UNUSED — get a single
+// purposeful one-liner instead of a meaningless hex dump.
 func renderHeapTupleExpand(t pg.HeapTuple) []string {
 	indent := "       "
-	dataLine := indent + styleMuted.Render("data: ") + previewBytes(t.Data, 48)
-	bits := "—"
-	if t.Bits != nil && *t.Bits != "" {
-		s := *t.Bits
-		if len(s) > 32 {
-			s = s[:32] + "…"
-		}
-		bits = s
+	switch t.LPFlags {
+	case pg.LPRedirect:
+		return []string{indent + styleMuted.Render("redirect → ") +
+			styleLPRedirect.Render(fmt.Sprintf("#%04d", t.LPOff)) +
+			styleMuted.Render("  ·  HOT-chain hop to a live tuple later on this page")}
+	case pg.LPDead:
+		return []string{indent +
+			styleMuted.Render("dead line pointer  ·  tuple pruned; slot reclaimable on next vacuum")}
+	case pg.LPUnused:
+		return []string{indent +
+			styleMuted.Render("unused slot  ·  free line pointer, available for a new tuple")}
 	}
-	hoff := "—"
+	return []string{
+		tupleDataLine(t, indent),
+		tupleLifecycleLine(t, indent),
+		tupleAnatomyLine(t, indent),
+	}
+}
+
+// tupleDataLine previews the raw t_data bytes (still the most direct look at
+// the payload) and tags it with the payload byte count.
+func tupleDataLine(t pg.HeapTuple, indent string) string {
+	return indent + styleMuted.Render("data: ") + previewBytes(t.Data, 48) +
+		styleMuted.Render(fmt.Sprintf("  (%d B payload)", len(t.Data)))
+}
+
+// tupleLifecycleLine narrates the tuple's MVCC story from xmin/xmax and the
+// commit bits in t_infomask: who inserted it and whether that committed, then
+// whether it was deleted / locked / is still live, then any structural notes.
+func tupleLifecycleLine(t pg.HeapTuple, indent string) string {
+	im := uint16(t.Infomask)
+	im2 := uint16(t.Infomask2)
+	var parts []string
+
+	ins := "inserted " + xidLabel(t.Xmin)
+	switch {
+	case im&pg.HeapXminCommitted != 0 && im&pg.HeapXminInvalid != 0:
+		ins += " (frozen)"
+	case im&pg.HeapXminCommitted != 0:
+		ins += " (committed)"
+	case im&pg.HeapXminInvalid != 0:
+		ins += " (aborted)"
+	default:
+		ins += " (in progress)"
+	}
+	parts = append(parts, ins)
+
+	switch {
+	case t.Xmax == nil || *t.Xmax == 0 || im&pg.HeapXmaxInvalid != 0:
+		parts = append(parts, "not deleted")
+	case im&pg.HeapXmaxIsMulti != 0:
+		parts = append(parts, "locked (multixact "+xidLabel(t.Xmax)+")")
+	case im&pg.HeapXmaxCommitted != 0:
+		parts = append(parts, "deleted "+xidLabel(t.Xmax)+" (committed)")
+	default:
+		parts = append(parts, "deleting "+xidLabel(t.Xmax))
+	}
+
+	if im2&pg.HeapHotUpdated2 != 0 {
+		parts = append(parts, "HOT-updated")
+	}
+	if im2&pg.HeapOnlyTuple2 != 0 {
+		parts = append(parts, "heap-only")
+	}
+	if im&pg.HeapHasExternal != 0 {
+		parts = append(parts, "has external (TOAST)")
+	}
+
+	return indent + styleMuted.Render("lifecycle: "+strings.Join(parts, " · "))
+}
+
+// tupleAnatomyLine breaks lp_len down into header overhead vs. user payload
+// (split at t_hoff), draws a tiny proportional bar, and locates the tuple in
+// the page by byte span — turning the old bare lp_off / raw_len numbers into a
+// disk-efficiency story. The header byte count is graded by payload share so
+// overhead-heavy tuples (many tiny rows) read warm.
+func tupleAnatomyLine(t pg.HeapTuple, indent string) string {
+	total := int(t.LPLen)
+	header := 0
 	if t.Hoff != nil {
-		hoff = fmt.Sprintf("%d", *t.Hoff)
+		header = int(*t.Hoff)
 	}
-	infoLine := indent + styleMuted.Render(fmt.Sprintf(
-		"infomask 0x%04x  ·  infomask2 0x%04x  ·  hoff %s  ·  bits %s",
-		uint16(t.Infomask), uint16(t.Infomask2), hoff, bits,
-	))
-	rawLine := indent + styleMuted.Render(fmt.Sprintf("lp_off %d  raw_len %d", t.LPOff, t.LPLen))
-	return []string{dataLine, infoLine, rawLine}
+	data := max(total-header, 0)
+	bar := renderTupleAnatomyBar(header, total, 10)
+
+	headStr := fmt.Sprintf("%d B header", header)
+	if total > 0 {
+		headStr = percentStyle(float64(data) * 100 / float64(total)).Render(headStr)
+	}
+	nullNote := ""
+	if im := uint16(t.Infomask); im&pg.HeapHasNull != 0 {
+		nullNote = styleMuted.Render(" incl null-map")
+	}
+	return indent + bar + "  " + headStr + nullNote +
+		styleMuted.Render(fmt.Sprintf(" + %d B data = %d B", data, total)) +
+		styleMuted.Render(fmt.Sprintf("  ·  page bytes %d–%d", t.LPOff, int(t.LPOff)+total))
+}
+
+// renderTupleAnatomyBar paints header overhead (toast-yellow) against payload
+// (heap-cyan) scaled to the tuple length, matching the page bars' visual idiom.
+func renderTupleAnatomyBar(header, total, width int) string {
+	if total <= 0 {
+		return paintBar(width)
+	}
+	h := min(max(int(float64(width)*float64(header)/float64(total)), 0), width)
+	return paintBar(width,
+		barSegment{cells: h, style: styleHeapToastTag},
+		barSegment{cells: width - h, style: styleHeapSeg},
+	)
+}
+
+// xidLabel formats a transaction id as "t<NNN>" for the lifecycle sentence,
+// or "t?" when pageinspect reported NULL (only happens on bodyless pointers,
+// which take a different render path).
+func xidLabel(x *uint32) string {
+	if x == nil {
+		return "t?"
+	}
+	return fmt.Sprintf("t%d", *x)
 }
 
 // lpFlagDecoration returns the coloured LP dot and the four-letter label for

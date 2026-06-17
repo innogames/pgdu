@@ -43,6 +43,11 @@ type row struct {
 	// pages is the heap page count; only rendered when hasPages is true.
 	pages    int64
 	hasPages bool
+
+	// tableCount is the schema's table count; only rendered when hasTableCount
+	// is true (the schemas level), as a column between size and name.
+	tableCount    int64
+	hasTableCount bool
 }
 
 // barWidthMin is the fallback bar width when the terminal is too narrow for
@@ -100,11 +105,15 @@ func renderRow(r row) string {
 	if r.hasPages {
 		pagesStr = styleMuted.Render(padRight(formatRows(r.pages)+"p", pagesColW)) + "  "
 	}
+	tableCountStr := ""
+	if r.hasTableCount {
+		tableCountStr = styleMuted.Render(padRight(formatRows(r.tableCount), tableCountColW)) + "  "
+	}
 	childMark := "  "
 	if r.hasChildren {
 		childMark = styleMuted.Render("+ ")
 	}
-	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + breakdownStr + rowsStr + pagesStr + bloatStr + childMark + name + detail
+	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + tableCountStr + breakdownStr + rowsStr + pagesStr + bloatStr + childMark + name + detail
 }
 
 // rowsColW is the padded width of the rows column on the tables level.
@@ -118,6 +127,10 @@ const breakdownColW = 10
 
 // pagesColW matches rowsColW: formatRows output (max 6 chars) + a "p" suffix.
 const pagesColW = 7
+
+// tableCountColW is the width of the schemas level's "tables" column; wide
+// enough for the "tables↓" header label and any realistic formatRows count.
+const tableCountColW = 7
 
 // barSegment is one coloured run inside a bar. cells must be >= 0; paintBar
 // will clip if the segments together exceed the bar width.
@@ -545,6 +558,17 @@ func renderGenericHeader(s *screen, barW int, nameLabel string) string {
 	line := headerIndent(barW) +
 		padRight(sortMark("size", s.sort == sortBySize, s.sortDesc), 10) + "  " +
 		"  " + sortMark(nameLabel, s.sort == sortByName, s.sortDesc)
+	return styleMuted.Render(line)
+}
+
+// renderSchemasHeader is renderGenericHeader plus the "tables" count column
+// that sits between size and the schema name (matching renderRow's layout when
+// hasTableCount is set).
+func renderSchemasHeader(s *screen, barW int) string {
+	line := headerIndent(barW) +
+		padRight(sortMark("size", s.sort == sortBySize, s.sortDesc), 10) + "  " +
+		padRight(sortMark("tables", s.sort == sortByTables, s.sortDesc), tableCountColW) + "  " +
+		"  " + sortMark("schema", s.sort == sortByName, s.sortDesc)
 	return styleMuted.Render(line)
 }
 
