@@ -185,6 +185,15 @@ type screen struct {
 	filter        string
 	filterFocused bool
 
+	// Seek-to-key state (levelIndexTuples only). seekFocused routes keypresses
+	// into the seek input; seekQuery is the typed leading-key value; seekStatus
+	// is the one-line result hint ("→ #0008" / "no match"). Distinct from the
+	// fuzzy filter: seek jumps the cursor to the B-tree entry whose key range
+	// covers the value rather than narrowing the list.
+	seekFocused bool
+	seekQuery   string
+	seekStatus  string
+
 	// Filter-result cache. visibleIndexes/visibleLen run on every render frame,
 	// and on a 3000-row table (top-queries) the per-row match dominates the frame
 	// while scrolling — yet the filtered set only changes when the filter text or
@@ -243,9 +252,14 @@ type screen struct {
 	// Deep-dive context for the index page/tuple views, loaded alongside the
 	// page list (best-effort, so a privilege/redefinition failure just hides the
 	// banner). indexKeyCols drives the "keys: (…) include: (…)" banner;
-	// btreeMeta drives the metapage banner (root block, tree height, dedup).
+	// btreeMeta/brinMeta/ginMeta drive the per-AM metapage banner (GiST has no
+	// metapage). indexPageType is reused generically across access methods to
+	// carry the current page's role string (btree l/r/i/d; gist leaf/intr/del;
+	// brin meta/regular/revmap; gin opaque flags).
 	indexKeyCols []pg.IndexKeyColumn
 	btreeMeta    *pg.BtreeMeta
+	brinMeta     *pg.BrinMeta
+	ginMeta      *pg.GinMeta
 
 	// describe holds the loaded \d-style description for levelDescribe screens.
 	// Nil until the async load completes.
@@ -641,10 +655,10 @@ func toolItems() []item {
 	return []item{
 		{name: "Disk usage", detail: "browse tables by total relation size on disk", hasChildren: true, data: toolDisk},
 		{name: "Top queries", detail: "powa-style top queries from pg_stat_statements — calls, time, I/O; EXPLAIN and sample params on Enter", hasChildren: true, data: toolQueries},
+		{name: "Current Activity", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},
-		{name: "Current Activity", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
 		{name: "Maintenance", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
 		{name: "Other Tools", detail: "run diagnostic queries — index / table / vacuum / activity / wal / server health", hasChildren: true, data: toolTools},
 	}

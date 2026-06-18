@@ -7,9 +7,9 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// ListRelations returns the page-inspector tool's mixed list of heap tables
-// and B-tree indexes for one schema. Non-btree indexes are dropped at the
-// SQL layer — they're not drillable through bt_page_stats / bt_page_items.
+// ListRelations returns the page-inspector tool's mixed list of heap tables,
+// drillable indexes (btree/gist/brin/gin), and TOAST heaps for one schema.
+// Hash indexes are dropped at the SQL layer — pgdu has no hash drill path.
 // Result is ordered by pg_relation_size (DESC); callers may resort.
 func (c *Client) ListRelations(ctx context.Context, db, schema string) ([]Relation, error) {
 	pool, err := c.PoolFor(ctx, db)
@@ -29,7 +29,16 @@ func (c *Client) ListRelations(ctx context.Context, db, schema string) ([]Relati
 			}
 			switch kind {
 			case "i":
-				r.Kind = RelBTreeIndex
+				switch r.AccessMethod {
+				case "gist":
+					r.Kind = RelGist
+				case "brin":
+					r.Kind = RelBrin
+				case "gin":
+					r.Kind = RelGin
+				default:
+					r.Kind = RelBTreeIndex
+				}
 			case "t":
 				r.Kind = RelToast
 			default:

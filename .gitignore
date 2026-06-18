@@ -12,3 +12,5 @@
 .claude/
 .devcontainer/
 vendor/
+# DevContainer base layer (fetched by innoclaude)
+.devcontainer/base/

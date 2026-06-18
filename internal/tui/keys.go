@@ -27,6 +27,7 @@ type keyMap struct {
 	DeleteSnapshot   key.Binding
 	Columns          key.Binding
 	Filter           key.Binding
+	Seek             key.Binding
 	Help             key.Binding
 	Quit             key.Binding
 
@@ -75,6 +76,7 @@ func defaultKeys() keyMap {
 		DeleteSnapshot: key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete snapshot")),
 		Columns:        key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "configure columns")),
 		Filter:         key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+		Seek:           key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "seek to key")),
 		Help:           key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:           key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
 
@@ -135,6 +137,13 @@ func (k *keyMap) applyContext(s *screen) {
 	// w opens the by-relation WAL breakdown — only from the rmgr overview, so
 	// the physical key stays free for reuse on every other level.
 	k.WALByRelation.SetEnabled(s.level == levelWAL)
+
+	// s seeks on the index-tuples view: a key value on B-tree, a heap block
+	// number on BRIN. GiST/GIN keys have no total order, so seek is disabled
+	// there (use the / filter). The physical key is otherwise ShowQuery
+	// (diagnostic-result only), so the two never overlap.
+	k.Seek.SetEnabled(s.level == levelIndexTuples &&
+		(s.index.AccessMethod == "btree" || s.index.AccessMethod == "brin"))
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
@@ -149,7 +158,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Top, k.Bottom},
 		{k.Enter, k.Back},
-		{k.Filter, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
+		{k.Filter, k.Seek, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
 		{k.Refresh, k.ToggleBloat, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation},

@@ -65,6 +65,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onIndexPagesLoaded(msg)
 	case indexTuplesLoadedMsg:
 		return m, m.onIndexTuplesLoaded(msg)
+	case gistPagesLoadedMsg:
+		return m, m.onGistPagesLoaded(msg)
+	case gistItemsLoadedMsg:
+		return m, m.onGistItemsLoaded(msg)
+	case brinPagesLoadedMsg:
+		return m, m.onBrinPagesLoaded(msg)
+	case brinItemsLoadedMsg:
+		return m, m.onBrinItemsLoaded(msg)
+	case ginPagesLoadedMsg:
+		return m, m.onGinPagesLoaded(msg)
+	case ginItemsLoadedMsg:
+		return m, m.onGinItemsLoaded(msg)
 	case describeLoadedMsg:
 		return m, m.onDescribeLoaded(msg)
 	case describeBuffersLoadedMsg:

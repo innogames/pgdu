@@ -261,11 +261,13 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 	regclass := qualifiedIdent(r.Schema, r.Name)
 
 	sql := sqlIndexTuples
-	// Only leaf and root pages carry heap ctids worth decoding; internal
-	// pages store downlinks (child block addresses) that would either
-	// miss the heap entirely or — worse — match an unrelated row by
-	// coincidence. Skip the heap join in those cases. A single-page
-	// index is type 'r' (root) and is also effectively a leaf.
+	// Only leaf pages carry heap ctids worth decoding; internal pages store
+	// downlinks (child block addresses) that would either miss the heap
+	// entirely or — worse — match an unrelated row by coincidence, printing
+	// bogus keys. Skip the heap join in those cases. Type 'r' reaches here only
+	// for a single-page index, whose root is also a leaf: the caller maps a
+	// taller tree's (internal) root to 'i' first (see indexTuplePageType), so a
+	// non-leaf root never takes the decode path.
 	if (pageType == "l" || pageType == "r") && r.ParentOID != 0 && r.ParentName != "" {
 		var exprs string
 		// Fetching the expression list per call avoids a stale cache when
@@ -351,7 +353,8 @@ func (c *Client) IndexKeyColumns(ctx context.Context, r Relation) ([]IndexKeyCol
 	var out []IndexKeyColumn
 	for rows.Next() {
 		var k IndexKeyColumn
-		if err := rows.Scan(&k.Ordinal, &k.Def, &k.IsKey); err != nil {
+		if err := rows.Scan(&k.Ordinal, &k.Def, &k.IsKey,
+			&k.TypLen, &k.TypAlign, &k.TypName, &k.TypCategory); err != nil {
 			return nil, fmt.Errorf("index key columns for %q: %w", r.Qualified(), err)
 		}
 		out = append(out, k)
@@ -419,6 +422,296 @@ func (c *Client) ListHeapTuples(ctx context.Context, t Table, blkno int32) ([]He
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list heap tuples in %q page %d: %w", t.Qualified(), blkno, err)
+	}
+	return out, nil
+}
+
+// --- GiST ---
+
+// ListGistPages returns up to `count` per-page summaries of a GiST index from
+// `start`. GiST has no metapage (block 0 is the root), so minPages=1 and the
+// window starts wherever the caller asks.
+func (c *Client) ListGistPages(ctx context.Context, r Relation, start, count int32) ([]GistPageStat, error) {
+	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
+		return nil, err
+	}
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return nil, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	count, ok, err := c.clampPageWindow(ctx, pool, r.OID, r.Qualified(), start, count, 1)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	rows, err := pool.Query(ctx, sqlGistPagesSummary, regclass, start, count)
+	if err != nil {
+		return nil, fmt.Errorf("list gist pages in %q: %w", r.Qualified(), err)
+	}
+	defer rows.Close()
+	var out []GistPageStat
+	for rows.Next() {
+		var p GistPageStat
+		if err := rows.Scan(&p.Blkno, &p.IsLeaf, &p.IsDeleted, &p.Items,
+			&p.FreeSize, &p.PageSize, &p.RightLink); err != nil {
+			return nil, fmt.Errorf("list gist pages in %q: %w", r.Qualified(), err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list gist pages in %q: %w", r.Qualified(), err)
+	}
+	return out, nil
+}
+
+// ListGistItems lists one GiST page's items. It prefers gist_page_items, whose
+// keys column is opclass-decoded, but falls back to gist_page_items_bytea (raw
+// key bytes, rendered as hex) when the decoded variant fails — many opclasses,
+// notably btree_gist's gbtreekey* types, have no output function and raise
+// "cannot display a value of type gbtreekeyNN" (SQLSTATE 0A000).
+func (c *Client) ListGistItems(ctx context.Context, r Relation, blkno int32) ([]GistItem, error) {
+	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
+		return nil, err
+	}
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return nil, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	out, err := scanGistItems(ctx, pool, sqlGistItems, regclass, blkno, false)
+	if err != nil {
+		// Re-run with the raw-bytes variant. If that fails too, surface the
+		// original (decoded-path) error — it's the more informative one.
+		if raw, rawErr := scanGistItems(ctx, pool, sqlGistItemsBytea, regclass, blkno, true); rawErr == nil {
+			return raw, nil
+		}
+		return nil, fmt.Errorf("list gist items in %q page %d: %w", r.Qualified(), blkno, err)
+	}
+	return out, nil
+}
+
+// scanGistItems runs one of the two GiST item queries and scans the rows. When
+// raw is true the final column is gist_page_items_bytea's key_data (bytea),
+// hex-encoded into GistItem.Keys; otherwise it's gist_page_items' keys (text).
+func scanGistItems(ctx context.Context, pool *pgxpool.Pool, sql, regclass string, blkno int32, raw bool) ([]GistItem, error) {
+	rows, err := pool.Query(ctx, sql, regclass, blkno)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []GistItem
+	for rows.Next() {
+		var it GistItem
+		if raw {
+			var keyData []byte
+			if err := rows.Scan(&it.ItemOffset, &it.Ctid, &it.ItemLen, &it.Dead, &keyData); err != nil {
+				return nil, err
+			}
+			if len(keyData) > 0 {
+				s := fmt.Sprintf(`\x%x`, keyData)
+				it.Keys = &s
+			}
+		} else {
+			if err := rows.Scan(&it.ItemOffset, &it.Ctid, &it.ItemLen, &it.Dead, &it.Keys); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GistPageFlags resolves a GiST child page's leaf/deleted role mid-descent
+// (mirrors BtreePageType). Best-effort at the call site: a failure leaves the
+// role unknown and the renderer/drill fall back to treating it conservatively.
+func (c *Client) GistPageFlags(ctx context.Context, r Relation, blkno int32) (isLeaf, isDeleted bool, err error) {
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return false, false, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	if err := pool.QueryRow(ctx, sqlGistPageFlags, regclass, blkno).Scan(&isLeaf, &isDeleted); err != nil {
+		return false, false, fmt.Errorf("gist_page_opaque_info for %q page %d: %w", r.Qualified(), blkno, err)
+	}
+	return isLeaf, isDeleted, nil
+}
+
+// --- BRIN ---
+
+// BrinMeta reads the BRIN metapage for the page-list banner (pages-per-range,
+// version, last revmap block). Best-effort, like BtreeMeta.
+func (c *Client) BrinMeta(ctx context.Context, r Relation) (BrinMeta, error) {
+	var m BrinMeta
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return m, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	if err := pool.QueryRow(ctx, sqlBrinMeta, regclass).Scan(
+		&m.Magic, &m.Version, &m.PagesPerRange, &m.LastRevmapPage); err != nil {
+		return m, fmt.Errorf("brin_metapage_info for %q: %w", r.Qualified(), err)
+	}
+	return m, nil
+}
+
+// ListBrinPages returns up to `count` BRIN page summaries from `start`. Block 0
+// (meta) is browsable — brin_page_type handles every page type — so minPages=1.
+func (c *Client) ListBrinPages(ctx context.Context, r Relation, start, count int32) ([]BrinPageStat, error) {
+	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
+		return nil, err
+	}
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return nil, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	count, ok, err := c.clampPageWindow(ctx, pool, r.OID, r.Qualified(), start, count, 1)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	rows, err := pool.Query(ctx, sqlBrinPagesSummary, regclass, start, count)
+	if err != nil {
+		return nil, fmt.Errorf("list brin pages in %q: %w", r.Qualified(), err)
+	}
+	defer rows.Close()
+	var out []BrinPageStat
+	for rows.Next() {
+		var p BrinPageStat
+		if err := rows.Scan(&p.Blkno, &p.PageType, &p.FreeSize, &p.PageSize); err != nil {
+			return nil, fmt.Errorf("list brin pages in %q: %w", r.Qualified(), err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list brin pages in %q: %w", r.Qualified(), err)
+	}
+	return out, nil
+}
+
+// ListBrinItems lists one BRIN regular page's range-summary tuples. A non-regular
+// page (meta/revmap) surfaces as a pageinspect error from the server; callers
+// only drill regular pages.
+func (c *Client) ListBrinItems(ctx context.Context, r Relation, blkno int32) ([]BrinItem, error) {
+	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
+		return nil, err
+	}
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return nil, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	rows, err := pool.Query(ctx, sqlBrinItems, regclass, blkno)
+	if err != nil {
+		return nil, fmt.Errorf("list brin items in %q page %d: %w", r.Qualified(), blkno, err)
+	}
+	defer rows.Close()
+	var out []BrinItem
+	for rows.Next() {
+		var it BrinItem
+		if err := rows.Scan(&it.ItemOffset, &it.BlockNum, &it.AttNum,
+			&it.AllNulls, &it.HasNulls, &it.Placeholder, &it.Empty, &it.Value); err != nil {
+			return nil, fmt.Errorf("list brin items in %q page %d: %w", r.Qualified(), blkno, err)
+		}
+		out = append(out, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list brin items in %q page %d: %w", r.Qualified(), blkno, err)
+	}
+	return out, nil
+}
+
+// --- GIN ---
+
+// GinMeta reads the GIN metapage for the page-list banner. Best-effort.
+func (c *Client) GinMeta(ctx context.Context, r Relation) (GinMeta, error) {
+	var m GinMeta
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return m, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	if err := pool.QueryRow(ctx, sqlGinMeta, regclass).Scan(
+		&m.PendingPages, &m.PendingTuples, &m.TotalPages,
+		&m.EntryPages, &m.DataPages, &m.Entries, &m.Version); err != nil {
+		return m, fmt.Errorf("gin_metapage_info for %q: %w", r.Qualified(), err)
+	}
+	return m, nil
+}
+
+// ListGinPages returns up to `count` GIN page summaries from `start`. The
+// metapage (block 0) is skipped (minPages=2; the SQL clamps the lower bound to
+// block 1) since its opaque area differs and it's covered by the banner.
+func (c *Client) ListGinPages(ctx context.Context, r Relation, start, count int32) ([]GinPageStat, error) {
+	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
+		return nil, err
+	}
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return nil, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	count, ok, err := c.clampPageWindow(ctx, pool, r.OID, r.Qualified(), start, count, 2)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	rows, err := pool.Query(ctx, sqlGinPagesSummary, regclass, start, count)
+	if err != nil {
+		return nil, fmt.Errorf("list gin pages in %q: %w", r.Qualified(), err)
+	}
+	defer rows.Close()
+	var out []GinPageStat
+	for rows.Next() {
+		var p GinPageStat
+		if err := rows.Scan(&p.Blkno, &p.Flags, &p.MaxOff, &p.FreeSize, &p.PageSize); err != nil {
+			return nil, fmt.Errorf("list gin pages in %q: %w", r.Qualified(), err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list gin pages in %q: %w", r.Qualified(), err)
+	}
+	return out, nil
+}
+
+// ListGinItems lists posting-list segments on a compressed GIN data-leaf page.
+// Returns a pageinspect error from the server for non-leaf/entry pages; callers
+// only drill data-leaf pages.
+func (c *Client) ListGinItems(ctx context.Context, r Relation, blkno int32) ([]GinItem, error) {
+	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
+		return nil, err
+	}
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return nil, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	rows, err := pool.Query(ctx, sqlGinItems, regclass, blkno)
+	if err != nil {
+		return nil, fmt.Errorf("list gin items in %q page %d: %w", r.Qualified(), blkno, err)
+	}
+	defer rows.Close()
+	var out []GinItem
+	for rows.Next() {
+		var it GinItem
+		if err := rows.Scan(&it.FirstTid, &it.NBytes, &it.TidCount, &it.TidsText); err != nil {
+			return nil, fmt.Errorf("list gin items in %q page %d: %w", r.Qualified(), blkno, err)
+		}
+		out = append(out, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list gin items in %q page %d: %w", r.Qualified(), blkno, err)
 	}
 	return out, nil
 }

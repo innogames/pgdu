@@ -141,6 +141,54 @@ type indexTuplesLoadedMsg struct {
 	tuples   []pg.IndexTuple
 	err      error
 }
+type gistPagesLoadedMsg struct {
+	indexOID   uint32
+	start      int32
+	count      int32
+	pages      []pg.GistPageStat
+	totalPages int32
+	keyCols    []pg.IndexKeyColumn
+	err        error
+}
+type gistItemsLoadedMsg struct {
+	indexOID uint32
+	blkno    int32
+	pageType string // "leaf" / "intr" / "del" (resolved when descending)
+	items    []pg.GistItem
+	err      error
+}
+type brinPagesLoadedMsg struct {
+	indexOID   uint32
+	start      int32
+	count      int32
+	pages      []pg.BrinPageStat
+	totalPages int32
+	keyCols    []pg.IndexKeyColumn
+	meta       *pg.BrinMeta
+	err        error
+}
+type brinItemsLoadedMsg struct {
+	indexOID uint32
+	blkno    int32
+	items    []pg.BrinItem
+	err      error
+}
+type ginPagesLoadedMsg struct {
+	indexOID   uint32
+	start      int32
+	count      int32
+	pages      []pg.GinPageStat
+	totalPages int32
+	keyCols    []pg.IndexKeyColumn
+	meta       *pg.GinMeta
+	err        error
+}
+type ginItemsLoadedMsg struct {
+	indexOID uint32
+	blkno    int32
+	items    []pg.GinItem
+	err      error
+}
 type describeLoadedMsg struct {
 	oid  uint32
 	desc *pg.Description
@@ -400,6 +448,78 @@ func (m *Model) loadIndexTuplesCmd(r pg.Relation, blkno int32, pageType string) 
 		}
 		tuples, err := m.client.ListIndexTuples(ctx, r, blkno, pageType)
 		return indexTuplesLoadedMsg{indexOID: r.OID, blkno: blkno, pageType: pageType, tuples: tuples, err: err}
+	})
+}
+
+func (m *Model) loadGistPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		pages, err := m.client.ListGistPages(ctx, r, start, count)
+		if err != nil {
+			return gistPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
+		}
+		rp, _ := m.client.RelPages(ctx, pg.Table{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
+		keyCols, _ := m.client.IndexKeyColumns(ctx, r) // best-effort banner
+		return gistPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols}
+	})
+}
+
+func (m *Model) loadGistItemsCmd(r pg.Relation, blkno int32, pageType string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		// On a downlink descent the child's role is unknown; probe its opaque
+		// flags so the decode/drill path is correct. Best-effort.
+		if pageType == "" {
+			if leaf, deleted, err := m.client.GistPageFlags(ctx, r, blkno); err == nil {
+				pageType = gistPageRole(leaf, deleted)
+			}
+		}
+		items, err := m.client.ListGistItems(ctx, r, blkno)
+		return gistItemsLoadedMsg{indexOID: r.OID, blkno: blkno, pageType: pageType, items: items, err: err}
+	})
+}
+
+func (m *Model) loadBrinPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		pages, err := m.client.ListBrinPages(ctx, r, start, count)
+		if err != nil {
+			return brinPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
+		}
+		rp, _ := m.client.RelPages(ctx, pg.Table{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
+		keyCols, _ := m.client.IndexKeyColumns(ctx, r)
+		var meta *pg.BrinMeta
+		if bm, err := m.client.BrinMeta(ctx, r); err == nil {
+			meta = &bm
+		}
+		return brinPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta}
+	})
+}
+
+func (m *Model) loadBrinItemsCmd(r pg.Relation, blkno int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		items, err := m.client.ListBrinItems(ctx, r, blkno)
+		return brinItemsLoadedMsg{indexOID: r.OID, blkno: blkno, items: items, err: err}
+	})
+}
+
+func (m *Model) loadGinPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		pages, err := m.client.ListGinPages(ctx, r, start, count)
+		if err != nil {
+			return ginPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
+		}
+		rp, _ := m.client.RelPages(ctx, pg.Table{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
+		keyCols, _ := m.client.IndexKeyColumns(ctx, r)
+		var meta *pg.GinMeta
+		if gm, err := m.client.GinMeta(ctx, r); err == nil {
+			meta = &gm
+		}
+		return ginPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta}
+	})
+}
+
+func (m *Model) loadGinItemsCmd(r pg.Relation, blkno int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		items, err := m.client.ListGinItems(ctx, r, blkno)
+		return ginItemsLoadedMsg{indexOID: r.OID, blkno: blkno, items: items, err: err}
 	})
 }
 

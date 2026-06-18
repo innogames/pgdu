@@ -236,7 +236,7 @@ func validSorts(l level) []sortMode {
 	case levelTupleRow:
 		return []sortMode{sortByName}
 	case levelRelations:
-		return []sortMode{sortBySize, sortByRows, sortByName}
+		return []sortMode{sortBySize, sortByRows, sortByType, sortByName}
 	case levelIndexPages:
 		return []sortMode{sortByBlkno, sortByType, sortByLevel, sortBySize, sortByDeadRatio, sortByFreeSpace}
 	case levelIndexTuples:

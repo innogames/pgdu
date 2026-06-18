@@ -30,3 +30,7 @@ test:
 
 clean:
 	rm -rf $(NAME) debian-pkg $(NAME)_*.deb
+
+# DevContainer targets (wildcard picks up all base .mk files)
+-include .devcontainer/base/mk/dev-*.mk
+-include .devcontainer/base/mk/features/dev-*.mk

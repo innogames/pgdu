@@ -83,8 +83,9 @@ type Part struct {
 }
 
 // RelationKind discriminates a row in the page-inspector relation list: heap
-// table vs. B-tree index vs. TOAST heap. Other access methods aren't drillable
-// here so they don't get a kind.
+// table, one of the drillable index access methods (btree/gist/brin/gin), or a
+// TOAST heap. Hash indexes aren't drillable here so they don't get a kind (and
+// are filtered out of sqlRelations).
 type RelationKind int
 
 const (
@@ -94,6 +95,12 @@ const (
 	// same way as RelTable; the line-pointer list additionally decodes
 	// chunk_id/chunk_seq for each live chunk.
 	RelToast
+	// RelGist / RelBrin / RelGin are the non-btree index access methods with a
+	// pageinspect drill path. Each has its own page/item queries and renderers;
+	// the screen branches on Relation.AccessMethod to pick them.
+	RelGist
+	RelBrin
+	RelGin
 )
 
 // Relation is one entry in the page-inspector tool's mixed table+index+toast

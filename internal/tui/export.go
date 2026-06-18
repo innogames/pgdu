@@ -286,7 +286,13 @@ func relKindName(k pg.RelationKind) string {
 	case pg.RelTable:
 		return "table"
 	case pg.RelBTreeIndex:
-		return "index"
+		return "btree"
+	case pg.RelGist:
+		return "gist"
+	case pg.RelBrin:
+		return "brin"
+	case pg.RelGin:
+		return "gin"
 	case pg.RelToast:
 		return "toast"
 	}

@@ -37,8 +37,24 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 	case levelHeapTuples:
 		return m.renderHeapTuplesInfo(height)
 	case levelIndexPages:
+		switch s.index.AccessMethod {
+		case "gist":
+			return m.renderGistInfo(height, false)
+		case "brin":
+			return m.renderBrinInfo(height, false)
+		case "gin":
+			return m.renderGinInfo(height, false)
+		}
 		return m.renderIndexPagesInfo(height)
 	case levelIndexTuples:
+		switch s.index.AccessMethod {
+		case "gist":
+			return m.renderGistInfo(height, true)
+		case "brin":
+			return m.renderBrinInfo(height, true)
+		case "gin":
+			return m.renderGinInfo(height, true)
+		}
 		return m.renderIndexTuplesInfo(height)
 	case levelWAL:
 		return m.renderWALInfo(height)
@@ -92,9 +108,30 @@ func renderLegend(s *screen) string {
 			styleLPUnused.Render("●") + " " + styleMuted.Render("unused")
 	case levelRelations:
 		return "  " + swatch(styleHeapSeg, "table") + sep +
-			swatch(styleIndexSeg, "btree index") + sep +
+			swatch(styleIndexSeg, "btree") + sep +
+			swatch(styleGistSeg, "gist") + sep +
+			swatch(styleBrinSeg, "brin") + sep +
+			swatch(styleGinSeg, "gin") + sep +
 			swatch(styleToastSeg, "toast")
 	case levelIndexPages:
+		switch s.index.AccessMethod {
+		case "gist":
+			return "  " + swatch(styleGistSeg, "used") + sep +
+				styleMuted.Render("░ free") + sep +
+				styleMuted.Render("leaf") + sep +
+				styleBarAlt.Render("intr") + sep +
+				styleBloat.Render("del")
+		case "brin":
+			return "  " + swatch(styleBrinSeg, "used") + sep +
+				styleMuted.Render("░ free") + sep +
+				styleMuted.Render("regular") + sep +
+				styleBarAlt.Render("meta/revmap")
+		case "gin":
+			return "  " + swatch(styleGinSeg, "used") + sep +
+				styleMuted.Render("░ free") + sep +
+				styleMuted.Render("data-leaf (drillable)") + sep +
+				styleBarAlt.Render("entry/meta")
+		}
 		return "  " + swatch(styleIndexSeg, "live") + sep +
 			swatch(styleBloat, "dead") + sep +
 			styleMuted.Render("░ free")
@@ -112,6 +149,22 @@ func renderLegend(s *screen) string {
 		return "  " + swatch(styleBarAlt, "FPI bytes") + sep +
 			styleMuted.Render("░ no full-page image")
 	case levelIndexTuples:
+		switch s.index.AccessMethod {
+		case "gist":
+			return "  " + styleLPNormal.Render("●") + " " + styleMuted.Render("leaf → heap row") + sep +
+				styleGistSeg.Render("→ blk") + " " + styleMuted.Render("downlink") + sep +
+				styleBloat.Render("dead") + " " + styleMuted.Render("dead entry") + sep +
+				styleMuted.Render("keys = opclass-decoded")
+		case "brin":
+			return "  " + styleIndexSeg.Render("block range") + " " + styleMuted.Render("summarised heap blocks") + sep +
+				styleBadge.Render("N") + styleMuted.Render(" has-nulls") + sep +
+				styleHeapToastTag.Render("P") + styleMuted.Render(" placeholder") + sep +
+				styleMuted.Render("E empty") + sep +
+				styleMuted.Render("↵ → heap pages of range")
+		case "gin":
+			return "  " + styleMuted.Render("each row = one posting-list segment (compressed heap tids)") + sep +
+				styleMuted.Render("entry-tree pages aren't itemizable via pageinspect")
+		}
 		// Three kinds of bt_page_items rows the user will run into on a
 		// modern leaf page: regular entries (pointing at a heap row, so
 		// the decoded key resolves and ENTER drills); the high-key

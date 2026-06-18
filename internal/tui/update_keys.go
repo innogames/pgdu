@@ -74,6 +74,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if s.filterFocused {
 		return m.handleFilterKey(s, msg)
 	}
+	// While the seek input has focus, route keys into the seek editor (typing
+	// builds the key value and live-jumps the cursor) instead of the list.
+	if s.seekFocused {
+		return m.handleSeekKey(s, msg)
+	}
 	// When a reindex confirmation is armed, capture the next key here: `y`
 	// (case-insensitive) executes; anything else cancels. Using y/n instead of
 	// a second Enter avoids running REINDEX on an accidental double-tap.
@@ -186,6 +191,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.help.ShowAll = !m.help.ShowAll
 	case key.Matches(msg, m.keys.Filter):
 		s.filterFocused = true
+	case key.Matches(msg, m.keys.Seek):
+		// Seek is enabled only on levelIndexTuples (see applyContext). Open the
+		// input fresh; mutually exclusive with the fuzzy filter.
+		s.seekFocused = true
+		s.seekQuery = ""
+		s.seekStatus = ""
+		s.filterFocused = false
 	case key.Matches(msg, m.keys.Down):
 		if s.level == levelStatementDetail {
 			s.offset++ // clamped to the last screen by scrollWindow
@@ -659,7 +671,7 @@ func describeTarget(s *screen) (descTarget, bool) {
 				DB: r.DB, Schema: r.Schema, OID: r.OID, Name: r.Name,
 				TotalBytes: r.SizeBytes, EstRows: r.EstRows,
 			}}, true
-		case pg.RelBTreeIndex:
+		case pg.RelBTreeIndex, pg.RelGist, pg.RelBrin, pg.RelGin:
 			return descTarget{
 				isIndex:   true,
 				db:        r.DB,

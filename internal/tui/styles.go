@@ -41,8 +41,14 @@ var (
 
 	// Segment colors for the table-row bar. Heap reuses the default bar tint
 	// so the colour palette doesn't bloom; index and toast get distinct hues.
+	// styleIndexSeg is the btree hue (and the generic "index" green used by the
+	// page bars); gist/brin/gin get sibling hues so the relations "type" column
+	// and their page bars are tellable apart at a glance.
 	styleHeapSeg  = styleBar
-	styleIndexSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("114")) // soft green
+	styleIndexSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("114")) // soft green (btree)
+	styleGistSeg  = lipgloss.NewStyle().Foreground(lipgloss.Color("79"))  // teal (gist)
+	styleBrinSeg  = lipgloss.NewStyle().Foreground(lipgloss.Color("141")) // purple (brin)
+	styleGinSeg   = lipgloss.NewStyle().Foreground(lipgloss.Color("209")) // salmon (gin)
 	styleToastSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("231")) // white
 
 	// Page-inspector colours. Distinct from the bar segment colours above so

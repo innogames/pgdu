@@ -154,14 +154,7 @@ func (m *Model) renderRelationsList(s *screen, height int) string {
 	return m.renderRowList(s, height, renderRelationsHeader(s.sort, s.sortDesc, barW),
 		func(it item, selected bool) string {
 			r, _ := it.data.(pg.Relation)
-			style := styleHeapSeg
-			switch r.Kind {
-			case pg.RelBTreeIndex:
-				style = styleIndexSeg
-			case pg.RelToast:
-				style = styleToastSeg
-			}
-			return renderRelationRow(it, r, maxSize, barW, selected, style)
+			return renderRelationRow(it, r, maxSize, barW, selected, relationBarStyle(r))
 		})
 }
 
@@ -171,6 +164,7 @@ func renderRelationsHeader(sort sortMode, sortDesc bool, barW int) string {
 		padRight(sortMark("size", sort == sortBySize, sortDesc), 10) + "  " +
 		padRight(sortMark("rows", sort == sortByRows, sortDesc), rowsColW) + "  " +
 		padRight("pages", pagesColW) + "  " +
+		padRight(sortMark("type", sort == sortByType, sortDesc), relTypeColW) + "  " +
 		"  " + // child mark column ("+ ")
 		sortMark("name", sort == sortByName, sortDesc)
 	return styleMuted.Render(line)
@@ -183,12 +177,53 @@ func renderRelationRow(it item, r pg.Relation, maxSize int64, barW int, selected
 	sizeStr := humanize.Bytes(it.size)
 	rowsStr := styleMuted.Render(padRight(formatRows(it.rows), rowsColW)) + "  "
 	pagesStr := styleMuted.Render(padRight(formatRows(it.pages)+"p", pagesColW)) + "  "
+	// The type tag is coloured per kind (same hue as the bar) and padded on the
+	// raw label so the styling escape codes don't throw off the column width.
+	typeStr := relationBarStyle(r).Render(padRight(relationTypeLabel(r), relTypeColW)) + "  "
 	childMark := styleMuted.Render("+ ")
 	parent := ""
 	if r.ParentName != "" {
 		parent = "  " + styleMuted.Render("→ "+r.ParentName)
 	}
-	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + rowsStr + pagesStr + childMark + name + parent
+	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + rowsStr + pagesStr + typeStr + childMark + name + parent
+}
+
+// relationTypeLabel is the short kind tag shown in the relations "type" column:
+// the storage kind for heap/toast, the access method for an index.
+func relationTypeLabel(r pg.Relation) string {
+	switch r.Kind {
+	case pg.RelBTreeIndex:
+		return "btree"
+	case pg.RelGist:
+		return "gist"
+	case pg.RelBrin:
+		return "brin"
+	case pg.RelGin:
+		return "gin"
+	case pg.RelToast:
+		return "toast"
+	default:
+		return "heap"
+	}
+}
+
+// relationBarStyle tints both the row bar and the type tag by relation kind:
+// heap cyan, toast white, and a distinct hue per index access method.
+func relationBarStyle(r pg.Relation) lipgloss.Style {
+	switch r.Kind {
+	case pg.RelBTreeIndex:
+		return styleIndexSeg
+	case pg.RelGist:
+		return styleGistSeg
+	case pg.RelBrin:
+		return styleBrinSeg
+	case pg.RelGin:
+		return styleGinSeg
+	case pg.RelToast:
+		return styleToastSeg
+	default:
+		return styleHeapSeg
+	}
 }
 
 // renderIndexKeyBanner builds the context banner shown above the B-tree page
@@ -202,11 +237,23 @@ func (m *Model) renderIndexKeyBanner(s *screen) string {
 	if line := indexKeyLine(s.indexKeyCols); line != "" {
 		lines = append(lines, line)
 	}
-	// The metapage describes the whole tree, so it belongs on the page list, not
-	// on a single page's tuple view.
+	// The metapage describes the whole index, so it belongs on the page list,
+	// not on a single page's tuple view. Each access method has its own metapage
+	// shape (GiST has none).
 	if s.level == levelIndexPages {
-		if line := btreeMetaLine(s.btreeMeta); line != "" {
-			lines = append(lines, line)
+		var meta string
+		switch s.index.AccessMethod {
+		case "brin":
+			meta = brinMetaLine(s.brinMeta)
+		case "gin":
+			meta = ginMetaLine(s.ginMeta)
+		case "gist":
+			meta = "" // GiST has no metapage (block 0 is the root)
+		default:
+			meta = btreeMetaLine(s.btreeMeta)
+		}
+		if meta != "" {
+			lines = append(lines, meta)
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -419,11 +466,11 @@ func (m *Model) renderIndexTuplesList(s *screen, height int) string {
 	// key in that child block; the block therefore covers [thisKey, nextKey).
 	// Precompute that range per item so the key column can show what range of
 	// keys lives behind each "→ blk N", rather than the bare separator key.
-	ranges := internalDownlinkRanges(s.items, pageType, keyW)
+	ranges := internalDownlinkRanges(s.items, pageType, s.indexKeyCols, keyW)
 	return m.renderRowList(s, height, renderIndexTuplesHeader(s.sort, s.sortDesc, pageType),
 		func(it item, selected bool) string {
 			t, _ := it.data.(pg.IndexTuple)
-			return renderIndexTupleRow(t, pageType, ranges[t.ItemOffset], keyW, selected)
+			return renderIndexTupleRow(t, pageType, ranges[t.ItemOffset], s.indexKeyCols, keyW, selected)
 		})
 }
 
@@ -442,7 +489,7 @@ func renderIndexTuplesHeader(sort sortMode, sortDesc bool, pageType string) stri
 	return styleMuted.Render(line)
 }
 
-func renderIndexTupleRow(t pg.IndexTuple, pageType, blockRange string, keyW int, selected bool) string {
+func renderIndexTupleRow(t pg.IndexTuple, pageType, blockRange string, cols []pg.IndexKeyColumn, keyW int, selected bool) string {
 	cursor := selectedCursor(selected)
 	off := fmt.Sprintf("#%04d", t.ItemOffset)
 	if selected {
@@ -502,11 +549,20 @@ func renderIndexTupleRow(t pg.IndexTuple, pageType, blockRange string, keyW int,
 	case t.Decoded != nil:
 		key = truncateValue(t.Decoded, keyW)
 	case t.Data != nil && kind == idxTupleNormal:
-		// Normal leaf entry whose ctid didn't resolve to a live heap row:
-		// the row was deleted/updated since the last VACUUM.
-		key = deadTag + styleMuted.Render(truncateValue(t.Data, keyW-5))
+		// Normal leaf entry whose ctid didn't resolve to a live heap row: the
+		// row was deleted/updated since the last VACUUM. Decode the raw key
+		// bytes type-aware when possible, else fall back to the hex.
+		if s, ok := indexKeyText(t, cols); ok {
+			key = deadTag + styleMuted.Render(truncateToWidth(s, keyW-5))
+		} else {
+			key = deadTag + styleMuted.Render(truncateValue(t.Data, keyW-5))
+		}
 	case t.Data != nil:
-		key = styleMuted.Render(truncateValue(t.Data, keyW))
+		if s, ok := indexKeyText(t, cols); ok {
+			key = styleMuted.Render(truncateToWidth(s, keyW))
+		} else {
+			key = styleMuted.Render(truncateValue(t.Data, keyW))
+		}
 	default:
 		key = styleMuted.Render("—")
 	}
@@ -568,7 +624,7 @@ func parseCtidBlock(ctid *string) (int32, bool) {
 // leftmost downlink's key is truncated to "minus infinity" (no key bytes).
 // The result is keyed by ItemOffset so the renderer can look each row up
 // regardless of the active display sort. Returns nil for non-internal pages.
-func internalDownlinkRanges(items []item, pageType string, keyW int) map[int32]string {
+func internalDownlinkRanges(items []item, pageType string, cols []pg.IndexKeyColumn, keyW int) map[int32]string {
 	if pageType != "i" {
 		return nil
 	}
@@ -583,7 +639,7 @@ func internalDownlinkRanges(items []item, pageType string, keyW int) map[int32]s
 		if !ok {
 			continue
 		}
-		text, hasKey := indexKeyText(t)
+		text, hasKey := indexKeyText(t, cols)
 		all = append(all, entry{t.ItemOffset, text, hasKey})
 	}
 	if len(all) == 0 {
@@ -631,15 +687,21 @@ func internalDownlinkRanges(items []item, pageType string, keyW int) map[int32]s
 
 // indexKeyText returns a readable form of a tuple's key and whether it carries
 // one at all. A decoded heap projection wins; otherwise the raw hex `data` is
-// decoded to text when it looks like a printable key (see decodeHexKey), else
-// kept verbatim. An empty/absent key — the minus-infinity leftmost downlink —
-// reports hasKey == false.
-func indexKeyText(t pg.IndexTuple) (string, bool) {
+// decoded type-aware against the index's key columns (see decodeIndexKey) —
+// used on internal-page separators and dead leaf entries where no heap
+// projection exists. With no column types available it falls back to the
+// printable-ASCII heuristic (decodeHexKey), then to the raw hex verbatim. An
+// empty/absent key — the minus-infinity leftmost downlink — reports
+// hasKey == false.
+func indexKeyText(t pg.IndexTuple, cols []pg.IndexKeyColumn) (string, bool) {
 	if t.Decoded != nil && *t.Decoded != "" {
 		return *t.Decoded, true
 	}
 	if t.Data == nil {
 		return "", false
+	}
+	if s, ok := decodeIndexKey(*t.Data, cols); ok {
+		return s, true
 	}
 	if s, ok := decodeHexKey(*t.Data); ok {
 		return s, true
@@ -648,6 +710,17 @@ func indexKeyText(t pg.IndexTuple) (string, bool) {
 		return raw, true
 	}
 	return "", false
+}
+
+// firstKeyColName returns the index's leading key column's definition (the
+// column the seek feature compares against), or "" when no key columns are known.
+func firstKeyColName(cols []pg.IndexKeyColumn) string {
+	for _, c := range cols {
+		if c.IsKey {
+			return c.Def
+		}
+	}
+	return ""
 }
 
 // decodeHexKey turns pageinspect's space-separated hex `data`
@@ -807,3 +880,485 @@ func tupleInfomaskBadges(infomask, infomask2 int32) string {
 	return strings.Join(parts, "")
 }
 */
+
+// ─── GiST page inspector ─────────────────────────────────────────────────────
+
+// renderGistPagesList draws one row per GiST page. GiST has no tree-level
+// column (its pages aren't strictly leveled like a B-tree); the columns are
+// type (leaf/intr/del), used bytes, item count, free %, block.
+func (m *Model) renderGistPagesList(s *screen, height int) string {
+	barW := m.barWidth(s)
+	return m.renderRowList(s, height, renderGistPagesHeader(s.sort, s.sortDesc, barW),
+		func(it item, selected bool) string {
+			p, _ := it.data.(pg.GistPageStat)
+			return renderGistPageRow(it, p, barW, selected)
+		})
+}
+
+func renderGistPagesHeader(sort sortMode, sortDesc bool, barW int) string {
+	line := headerIndent(barW) +
+		padRight(sortMark("type", sort == sortByType, sortDesc), idxPageTypeColW) + "  " +
+		padRight(sortMark("used", sort == sortBySize, sortDesc), idxPageUsedColW) + "  " +
+		padRight("items", idxPageItemsColW) + "  " +
+		padRight(sortMark("free", sort == sortByFreeSpace, sortDesc), idxPageFreeColW) + "  " +
+		sortMark("page", sort == sortByBlkno, sortDesc)
+	return styleMuted.Render(line)
+}
+
+func gistPageTypeLabel(p pg.GistPageStat) string {
+	return gistPageRole(p.IsLeaf, p.IsDeleted)
+}
+
+func gistPageTypeStyle(p pg.GistPageStat) lipgloss.Style {
+	switch {
+	case p.IsDeleted:
+		return styleBloat
+	case !p.IsLeaf:
+		return styleBarAlt // internal pages take the accent hue
+	}
+	return styleMuted // leaf stays muted (the common case)
+}
+
+func renderGistPageRow(it item, p pg.GistPageStat, barW int, selected bool) string {
+	cursor := selectedCursor(selected)
+	bar := renderSolidBar(it.size, heapPageBlockSize, barW, styleGistSeg)
+	typ := gistPageTypeStyle(p).Render(gistPageTypeLabel(p))
+	used := humanize.Bytes(it.size)
+	items := styleMuted.Render(fmt.Sprintf("%d", p.Items))
+	free := styleMuted.Render("—")
+	if p.PageSize > 0 {
+		pct := float64(p.FreeSize) * 100 / float64(p.PageSize)
+		freeStr := fmt.Sprintf("%.0f%%", pct)
+		if p.IsLeaf {
+			free = percentStyle(100 - pct).Render(freeStr)
+		} else {
+			free = styleMuted.Render(freeStr)
+		}
+	}
+	name := highlightName(it.name, selected)
+	return cursor + bar + "  " +
+		padRight(typ, idxPageTypeColW) + "  " +
+		padRight(used, idxPageUsedColW) + "  " +
+		padRight(items, idxPageItemsColW) + "  " +
+		padRight(free, idxPageFreeColW) + "  " +
+		name
+}
+
+// renderGistTuplesList draws one row per item on a GiST page: offset, len, a
+// dead flag, the ctid (heap tid on a leaf, "→ blk N" downlink on an internal
+// page), and pageinspect's opclass-decoded keys.
+func (m *Model) renderGistTuplesList(s *screen, height int) string {
+	const deadColW = 4
+	keyW := max(m.width-(colCursor+idxTupleOffColW+colGutter+
+		idxTupleLenColW+colGutter+deadColW+colGutter+
+		idxTupleCtidColW+colGutter+4), 16)
+	internal := s.indexPageType == "intr"
+	return m.renderRowList(s, height, renderGistTuplesHeader(s.sort, s.sortDesc, internal),
+		func(it item, selected bool) string {
+			t, _ := it.data.(pg.GistItem)
+			return renderGistTupleRow(t, internal, keyW, selected)
+		})
+}
+
+func renderGistTuplesHeader(sort sortMode, sortDesc bool, internal bool) string {
+	keyCol := "keys"
+	if internal {
+		keyCol = "keys (child bounding predicate)"
+	}
+	line := "  " + padRight(sortMark("off", sort == sortByLP, sortDesc), idxTupleOffColW) + "  " +
+		padRight(sortMark("len", sort == sortBySize, sortDesc), idxTupleLenColW) + "  " +
+		padRight("dead", 4) + "  " +
+		padRight("ctid", idxTupleCtidColW) + "  " +
+		keyCol
+	return styleMuted.Render(line)
+}
+
+func renderGistTupleRow(t pg.GistItem, internal bool, keyW int, selected bool) string {
+	cursor := selectedCursor(selected)
+	off := fmt.Sprintf("#%04d", t.ItemOffset)
+	if selected {
+		off = styleSelected.Render(off)
+	}
+	lenStr := fmt.Sprintf("%d", t.ItemLen)
+	dead := styleMuted.Render("—")
+	if t.Dead {
+		dead = styleBloat.Render("dead")
+	}
+	var ctidLabel string
+	switch {
+	case internal:
+		if blk, ok := parseCtidBlock(t.Ctid); ok {
+			ctidLabel = styleGistSeg.Render(fmt.Sprintf("→ blk %d", blk))
+		} else {
+			ctidLabel = styleMuted.Render("—")
+		}
+	case t.Ctid != nil:
+		ctidLabel = *t.Ctid
+	default:
+		ctidLabel = styleMuted.Render("—")
+	}
+	key := styleMuted.Render("—")
+	if t.Keys != nil && *t.Keys != "" {
+		key = truncateValue(t.Keys, keyW)
+	}
+	return cursor + padRight(off, idxTupleOffColW) + "  " +
+		padRight(lenStr, idxTupleLenColW) + "  " +
+		padRight(dead, 4) + "  " +
+		padRight(ctidLabel, idxTupleCtidColW) + "  " +
+		key
+}
+
+// ─── BRIN page inspector ─────────────────────────────────────────────────────
+
+// brinMetaLine renders the BRIN metapage summary above the page list: the
+// heap-block span each summary covers (pages/range), the on-disk version, the
+// last revmap block, and the magic.
+func brinMetaLine(meta *pg.BrinMeta) string {
+	if meta == nil {
+		return ""
+	}
+	mu := styleMuted.Render
+	return "  " + mu(fmt.Sprintf("pages/range %d", meta.PagesPerRange)) + mu("  ·  ") +
+		mu(fmt.Sprintf("v%d", meta.Version)) + mu("  ·  ") +
+		mu(fmt.Sprintf("last revmap blk %d", meta.LastRevmapPage)) + mu("  ·  ") +
+		mu("magic "+meta.Magic)
+}
+
+// renderBrinPagesList draws one row per BRIN page: type (meta/revmap/regular),
+// used bytes, free %, block. Item counts are omitted (see BrinPageStat).
+func (m *Model) renderBrinPagesList(s *screen, height int) string {
+	barW := m.barWidth(s)
+	return m.renderRowList(s, height, renderBrinPagesHeader(s.sort, s.sortDesc, barW),
+		func(it item, selected bool) string {
+			p, _ := it.data.(pg.BrinPageStat)
+			return renderBrinPageRow(it, p, barW, selected)
+		})
+}
+
+func renderBrinPagesHeader(sort sortMode, sortDesc bool, barW int) string {
+	line := headerIndent(barW) +
+		padRight(sortMark("type", sort == sortByType, sortDesc), brinPageTypeColW) + "  " +
+		padRight(sortMark("used", sort == sortBySize, sortDesc), idxPageUsedColW) + "  " +
+		padRight(sortMark("free", sort == sortByFreeSpace, sortDesc), idxPageFreeColW) + "  " +
+		sortMark("page", sort == sortByBlkno, sortDesc)
+	return styleMuted.Render(line)
+}
+
+func brinPageTypeStyle(t string) lipgloss.Style {
+	switch t {
+	case "meta", "revmap":
+		return styleBarAlt // structural pages take the accent hue
+	}
+	return styleMuted // regular (data) pages stay muted — the common case
+}
+
+func renderBrinPageRow(it item, p pg.BrinPageStat, barW int, selected bool) string {
+	cursor := selectedCursor(selected)
+	bar := renderSolidBar(it.size, heapPageBlockSize, barW, styleBrinSeg)
+	typ := brinPageTypeStyle(p.PageType).Render(p.PageType)
+	used := humanize.Bytes(it.size)
+	free := styleMuted.Render("—")
+	if p.PageSize > 0 {
+		pct := float64(p.FreeSize) * 100 / float64(p.PageSize)
+		free = styleMuted.Render(fmt.Sprintf("%.0f%%", pct))
+	}
+	name := highlightName(it.name, selected)
+	return cursor + bar + "  " +
+		padRight(typ, brinPageTypeColW) + "  " +
+		padRight(used, idxPageUsedColW) + "  " +
+		padRight(free, idxPageFreeColW) + "  " +
+		name
+}
+
+// renderBrinTuplesList draws one row per BRIN summary tuple: the heap block range
+// it covers, the indexed attribute, the null/placeholder/empty flags, and the
+// opclass-rendered summary value. The range end is shown when pages-per-range is
+// known (carried down from the page list's metapage).
+func (m *Model) renderBrinTuplesList(s *screen, height int) string {
+	ppr := int64(0)
+	if s.brinMeta != nil {
+		ppr = int64(s.brinMeta.PagesPerRange)
+	}
+	const offW, blkW, attW, flagsW = 6, 18, 6, 10
+	valW := max(m.width-(colCursor+offW+colGutter+blkW+colGutter+
+		attW+colGutter+flagsW+colGutter+2), 16)
+	return m.renderRowList(s, height, renderBrinTuplesHeader(s.sort, s.sortDesc, offW, blkW, attW, flagsW),
+		func(it item, selected bool) string {
+			t, _ := it.data.(pg.BrinItem)
+			return renderBrinTupleRow(t, ppr, valW, offW, blkW, attW, flagsW, selected)
+		})
+}
+
+func renderBrinTuplesHeader(sort sortMode, sortDesc bool, offW, blkW, attW, flagsW int) string {
+	line := "  " + padRight(sortMark("off", sort == sortByLP, sortDesc), offW) + "  " +
+		padRight(sortMark("block range", sort == sortBySize, sortDesc), blkW) + "  " +
+		padRight("att", attW) + "  " +
+		padRight("flags", flagsW) + "  " +
+		"summary value"
+	return styleMuted.Render(line)
+}
+
+func renderBrinTupleRow(t pg.BrinItem, ppr int64, valW, offW, blkW, attW, flagsW int, selected bool) string {
+	cursor := selectedCursor(selected)
+	off := fmt.Sprintf("#%04d", t.ItemOffset)
+	if selected {
+		off = styleSelected.Render(off)
+	}
+	blk := fmt.Sprintf("%d", t.BlockNum)
+	if ppr > 0 {
+		blk = fmt.Sprintf("%d…%d", t.BlockNum, t.BlockNum+ppr-1)
+	}
+	att := fmt.Sprintf("att%d", t.AttNum)
+	flags := brinFlagTags(t)
+	val := styleMuted.Render("—")
+	switch {
+	case t.AllNulls:
+		val = styleMuted.Render("(all nulls)")
+	case t.Value != nil && *t.Value != "":
+		val = truncateValue(t.Value, valW)
+	}
+	return cursor + padRight(off, offW) + "  " +
+		padRight(styleIndexSeg.Render(blk), blkW) + "  " +
+		padRight(att, attW) + "  " +
+		padRight(flags, flagsW) + "  " +
+		val
+}
+
+// brinFlagTags renders a BRIN summary tuple's boolean flags as compact badges.
+func brinFlagTags(t pg.BrinItem) string {
+	var parts []string
+	if t.HasNulls {
+		parts = append(parts, styleBadge.Render("N"))
+	}
+	if t.Placeholder {
+		parts = append(parts, styleHeapToastTag.Render("P"))
+	}
+	if t.Empty {
+		parts = append(parts, styleMuted.Render("E"))
+	}
+	if len(parts) == 0 {
+		return styleMuted.Render("—")
+	}
+	return strings.Join(parts, " ")
+}
+
+// ─── GIN page inspector ──────────────────────────────────────────────────────
+
+// ginMetaLine renders the GIN metapage summary above the page list: entry-tree
+// and posting-tree page counts, total entries, pending-list size, version.
+func ginMetaLine(meta *pg.GinMeta) string {
+	if meta == nil {
+		return ""
+	}
+	mu := styleMuted.Render
+	out := "  " + mu(fmt.Sprintf("entries %d", meta.Entries)) + mu("  ·  ") +
+		mu(fmt.Sprintf("entry pages %d", meta.EntryPages)) + mu("  ·  ") +
+		mu(fmt.Sprintf("data pages %d", meta.DataPages))
+	if meta.PendingPages > 0 {
+		out += mu("  ·  ") + styleHeapToastTag.Render(fmt.Sprintf("pending %d", meta.PendingPages))
+	}
+	out += mu(fmt.Sprintf("  ·  v%d", meta.Version))
+	return out
+}
+
+// ginPageTypeLabel maps a GIN page's opaque flags to a short role tag.
+func ginPageTypeLabel(flags string) string {
+	switch {
+	case strings.Contains(flags, "meta"):
+		return "meta"
+	case ginPageIsDataLeaf(flags):
+		return "data-leaf"
+	case strings.Contains(flags, "data"):
+		return "data"
+	default:
+		return "entry"
+	}
+}
+
+func ginPageTypeStyle(flags string) lipgloss.Style {
+	switch {
+	case strings.Contains(flags, "meta"):
+		return styleBarAlt
+	case ginPageIsDataLeaf(flags):
+		return styleMuted // the drillable common case
+	default:
+		return styleBarAlt // entry-tree / non-leaf data pages
+	}
+}
+
+// renderGinPagesList draws one row per GIN page: type tag (from opaque flags),
+// item count (maxoff), used bytes, free %, block. Only data-leaf pages drill.
+func (m *Model) renderGinPagesList(s *screen, height int) string {
+	barW := m.barWidth(s)
+	return m.renderRowList(s, height, renderGinPagesHeader(s.sort, s.sortDesc, barW),
+		func(it item, selected bool) string {
+			p, _ := it.data.(pg.GinPageStat)
+			return renderGinPageRow(it, p, barW, selected)
+		})
+}
+
+func renderGinPagesHeader(sort sortMode, sortDesc bool, barW int) string {
+	line := headerIndent(barW) +
+		padRight(sortMark("type", sort == sortByType, sortDesc), ginPageTypeColW) + "  " +
+		padRight("items", idxPageItemsColW) + "  " +
+		padRight(sortMark("used", sort == sortBySize, sortDesc), idxPageUsedColW) + "  " +
+		padRight(sortMark("free", sort == sortByFreeSpace, sortDesc), idxPageFreeColW) + "  " +
+		sortMark("page", sort == sortByBlkno, sortDesc)
+	return styleMuted.Render(line)
+}
+
+func renderGinPageRow(it item, p pg.GinPageStat, barW int, selected bool) string {
+	cursor := selectedCursor(selected)
+	bar := renderSolidBar(it.size, heapPageBlockSize, barW, styleGinSeg)
+	typ := ginPageTypeStyle(p.Flags).Render(ginPageTypeLabel(p.Flags))
+	items := styleMuted.Render(fmt.Sprintf("%d", p.MaxOff))
+	used := humanize.Bytes(it.size)
+	free := styleMuted.Render("—")
+	if p.PageSize > 0 {
+		pct := float64(p.FreeSize) * 100 / float64(p.PageSize)
+		free = styleMuted.Render(fmt.Sprintf("%.0f%%", pct))
+	}
+	name := highlightName(it.name, selected)
+	return cursor + bar + "  " +
+		padRight(typ, ginPageTypeColW) + "  " +
+		padRight(items, idxPageItemsColW) + "  " +
+		padRight(used, idxPageUsedColW) + "  " +
+		padRight(free, idxPageFreeColW) + "  " +
+		name
+}
+
+// renderGinTuplesList draws one row per posting-list segment on a GIN data-leaf
+// page: the segment's first heap tid, its compressed byte size, the number of
+// TIDs it packs, and a sample of those TIDs.
+func (m *Model) renderGinTuplesList(s *screen, height int) string {
+	const tidW, bytesW, countW = 14, 8, 8
+	sampleW := max(m.width-(colCursor+tidW+colGutter+bytesW+colGutter+
+		countW+colGutter+2), 16)
+	return m.renderRowList(s, height, renderGinTuplesHeader(s.sort, s.sortDesc, tidW, bytesW, countW),
+		func(it item, selected bool) string {
+			t, _ := it.data.(pg.GinItem)
+			return renderGinTupleRow(t, sampleW, tidW, bytesW, countW, selected)
+		})
+}
+
+func renderGinTuplesHeader(sort sortMode, sortDesc bool, tidW, bytesW, countW int) string {
+	line := "  " + padRight("first tid", tidW) + "  " +
+		padRight(sortMark("bytes", sort == sortBySize, sortDesc), bytesW) + "  " +
+		padRight("tids", countW) + "  " +
+		"heap tids (sample)"
+	return styleMuted.Render(line)
+}
+
+func renderGinTupleRow(t pg.GinItem, sampleW, tidW, bytesW, countW int, selected bool) string {
+	cursor := selectedCursor(selected)
+	tid := t.FirstTid
+	if selected {
+		tid = styleSelected.Render(tid)
+	}
+	bytesStr := humanize.Bytes(int64(t.NBytes))
+	count := styleMuted.Render(fmt.Sprintf("×%d", t.TidCount))
+	sample := t.TidsText
+	if t.TidCount > 20 && sample != "" {
+		sample += " …"
+	}
+	sample = styleMuted.Render(truncateToWidth(sample, sampleW))
+	return cursor + padRight(tid, tidW) + "  " +
+		padRight(bytesStr, bytesW) + "  " +
+		padRight(count, countW) + "  " +
+		sample
+}
+
+// ─── per-AM ? reference overlays ─────────────────────────────────────────────
+
+// infoHeader writes the standard overlay title + dismiss-hint line into b.
+// Shared by the gist/brin/gin reference overlays.
+func infoHeader(b *strings.Builder, title string) {
+	mu := styleMuted.Render
+	b.WriteString("\n")
+	b.WriteString("  " + styleSelected.Render(title) + mu("  ·  press ") +
+		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+}
+
+func infoPad(b *strings.Builder, height int) string {
+	rendered := strings.Count(b.String(), "\n")
+	for i := rendered; i < height; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func (m *Model) renderGistInfo(height int, tuples bool) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+	if tuples {
+		infoHeader(&b, "GiST item reference")
+		b.WriteString("  " + mu("Each row is one entry on a GiST page (gist_page_items).") + "\n\n")
+		b.WriteString("    " + padRight("keys", 8) + mu("the opclass-decoded key pageinspect renders directly (e.g. a bounding box) —") + "\n")
+		b.WriteString("    " + strings.Repeat(" ", 8) + mu("on internal pages it's the bounding predicate covering the child block") + "\n")
+		b.WriteString("    " + padRight("ctid", 8) + mu("heap pointer on a leaf, ") + styleGistSeg.Render("→ blk N") + mu(" downlink on an internal page") + "\n")
+		b.WriteString("    " + padRight("dead", 8) + mu("entry marked dead (reclaimable on the next vacuum)") + "\n\n")
+		b.WriteString("  " + mu("Enter descends an internal downlink toward the leaves, or opens the heap row a") + "\n")
+		b.WriteString("  " + mu("leaf entry points at. GiST keys have no total order, so there's no key-seek —") + "\n")
+		b.WriteString("  " + mu("use the ") + styleBadge.Render("/") + mu(" filter to search the rendered keys text.") + "\n")
+		return infoPad(&b, height)
+	}
+	infoHeader(&b, "GiST page reference")
+	b.WriteString("  " + mu("GiST has no metapage — block 0 is the root, so every page is browsable.") + "\n\n")
+	b.WriteString("    " + padRight("type", 8) + styleMuted.Render("leaf") + mu(" data page  ·  ") + styleBarAlt.Render("intr") + mu(" internal (downlinks)  ·  ") + styleBloat.Render("del") + mu(" deleted") + "\n")
+	b.WriteString("    " + padRight("used", 8) + mu("BLCKSZ − free; the bar shows how packed the page is") + "\n")
+	b.WriteString("    " + padRight("items", 8) + mu("entry count on the page") + "\n")
+	b.WriteString("    " + padRight("free", 8) + mu("free space as a percent of the page") + "\n\n")
+	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+fmt.Sprintf("%d", heapWindowDefault)+" pages per step); Enter drills a page's items.") + "\n")
+	b.WriteString("  " + mu("Reading gist_page_* needs a superuser (or pg_read_server_files).") + "\n")
+	return infoPad(&b, height)
+}
+
+func (m *Model) renderBrinInfo(height int, tuples bool) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+	if tuples {
+		infoHeader(&b, "BRIN range reference")
+		b.WriteString("  " + mu("Each row is one summary tuple (brin_page_items): the per-attribute summary for a") + "\n")
+		b.WriteString("  " + mu("range of heap blocks. A BRIN index stores one summary per pages-per-range span.") + "\n\n")
+		b.WriteString("    " + padRight("block range", 12) + mu("the heap blocks this summary covers (start…end)") + "\n")
+		b.WriteString("    " + padRight("att", 12) + mu("which indexed attribute this summary is for") + "\n")
+		b.WriteString("    " + padRight("flags", 12) + styleBadge.Render("N") + mu(" has-nulls  ·  ") + styleHeapToastTag.Render("P") + mu(" placeholder  ·  ") + mu("E empty") + "\n")
+		b.WriteString("    " + padRight("summary", 12) + mu("the opclass-rendered summary value (e.g. a min…max range)") + "\n\n")
+		b.WriteString("  " + mu("Press ") + styleBadge.Render("s") + mu(" to seek to the range covering a heap block number.") + "\n")
+		b.WriteString("  " + mu("Enter jumps to the heap pages of the summarised block range.") + "\n")
+		return infoPad(&b, height)
+	}
+	infoHeader(&b, "BRIN page reference")
+	b.WriteString("  " + mu("BRIN pages come in three kinds; the banner above carries the metapage summary.") + "\n\n")
+	b.WriteString("    " + styleMuted.Render(padRight("regular", 9)) + mu("holds the range-summary tuples — Enter drills into these") + "\n")
+	b.WriteString("    " + styleBarAlt.Render(padRight("revmap", 9)) + mu("range map: points each block range at its summary tuple") + "\n")
+	b.WriteString("    " + styleBarAlt.Render(padRight("meta", 9)) + mu("metapage (block 0): pages-per-range, version") + "\n\n")
+	b.WriteString("  " + mu("PgUp/PgDn slides the load window; Enter on a regular page lists its summaries.") + "\n")
+	b.WriteString("  " + mu("Reading brin_* needs a superuser (or pg_read_server_files).") + "\n")
+	return infoPad(&b, height)
+}
+
+func (m *Model) renderGinInfo(height int, tuples bool) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+	if tuples {
+		infoHeader(&b, "GIN posting-list reference")
+		b.WriteString("  " + mu("Each row is one posting-list segment on a compressed data-leaf page") + "\n")
+		b.WriteString("  " + mu("(gin_leafpage_items): a run of heap TIDs sharing a starting tid.") + "\n\n")
+		b.WriteString("    " + padRight("first tid", 12) + mu("the segment's first heap pointer") + "\n")
+		b.WriteString("    " + padRight("bytes", 12) + mu("compressed on-disk size of the segment") + "\n")
+		b.WriteString("    " + padRight("tids", 12) + mu("number of heap TIDs packed into the segment") + "\n\n")
+		b.WriteString("  " + styleHeapToastTag.Render("Note") + mu(": pageinspect cannot list GIN entry-tree keys, so only data-leaf") + "\n")
+		b.WriteString("  " + mu("pages are itemizable. These rows are terminal (no per-row drill).") + "\n")
+		return infoPad(&b, height)
+	}
+	infoHeader(&b, "GIN page reference")
+	b.WriteString("  " + mu("A GIN index is an entry tree (keys) over posting trees/lists (heap tids).") + "\n\n")
+	b.WriteString("    " + styleMuted.Render(padRight("data-leaf", 10)) + mu("compressed posting lists — the only itemizable pages (Enter drills)") + "\n")
+	b.WriteString("    " + styleBarAlt.Render(padRight("data", 10)) + mu("posting-tree internal page") + "\n")
+	b.WriteString("    " + styleBarAlt.Render(padRight("entry", 10)) + mu("entry-tree page (keys) — not itemizable via pageinspect") + "\n")
+	b.WriteString("    " + styleBarAlt.Render(padRight("meta", 10)) + mu("metapage (block 0): entry/data page counts, pending list") + "\n\n")
+	b.WriteString("  " + mu("The banner shows entry/data page counts and pending-list size. PgUp/PgDn slides") + "\n")
+	b.WriteString("  " + mu("the window; Enter on a data-leaf page lists its posting segments.") + "\n")
+	return infoPad(&b, height)
+}

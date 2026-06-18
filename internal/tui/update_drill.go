@@ -172,7 +172,9 @@ func (m *Model) drillIn() tea.Cmd {
 			}
 			m.stack = append(m.stack, next)
 			return m.loadCurrent()
-		case pg.RelBTreeIndex:
+		case pg.RelBTreeIndex, pg.RelGist, pg.RelBrin, pg.RelGin:
+			// Every drillable index AM uses the shared levelIndexPages screen;
+			// the loader/renderer branch on r.AccessMethod from here on.
 			next := &screen{
 				level: levelIndexPages, title: "index pages", tool: s.tool,
 				db: r.DB, schema: r.Schema, index: r,
@@ -184,6 +186,14 @@ func (m *Model) drillIn() tea.Cmd {
 		}
 		return nil
 	case levelIndexPages:
+		switch s.index.AccessMethod {
+		case "gist":
+			return m.drillGistPage(s, cur)
+		case "brin":
+			return m.drillBrinPage(s, cur)
+		case "gin":
+			return m.drillGinPage(s, cur)
+		}
 		p, ok := cur.data.(pg.IndexPageStat)
 		if !ok {
 			return nil
@@ -194,12 +204,20 @@ func (m *Model) drillIn() tea.Cmd {
 			indexKeyCols:   s.indexKeyCols, // carry the keys banner; no refetch
 			heapPageCount:  s.heapPageCount,
 			indexPageBlkno: p.Blkno,
-			indexPageType:  p.Type,
+			indexPageType:  indexTuplePageType(p.Type, p.BtpoLevel),
 			sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
 		}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
 	case levelIndexTuples:
+		switch s.index.AccessMethod {
+		case "gist":
+			return m.drillGistItem(s, cur)
+		case "brin":
+			return m.drillBrinItem(s, cur)
+		case "gin":
+			return nil // GIN posting-list segments are terminal
+		}
 		t, ok := cur.data.(pg.IndexTuple)
 		if !ok {
 			return nil
@@ -370,6 +388,23 @@ func (m *Model) drillIn() tea.Cmd {
 	return nil
 }
 
+// indexTuplePageType normalizes a B-tree page's bt_page_stats type for the
+// tuple view. pageinspect reports the root as 'r' whether it's a single-page
+// index (the root is also a leaf — its entries are heap pointers we can decode
+// against the table) or the top of a taller tree (the root is internal — its
+// entries are downlinks to child index pages). Only the level disambiguates: a
+// non-leaf root (level > 0) must be treated exactly like an internal page, or
+// its downlink ctids get looked up in the heap and resolve to unrelated rows,
+// printing bogus, unsorted "keys". Mapping it to 'i' here flips both the decode
+// path (ListIndexTuples skips the heap join) and the renderer (downlink ranges
+// and "→ blk N" instead of a fake key column) in one place.
+func indexTuplePageType(typ string, level int32) string {
+	if typ == "r" && level > 0 {
+		return "i"
+	}
+	return typ
+}
+
 // downlinkChildBlock resolves the child index page an internal-page downlink
 // points at. On internal B-tree pages the item's ctid block IS the child block
 // number (the offset word carries pivot flag bits, which we ignore). Returns
@@ -385,6 +420,163 @@ func downlinkChildBlock(t pg.IndexTuple, pageCount, current int32) (int32, bool)
 		return 0, false
 	}
 	return blk, true
+}
+
+// --- GiST / BRIN / GIN drill handlers (called from drillIn) ---
+
+// drillGistPage opens a GiST page's items. Leaf and internal pages both carry
+// items worth showing; deleted/empty pages don't drill.
+func (m *Model) drillGistPage(s *screen, cur item) tea.Cmd {
+	p, ok := cur.data.(pg.GistPageStat)
+	if !ok {
+		return nil
+	}
+	if p.IsDeleted {
+		m.notice = "deleted page — emptied by VACUUM, nothing to inspect"
+		return nil
+	}
+	if p.Items == 0 {
+		m.notice = "empty page — no items to inspect"
+		return nil
+	}
+	next := &screen{
+		level: levelIndexTuples, title: "index tuples", tool: s.tool,
+		db: s.db, schema: s.schema, index: s.index,
+		indexKeyCols:   s.indexKeyCols,
+		heapPageCount:  s.heapPageCount,
+		indexPageBlkno: p.Blkno,
+		indexPageType:  gistPageRole(p.IsLeaf, p.IsDeleted),
+		sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
+	}
+	m.stack = append(m.stack, next)
+	return m.loadCurrent()
+}
+
+// drillGistItem walks a GiST internal-page downlink to its child page, or opens
+// the heap row a leaf entry points at (mirrors the B-tree tree-walk).
+func (m *Model) drillGistItem(s *screen, cur item) tea.Cmd {
+	t, ok := cur.data.(pg.GistItem)
+	if !ok {
+		return nil
+	}
+	if s.indexPageType == "intr" {
+		child, ok := gistDownlinkChildBlock(t, s.heapPageCount, s.indexPageBlkno)
+		if !ok {
+			return nil
+		}
+		next := &screen{
+			level: levelIndexTuples, title: "index tuples", tool: s.tool,
+			db: s.db, schema: s.schema, index: s.index,
+			indexKeyCols:   s.indexKeyCols,
+			heapPageCount:  s.heapPageCount,
+			indexPageBlkno: child,
+			indexPageType:  "", // probed by loadGistItemsCmd mid-descent
+			sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
+		}
+		m.stack = append(m.stack, next)
+		return m.loadCurrent()
+	}
+	if t.Dead || t.Ctid == nil {
+		return nil
+	}
+	parent := pg.Table{DB: s.db, Schema: s.schema, OID: s.index.ParentOID, Name: s.index.ParentName}
+	next := &screen{
+		level: levelTupleRow, title: "row", tool: s.tool,
+		db: s.db, schema: s.schema, table: parent,
+		tupleCtid: *t.Ctid,
+		sort:      sortByName, sortDesc: false,
+	}
+	m.stack = append(m.stack, next)
+	return m.loadCurrent()
+}
+
+// gistDownlinkChildBlock resolves the child page a GiST internal-page downlink
+// points at (its ctid block). Mirrors downlinkChildBlock's safety guards.
+func gistDownlinkChildBlock(t pg.GistItem, pageCount, current int32) (int32, bool) {
+	blk, ok := parseCtidBlock(t.Ctid)
+	if !ok || blk <= 0 || blk == current {
+		return 0, false
+	}
+	if pageCount > 0 && blk >= pageCount {
+		return 0, false
+	}
+	return blk, true
+}
+
+// drillBrinPage opens a regular BRIN page's range summaries; meta/revmap pages
+// have nothing to itemize. Carries the metapage down so the range column and
+// block-seek know pages-per-range.
+func (m *Model) drillBrinPage(s *screen, cur item) tea.Cmd {
+	p, ok := cur.data.(pg.BrinPageStat)
+	if !ok {
+		return nil
+	}
+	if p.PageType != "regular" {
+		m.notice = p.PageType + " page holds no range summaries — open a regular page to see them"
+		return nil
+	}
+	next := &screen{
+		level: levelIndexTuples, title: "brin ranges", tool: s.tool,
+		db: s.db, schema: s.schema, index: s.index,
+		indexKeyCols:   s.indexKeyCols,
+		heapPageCount:  s.heapPageCount,
+		indexPageBlkno: p.Blkno,
+		indexPageType:  "regular",
+		brinMeta:       s.brinMeta,
+		sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
+	}
+	m.stack = append(m.stack, next)
+	return m.loadCurrent()
+}
+
+// drillBrinItem jumps from a BRIN range summary to the heap pages of the block
+// range it covers, positioning the heap-pages window at the range's start.
+func (m *Model) drillBrinItem(s *screen, cur item) tea.Cmd {
+	t, ok := cur.data.(pg.BrinItem)
+	if !ok {
+		return nil
+	}
+	parent := pg.Table{DB: s.db, Schema: s.schema, OID: s.index.ParentOID, Name: s.index.ParentName}
+	start := int32(t.BlockNum)
+	if start < 0 {
+		start = 0
+	}
+	start = (start / heapWindowDefault) * heapWindowDefault // align to the window grid
+	next := &screen{
+		level: levelHeapPages, title: "heap pages", tool: s.tool,
+		db: s.db, schema: s.schema, table: parent,
+		heapWindowStart: start, heapWindowCount: heapWindowDefault,
+		sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
+	}
+	m.notice = fmt.Sprintf("heap pages from block %d — BRIN range start", t.BlockNum)
+	m.stack = append(m.stack, next)
+	return m.loadCurrent()
+}
+
+// drillGinPage opens a GIN data-leaf page's posting-list segments; entry-tree
+// and other pages aren't itemizable via pageinspect.
+func (m *Model) drillGinPage(s *screen, cur item) tea.Cmd {
+	p, ok := cur.data.(pg.GinPageStat)
+	if !ok {
+		return nil
+	}
+	if !ginPageIsDataLeaf(p.Flags) {
+		// pageinspect can only list compressed data-leaf pages; entry-tree and
+		// meta pages aren't itemizable. Point the user at the drillable kind.
+		m.notice = "only data-leaf pages are itemizable (pageinspect can't read entry-tree keys) — sort by type (→) to find them"
+		return nil
+	}
+	next := &screen{
+		level: levelIndexTuples, title: "gin posting lists", tool: s.tool,
+		db: s.db, schema: s.schema, index: s.index,
+		indexKeyCols:   s.indexKeyCols,
+		heapPageCount:  s.heapPageCount,
+		indexPageBlkno: p.Blkno,
+		indexPageType:  "data-leaf",
+		sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
+	}
+	m.stack = append(m.stack, next)
+	return m.loadCurrent()
 }
 
 // the picker (and when a --<tool> flag opens one directly at startup). The

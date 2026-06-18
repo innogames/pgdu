@@ -169,8 +169,121 @@ type BtreeMeta struct {
 // per-column pg_get_indexdef output (a bare column name, or an expression like
 // "lower(email)"). IsKey is false for INCLUDE (covering) columns — those past
 // indnkeyatts that are stored but not part of the search key.
+//
+// The physical type fields drive the type-aware decoder that renders raw key
+// bytes on internal-page separators (where no heap projection exists). They
+// mirror pg_attribute/pg_type for the index's own k-th column: TypLen is
+// attlen (>0 fixed width, -1 varlena, -2 cstring), TypAlign is attalign
+// ('c'/'s'/'i'/'d'), and TypName/TypCategory identify the type for formatting.
 type IndexKeyColumn struct {
-	Ordinal int32
-	Def     string
-	IsKey   bool
+	Ordinal     int32
+	Def         string
+	IsKey       bool
+	TypLen      int32
+	TypAlign    string
+	TypName     string
+	TypCategory string
+}
+
+// --- GiST page inspector ---
+
+// GistPageStat summarises one GiST index page (gist_page_opaque_info +
+// page_header + an item count). GiST has no metapage — block 0 is the root — so
+// every page in the file is browsable. IsLeaf/IsDeleted come from the opaque
+// flags; Items is the live item count; FreeSize is page_header's free space.
+type GistPageStat struct {
+	Blkno     int32
+	IsLeaf    bool
+	IsDeleted bool
+	Items     int32
+	FreeSize  int32
+	PageSize  int32
+	RightLink int64
+}
+
+// GistItem is one entry on a GiST page from gist_page_items. On leaf pages Ctid
+// points at the heap row; on internal pages it's a downlink to a child index
+// page. Keys is the opclass-decoded key text pageinspect returns directly (e.g.
+// a bounding box) — no heap projection is needed, unlike B-tree.
+type GistItem struct {
+	ItemOffset int32
+	Ctid       *string
+	ItemLen    int32
+	Dead       bool
+	Keys       *string
+}
+
+// --- BRIN page inspector ---
+
+// BrinMeta is the BRIN metapage (block 0) via brin_metapage_info. PagesPerRange
+// is the heap-block span each summary tuple covers; it's also what the seek
+// feature uses to report the range a typed block falls into.
+type BrinMeta struct {
+	Magic          string
+	Version        int32
+	PagesPerRange  int32
+	LastRevmapPage int64
+}
+
+// BrinPageStat summarises one BRIN page. PageType is brin_page_type:
+// "meta" / "revmap" / "regular". Per-page item counts are deliberately not
+// computed here — brin_page_items errors on non-regular pages and a CASE/LATERAL
+// guard doesn't reliably suppress the set-returning call — so counts surface
+// only when the user drills into a regular page.
+type BrinPageStat struct {
+	Blkno    int32
+	PageType string
+	FreeSize int32
+	PageSize int32
+}
+
+// BrinItem is one summary tuple on a BRIN regular page from brin_page_items: the
+// per-attribute summary for the heap block range starting at BlockNum. Value is
+// the opclass-rendered summary text (e.g. "{1 .. 100}"); nil when AllNulls.
+type BrinItem struct {
+	ItemOffset  int32
+	BlockNum    int64
+	AttNum      int32
+	AllNulls    bool
+	HasNulls    bool
+	Placeholder bool
+	Empty       bool
+	Value       *string
+}
+
+// --- GIN page inspector ---
+
+// GinMeta is the GIN metapage (block 0) via gin_metapage_info. Surfaced as a
+// banner over the page list (entry/data/pending page counts, total entries).
+type GinMeta struct {
+	PendingPages  int32
+	PendingTuples int64
+	TotalPages    int32
+	EntryPages    int32
+	DataPages     int32
+	Entries       int64
+	Version       int32
+}
+
+// GinPageStat summarises one GIN page (gin_page_opaque_info + page_header).
+// Flags is the opaque flag set joined into a readable string ("data leaf
+// compressed"); MaxOff is the page's item count from the opaque area.
+type GinPageStat struct {
+	Blkno    int32
+	Flags    string
+	MaxOff   int32
+	FreeSize int32
+	PageSize int32
+}
+
+// GinItem is one posting-list segment on a compressed GIN data-leaf page from
+// gin_leafpage_items: a run of heap TIDs sharing a starting tid. Entry-tree
+// pages are not itemizable via pageinspect, so only data-leaf pages produce
+// these. TidsText is a space-joined sample of the first few TIDs (full list can
+// be thousands); TidCount is the true length.
+type GinItem struct {
+	FirstTid string
+	NBytes   int32
+	TidCount int32
+	TidsText string
 }

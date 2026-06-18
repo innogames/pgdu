@@ -95,6 +95,12 @@ func itemBlkno(it item) (int64, bool) {
 		return p.Blkno, true
 	case pg.IndexPageStat:
 		return int64(p.Blkno), true
+	case pg.GistPageStat:
+		return int64(p.Blkno), true
+	case pg.BrinPageStat:
+		return int64(p.Blkno), true
+	case pg.GinPageStat:
+		return int64(p.Blkno), true
 	}
 	return 0, false
 }
@@ -124,6 +130,12 @@ func itemFreeSpace(it item) (int64, bool) {
 	case pg.HeapPageStat:
 		return int64(p.FreeBytes), true
 	case pg.IndexPageStat:
+		return int64(p.FreeSize), true
+	case pg.GistPageStat:
+		return int64(p.FreeSize), true
+	case pg.BrinPageStat:
+		return int64(p.FreeSize), true
+	case pg.GinPageStat:
 		return int64(p.FreeSize), true
 	}
 	return 0, false
@@ -165,6 +177,10 @@ func itemLP(it item) (int64, bool) {
 		return int64(t.LP), true
 	case pg.IndexTuple:
 		return int64(t.ItemOffset), true
+	case pg.GistItem:
+		return int64(t.ItemOffset), true
+	case pg.BrinItem:
+		return int64(t.ItemOffset), true
 	}
 	return 0, false
 }
@@ -183,11 +199,40 @@ func itemTreeLevel(it item) (int64, bool) {
 // internal → root → deleted pages together (the name tiebreaker then orders by
 // block within a group). Second return is false for non-index-page items.
 func itemPageType(it item) (int64, bool) {
-	p, ok := it.data.(pg.IndexPageStat)
-	if !ok {
-		return 0, false
+	switch p := it.data.(type) {
+	case pg.IndexPageStat:
+		return int64(indexPageTypeRank(p.Type)), true
+	case pg.GistPageStat:
+		return int64(gistPageTypeRank(gistPageRole(p.IsLeaf, p.IsDeleted))), true
+	case pg.BrinPageStat:
+		return int64(brinPageTypeRank(p.PageType)), true
+	case pg.GinPageStat:
+		return int64(ginPageTypeRank(p.Flags)), true
+	case pg.Relation:
+		// Relations level: rank by kind so the "type" sort groups heap, toast,
+		// then the index access methods together.
+		return int64(relationTypeRank(p)), true
 	}
-	return int64(indexPageTypeRank(p.Type)), true
+	return 0, false
+}
+
+// relationTypeRank orders the relations "type" column: heap first, then toast,
+// then the index access methods alphabetically (btree, brin, gin, gist).
+func relationTypeRank(r pg.Relation) int {
+	switch r.Kind {
+	case pg.RelToast:
+		return 1
+	case pg.RelBTreeIndex:
+		return 2
+	case pg.RelBrin:
+		return 3
+	case pg.RelGin:
+		return 4
+	case pg.RelGist:
+		return 5
+	default: // RelTable / heap
+		return 0
+	}
 }
 
 // relationToItem builds the levelRelations row for one mixed relation entry.
@@ -230,6 +275,144 @@ func indexTupleToItem(t pg.IndexTuple) item {
 		size:        int64(t.ItemLen),
 		hasChildren: t.Decoded != nil && t.Ctid != nil,
 		data:        t,
+	}
+}
+
+// --- GiST / BRIN / GIN item builders ---
+
+func gistPageToItem(p pg.GistPageStat) item {
+	used := max(heapPageBlockSize-int64(p.FreeSize), 0)
+	return item{
+		name:        fmt.Sprintf("page #%07d", p.Blkno),
+		size:        used,
+		hasChildren: p.Items > 0 && !p.IsDeleted,
+		data:        p,
+	}
+}
+
+func gistItemToItem(it pg.GistItem) item {
+	// name carries the decoded keys so the `/` filter searches by key. The "+"
+	// marker is approximate (the builder can't see the page role): a live ctid
+	// is a heap pointer on a leaf or a downlink on an internal page — both drill.
+	name := fmt.Sprintf("#%04d", it.ItemOffset)
+	if it.Keys != nil && *it.Keys != "" {
+		name = *it.Keys
+	}
+	return item{
+		name:        name,
+		size:        int64(it.ItemLen),
+		hasChildren: it.Ctid != nil && !it.Dead,
+		data:        it,
+	}
+}
+
+func brinPageToItem(p pg.BrinPageStat) item {
+	used := max(heapPageBlockSize-int64(p.FreeSize), 0)
+	return item{
+		name: fmt.Sprintf("page #%07d", p.Blkno),
+		size: used,
+		// Only regular pages carry range summaries to drill into; Enter on one
+		// jumps to the heap pages of the summarised block range.
+		hasChildren: p.PageType == "regular",
+		data:        p,
+	}
+}
+
+func brinItemToItem(it pg.BrinItem) item {
+	val := ""
+	if it.Value != nil {
+		val = *it.Value
+	}
+	return item{
+		// name carries "blk N attM value" so the `/` filter matches block ranges
+		// and summary values alike.
+		name:        fmt.Sprintf("blk %d att%d %s", it.BlockNum, it.AttNum, val),
+		size:        it.BlockNum, // ranges sort by starting block under sortBySize
+		hasChildren: true,        // Enter → heap pages of the range
+		data:        it,
+	}
+}
+
+func ginPageToItem(p pg.GinPageStat) item {
+	used := max(heapPageBlockSize-int64(p.FreeSize), 0)
+	return item{
+		name: fmt.Sprintf("page #%07d", p.Blkno),
+		size: used,
+		// Only compressed data-leaf pages are itemizable by pageinspect.
+		hasChildren: ginPageIsDataLeaf(p.Flags),
+		data:        p,
+	}
+}
+
+func ginItemToItem(it pg.GinItem) item {
+	return item{
+		// Posting-list segments are terminal (the TIDs are heap pointers, not a
+		// single row to open). name carries the first tid for the `/` filter.
+		name: fmt.Sprintf("%s ×%d", it.FirstTid, it.TidCount),
+		size: int64(it.NBytes),
+		data: it,
+	}
+}
+
+// gistPageRole maps gist_page_opaque_info flags to the short role tag carried in
+// screen.indexPageType and shown in the page column: del / leaf / intr.
+func gistPageRole(isLeaf, isDeleted bool) string {
+	switch {
+	case isDeleted:
+		return "del"
+	case isLeaf:
+		return "leaf"
+	default:
+		return "intr"
+	}
+}
+
+// gistPageTypeRank / brinPageTypeRank / ginPageTypeRank order the per-AM page
+// lists under the "type" sort (sortByType).
+func gistPageTypeRank(role string) int {
+	switch role {
+	case "leaf":
+		return 0
+	case "intr":
+		return 1
+	case "del":
+		return 2
+	}
+	return 3
+}
+
+func brinPageTypeRank(t string) int {
+	switch t {
+	case "meta":
+		return 0
+	case "revmap":
+		return 1
+	case "regular":
+		return 2
+	}
+	return 3
+}
+
+// ginPageIsDataLeaf reports whether a GIN page's opaque flags mark it a
+// compressed posting-list data-leaf page — the only kind gin_leafpage_items can
+// read.
+func ginPageIsDataLeaf(flags string) bool {
+	return strings.Contains(flags, "data") && strings.Contains(flags, "leaf")
+}
+
+// ginPageTypeRank ranks GIN pages for the "type" sort. Data-leaf pages rank
+// first because they're the only itemizable kind — an ascending type sort then
+// surfaces the drillable pages at the top of the (often vast) entry-page list.
+func ginPageTypeRank(flags string) int {
+	switch {
+	case strings.Contains(flags, "data") && strings.Contains(flags, "leaf"):
+		return 0
+	case strings.Contains(flags, "data"):
+		return 1
+	case strings.Contains(flags, "meta"):
+		return 2
+	default: // entry-tree pages
+		return 3
 	}
 }
 

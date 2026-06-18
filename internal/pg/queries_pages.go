@@ -129,13 +129,13 @@ SELECT col, val FROM (
 // of sqlTables so the user sees tables, their indexes, and their TOAST storage
 // side by side, ranked by on-disk size.
 //
-// Only B-tree indexes are listed: hash/gist/gin/brin are filtered out because
-// the index-page drill relies on bt_page_stats / bt_page_items, neither of
-// which works on other access methods.
+// btree/gist/brin/gin indexes are listed (each has its own pageinspect drill
+// path keyed on access_method); hash is still filtered out — pageinspect can
+// summarise its pages but pgdu has no hash drill yet.
 //
 // Three arms in the WHERE:
 //   - Tables:  relkind IN ('r','m','p') AND namespace = $1
-//   - Indexes: relkind = 'i' AND btree AND parent namespace = $1
+//   - Indexes: relkind = 'i' AND drillable AM AND parent namespace = $1
 //   - TOAST:   relkind = 't' AND owner's namespace = $1
 //
 // For tables ParentOID is 0; for indexes it's pg_index.indrelid; for TOAST it's
@@ -164,7 +164,7 @@ LEFT   JOIN pg_namespace onsp ON onsp.oid = oc.relnamespace
 WHERE  (
          (c.relkind IN ('r','m','p') AND n.nspname = $1)
          OR
-         (c.relkind = 'i' AND am.amname = 'btree' AND pn.nspname = $1)
+         (c.relkind = 'i' AND am.amname IN ('btree','gist','brin','gin') AND pn.nspname = $1)
          OR
          (c.relkind = 't' AND onsp.nspname = $1)
        )
@@ -276,15 +276,28 @@ FROM   bt_metap($1)
 // sqlIndexKeyColumns lists an index's columns in definition order, splitting
 // key columns (k <= indnkeyatts) from INCLUDE/covering columns. Each Def is the
 // per-column pg_get_indexdef projection (a bare name or an expression). The
-// set-returning generate_series is implicitly LATERAL so it can read
-// idx.indnatts from the preceding FROM item. Works for any access method.
-// $1 is the index oid.
+// generate_series over 1..indnatts is LATERAL (it reads idx.indnatts) and must
+// come before the pg_attribute/pg_type joins, which key off its k. Works for
+// any access method.
+//
+// The physical type columns (typlen/typalign/typname/typcategory) drive the
+// type-aware key decoder used on internal-page separators, where no heap
+// projection is available. They come from the index relation's *own*
+// pg_attribute rows (attnum k maps 1:1 to the k-th indexed column, with the
+// type already resolved — even for expression and INCLUDE columns). $1 is the
+// index oid.
 const sqlIndexKeyColumns = `
 SELECT k::int,
        pg_get_indexdef($1::oid, k::int, false) AS def,
-       (k <= idx.indnkeyatts)                  AS is_key
-FROM   pg_index idx,
-       generate_series(1, idx.indnatts) AS k
+       (k <= idx.indnkeyatts)                  AS is_key,
+       a.attlen::int                           AS typlen,
+       a.attalign::text                        AS typalign,
+       t.typname::text                         AS typname,
+       t.typcategory::text                     AS typcategory
+FROM   pg_index idx
+CROSS  JOIN LATERAL generate_series(1, idx.indnatts) AS k
+JOIN   pg_attribute a ON a.attrelid = idx.indexrelid AND a.attnum = k
+JOIN   pg_type      t ON t.oid = a.atttypid
 WHERE  idx.indexrelid = $1::oid
 ORDER  BY k
 `
@@ -306,4 +319,165 @@ ORDER  BY chunk_seq
 // the file and is always accurate.
 const sqlRelPages = `
 SELECT (pg_relation_size($1) / current_setting('block_size')::int)::int
+`
+
+// --- GiST page inspector ---
+
+// sqlGistPagesSummary mirrors sqlIndexPagesSummary for GiST. GiST has no
+// metapage (block 0 is the root), so the window starts at $2 with no skip.
+// Leaf/deleted come from gist_page_opaque_info.flags; the item count is a
+// LATERAL count over gist_page_items_bytea (the raw variant needs no index
+// oid). $1 is the index regclass-castable text; $2 the window start; $3 count.
+const sqlGistPagesSummary = `
+WITH pages AS (
+  SELECT g.blkno, get_raw_page($1, g.blkno) AS raw
+  FROM   generate_series($2::int, $2::int + $3::int - 1) AS g(blkno)
+)
+SELECT p.blkno::int,
+       ('leaf'    = ANY(o.flags))        AS is_leaf,
+       ('deleted' = ANY(o.flags))        AS is_deleted,
+       COALESCE(it.items, 0)::int        AS items,
+       (hdr.upper - hdr.lower)::int      AS free_size,
+       hdr.pagesize::int                 AS page_size,
+       o.rightlink::bigint               AS rightlink
+FROM   pages p,
+       LATERAL page_header(p.raw)            AS hdr,
+       LATERAL gist_page_opaque_info(p.raw)  AS o
+LEFT   JOIN LATERAL (
+         SELECT count(*) AS items FROM gist_page_items_bytea(p.raw)
+       ) it ON true
+ORDER  BY p.blkno
+`
+
+// sqlGistItems lists one GiST page's items. keys is pageinspect's opclass-decoded
+// key text — already human-readable, so there's no heap-projection path like
+// B-tree's. ctid points at the heap row (leaf) or a child page (internal). $1 is
+// the index regclass-castable text; $2 the block number.
+const sqlGistItems = `
+SELECT itemoffset::int,
+       ctid::text,
+       itemlen::int,
+       dead,
+       keys
+FROM   gist_page_items(get_raw_page($1, $2::int), $1::regclass)
+ORDER  BY itemoffset
+`
+
+// sqlGistItemsBytea is the raw-bytes fallback for sqlGistItems. gist_page_items
+// formats the key via the opclass's output function, which some opclasses lack —
+// notably btree_gist's gbtreekey* types, which raise "cannot display a value of
+// type gbtreekeyNN" (SQLSTATE 0A000). gist_page_items_bytea returns the raw key
+// bytes (no index oid needed, no formatting), which we render as hex instead.
+const sqlGistItemsBytea = `
+SELECT itemoffset::int,
+       ctid::text,
+       itemlen::int,
+       dead,
+       key_data
+FROM   gist_page_items_bytea(get_raw_page($1, $2::int))
+ORDER  BY itemoffset
+`
+
+// sqlGistPageFlags resolves a child page's leaf/deleted role when descending a
+// GiST downlink (the parent only gave us the block number). Mirrors
+// sqlBtreePageType. $1 is the index regclass-castable text; $2 the block number.
+const sqlGistPageFlags = `
+SELECT ('leaf' = ANY(flags)) AS is_leaf,
+       ('deleted' = ANY(flags)) AS is_deleted
+FROM   gist_page_opaque_info(get_raw_page($1, $2::int))
+`
+
+// --- BRIN page inspector ---
+
+// sqlBrinMeta reads the BRIN metapage (block 0) via brin_metapage_info. magic is
+// text; the rest cast to fit the int32/int64 struct fields. $1 is the index
+// regclass-castable text.
+const sqlBrinMeta = `
+SELECT magic::text, version::int, pagesperrange::int, lastrevmappage::bigint
+FROM   brin_metapage_info(get_raw_page($1, 0))
+`
+
+// sqlBrinPagesSummary summarises BRIN pages by type (meta/revmap/regular) and
+// free space. It deliberately does NOT count items: brin_page_items errors on
+// non-regular pages and there's no reliable way to guard the set-returning call
+// per row, so item counts come from the drill (sqlBrinItems). Block 0 (meta) is
+// browsable here — brin_page_type handles it. $1 index text; $2 start; $3 count.
+const sqlBrinPagesSummary = `
+WITH pages AS (
+  SELECT g.blkno, get_raw_page($1, g.blkno) AS raw
+  FROM   generate_series($2::int, $2::int + $3::int - 1) AS g(blkno)
+)
+SELECT p.blkno::int,
+       brin_page_type(p.raw)        AS page_type,
+       (hdr.upper - hdr.lower)::int AS free_size,
+       hdr.pagesize::int            AS page_size
+FROM   pages p,
+       LATERAL page_header(p.raw) AS hdr
+ORDER  BY p.blkno
+`
+
+// sqlBrinItems lists one BRIN regular page's summary tuples: per heap-block-range
+// (blknum), per indexed attribute (attnum), the opclass-rendered summary value
+// plus the null/placeholder/empty flags. The empty column is PG 17+. $1 is the
+// index regclass-castable text (also the oid arg via ::regclass); $2 the block.
+const sqlBrinItems = `
+SELECT itemoffset::int,
+       blknum::bigint,
+       attnum::int,
+       allnulls,
+       hasnulls,
+       placeholder,
+       empty,
+       value
+FROM   brin_page_items(get_raw_page($1, $2::int), $1::regclass)
+ORDER  BY blknum, attnum
+`
+
+// --- GIN page inspector ---
+
+// sqlGinMeta reads the GIN metapage (block 0) via gin_metapage_info. $1 is the
+// index regclass-castable text.
+const sqlGinMeta = `
+SELECT n_pending_pages::int,
+       n_pending_tuples::bigint,
+       n_total_pages::int,
+       n_entry_pages::int,
+       n_data_pages::int,
+       n_entries::bigint,
+       version::int
+FROM   gin_metapage_info(get_raw_page($1, 0))
+`
+
+// sqlGinPagesSummary summarises GIN pages by opaque flags (entry/data/leaf/…) +
+// free space. The metapage (block 0) is skipped via GREATEST($2,1) — its opaque
+// area differs and it's already shown in the banner (mirrors B-tree's meta skip).
+// $1 index text; $2 start; $3 count.
+const sqlGinPagesSummary = `
+WITH pages AS (
+  SELECT g.blkno, get_raw_page($1, g.blkno) AS raw
+  FROM   generate_series(GREATEST($2::int, 1), $2::int + $3::int - 1) AS g(blkno)
+)
+SELECT p.blkno::int,
+       array_to_string(o.flags, ' ') AS flags,
+       o.maxoff::int                 AS maxoff,
+       (hdr.upper - hdr.lower)::int  AS free_size,
+       hdr.pagesize::int             AS page_size
+FROM   pages p,
+       LATERAL page_header(p.raw)           AS hdr,
+       LATERAL gin_page_opaque_info(p.raw)  AS o
+ORDER  BY p.blkno
+`
+
+// sqlGinItems lists posting-list segments on a compressed GIN data-leaf page via
+// gin_leafpage_items. tids is a tid[]; we return its length and a space-joined
+// sample of the first 20 (a segment can pack thousands). Entry-tree pages aren't
+// itemizable by pageinspect, so callers only run this on data-leaf pages. $1 is
+// the index regclass-castable text; $2 the block number.
+const sqlGinItems = `
+SELECT first_tid::text,
+       nbytes::int,
+       COALESCE(array_length(tids, 1), 0)::int AS tid_count,
+       COALESCE(array_to_string(tids[1:20], ' '), '') AS tids_text
+FROM   gin_leafpage_items(get_raw_page($1, $2::int))
+ORDER  BY first_tid
 `

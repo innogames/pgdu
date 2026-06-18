@@ -114,6 +114,12 @@ func (m *Model) View() string {
 		contentHeight--
 	}
 
+	if line := m.renderSeekLine(s); line != "" {
+		b.WriteString(line)
+		b.WriteString("\n")
+		contentHeight--
+	}
+
 	// Reserve a line for the colour legend (rendered after the list, before
 	// the help row) on levels whose bars carry more than one colour.
 	legend := renderLegend(s)
@@ -177,9 +183,27 @@ func (m *Model) View() string {
 		case levelRelations:
 			b.WriteString(m.renderRelationsList(s, contentHeight))
 		case levelIndexPages:
-			b.WriteString(m.renderIndexPagesList(s, contentHeight))
+			switch s.index.AccessMethod {
+			case "gist":
+				b.WriteString(m.renderGistPagesList(s, contentHeight))
+			case "brin":
+				b.WriteString(m.renderBrinPagesList(s, contentHeight))
+			case "gin":
+				b.WriteString(m.renderGinPagesList(s, contentHeight))
+			default:
+				b.WriteString(m.renderIndexPagesList(s, contentHeight))
+			}
 		case levelIndexTuples:
-			b.WriteString(m.renderIndexTuplesList(s, contentHeight))
+			switch s.index.AccessMethod {
+			case "gist":
+				b.WriteString(m.renderGistTuplesList(s, contentHeight))
+			case "brin":
+				b.WriteString(m.renderBrinTuplesList(s, contentHeight))
+			case "gin":
+				b.WriteString(m.renderGinTuplesList(s, contentHeight))
+			default:
+				b.WriteString(m.renderIndexTuplesList(s, contentHeight))
+			}
 		case levelDescribe:
 			b.WriteString(m.renderDescribe(s, contentHeight))
 		case levelDiagnostics:
@@ -437,6 +461,31 @@ func (m *Model) renderFilterLine(s *screen) string {
 		styleBadge.Render("/") + styleMuted.Render(" to edit, ") +
 		styleBadge.Render("esc") + styleMuted.Render(" to clear")
 	return "  " + styleMuted.Render("filter: ") + s.filter + "  " + hint
+}
+
+// renderSeekLine draws the seek-to-key affordance on the index-tuples view:
+// "seek (player_id): <value>▏  <status>". The status reports where the cursor
+// jumped. Returns "" unless the seek input is focused or carries a query.
+func (m *Model) renderSeekLine(s *screen) string {
+	if s.level != levelIndexTuples || (s.seekQuery == "" && !s.seekFocused) {
+		return ""
+	}
+	label := "seek"
+	if s.index.AccessMethod == "brin" {
+		// BRIN seeks by heap block number, not by key value.
+		label = "seek (heap block)"
+	} else if col := firstKeyColName(s.indexKeyCols); col != "" {
+		label = "seek (" + col + ")"
+	}
+	var status string
+	if s.seekStatus != "" {
+		status = "  " + styleMuted.Render(s.seekStatus)
+	}
+	if s.seekFocused {
+		caret := styleSelected.Render("▏")
+		return "  " + styleSelected.Render(label+": ") + s.seekQuery + caret + status
+	}
+	return "  " + styleMuted.Render(label+": ") + s.seekQuery + status
 }
 
 // summaryLabelWidth is the width of the label column ("server memory" /

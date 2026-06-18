@@ -68,7 +68,7 @@ func TestInternalDownlinkRanges(t *testing.T) {
 		tupleItem(2, nil),          // minus-infinity leftmost child
 		tupleItem(4, hexText("h")),
 	}
-	got := internalDownlinkRanges(items, "i", 200)
+	got := internalDownlinkRanges(items, "i", nil, 200)
 
 	want := map[int32]string{
 		2: "−∞  …  d",
@@ -93,7 +93,7 @@ func TestInternalDownlinkRangesRightmost(t *testing.T) {
 		tupleItem(1, nil),
 		tupleItem(2, hexText("k")),
 	}
-	got := internalDownlinkRanges(items, "i", 200)
+	got := internalDownlinkRanges(items, "i", nil, 200)
 	if plain := stripANSI(got[1]); plain != "−∞  …  k" {
 		t.Errorf("off 1 range = %q, want %q", plain, "−∞  …  k")
 	}
@@ -104,9 +104,30 @@ func TestInternalDownlinkRangesRightmost(t *testing.T) {
 
 func TestInternalDownlinkRangesSkipsNonInternal(t *testing.T) {
 	items := []item{tupleItem(1, hexText("a"))}
-	if got := internalDownlinkRanges(items, "l", 200); got != nil {
+	if got := internalDownlinkRanges(items, "l", nil, 200); got != nil {
 		t.Errorf("leaf page should return nil ranges, got %v", got)
 	}
 }
 
 func stripANSI(s string) string { return ansi.Strip(s) }
+
+func TestIndexTuplePageType(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		typ   string
+		level int32
+		want  string
+	}{
+		{"single-page root is a leaf", "r", 0, "r"},
+		{"multi-level root is internal", "r", 2, "i"},
+		{"leaf unchanged", "l", 0, "l"},
+		{"internal unchanged", "i", 1, "i"},
+		{"deleted unchanged", "d", 3, "d"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := indexTuplePageType(tc.typ, tc.level); got != tc.want {
+				t.Errorf("indexTuplePageType(%q, %d) = %q, want %q", tc.typ, tc.level, got, tc.want)
+			}
+		})
+	}
+}

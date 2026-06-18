@@ -10,7 +10,7 @@ import (
 // cap it so very wide terminals don't turn the bar into ASCII art at the
 // expense of the actual numeric columns.
 func (m *Model) barWidth(s *screen) int {
-	w := m.width - barReserve(s.level, s.tool)
+	w := m.width - barReserve(s)
 	if w < barWidthMin {
 		return barWidthMin
 	}
@@ -39,7 +39,8 @@ const (
 // Tool is consulted on levels whose columns differ per tool — at the tables
 // level, the page-inspector swaps the toast/index detail string for a pages
 // column.
-func barReserve(l level, tl tool) int {
+func barReserve(s *screen) int {
+	l, tl := s.level, s.tool
 	switch l {
 	case levelBufferTables:
 		// cursor + bar(brackets) + buffered + total + cached + hit + dirty + name
@@ -92,13 +93,30 @@ func barReserve(l level, tl tool) int {
 		// budget for the muted "→ <table>" tail shown on index rows.
 		return colCursor + colBrackets + colSize +
 			(rowsColW + colGutter) + (pagesColW + colGutter) +
+			(relTypeColW + colGutter) +
 			colMark + colName + relParentColW
 	case levelIndexPages:
-		// cursor + bar(brackets) + type + level + used + items + free% + page name
-		return colCursor + colBrackets + idxPageTypeColW + colGutter +
-			idxPageLevelColW + colGutter + idxPageUsedColW + colGutter +
-			idxPageItemsColW + colGutter + idxPageFreeColW + colGutter +
-			idxPageNameColW
+		base := colCursor + colBrackets
+		switch s.index.AccessMethod {
+		case "gist":
+			// type + used + items + free% + page name (no tree level)
+			return base + idxPageTypeColW + colGutter + idxPageUsedColW + colGutter +
+				idxPageItemsColW + colGutter + idxPageFreeColW + colGutter + idxPageNameColW
+		case "brin":
+			// type(meta/revmap/regular) + used + free% + page name
+			return base + brinPageTypeColW + colGutter + idxPageUsedColW + colGutter +
+				idxPageFreeColW + colGutter + idxPageNameColW
+		case "gin":
+			// type(flags tag) + maxoff(items) + used + free% + page name
+			return base + ginPageTypeColW + colGutter + idxPageItemsColW + colGutter +
+				idxPageUsedColW + colGutter + idxPageFreeColW + colGutter + idxPageNameColW
+		default:
+			// btree: cursor + bar(brackets) + type + level + used + items + free% + name
+			return base + idxPageTypeColW + colGutter +
+				idxPageLevelColW + colGutter + idxPageUsedColW + colGutter +
+				idxPageItemsColW + colGutter + idxPageFreeColW + colGutter +
+				idxPageNameColW
+		}
 	case levelIndexTuples:
 		// cursor + offset + len + nulls/vars flags + ctid + key preview
 		const idxTupleReserve = 2 + 6 + 8 + 8 + 14 + 4
@@ -158,6 +176,10 @@ const (
 	idxPageItemsColW = 12 // "###L ###D"
 	idxPageFreeColW  = 7
 	idxPageNameColW  = 16
+
+	// Per-AM page-type column widths (GiST reuses idxPageTypeColW).
+	brinPageTypeColW = 7 // "regular" / "revmap" / "meta"
+	ginPageTypeColW  = 9 // "data-leaf" / "entry" / "data" / "meta"
 )
 
 // Column widths shared by the index-tuples header and rows.
@@ -172,6 +194,10 @@ const (
 // rows so the user can correlate an index back to its table when sort
 // interleaves the list.
 const relParentColW = 24
+
+// Type column on levelRelations: holds the kind tag ("heap"/"toast"/"btree"/
+// "gist"/"brin"/"gin") — 5 chars plus a sort-arrow allowance.
+const relTypeColW = 6
 
 // Column width for the tuple-row column-name slot. Wide enough for most
 // SQL identifiers without truncation; the value column gets all the

@@ -141,6 +141,129 @@ func (m *Model) onIndexTuplesLoaded(msg indexTuplesLoadedMsg) tea.Cmd {
 	return nil
 }
 
+func (m *Model) onGistPagesLoaded(msg gistPagesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexPages)
+	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	}
+	s.err = msg.err
+	s.heapPageCount = msg.totalPages
+	s.indexKeyCols = msg.keyCols
+	s.items = s.items[:0]
+	for _, p := range msg.pages {
+		s.items = append(s.items, gistPageToItem(p))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onGistItemsLoaded(msg gistItemsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexTuples)
+	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	}
+	s.err = msg.err
+	s.indexPageType = msg.pageType
+	s.items = s.items[:0]
+	for _, it := range msg.items {
+		s.items = append(s.items, gistItemToItem(it))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onBrinPagesLoaded(msg brinPagesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexPages)
+	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	}
+	s.err = msg.err
+	s.heapPageCount = msg.totalPages
+	s.indexKeyCols = msg.keyCols
+	s.brinMeta = msg.meta
+	s.items = s.items[:0]
+	for _, p := range msg.pages {
+		s.items = append(s.items, brinPageToItem(p))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onBrinItemsLoaded(msg brinItemsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexTuples)
+	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	}
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, it := range msg.items {
+		s.items = append(s.items, brinItemToItem(it))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onGinPagesLoaded(msg ginPagesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexPages)
+	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	}
+	s.err = msg.err
+	s.heapPageCount = msg.totalPages
+	s.indexKeyCols = msg.keyCols
+	s.ginMeta = msg.meta
+	s.items = s.items[:0]
+	for _, p := range msg.pages {
+		s.items = append(s.items, ginPageToItem(p))
+	}
+	m.applySort(s)
+	return nil
+}
+
+func (m *Model) onGinItemsLoaded(msg ginItemsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexTuples)
+	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(msg.err); ext != nil {
+		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	}
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, it := range msg.items {
+		s.items = append(s.items, ginItemToItem(it))
+	}
+	m.applySort(s)
+	return nil
+}
+
 func (m *Model) onWALOverviewLoaded(msg walOverviewLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelWAL)
 	if s == nil || s.db != msg.db {

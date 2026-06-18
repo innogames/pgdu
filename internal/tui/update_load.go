@@ -108,9 +108,27 @@ func (m *Model) loadCurrent() tea.Cmd {
 	case levelRelations:
 		return m.loadRelationsCmd(s.db, s.schema)
 	case levelIndexPages:
-		return m.loadIndexPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount)
+		switch s.index.AccessMethod {
+		case "gist":
+			return m.loadGistPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount)
+		case "brin":
+			return m.loadBrinPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount)
+		case "gin":
+			return m.loadGinPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount)
+		default:
+			return m.loadIndexPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount)
+		}
 	case levelIndexTuples:
-		return m.loadIndexTuplesCmd(s.index, s.indexPageBlkno, s.indexPageType)
+		switch s.index.AccessMethod {
+		case "gist":
+			return m.loadGistItemsCmd(s.index, s.indexPageBlkno, s.indexPageType)
+		case "brin":
+			return m.loadBrinItemsCmd(s.index, s.indexPageBlkno)
+		case "gin":
+			return m.loadGinItemsCmd(s.index, s.indexPageBlkno)
+		default:
+			return m.loadIndexTuplesCmd(s.index, s.indexPageBlkno, s.indexPageType)
+		}
 	case levelDescribe:
 		// Re-issue the right loader on Refresh. On first push s.describe is nil
 		// so we identify the target from s.table (table describe) or s.index
@@ -188,4 +206,3 @@ func (m *Model) loadCurrent() tea.Cmd {
 	}
 	return nil
 }
-
