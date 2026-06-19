@@ -573,6 +573,33 @@ func TestRewriteNormalizedParams(t *testing.T) {
 			query: "SELECT extract($1 FROM ts) FROM t WHERE created >= NOW() - INTERVAL $2 AND n = $3",
 			want:  "SELECT extract($1, ts) FROM t WHERE created >= NOW() - $2::interval AND n = $3",
 		},
+		{
+			// The reported bug: an ORM binds the interval as a parameter (NOW() - ?),
+			// so there's no INTERVAL keyword — the bare $n must still be cast to
+			// interval or the planner infers timestamptz and the comparison fails.
+			name:  "datetime minus bare param cast to interval",
+			query: "SELECT id FROM battle WHERE modified_at < NOW() - $1 AND state != $2",
+			want:  "SELECT id FROM battle WHERE modified_at < NOW() - $1::interval AND state != $2",
+		},
+		{
+			name:  "current_timestamp plus bare param",
+			query: "SELECT * FROM t WHERE ts > current_timestamp + $1",
+			want:  "SELECT * FROM t WHERE ts > current_timestamp + $1::interval",
+		},
+		{
+			// A datetime function still followed by INTERVAL $n is handled by the
+			// interval rewrite, not double-cast by the datetime-arithmetic rule.
+			name:  "datetime arithmetic does not double-cast interval keyword",
+			query: "SELECT * FROM t WHERE created >= NOW() - INTERVAL $1",
+			want:  "SELECT * FROM t WHERE created >= NOW() - $1::interval",
+		},
+		{
+			// A bare param after a non-datetime operand is left alone — casting it to
+			// interval would be wrong (e.g. a numeric column).
+			name:  "non-datetime arithmetic untouched",
+			query: "SELECT * FROM t WHERE price - $1 > 0",
+			want:  "SELECT * FROM t WHERE price - $1 > 0",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

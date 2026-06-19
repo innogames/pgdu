@@ -55,14 +55,6 @@ var Diagnostics = []Diagnostic{
 		Bar:         "",
 	},
 	{
-		Key:         "index_show_invalid",
-		Title:       "Invalid indexes",
-		Category:    "index",
-		Description: "indexes marked indisvalid=false (failed CONCURRENTLY builds)",
-		SQL:         sqlDiagIndexShowInvalid,
-		Bar:         "",
-	},
-	{
 		Key:         "index_show_size",
 		Title:       "Indexes",
 		Category:    "index",
@@ -113,6 +105,15 @@ var Diagnostics = []Diagnostic{
 		Description: "tables with heap cache hit ratio below 80%, ordered by blocks read from disk",
 		SQL:         sqlDiagTableShowHitratio,
 		Bar:         "hit_pct",
+	},
+	{
+		Key:         "table_show_hot_ratio",
+		Title:       "Table HOT update ratio",
+		Category:    "table",
+		Description: "HOT vs non-HOT update split per table; sorted by absolute non-HOT updates (index-churn offenders first)",
+		SQL:         sqlDiagTableShowHotRatio,
+		Bar:         "hot_pct",
+		Sort:        "non_hot_updates",
 	},
 	{
 		Key:         "table_show_modify_ratio",

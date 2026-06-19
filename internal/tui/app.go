@@ -6,6 +6,7 @@ import (
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"pgdu/internal/pg"
 	"pgdu/internal/prefs"
@@ -76,7 +77,7 @@ func (t tool) Name() string {
 	case toolQueries:
 		return "queries"
 	case toolMaintenance:
-		return "maintenance"
+		return "system overview"
 	case toolActivity:
 		return "activity"
 	}
@@ -96,6 +97,13 @@ type item struct {
 	// styleMuted, which would clobber the inner colors after their resets.
 	detailStyled bool
 	data         any
+
+	// typeTag is the kind label shown in the parts level's "type" column
+	// ("heap"/"toast"/"btree"/"gist"/"brin"/"gin"/…). typeStyle tints it (and
+	// only it) per kind, matching the relations level. Empty on other levels,
+	// where the type column isn't rendered.
+	typeTag   string
+	typeStyle lipgloss.Style
 
 	// Optional heap/index/toast breakdown for the tables level. When any are
 	// non-zero, the bar is rendered as three coloured segments.
@@ -389,6 +397,12 @@ type screen struct {
 	statExplaining     bool
 	statExplainAnalyze bool
 	statVerbose        bool // v toggles the verbose detail view (parameter table + extra metric rows)
+	// statHotStats holds the main table's cumulative HOT-update counters
+	// (pg_stat_user_tables), fetched async on entry and rendered next to the
+	// parsed table name. nil until loaded or when the table didn't resolve;
+	// statHotErr records a fetch failure (kept quiet — the row is just omitted).
+	statHotStats *pg.TableHotStats
+	statHotErr   error
 
 	// ── Activity tool (levelActivity) ────────────────────────────────────────
 	// actRows is the last fetched pg_stat_activity snapshot.
@@ -659,7 +673,7 @@ func toolItems() []item {
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},
-		{name: "Maintenance", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
+		{name: "System overview", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
 		{name: "Other Tools", detail: "run diagnostic queries — index / table / vacuum / activity / wal / server health", hasChildren: true, data: toolTools},
 	}
 }

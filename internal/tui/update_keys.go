@@ -3,6 +3,7 @@ package tui
 import (
 	"math"
 	"regexp"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -691,9 +692,76 @@ func describeTarget(s *screen) (descTarget, bool) {
 			indexOID:  s.index.OID,
 			indexName: s.index.Qualified(),
 		}, true
+
+	case levelDiagnosticResult:
+		// Generic diagnostic rows carry no pg.Table — resolve the relation by
+		// the name in the row (server-side, like the top-queries view). Only
+		// the table-shaped diagnostics expose a name column; the rest return
+		// false here and `d` is a no-op.
+		it, ok := curItem()
+		if !ok {
+			return descTarget{}, false
+		}
+		cells, ok := it.data.([]pg.DiagCell)
+		if !ok {
+			return descTarget{}, false
+		}
+		name, ok := diagDescribeName(s.diagCols, cells)
+		if !ok {
+			return descTarget{}, false
+		}
+		return descTarget{byName: true, db: s.db, tableName: name}, true
 	}
 
 	return descTarget{}, false
+}
+
+// diagDescribeName extracts a relation name from a diagnostic result row so `d`
+// can describe it. It finds a table-name column by the naming conventions the
+// diagnostic SQL uses (relname / table / table_name / tablename), qualifying it
+// with a sibling schema column when present and the value isn't already
+// schema-qualified (regclass columns arrive pre-qualified, e.g. "public.foo").
+// Returns ("", false) for diagnostics with no relation column — connections,
+// database sizes, WAL, sequences, settings — so `d` stays inert there.
+func diagDescribeName(cols []pg.DiagColumn, cells []pg.DiagCell) (string, bool) {
+	tableIdx, schemaIdx := -1, -1
+	for i, c := range cols {
+		switch strings.ToLower(c.Name) {
+		case "relname", "table", "table_name", "tablename", "main_table_name":
+			if tableIdx == -1 {
+				tableIdx = i
+			}
+		case "schema", "schemaname", "schema_name", "table_schema":
+			if schemaIdx == -1 {
+				schemaIdx = i
+			}
+		}
+	}
+	if tableIdx < 0 || tableIdx >= len(cells) {
+		return "", false
+	}
+	table := strings.TrimSpace(cells[tableIdx].Display)
+	if table == "" || table == "—" {
+		return "", false
+	}
+	// regclass-derived values are already schema-qualified and correctly quoted;
+	// pass them straight through to to_regclass.
+	if strings.Contains(table, ".") {
+		return table, true
+	}
+	if schemaIdx >= 0 && schemaIdx < len(cells) {
+		if schema := strings.TrimSpace(cells[schemaIdx].Display); schema != "" && schema != "—" {
+			return quoteDiagIdent(schema) + "." + quoteDiagIdent(table), true
+		}
+	}
+	// Quote even the bare name so a mixed-case relname survives to_regclass.
+	return quoteDiagIdent(table), true
+}
+
+// quoteDiagIdent double-quotes a single SQL identifier so it round-trips through
+// to_regclass unchanged regardless of case or special characters.
+func quoteDiagIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 // triggerInstall is a no-op unless the current screen has an extPrompt

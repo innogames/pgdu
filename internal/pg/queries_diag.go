@@ -29,6 +29,23 @@ WHERE (n_tup_ins + n_tup_upd + n_tup_del) > 0
 ORDER BY relname
 `
 
+// sqlDiagTableShowHotRatio reports the HOT (heap-only tuple) update split per
+// table. A high hot_pct is good — the update stayed on the same page and
+// touched no indexes; the absolute non_hot_updates count surfaces the tables
+// doing the most index churn (FILLFACTOR / over-indexing candidates), which is
+// why it is the default sort rather than the ratio.
+const sqlDiagTableShowHotRatio = `
+SELECT
+    relname,
+    n_tup_upd                  AS updates,
+    n_tup_hot_upd              AS hot_updates,
+    n_tup_upd - n_tup_hot_upd  AS non_hot_updates,
+    round(100.0 * n_tup_hot_upd / NULLIF(n_tup_upd, 0), 1) AS hot_pct
+FROM pg_stat_user_tables
+WHERE n_tup_upd > 0
+ORDER BY non_hot_updates DESC
+`
+
 const sqlDiagTableScanTypes = `
 SELECT
     relname,
@@ -129,7 +146,7 @@ JOIN pg_catalog.pg_stat_user_tables t ON t.relid = i.relid
 WHERE i.schemaname NOT IN ('pg_catalog','information_schema')
   AND i.schemaname NOT LIKE 'pg\_toast%'
   AND t.n_live_tup >= 100
-ORDER BY i.idx_scan ASC, pg_relation_size(i.indexrelid) DESC
+ORDER BY pg_relation_size(i.indexrelid) DESC
 `
 
 // sqlDiagIndexShowSize is the single "Indexes" listing. It folds in the scan
@@ -188,33 +205,21 @@ ORDER BY pg_relation_size(i.oid) DESC
 // ORDER BY 1, 2
 // `
 
-const sqlDiagIndexShowInvalid = `
-SELECT
-    i.relname AS index_name,
-    idx.indrelid::regclass AS location,
-    idx.indexrelid AS relation_id,
-    am.amname AS type,
-    ARRAY(
-        SELECT pg_get_indexdef(idx.indexrelid, k + 1, true)
-        FROM generate_subscripts(idx.indkey, 1) AS k
-        ORDER BY k
-    ) AS index_key_names
-FROM pg_index AS idx
-JOIN pg_class AS i ON i.oid = idx.indexrelid
-JOIN pg_am AS am ON i.relam = am.oid
-WHERE idx.indisvalid IS FALSE
-`
-
 const sqlDiagIndexShowDuplicate = `
 SELECT
     pg_size_pretty(sum(pg_relation_size(idx))::bigint) AS size,
+    pg_size_pretty((array_agg(idx_size))[1]) AS index_size,
+    (array_agg(tbl))[1] AS "table",
     (array_agg(idx))[1] AS idx1,
     (array_agg(idx))[2] AS idx2,
-    (array_agg(idx))[3] AS idx3,
-    (array_agg(idx))[4] AS idx4
+    (array_agg(cols))[1] AS columns
 FROM (
     SELECT
         indexrelid::regclass AS idx,
+        pg_relation_size(indexrelid) AS idx_size,
+        indrelid::regclass AS tbl,
+        (SELECT string_agg(pg_get_indexdef(indexrelid, k + 1, true), ', ' ORDER BY k)
+         FROM generate_subscripts(indkey, 1) AS k) AS cols,
         (indrelid::text || E'\n' || indclass::text || E'\n' || indkey::text || E'\n' ||
          coalesce(indexprs::text, '') || E'\n' || coalesce(indpred::text, '')) AS key
     FROM pg_index

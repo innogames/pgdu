@@ -294,14 +294,34 @@ func ExtractFieldOrdinals(query string) []int {
 // whitespace; it captures the ordinal so callers can map it back to the original.
 var intervalParamRe = regexp.MustCompile(`(?i)\binterval\s+\$(\d+)`)
 
+// dtArithParamRe matches a niladic datetime expression (now(), current_timestamp,
+// …) immediately followed by + or - and a bare $n placeholder, capturing the
+// expression, the operator and the ordinal. An ORM that binds the interval as a
+// parameter — `NOW() - ?` — normalizes to `NOW() - $1` with no INTERVAL keyword
+// for intervalParamRe to anchor on. PREPARE/GENERIC_PLAN then can't resolve the
+// operator: with an untyped $n the planner picks the `timestamptz - timestamptz →
+// interval` candidate (inferring $n as timestamptz), so the surrounding
+// `col < NOW() - $1` fails with "operator does not exist: timestamp with time zone
+// < interval". Casting $n to interval forces the intended `timestamptz - interval
+// → timestamptz` operator. Case-insensitive; tolerates whitespace and an optional
+// precision on the keyword forms (current_timestamp(3)). The function-call forms
+// require their () so a column literally named e.g. "now" isn't mistaken for now().
+var dtArithParamRe = regexp.MustCompile(`(?i)\b((?:now|clock_timestamp|statement_timestamp|transaction_timestamp)\s*\(\s*\)|(?:current_timestamp|current_date|current_time|localtimestamp|localtime)(?:\s*\(\s*\d+\s*\))?)\s*([-+])\s*\$(\d+)`)
+
 // rewriteNormalizedParams makes a pg_stat_statements-normalized query parseable
 // with its $n placeholders intact, fixing the spots where normalization drops a
-// $n where the grammar forbids one: EXTRACT(field FROM …) and INTERVAL value.
-// INTERVAL $n becomes the equivalent cast $n::interval — a bindable expression of
-// the same type. Ordinals are preserved throughout, so inferred parameter types
-// and sampled values still map back to the original query by number.
+// $n where the grammar forbids one (EXTRACT(field FROM …), INTERVAL value) or
+// leaves one whose type the planner can't infer (datetime ± $n). INTERVAL $n and
+// the bare datetime-arithmetic $n both become the cast $n::interval — a bindable
+// expression of the correct type. Ordinals are preserved throughout, so inferred
+// parameter types and sampled values still map back to the original query by
+// number.
 func rewriteNormalizedParams(query string) string {
 	q := rewriteExtractFieldParams(query)
+	// Before intervalParamRe: this only matches a bare $n (no INTERVAL keyword), so
+	// it never touches `NOW() - INTERVAL $1` — but running it after the interval
+	// rewrite would re-match the `NOW() - $1` it produces and double-cast it.
+	q = dtArithParamRe.ReplaceAllString(q, "${1} ${2} $$${3}::interval")
 	return intervalParamRe.ReplaceAllString(q, "$$${1}::interval")
 }
 

@@ -537,10 +537,7 @@ func (m *Model) drillBrinItem(s *screen, cur item) tea.Cmd {
 		return nil
 	}
 	parent := pg.Table{DB: s.db, Schema: s.schema, OID: s.index.ParentOID, Name: s.index.ParentName}
-	start := int32(t.BlockNum)
-	if start < 0 {
-		start = 0
-	}
+	start := max(int32(t.BlockNum), 0)
 	start = (start / heapWindowDefault) * heapWindowDefault // align to the window grid
 	next := &screen{
 		level: levelHeapPages, title: "heap pages", tool: s.tool,
@@ -596,7 +593,7 @@ func (m *Model) toolEntryScreen(t tool) *screen {
 		return &screen{level: levelWAL, title: "wal", tool: toolWAL, db: m.client.DefaultDB(), sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 	case toolMaintenance:
 		// Maintenance dashboard is cluster-wide: skip the database picker.
-		return &screen{level: levelMaintenance, title: "maintenance", tool: toolMaintenance, db: m.client.DefaultDB()}
+		return &screen{level: levelMaintenance, title: "system overview", tool: toolMaintenance, db: m.client.DefaultDB()}
 	case toolActivity:
 		// Activity tool is cluster-wide: skip the database picker and go
 		// directly to the live pg_stat_activity list.

@@ -37,7 +37,20 @@ func (m *Model) loadCurrent() tea.Cmd {
 		// immediately instead of behind a spinner.
 		s.loading = false
 		s.loaded = true
-		if s.statDetail != nil && pg.ExplainableQuery(s.statDetail.Query) {
+		if s.statDetail == nil {
+			return nil
+		}
+		var cmds []tea.Cmd
+		// HOT update ratio for the statement's main table (cumulative, from
+		// pg_stat_user_tables). Reset first so a refresh re-fetches and a stale
+		// value from a previous query never lingers; the cmd is nil-safe when no
+		// table parses out.
+		s.statHotStats = nil
+		s.statHotErr = nil
+		if c := m.loadStatementTableHotCmd(s.db, s.statDetail.Query); c != nil {
+			cmds = append(cmds, c)
+		}
+		if pg.ExplainableQuery(s.statDetail.Query) {
 			// Resolve the sample call first, then auto-run the plan once it's
 			// known: a real pg_qualstats example takes a plain EXPLAIN, a
 			// synthesized one the generic plan. onStatementSampleLoaded fires the
@@ -47,9 +60,9 @@ func (m *Model) loadCurrent() tea.Cmd {
 			s.statExplain = ""
 			s.statExplainErr = nil
 			s.statExplainAnalyze = false
-			return m.loadStatementSampleCmd(s.db, s.statDetail.QueryID, s.statDetail.Query)
+			cmds = append(cmds, m.loadStatementSampleCmd(s.db, s.statDetail.QueryID, s.statDetail.Query))
 		}
-		return nil
+		return tea.Batch(cmds...)
 	}
 	s.loading = true
 	s.loaded = false

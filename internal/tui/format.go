@@ -128,6 +128,10 @@ func levelLabel(l level) string {
 		return "snapshots"
 	case levelActivity:
 		return "activity"
+	case levelMaintenance:
+		return "system overview"
+	case levelSettings:
+		return "settings"
 	}
 	return "?"
 }

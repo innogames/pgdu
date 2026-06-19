@@ -61,6 +61,22 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	// same value shown in the overview's `table` column. Omitted when unparseable.
 	if t := pg.MainTable(q.Query); t != "" {
 		metrics = append(metrics, [2]string{"table", t})
+		// HOT update ratio for that table, fetched async into statHotStats. It's
+		// cumulative (since the last stats reset), not window-scoped like the rows
+		// above, so it's explicitly labelled "lifetime". Higher is better →
+		// percentStyle (green high). Shown only once loaded and the table has
+		// recorded updates; otherwise omitted (no row clutters a SELECT-only table).
+		if hs := s.statHotStats; hs != nil {
+			if ratio, ok := hs.HotRatio(); ok {
+				val := percentStyle(ratio).Render(fmtFloat(ratio)+"%") +
+					mu(fmt.Sprintf("  (%s HOT · %s non-HOT of %s updates)",
+						formatRows(hs.HotUpdates), formatRows(hs.NonHotUpdates()), formatRows(hs.Updates)))
+				metrics = append(metrics, [2]string{"HOT updates", val})
+				// Make clear this is a table-level counter (every update to the
+				// table since the last stats reset), not scoped to this query.
+				metrics = append(metrics, [2]string{"", mu("all updates to this table, since last stats reset")})
+			}
+		}
 	}
 	// Verbose extras: counters/timings that the compact view collapses or omits.
 	// All read straight off the window-delta QueryStat (no extrema — those are

@@ -403,6 +403,10 @@ func (m *Model) breadcrumb() string {
 			}
 		case levelStatementResult:
 			parts = append(parts, "result")
+		case levelMaintenance:
+			parts = append(parts, "system overview")
+		case levelSettings:
+			parts = append(parts, "settings")
 		}
 	}
 	out := make([]string, len(parts))
@@ -541,6 +545,7 @@ func (m *Model) renderList(s *screen, height int) string {
 			rows: it.rows, hasRows: it.hasRows,
 			pages: it.pages, hasPages: it.hasPages,
 			tableCount: it.tableCount, hasTableCount: it.hasTableCount,
+			typeTag: it.typeTag, typeStyle: it.typeStyle,
 			name: it.name, detail: it.detail, detailStyled: it.detailStyled, selected: vi == s.cursor,
 		}))
 		b.WriteString("\n")

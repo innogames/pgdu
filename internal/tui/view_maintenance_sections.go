@@ -128,6 +128,66 @@ func renderMaintTransactions(info *pg.MaintenanceInfo) string {
 	return b.String()
 }
 
+// renderMaintTableActivity renders the "table activity" section: tuple-level
+// write/scan counters aggregated across pg_stat_user_tables for the current
+// database. Ratios are derived here from the raw counters.
+func renderMaintTableActivity(info *pg.MaintenanceInfo) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+	b.WriteString("  " + styleHeader.Render(" table activity ") + "\n")
+	if info == nil {
+		b.WriteString("\n")
+		return b.String()
+	}
+
+	if info.TupInserted+info.TupUpdated+info.TupDeleted > 0 {
+		writes := fmt.Sprintf("%s ins  %s upd  %s del",
+			formatRows(info.TupInserted), formatRows(info.TupUpdated), formatRows(info.TupDeleted))
+		b.WriteString("  " + padRight(mu("writes"), 22) + writes + "\n")
+	}
+
+	// HOT updates are good: a high ratio means updates avoided index churn.
+	if info.TupUpdated > 0 {
+		hotPct := float64(info.TupHotUpdated) / float64(info.TupUpdated) * 100
+		hotStyle := lipgloss.NewStyle().Foreground(colorOK)
+		switch {
+		case hotPct < 50:
+			hotStyle = styleErr
+		case hotPct < 80:
+			hotStyle = lipgloss.NewStyle().Foreground(colorAccent)
+		}
+		b.WriteString("  " + padRight(mu("hot ratio"), 22) +
+			hotStyle.Render(fmt1(hotPct)+"%") +
+			"  " + mu(fmt.Sprintf("(%s of %s upd)", formatRows(info.TupHotUpdated), formatRows(info.TupUpdated))) + "\n")
+	}
+
+	// Index usage is good: high ratio means few seq scans relative to index scans.
+	if info.SeqScans+info.IdxScans > 0 {
+		idxPct := float64(info.IdxScans) / float64(info.SeqScans+info.IdxScans) * 100
+		b.WriteString("  " + padRight(mu("index usage"), 22) +
+			gradedPercentStyle(idxPct).Render(fmt1(idxPct)+"%") +
+			"  " + mu(fmt.Sprintf("(%s idx / %s seq)", formatRows(info.IdxScans), formatRows(info.SeqScans))) + "\n")
+	}
+
+	// Dead tuples are bad: a high fraction signals bloat / vacuum lag.
+	if info.LiveTuples+info.DeadTuples > 0 {
+		deadPct := float64(info.DeadTuples) / float64(info.LiveTuples+info.DeadTuples) * 100
+		deadStyle := lipgloss.NewStyle().Foreground(colorOK)
+		switch {
+		case deadPct >= 20:
+			deadStyle = styleErr
+		case deadPct >= 10:
+			deadStyle = lipgloss.NewStyle().Foreground(colorAccent)
+		}
+		b.WriteString("  " + padRight(mu("dead tuples"), 22) +
+			fmt.Sprintf("%s / %s  ", formatRows(info.DeadTuples), formatRows(info.LiveTuples+info.DeadTuples)) +
+			deadStyle.Render(fmt1(deadPct)+"%") + "\n")
+	}
+
+	b.WriteString("\n")
+	return b.String()
+}
+
 // renderMaintReplication renders the "replication & slots" section.
 // Returns "" when there is no replication data to show.
 func renderMaintReplication(info *pg.MaintenanceInfo) string {

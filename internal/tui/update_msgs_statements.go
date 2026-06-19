@@ -329,6 +329,20 @@ func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
 	return nil
 }
 
+// onStatementHotLoaded stores the main table's HOT-update counters for the
+// detail view. The query-text guard rejects a result that arrives after the
+// user has drilled into a different statement. A fetch error is kept quiet —
+// the HOT row is simply omitted rather than cluttering a secondary metric.
+func (m *Model) onStatementHotLoaded(msg statementHotLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelStatementDetail)
+	if s == nil || s.statDetail == nil || s.statDetail.Query != msg.query {
+		return nil
+	}
+	s.statHotStats = msg.stats
+	s.statHotErr = msg.err
+	return nil
+}
+
 func (m *Model) onExportDone(msg exportDoneMsg) tea.Cmd {
 	if msg.err != nil {
 		m.notice = "export failed: " + msg.err.Error()

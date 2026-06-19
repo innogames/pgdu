@@ -196,3 +196,14 @@ WHERE  q.queryid = $1
 ORDER BY q.occurences DESC, q.constvalue
 LIMIT  50
 `
+
+// sqlTableHotStats reads the cumulative update / HOT-update counters for one
+// relation (resolved by optionally schema-qualified name) from
+// pg_stat_user_tables. The statement-detail view uses it to show the HOT update
+// ratio of a query's main table. to_regclass resolves the name via search_path
+// and yields NULL (→ no row) for an unknown or non-user relation.
+const sqlTableHotStats = `
+SELECT n_tup_upd, n_tup_hot_upd
+FROM pg_stat_user_tables
+WHERE relid = to_regclass($1)
+`

@@ -295,7 +295,7 @@ func formatBytesText(v []byte) string {
 // A field carrying pageinspect's "…" truncation marker — or any malformed field
 // — stops parsing and reports truncated so the caller can append an ellipsis.
 func parseHexBytes(s string) (b []byte, truncated bool) {
-	for _, f := range strings.Fields(s) {
+	for f := range strings.FieldsSeq(s) {
 		if len(f) != 2 {
 			truncated = true
 			break

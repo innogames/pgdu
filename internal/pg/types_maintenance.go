@@ -62,6 +62,18 @@ type MaintenanceInfo struct {
 	ActiveTimeMs  float64 // cumulative active query time in ms across all sessions
 	IdleTxTimeMs  float64 // cumulative idle-in-transaction time in ms
 
+	// Tuple-level activity aggregated across pg_stat_user_tables for the current
+	// database. Ratios (HOT %, index-usage %, dead-tuple %) are derived at render
+	// time. All zero when the DB has no user tables / no activity yet.
+	TupInserted   int64
+	TupUpdated    int64
+	TupDeleted    int64
+	TupHotUpdated int64
+	SeqScans      int64
+	IdxScans      int64
+	LiveTuples    int64
+	DeadTuples    int64
+
 	// Autovacuum / wraparound
 	XidAge       int64 // max(age(datfrozenxid)) over pg_database
 	FreezeMaxAge int64 // autovacuum_freeze_max_age from settings

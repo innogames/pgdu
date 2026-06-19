@@ -377,17 +377,36 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 	colWBase, naturalW, barMax, costMax := s.diagMetrics(cols, barCol)
 	colW := append([]int(nil), colWBase...) // local copy: the last-column grow below mutates it
 
-	// With no bar column, the bar's horizontal budget is unused, so let the last
-	// column grow past diagColWidth into the remaining terminal width — this is
-	// where wide text (queries, definitions, grants) would otherwise be clipped.
+	// With no bar column, the bar's horizontal budget is unused, so let columns
+	// capped at diagColWidth grow back toward their natural width into the
+	// remaining terminal width — this is where wide text (index names, queries,
+	// definitions, grants) would otherwise be clipped. Distribute the slack across
+	// every truncated column (left to right), not just the last one, so a short
+	// trailing column doesn't strand the space a wide middle column needs.
 	if barCol < 0 && nCols > 0 {
 		used := 2 // cursor
 		for _, w := range colW {
 			used += w + colGutter
 		}
-		last := nCols - 1
-		if remaining := m.width - used; remaining > 0 {
-			colW[last] = min(naturalW[last], colW[last]+remaining)
+		remaining := m.width - used
+		// Repeatedly hand a slice of the slack to whichever capped columns still
+		// want more, until the space runs out or no column wants growth.
+		for remaining > 0 {
+			grew := false
+			for i := range colW {
+				if remaining <= 0 {
+					break
+				}
+				if want := naturalW[i] - colW[i]; want > 0 {
+					give := min(want, remaining)
+					colW[i] += give
+					remaining -= give
+					grew = true
+				}
+			}
+			if !grew {
+				break
+			}
 		}
 	}
 
@@ -494,6 +513,11 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 				if barIsBytes && cell.HasNum {
 					numStr = humanize.Bytes(int64(cell.Num))
 				}
+				// Colour the percentage next to its bar the same way the bar is
+				// graded (percentStyle), so the digits read at a glance too.
+				if barIsPercent && cell.HasNum && !selected {
+					numStr = percentStyle(cell.Num).Render(numStr)
+				}
 				if selected {
 					numStr = styleSelected.Render(numStr)
 				}
@@ -521,6 +545,12 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			// row, which renders in the selection style like every other cell.
 			if graded && cell.HasNum && !selected {
 				display = gradedPercentStyle(cell.Num).Render(display)
+			}
+			// Plain percent columns that aren't the headline bar (e.g. the
+			// ins/upd/del split, HOT % when another column is the bar) get the
+			// same green→red grade so every % column carries colour.
+			if i < nCols && cols[i].Kind == pg.DiagPercent && i != barCol && cell.HasNum && !selected {
+				display = percentStyle(cell.Num).Render(display)
 			}
 			// Grade "lower is better" cost cells relative to their column max: 0
 			// green, worst-in-window red. Same selected-row suppression.

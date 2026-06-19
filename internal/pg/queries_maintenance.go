@@ -254,6 +254,23 @@ FROM   pg_stat_database
 WHERE  datname NOT IN ('template0', 'template1')
   AND  datname IS NOT NULL`
 
+	// sqlMaintTableActivity aggregates tuple-level write/scan counters across all
+	// user tables in the current database (pg_stat_user_tables). Used for the
+	// HOT-update ratio, write mix, index-usage ratio and dead-tuple ratio on the
+	// Maintenance dashboard. idx_scan/seq_scan/n_dead_tup can be NULL per row on
+	// never-touched relations; sum() ignores NULLs and COALESCE guards the
+	// all-NULL case. All columns exist on PG 9.x+, so no version gating is needed.
+	sqlMaintTableActivity = `
+SELECT COALESCE(sum(n_tup_ins),     0),
+       COALESCE(sum(n_tup_upd),     0),
+       COALESCE(sum(n_tup_del),     0),
+       COALESCE(sum(n_tup_hot_upd), 0),
+       COALESCE(sum(seq_scan),      0),
+       COALESCE(sum(idx_scan),      0),
+       COALESCE(sum(n_live_tup),    0),
+       COALESCE(sum(n_dead_tup),    0)
+FROM   pg_stat_user_tables`
+
 	// sqlMaintIO aggregates I/O counters across all backend types from
 	// pg_stat_io (PG 16+). BackendFsyncs is fsyncs by client backends —
 	// non-zero means the checkpointer can't keep up.

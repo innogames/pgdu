@@ -186,13 +186,6 @@ func (m *Model) maintVacuumLine(st *pg.TableMaintStats) string {
 		parts = append(parts, mu("never vacuumed"))
 	}
 
-	// Run counts.
-	total := st.VacuumCount + st.AutovacuumCount
-	if total > 0 {
-		parts = append(parts, mu(fmt.Sprintf("%s autovacuum / %s manual",
-			formatRows(st.AutovacuumCount), formatRows(st.VacuumCount))))
-	}
-
 	// Insert-based trigger progress.
 	if st.NInsSinceVacuum > 0 {
 		if trig, ok := st.InsertTriggerAt(); ok && trig > 0 {
@@ -217,12 +210,6 @@ func (m *Model) maintAnalyzeLine(st *pg.TableMaintStats) string {
 		parts = append(parts, mu("last ")+relativeAge(time.Since(*st.LastAutoanalyze))+mu(" (auto)"))
 	default:
 		parts = append(parts, mu("never analyzed"))
-	}
-
-	total := st.AnalyzeCount + st.AutoanalyzeCount
-	if total > 0 {
-		parts = append(parts, mu(fmt.Sprintf("%s autovacuum / %s manual",
-			formatRows(st.AutoanalyzeCount), formatRows(st.AnalyzeCount))))
 	}
 
 	if st.NModSinceAnalyze > 0 {

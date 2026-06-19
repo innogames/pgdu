@@ -105,6 +105,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onStatementSampleLoaded(msg)
 	case statementExplainLoadedMsg:
 		return m, m.onStatementExplainLoaded(msg)
+	case statementHotLoadedMsg:
+		return m, m.onStatementHotLoaded(msg)
 	case statementSamplesLoadedMsg:
 		return m, m.onStatementSamplesLoaded(msg)
 	case statementResultLoadedMsg:

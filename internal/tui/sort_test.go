@@ -13,7 +13,7 @@ func TestValidSorts(t *testing.T) {
 	}{
 		{levelTools, []sortMode{sortByName}},
 		{levelTables, []sortMode{sortBySize, sortByHeap, sortByIndex, sortByRows, sortByName}},
-		{levelParts, []sortMode{sortBySize, sortByBloat, sortByName}},
+		{levelParts, []sortMode{sortBySize, sortByBloat, sortByType, sortByName}},
 		{levelHeapPages, []sortMode{sortByBlkno, sortBySize, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByDeadRatio, sortByFreeSpace}},
 		{levelColumns, []sortMode{sortBySize, sortByAvgWidth, sortByColType, sortByName}},
 	}

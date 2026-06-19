@@ -75,6 +75,11 @@ type statementSamplesLoadedMsg struct {
 	samples []pg.QualSample
 	err     error
 }
+type statementHotLoadedMsg struct {
+	query string // matches screen.statDetail.Query for stale-message rejection
+	stats *pg.TableHotStats
+	err   error
+}
 type statementResultLoadedMsg struct {
 	query     string // matches screen.statDetail.Query for stale-message rejection
 	result    *pg.DiagResult
@@ -206,6 +211,20 @@ func paramsWithout(params []pg.ParamType, cover map[int]string) []pg.ParamType {
 		}
 	}
 	return out
+}
+
+// loadStatementTableHotCmd fetches the HOT-update counters for the statement's
+// main table (parsed from the query, resolved server-side) so the detail view
+// can show its HOT update ratio. Returns nil when no table can be parsed.
+func (m *Model) loadStatementTableHotCmd(db, queryText string) tea.Cmd {
+	name := pg.MainTable(queryText)
+	if name == "" {
+		return nil
+	}
+	return query(func(ctx context.Context) tea.Msg {
+		st, err := m.client.TableHotStats(ctx, db, name)
+		return statementHotLoadedMsg{query: queryText, stats: st, err: err}
+	})
 }
 
 func (m *Model) loadStatementSampleCmd(db string, queryID int64, queryText string) tea.Cmd {

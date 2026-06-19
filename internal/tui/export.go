@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -29,7 +30,11 @@ func (m *Model) exportCSVCmd(s *screen) tea.Cmd {
 	if !ok {
 		return nil
 	}
-	name := fmt.Sprintf("pgdu-%s-%s.csv", s.tool.Name(), time.Now().Format("20060102-150405"))
+	// Write to the temp dir, not the CWD: under `sudo -iu postgres` the CWD is
+	// the postgres home dir (often unwritable / a surprising place to land a
+	// file), whereas the temp dir is world-writable and predictable. The notice
+	// reports this absolute path so the user can find the file.
+	name := filepath.Join(os.TempDir(), fmt.Sprintf("pgdu-%s-%s.csv", s.tool.Name(), time.Now().Format("20060102-150405")))
 	return func() tea.Msg {
 		f, err := os.Create(name)
 		if err != nil {

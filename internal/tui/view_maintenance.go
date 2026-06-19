@@ -53,15 +53,33 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	body.WriteString(m.renderCapacityRow(s, s.db, 1, "pg_qualstats", qualsCap) + "\n")
 	body.WriteString("\n")
 
-	body.WriteString(renderMaintServer(info))
-	body.WriteString(renderMaintTransactions(info))
-	body.WriteString(renderMaintReplication(info))
-	body.WriteString(renderMaintPgBouncer(info))
-	body.WriteString(renderMaintMemory(info))
-	body.WriteString(renderMaintAutovacuum(info))
-	body.WriteString(renderMaintWAL(info))
-	body.WriteString(renderMaintIO(info))
-	body.WriteString(renderMaintHealth(info))
+	// Wide terminals get a two-pane layout: compact "vitals" sections side by
+	// side, verbose sections (long advisory lines, bars, blocked-query text)
+	// full width below so they aren't truncated. Narrow terminals fall back to
+	// the single-column stack.
+	if m.width >= 88 {
+		leftW := max(40, min(64, m.width/2-2))
+		rightW := max(20, m.width-leftW-3) // -3 for the "│ " rule + safety
+		left := renderMaintServer(info) + renderMaintTransactions(info) + renderMaintTableActivity(info)
+		right := renderMaintMemory(info) + renderMaintAutovacuum(info) + renderMaintIO(info)
+		body.WriteString(renderColumns(left, right, leftW, rightW))
+		body.WriteString("\n")
+		body.WriteString(renderMaintReplication(info))
+		body.WriteString(renderMaintPgBouncer(info))
+		body.WriteString(renderMaintWAL(info))
+		body.WriteString(renderMaintHealth(info))
+	} else {
+		body.WriteString(renderMaintServer(info))
+		body.WriteString(renderMaintTransactions(info))
+		body.WriteString(renderMaintTableActivity(info))
+		body.WriteString(renderMaintReplication(info))
+		body.WriteString(renderMaintPgBouncer(info))
+		body.WriteString(renderMaintMemory(info))
+		body.WriteString(renderMaintAutovacuum(info))
+		body.WriteString(renderMaintWAL(info))
+		body.WriteString(renderMaintIO(info))
+		body.WriteString(renderMaintHealth(info))
+	}
 
 	hintLine := m.renderMaintHint(s)
 
@@ -73,6 +91,29 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	full.WriteString(body.String())
 
 	return scrollWindow(full.String(), &s.offset, height)
+}
+
+// renderColumns joins two pre-rendered text blocks into side-by-side panes:
+// each left line is truncated+padded to leftW, each right line truncated to
+// rightW, separated by a muted "│ " rule. The shorter block is padded with
+// blank lines so the rule stays continuous. Only compact sections belong here;
+// verbose sections render full width.
+func renderColumns(left, right string, leftW, rightW int) string {
+	l := strings.Split(strings.TrimRight(left, "\n"), "\n")
+	r := strings.Split(strings.TrimRight(right, "\n"), "\n")
+	rule := styleMuted.Render("│ ")
+	var b strings.Builder
+	for i := 0; i < max(len(l), len(r)); i++ {
+		var ll, rr string
+		if i < len(l) {
+			ll = truncateToWidth(l[i], leftW)
+		}
+		if i < len(r) {
+			rr = truncateToWidth(r[i], rightW)
+		}
+		b.WriteString(padRight(ll, leftW) + rule + rr + "\n")
+	}
+	return b.String()
 }
 
 // renderCapacityRow renders one extension capacity row with a fill bar,
@@ -291,7 +332,7 @@ func (m *Model) renderMaintenanceInfo(height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
 	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("maintenance dashboard reference") +
+	b.WriteString("  " + styleSelected.Render("system overview reference") +
 		mu("  ·  press ") + styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") +
 		mu(" to dismiss") + "\n\n")
 

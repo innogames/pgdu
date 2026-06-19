@@ -159,6 +159,11 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 		&info.Sessions, &info.SessAbandoned, &info.SessFatal, &info.SessKilled,
 		&info.ActiveTimeMs, &info.IdleTxTimeMs)
 
+	// --- table activity (pg_stat_user_tables, current DB) ---
+	_ = pool.QueryRow(ctx, sqlMaintTableActivity).Scan(
+		&info.TupInserted, &info.TupUpdated, &info.TupDeleted, &info.TupHotUpdated,
+		&info.SeqScans, &info.IdxScans, &info.LiveTuples, &info.DeadTuples)
+
 	// --- I/O stats (pg_stat_io, PG 16+) ---
 	if pool.QueryRow(ctx, sqlMaintIO).Scan(
 		&info.IO.Reads, &info.IO.Writes, &info.IO.Extends, &info.IO.Hits,

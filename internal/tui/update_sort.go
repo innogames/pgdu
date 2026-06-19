@@ -222,7 +222,7 @@ func validSorts(l level) []sortMode {
 	case levelTables:
 		return []sortMode{sortBySize, sortByHeap, sortByIndex, sortByRows, sortByName}
 	case levelParts:
-		return []sortMode{sortBySize, sortByBloat, sortByName}
+		return []sortMode{sortBySize, sortByBloat, sortByType, sortByName}
 	case levelColumns:
 		return []sortMode{sortBySize, sortByAvgWidth, sortByColType, sortByName}
 	case levelSchemas:

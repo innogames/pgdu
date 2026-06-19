@@ -26,6 +26,12 @@ type row struct {
 	detailStyled bool // detail is pre-styled; render verbatim (see item.detailStyled)
 	selected     bool
 
+	// typeTag, when non-empty, renders a kind column (tinted by typeStyle) just
+	// before the name — used by the parts level to surface heap/toast/btree/…
+	// as a dedicated column. Empty on levels that don't carry a kind.
+	typeTag   string
+	typeStyle lipgloss.Style
+
 	// Optional heap/index/toast breakdown — when any are non-zero, the bar is
 	// drawn as three coloured segments instead of one solid block. Used by the
 	// tables level so the composition of each table is visible at a glance.
@@ -109,11 +115,17 @@ func renderRow(r row) string {
 	if r.hasTableCount {
 		tableCountStr = styleMuted.Render(padRight(formatRows(r.tableCount), tableCountColW)) + "  "
 	}
+	typeStr := ""
+	if r.typeTag != "" {
+		// Pad the raw label before styling so the colour escapes don't skew the
+		// column width (same trick as the relations level's type column).
+		typeStr = r.typeStyle.Render(padRight(r.typeTag, partTypeColW)) + "  "
+	}
 	childMark := "  "
 	if r.hasChildren {
 		childMark = styleMuted.Render("+ ")
 	}
-	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + tableCountStr + breakdownStr + rowsStr + pagesStr + bloatStr + childMark + name + detail
+	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + tableCountStr + breakdownStr + rowsStr + pagesStr + bloatStr + typeStr + childMark + name + detail
 }
 
 // rowsColW is the padded width of the rows column on the tables level.
@@ -545,9 +557,54 @@ func renderPartsHeader(s *screen, barW int) string {
 	if anyBloat {
 		line += padRight(sortMark("bloat", s.sort == sortByBloat, s.sortDesc), 12) + "  "
 	}
+	line += padRight(sortMark("type", s.sort == sortByType, s.sortDesc), partTypeColW) + "  "
 	// 2-cell placeholder for the childMark ("+ " / "  ") before the name.
 	line += "  " + sortMark("name", s.sort == sortByName, s.sortDesc)
 	return styleMuted.Render(line)
+}
+
+// partTypeColW is the width of the parts level's "type" column. Wide enough
+// for the longest access-method tag ("spgist") plus a space of slack.
+const partTypeColW = 7
+
+// partTypeLabel is the kind tag shown in the parts level's "type" column: the
+// storage kind for heap/toast, the access method for an index.
+func partTypeLabel(p pg.Part) string {
+	switch p.Kind {
+	case pg.PartHeap:
+		return "heap"
+	case pg.PartToast:
+		return "toast"
+	case pg.PartIndex:
+		if p.AccessMethod != "" {
+			return p.AccessMethod
+		}
+		return "index"
+	}
+	return ""
+}
+
+// partTypeStyle tints the parts type tag by kind, matching the relations level:
+// heap cyan, toast white, and a distinct hue per index access method.
+func partTypeStyle(p pg.Part) lipgloss.Style {
+	switch p.Kind {
+	case pg.PartHeap:
+		return styleHeapSeg
+	case pg.PartToast:
+		return styleToastSeg
+	case pg.PartIndex:
+		switch p.AccessMethod {
+		case "gist":
+			return styleGistSeg
+		case "brin":
+			return styleBrinSeg
+		case "gin":
+			return styleGinSeg
+		default:
+			return styleIndexSeg
+		}
+	}
+	return styleMuted
 }
 
 // renderGenericHeader is the size/name header for the plain bar-list levels

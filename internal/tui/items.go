@@ -212,8 +212,40 @@ func itemPageType(it item) (int64, bool) {
 		// Relations level: rank by kind so the "type" sort groups heap, toast,
 		// then the index access methods together.
 		return int64(relationTypeRank(p)), true
+	case pg.Part:
+		// Parts level: same idea — heap, toast, then index access methods.
+		return int64(partTypeRank(p)), true
 	}
 	return 0, false
+}
+
+// partTypeRank orders the parts "type" column: heap first, then toast, then the
+// index access methods alphabetically. Unknown access methods sort last among
+// indexes; the name tiebreaker then orders within each group.
+func partTypeRank(p pg.Part) int {
+	switch p.Kind {
+	case pg.PartHeap:
+		return 0
+	case pg.PartToast:
+		return 1
+	case pg.PartIndex:
+		switch p.AccessMethod {
+		case "btree":
+			return 2
+		case "brin":
+			return 3
+		case "gin":
+			return 4
+		case "gist":
+			return 5
+		case "hash":
+			return 6
+		case "spgist":
+			return 7
+		}
+		return 8
+	}
+	return 9
 }
 
 // relationTypeRank orders the relations "type" column: heap first, then toast,
@@ -545,15 +577,16 @@ func columnToItem(col pg.Column) item {
 }
 
 func partToItem(p pg.Part) item {
+	// The kind ("heap"/"toast"/"btree"/…) now lives in its own type column, so
+	// detail carries only the remaining, kind-specific metadata: dead/vacuum
+	// stats for the heap, primary/unique flags for an index, the underlying
+	// pg_toast relname for toast.
 	detail := ""
 	switch p.Kind {
 	case pg.PartHeap:
 		detail = heapDetail(p.HeapStats)
 	case pg.PartToast:
-		detail = "TOAST storage"
-		if p.ToastName != "" {
-			detail += " · " + p.ToastName
-		}
+		detail = p.ToastName
 	case pg.PartIndex:
 		var tags []string
 		if p.IsPrimary {
@@ -562,8 +595,7 @@ func partToItem(p pg.Part) item {
 		if p.IsUnique && !p.IsPrimary {
 			tags = append(tags, "unique")
 		}
-		tags = append(tags, p.AccessMethod)
-		detail = "index · " + strings.Join(tags, " · ")
+		detail = strings.Join(tags, " · ")
 	}
 	return item{
 		name:        p.Name,
@@ -572,28 +604,31 @@ func partToItem(p pg.Part) item {
 		hasBloat:    p.HasBloat,
 		hasChildren: p.Kind == pg.PartHeap, // only heap drills into per-column view
 		detail:      detail,
+		typeTag:     partTypeLabel(p),
+		typeStyle:   partTypeStyle(p),
 		data:        p,
 	}
 }
 
 // heapDetail builds the inline status string shown on the heap row at the
-// parts level: dead-tuple % and "last vacuum" age. Falls back to "table heap"
-// when stats aren't available (e.g. matviews or stats never collected).
+// parts level: dead-tuple % and "last vacuum" age. The kind itself is carried
+// by the type column, so this returns "" when no stats are available (e.g.
+// matviews or stats never collected) rather than echoing the kind.
 func heapDetail(h *pg.HeapStats) string {
 	if h == nil {
-		return "table heap"
+		return ""
 	}
-	parts := []string{"heap"}
+	var parts []string
 	if frac := h.DeadFrac(); frac >= 0 && h.NDead > 0 {
 		parts = append(parts, fmt.Sprintf("%s dead (%.0f%%)", formatRows(h.NDead), frac*100))
 	}
 	if last := h.LastVacuumed(); last != nil {
-		parts = append(parts, "vac "+relativeAge(time.Since(*last)))
+		parts = append(parts, "vacuum "+relativeAge(time.Since(*last)))
 	} else if h.NLive+h.NDead > 0 {
 		parts = append(parts, "never vacuumed")
 	}
 	if last := h.LastAnalyzed(); last != nil {
-		parts = append(parts, "ana "+relativeAge(time.Since(*last)))
+		parts = append(parts, "analyze "+relativeAge(time.Since(*last)))
 	}
 	return strings.Join(parts, " · ")
 }

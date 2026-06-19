@@ -731,7 +731,7 @@ func firstKeyColName(cols []pg.IndexKeyColumn) string {
 // and binary keys stay hex). A pageinspect "…" truncation marker ends parsing.
 func decodeHexKey(hex string) (string, bool) {
 	var b []byte
-	for _, f := range strings.Fields(hex) {
+	for f := range strings.FieldsSeq(hex) {
 		if strings.ContainsRune(f, '…') {
 			break
 		}
