@@ -35,19 +35,17 @@ func TestDecodeHexKey(t *testing.T) {
 	}
 }
 
-//go:fix inline
-func strptr(s string) *string { return new(s) }
-
 // hexText builds pageinspect-style space-separated hex for a short-varlena
 // text value, mirroring what bt_page_items emits for a downlink separator.
 func hexText(s string) *string {
-	var parts []string
+	parts := make([]string, 0, len(s)+1)
 	hdr := byte((len(s)+1)<<1 | 1) // short varlena header includes its own byte
 	parts = append(parts, byteHex(hdr))
 	for i := 0; i < len(s); i++ {
 		parts = append(parts, byteHex(s[i]))
 	}
-	return new(strings.Join(parts, " "))
+	joined := strings.Join(parts, " ")
+	return &joined
 }
 
 func byteHex(b byte) string {

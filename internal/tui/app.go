@@ -670,10 +670,10 @@ func toolItems() []item {
 		{name: "Disk usage", detail: "browse tables by total relation size on disk", hasChildren: true, data: toolDisk},
 		{name: "Top queries", detail: "powa-style top queries from pg_stat_statements — calls, time, I/O; EXPLAIN and sample params on Enter", hasChildren: true, data: toolQueries},
 		{name: "Current Activity", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
+		{name: "System overview", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},
-		{name: "System overview", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
 		{name: "Other Tools", detail: "run diagnostic queries — index / table / vacuum / activity / wal / server health", hasChildren: true, data: toolTools},
 	}
 }
