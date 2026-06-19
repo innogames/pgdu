@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -148,7 +149,7 @@ func formatRows(n int64) string {
 	case n >= 1000:
 		return fmt.Sprintf("%.1fk", float64(n)/1e3)
 	}
-	return fmt.Sprintf("%d", n)
+	return strconv.FormatInt(n, 10)
 }
 
 func maxInt(a, b int) int {

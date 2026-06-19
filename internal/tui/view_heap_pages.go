@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -46,7 +47,7 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 	b.WriteString("    " + styleLPDead.Render("●") + "  " + mu("DEAD      reclaimable — VACUUM removes these (and their items)") + "\n")
 	b.WriteString("    " + styleLPUnused.Render("●") + "  " + mu("UNUSED    line pointer is free for reuse") + "\n\n")
 
-	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+fmt.Sprintf("%d", heapWindowDefault)+" pages per step).") + "\n")
+	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+strconv.Itoa(int(heapWindowDefault))+" pages per step).") + "\n")
 	b.WriteString("  " + mu("Within a window, j/k or arrows move the cursor; Enter drills into one page.") + "\n")
 
 	rendered := strings.Count(b.String(), "\n")
@@ -195,14 +196,14 @@ func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool) stri
 	// Each count echoes its colour from the page bar / flag glyphs: live in the
 	// heap-segment hue, REDIRECT in the HOT-hop accent, dead in bloat-red (only
 	// when non-zero, so a clean page stays quiet).
-	liveStr := styleHeapSeg.Render(fmt.Sprintf("%d", p.LiveLP))
-	redirStr := styleMuted.Render(fmt.Sprintf("%d", p.RedirectLP))
+	liveStr := styleHeapSeg.Render(strconv.Itoa(int(p.LiveLP)))
+	redirStr := styleMuted.Render(strconv.Itoa(int(p.RedirectLP)))
 	if p.RedirectLP > 0 {
-		redirStr = styleLPRedirect.Render(fmt.Sprintf("%d", p.RedirectLP))
+		redirStr = styleLPRedirect.Render(strconv.Itoa(int(p.RedirectLP)))
 	}
-	deadStr := styleMuted.Render(fmt.Sprintf("%d", p.DeadLP))
+	deadStr := styleMuted.Render(strconv.Itoa(int(p.DeadLP)))
 	if p.DeadLP > 0 {
-		deadStr = styleBloat.Render(fmt.Sprintf("%d", p.DeadLP))
+		deadStr = styleBloat.Render(strconv.Itoa(int(p.DeadLP)))
 	}
 	deadPct := "—"
 	if df := p.DeadFrac(); df >= 0 {
@@ -299,7 +300,7 @@ func renderHeapTupleHeadline(t pg.HeapTuple, selected bool) string {
 	}
 	return cursor + idx + "  " +
 		dot + " " + padRight(flagName, tupleFlagColW) + "  " +
-		padRight(fmt.Sprintf("%d", t.LPLen), tupleLenColW) + "  " +
+		padRight(strconv.Itoa(int(t.LPLen)), tupleLenColW) + "  " +
 		padRight(xmin, tupleXidColW) + "  " +
 		padRight(xmax, tupleXidColW) + "  " +
 		padRight(ctid, tupleCtidColW) + "  " +
@@ -520,7 +521,7 @@ func xidString(x *uint32) string {
 	if x == nil {
 		return "—"
 	}
-	return fmt.Sprintf("%d", *x)
+	return strconv.FormatUint(uint64(*x), 10)
 }
 
 // previewBytes formats the first N bytes of a tuple's t_data as a compact

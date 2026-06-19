@@ -1,9 +1,27 @@
 # Pin the config format so `make lint` and CI behave identically regardless of
-# the golangci-lint version on the runner. Uses the default linter set.
+# the golangci-lint version on the runner. Builds on the default linter set
+# (errcheck, govet, ineffassign, staticcheck, unused).
 version: "2"
 run:
   # go.mod targets 1.26, but released golangci-lint binaries are built with an
   # older Go and refuse to analyse a module that targets a newer one. Pin the
   # analysis target to the binary's build Go so lint runs; bump when prebuilt
   # golangci-lint ships a Go 1.26 build.
+  #
+  # The same skew makes staticcheck misread the Go 1.26 `new(expr)` form (it
+  # treats the argument as a type), so prefer the classic `x := …; return &x`
+  # idiom over `new(value)` until the analysis Go is bumped.
   go: "1.24"
+linters:
+  enable:
+    # --- performance ---
+    - prealloc      # slices grown with append() in a loop that should be presized
+    - perfsprint    # fmt.Sprintf where strconv is cheaper (autofixed by --fix)
+    - unconvert     # redundant type conversions (autofixed by --fix)
+    # --- unused / dead code (extends the default `unused`) ---
+    - wastedassign  # values assigned but never read before the next write
+    # signatures — every Update() message handler returns tea.Cmd (most via the
+    # `return m, m.onX(msg)` dispatch table, even when a given handler never
+    # issues a follow-up), and the render*(s *screen, …) / render*Row(it item, …)
+    # families share a fixed shape. unparam reads those uniform-but-unused
+    # params/returns as dead and floods ~30 false positives.

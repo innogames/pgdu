@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -481,7 +482,7 @@ func walRecordToItem(r pg.WALRecord) item {
 func walBlockToItem(b pg.WALBlockRef) item {
 	// Prefer the resolved relation name; fall back to the raw relfilenode when
 	// the relation lives in another database or has been dropped.
-	target := fmt.Sprintf("%d", b.RelFileNode)
+	target := strconv.FormatUint(uint64(b.RelFileNode), 10)
 	if b.RelName != "" {
 		target = b.RelName
 	}

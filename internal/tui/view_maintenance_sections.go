@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,17 +47,17 @@ func renderMaintServer(info *pg.MaintenanceInfo) string {
 	active := info.ConnByState["active"]
 	idle := info.ConnByState["idle"]
 	idleTxn := info.ConnByState["idle in transaction"]
-	maxStr := fmt.Sprintf("%d", info.MaxConns)
+	maxStr := strconv.Itoa(info.MaxConns)
 	connLine := fmt.Sprintf("%d/%s", total, maxStr)
 	var connParts []string
 	if active > 0 {
-		connParts = append(connParts, sel(fmt.Sprintf("%d", active))+" active")
+		connParts = append(connParts, sel(strconv.Itoa(active))+" active")
 	}
 	if idle > 0 {
 		connParts = append(connParts, mu(fmt.Sprintf("%d idle", idle)))
 	}
 	if idleTxn > 0 {
-		connParts = append(connParts, styleErr.Render(fmt.Sprintf("%d", idleTxn))+" idle-in-txn")
+		connParts = append(connParts, styleErr.Render(strconv.Itoa(idleTxn))+" idle-in-txn")
 	}
 	if len(connParts) > 0 {
 		connLine += mu("  (") + strings.Join(connParts, mu("  ·  ")) + mu(")")
@@ -262,7 +263,7 @@ func renderMaintPgBouncer(info *pg.MaintenanceInfo) string {
 	b.WriteString("  " + padRight(mu("version"), 22) + pbVer + "\n")
 	waitStr := mu("max wait 0s")
 	if pb.MaxWaitSec > 0 {
-		waitStr = styleErr.Render(fmt.Sprintf("max wait %s", fmtSecsDuration(pb.MaxWaitSec)))
+		waitStr = styleErr.Render("max wait " + fmtSecsDuration(pb.MaxWaitSec))
 	}
 	poolsLine := fmt.Sprintf("cl %d active  %d waiting  sv %d active  %d idle  %s",
 		pb.ClActive, pb.ClWaiting, pb.SvActive, pb.SvIdle, waitStr)
@@ -274,7 +275,7 @@ func renderMaintPgBouncer(info *pg.MaintenanceInfo) string {
 		}
 		waitMark := ""
 		if p.MaxWaitSec > 0 {
-			waitMark = "  " + styleErr.Render(fmt.Sprintf("wait %s", fmtSecsDuration(p.MaxWaitSec)))
+			waitMark = "  " + styleErr.Render("wait "+fmtSecsDuration(p.MaxWaitSec))
 		}
 		pLine := mu(fmt.Sprintf("%s/%s %s", p.Database, p.User, p.Mode)) +
 			fmt.Sprintf("  cl %d/%d  sv %d/%d idle", p.ClActive, p.ClWaiting, p.SvActive, p.SvIdle) +
@@ -474,7 +475,7 @@ func renderMaintIO(info *pg.MaintenanceInfo) string {
 	b.WriteString("  " + padRight(mu("evictions"), 24) + formatRows(io.Evictions) + "\n")
 	fsyncsLine := formatRows(io.Fsyncs)
 	if io.BackendFsyncs > 0 {
-		fsyncsLine += "  " + styleErr.Render(fmt.Sprintf("%s by backends", formatRows(io.BackendFsyncs))) +
+		fsyncsLine += "  " + styleErr.Render(formatRows(io.BackendFsyncs)+" by backends") +
 			mu("  — checkpointer can't keep up")
 	}
 	b.WriteString("  " + padRight(mu("fsyncs"), 24) + fsyncsLine + "\n")
@@ -488,39 +489,33 @@ func renderMaintHealth(info *pg.MaintenanceInfo) string {
 	var b strings.Builder
 	b.WriteString("  " + styleHeader.Render(" operational health ") + "\n")
 	if info != nil {
-		restartStr := ""
+		restartStr := mu("0 need restart")
 		if info.PendingRestart > 0 {
 			restartStr = styleErr.Render(fmt.Sprintf("%d need restart", info.PendingRestart))
 			if len(info.PendingRestartSettings) > 0 {
 				restartStr += mu("  (" + strings.Join(info.PendingRestartSettings, ", ") + ")")
 			}
-		} else {
-			restartStr = mu("0 need restart")
 		}
-		reloadStr := ""
+		reloadStr := mu("0 need reload")
 		if info.PendingReload > 0 {
 			reloadStr = lipgloss.NewStyle().Foreground(colorAccent).Render(fmt.Sprintf("%d need reload", info.PendingReload))
 			if len(info.PendingReloadSettings) > 0 {
 				reloadStr += mu("  (" + strings.Join(info.PendingReloadSettings, ", ") + ")")
 			}
-		} else {
-			reloadStr = mu("0 need reload")
 		}
 		b.WriteString("  " + padRight(mu("pending config"), 24) + restartStr + "\n")
 		b.WriteString("  " + padRight("", 24) + reloadStr + "\n")
 
-		lockStr := ""
+		lockStr := mu("0 waiting")
 		if info.LockWaits > 0 {
 			lockStr = styleErr.Render(fmt.Sprintf("%d waiting", info.LockWaits))
-		} else {
-			lockStr = mu("0 waiting")
 		}
 		b.WriteString("  " + padRight(mu("lock waits"), 24) + lockStr + "\n")
 
 		for _, bl := range info.Blocked {
 			blockers := make([]string, len(bl.BlockedBy))
 			for i, pid := range bl.BlockedBy {
-				blockers[i] = fmt.Sprintf("%d", pid)
+				blockers[i] = strconv.Itoa(int(pid))
 			}
 			blLine := fmt.Sprintf("pid %d blocked by %s  %s  %s",
 				bl.PID,

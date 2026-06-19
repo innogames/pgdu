@@ -60,7 +60,7 @@ func (m *Model) renderIndexPagesInfo(height int) string {
 	b.WriteString("    " + mu("height is the tree depth above the leaves; dedup ") + styleBadge.Render("on") +
 		mu(" means posting-list dedup is possible") + "\n\n")
 
-	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+fmt.Sprintf("%d", heapWindowDefault)+" pages per step).") + "\n")
+	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+strconv.Itoa(int(heapWindowDefault))+" pages per step).") + "\n")
 	b.WriteString("  " + mu("Within a window, j/k or arrows move the cursor; Enter drills into one page's items.") + "\n")
 	b.WriteString("  " + mu("Block 0 is the metapage — skipped here; it carries the root pointer, not a tree page.") + "\n")
 
@@ -495,7 +495,7 @@ func renderIndexTupleRow(t pg.IndexTuple, pageType, blockRange string, cols []pg
 	if selected {
 		off = styleSelected.Render(off)
 	}
-	lenStr := fmt.Sprintf("%d", t.ItemLen)
+	lenStr := strconv.Itoa(int(t.ItemLen))
 	flags := boolFlag("N", t.Nulls) + boolFlag("V", t.Vars)
 	if flags == "" {
 		flags = styleMuted.Render("—")
@@ -924,7 +924,7 @@ func renderGistPageRow(it item, p pg.GistPageStat, barW int, selected bool) stri
 	bar := renderSolidBar(it.size, heapPageBlockSize, barW, styleGistSeg)
 	typ := gistPageTypeStyle(p).Render(gistPageTypeLabel(p))
 	used := humanize.Bytes(it.size)
-	items := styleMuted.Render(fmt.Sprintf("%d", p.Items))
+	items := styleMuted.Render(strconv.Itoa(int(p.Items)))
 	free := styleMuted.Render("—")
 	if p.PageSize > 0 {
 		pct := float64(p.FreeSize) * 100 / float64(p.PageSize)
@@ -979,7 +979,7 @@ func renderGistTupleRow(t pg.GistItem, internal bool, keyW int, selected bool) s
 	if selected {
 		off = styleSelected.Render(off)
 	}
-	lenStr := fmt.Sprintf("%d", t.ItemLen)
+	lenStr := strconv.Itoa(int(t.ItemLen))
 	dead := styleMuted.Render("—")
 	if t.Dead {
 		dead = styleBloat.Render("dead")
@@ -1104,7 +1104,7 @@ func renderBrinTupleRow(t pg.BrinItem, ppr int64, valW, offW, blkW, attW, flagsW
 	if selected {
 		off = styleSelected.Render(off)
 	}
-	blk := fmt.Sprintf("%d", t.BlockNum)
+	blk := strconv.FormatInt(t.BlockNum, 10)
 	if ppr > 0 {
 		blk = fmt.Sprintf("%d…%d", t.BlockNum, t.BlockNum+ppr-1)
 	}
@@ -1211,7 +1211,7 @@ func renderGinPageRow(it item, p pg.GinPageStat, barW int, selected bool) string
 	cursor := selectedCursor(selected)
 	bar := renderSolidBar(it.size, heapPageBlockSize, barW, styleGinSeg)
 	typ := ginPageTypeStyle(p.Flags).Render(ginPageTypeLabel(p.Flags))
-	items := styleMuted.Render(fmt.Sprintf("%d", p.MaxOff))
+	items := styleMuted.Render(strconv.Itoa(int(p.MaxOff)))
 	used := humanize.Bytes(it.size)
 	free := styleMuted.Render("—")
 	if p.PageSize > 0 {
@@ -1308,7 +1308,7 @@ func (m *Model) renderGistInfo(height int, tuples bool) string {
 	b.WriteString("    " + padRight("used", 8) + mu("BLCKSZ − free; the bar shows how packed the page is") + "\n")
 	b.WriteString("    " + padRight("items", 8) + mu("entry count on the page") + "\n")
 	b.WriteString("    " + padRight("free", 8) + mu("free space as a percent of the page") + "\n\n")
-	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+fmt.Sprintf("%d", heapWindowDefault)+" pages per step); Enter drills a page's items.") + "\n")
+	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+strconv.Itoa(int(heapWindowDefault))+" pages per step); Enter drills a page's items.") + "\n")
 	b.WriteString("  " + mu("Reading gist_page_* needs a superuser (or pg_read_server_files).") + "\n")
 	return infoPad(&b, height)
 }

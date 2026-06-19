@@ -119,13 +119,13 @@ func Parse(args []string) (Config, error) {
 			continue
 		}
 		if cfg.Tool != "" {
-			return Config{}, fmt.Errorf("only one of --disk-usage/--shared-buffers/--activity/--top-queries may be given")
+			return Config{}, errors.New("only one of --disk-usage/--shared-buffers/--activity/--top-queries may be given")
 		}
 		cfg.Tool = name
 	}
 
 	if cfg.DSN == "" && cfg.User == "" {
-		return Config{}, fmt.Errorf("username required: pass -U or set PGUSER")
+		return Config{}, errors.New("username required: pass -U or set PGUSER")
 	}
 	return cfg, nil
 }

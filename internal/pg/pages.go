@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -185,9 +186,9 @@ func (c *Client) ReadToastValue(ctx context.Context, t Table, chunkID uint32) ([
 
 	str := func(s string) *string { return &s }
 	return []TupleCell{
-		{Name: "chunk_id", Value: str(fmt.Sprintf("%d", chunkID))},
-		{Name: "chunks", Value: str(fmt.Sprintf("%d", len(chunks)))},
-		{Name: "total_bytes", Value: str(fmt.Sprintf("%d", len(assembled)))},
+		{Name: "chunk_id", Value: str(strconv.FormatUint(uint64(chunkID), 10))},
+		{Name: "chunks", Value: str(strconv.Itoa(len(chunks)))},
+		{Name: "total_bytes", Value: str(strconv.Itoa(len(assembled)))},
 		{Name: "data", Value: str(hexData)},
 	}, nil
 }

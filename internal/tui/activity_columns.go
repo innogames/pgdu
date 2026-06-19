@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"pgdu/internal/humanize"
@@ -65,7 +66,7 @@ func actColumnRegistry() []actColDesc {
 		{id: actColPID, name: "pid", kind: pg.DiagInt, defaultOn: true,
 			desc: "backend process ID",
 			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell {
-				return pg.DiagCell{Display: fmt.Sprintf("%d", r.PID), Num: float64(r.PID), HasNum: true}
+				return pg.DiagCell{Display: strconv.Itoa(int(r.PID)), Num: float64(r.PID), HasNum: true}
 			}},
 		{id: actColDatabase, name: "database", kind: pg.DiagText, defaultOn: true,
 			desc: "database the backend is connected to",

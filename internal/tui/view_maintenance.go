@@ -169,7 +169,7 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 	extra := ""
 	if cap.Dealloc >= 0 {
 		if cap.Dealloc > 0 {
-			extra += "  " + styleErr.Render(fmt.Sprintf("dealloc %s", formatRows(cap.Dealloc)))
+			extra += "  " + styleErr.Render("dealloc "+formatRows(cap.Dealloc))
 		} else {
 			extra += "  " + mu("dealloc 0")
 		}

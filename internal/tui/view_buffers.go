@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -213,7 +214,7 @@ func (m *Model) renderBufferDetail(s *screen, height int) string {
 				}
 				pct := float64(u.Buffers) * 100 / float64(totBufs)
 				line := "  " + mu(padRight(word, 4)) + " " +
-					usageHeatStyle(u.Count).Render(fmt.Sprintf("%d", u.Count)) + "  " +
+					usageHeatStyle(u.Count).Render(strconv.Itoa(u.Count)) + "  " +
 					renderUsageCountBar(u, maxBufs, barW) + "  " +
 					padRight(formatRows(u.Buffers), 6) + "  " +
 					padRight(fmt.Sprintf("%.1f%%", pct), 6)

@@ -113,7 +113,7 @@ func seekToBlock(s *screen) {
 
 	upper := "+∞"
 	if s.brinMeta != nil && s.brinMeta.PagesPerRange > 0 {
-		upper = fmt.Sprintf("%d", coverStart+int64(s.brinMeta.PagesPerRange)-1)
+		upper = strconv.FormatInt(coverStart+int64(s.brinMeta.PagesPerRange)-1, 10)
 	}
 	s.seekStatus = fmt.Sprintf("→ blk %d  (range %d…%s)", blk, coverStart, upper)
 }

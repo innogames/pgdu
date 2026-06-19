@@ -195,11 +195,9 @@ func paintExplainLine(line string, style lipgloss.Style, boldName, analyze bool,
 // paintNodeName styles the node-type label — the text between the optional
 // "->  " marker (or line start) and the first "  (cost"/"  (actual" metric.
 func paintNodeName(line string, style lipgloss.Style) string {
-	nameStart := 0
+	nameStart := len(line) - len(strings.TrimLeft(line, " "))
 	if arrow := strings.Index(line, "->  "); arrow >= 0 {
 		nameStart = arrow + len("->  ")
-	} else {
-		nameStart = len(line) - len(strings.TrimLeft(line, " "))
 	}
 	nameEnd := strings.Index(line, "  (cost=")
 	if nameEnd <= nameStart {
