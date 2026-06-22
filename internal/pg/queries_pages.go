@@ -418,19 +418,24 @@ ORDER  BY p.blkno
 
 // sqlBrinItems lists one BRIN regular page's summary tuples: per heap-block-range
 // (blknum), per indexed attribute (attnum), the opclass-rendered summary value
-// plus the null/placeholder/empty flags. The empty column is PG 17+. $1 is the
-// index regclass-castable text (also the oid arg via ::regclass); $2 the block.
+// plus the null/placeholder/empty flags. The empty column arrived in pageinspect
+// 1.12 (PG 16) — but its presence tracks the *installed extension version*, not
+// the server: a pg_upgraded cluster never `ALTER EXTENSION pageinspect UPDATE`d
+// off an older layout lacks it even on PG 17/18. Read it through jsonb so a
+// missing column yields NULL (rendered as no badge) rather than failing the whole
+// query. $1 is the index regclass-castable text (also the oid arg via ::regclass);
+// $2 the block.
 const sqlBrinItems = `
-SELECT itemoffset::int,
-       blknum::bigint,
-       attnum::int,
-       allnulls,
-       hasnulls,
-       placeholder,
-       empty,
-       value
-FROM   brin_page_items(get_raw_page($1, $2::int), $1::regclass)
-ORDER  BY blknum, attnum
+SELECT bpi.itemoffset::int,
+       bpi.blknum::bigint,
+       bpi.attnum::int,
+       bpi.allnulls,
+       bpi.hasnulls,
+       bpi.placeholder,
+       (to_jsonb(bpi) ->> 'empty')::bool AS empty,
+       bpi.value
+FROM   brin_page_items(get_raw_page($1, $2::int), $1::regclass) AS bpi
+ORDER  BY bpi.blknum, bpi.attnum
 `
 
 // --- GIN page inspector ---

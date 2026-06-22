@@ -14,8 +14,9 @@ type ExtCapacity struct {
 	Installed  bool
 	Used       int64     // count(*) of currently tracked entries
 	Max        int64     // the .max GUC; 0 = unknown / extension not preloaded
-	Dealloc    int64     // pg_stat_statements_info.dealloc; -1 = n/a (qualstats)
 	StatsReset time.Time // last reset timestamp; zero = unknown
+	ShmemBytes int64     // reserved shared memory (pg_shmem_allocations); 0 = unknown
+	TextBytes  int64     // query-text bytes (pg_stat_statements only); 0 = n/a
 }
 
 // FillRatio is Used/Max as a fraction in [0,1]. Returns 0 when Max ≤ 0 (GUC

@@ -1133,7 +1133,7 @@ func brinFlagTags(t pg.BrinItem) string {
 	if t.Placeholder {
 		parts = append(parts, styleHeapToastTag.Render("P"))
 	}
-	if t.Empty {
+	if t.Empty != nil && *t.Empty {
 		parts = append(parts, styleMuted.Render("E"))
 	}
 	if len(parts) == 0 {

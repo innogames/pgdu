@@ -28,6 +28,13 @@ func (m *Model) View() string {
 		contentHeight -= strings.Count(summary, "\n") + 1
 	}
 
+	if s.level == levelShmem && s.loaded && s.err == nil && len(s.items) > 0 {
+		summary := m.renderShmemSummary(s)
+		b.WriteString(summary)
+		b.WriteString("\n")
+		contentHeight -= strings.Count(summary, "\n") + 1
+	}
+
 	if s.level == levelWAL && (s.extPrompt == nil || !s.extPrompt.blocking) &&
 		(s.walSummary != nil || s.walSummaryErr != nil) {
 		summary := m.renderWALSummary(s)
@@ -174,6 +181,8 @@ func (m *Model) View() string {
 			b.WriteString(m.renderBufferList(s, contentHeight, rankByOID))
 		case levelBufferDetail:
 			b.WriteString(m.renderBufferDetail(s, contentHeight))
+		case levelShmem:
+			b.WriteString(m.renderShmemList(s, contentHeight))
 		case levelHeapPages:
 			b.WriteString(m.renderHeapPagesList(s, contentHeight))
 		case levelHeapTuples:

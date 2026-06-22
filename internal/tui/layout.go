@@ -51,6 +51,13 @@ func barReserve(s *screen) int {
 			bufColHit + colGutter +
 			bufColDirty + colGutter +
 			colName
+	case levelShmem:
+		// cursor + bar(brackets) + size + share% + group + name
+		return colCursor + colBrackets +
+			shmemColSize + colGutter +
+			shmemColPct + colGutter +
+			shmemColGroup + colGutter +
+			colName
 	case levelTables:
 		if tl == toolPageInspect {
 			// Page-inspector tables: no bloat overlay and no toast/idx detail

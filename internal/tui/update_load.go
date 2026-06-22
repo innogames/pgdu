@@ -95,6 +95,8 @@ func (m *Model) loadCurrent() tea.Cmd {
 		s.bufUsage = nil
 		s.bufUsageErr = nil
 		return m.loadBufferDetailCmd(s.db, s.bufDetail.OID)
+	case levelShmem:
+		return m.loadShmemCmd(s.db)
 	case levelParts:
 		// Probe pgstattuple alongside the parts load. The probe is cheap
 		// (one pg_extension / pg_available_extensions lookup) and lets the

@@ -201,3 +201,40 @@ func (c *Client) BufferCacheSummary(ctx context.Context, db string) (BufferCache
 	}
 	return s, nil
 }
+
+// ShmemAllocations returns the full Postgres shared-memory map from
+// pg_shmem_allocations, biggest allocation first. No extension is needed, but
+// the view is restricted to pg_read_all_stats / superuser — a permission error
+// is wrapped and returned so the TUI can surface it rather than crash. The two
+// NULL-name rows are classified into Anonymous / Free (see ShmemAllocation).
+func (c *Client) ShmemAllocations(ctx context.Context, db string) ([]ShmemAllocation, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	return collect(ctx, pool, fmt.Sprintf("shmem allocations in %q", db), sqlShmemAllocations, nil,
+		func(row pgx.CollectableRow) (ShmemAllocation, error) {
+			var (
+				name *string
+				off  *int64
+				a    ShmemAllocation
+			)
+			if err := row.Scan(&name, &off, &a.Size, &a.AllocatedSize); err != nil {
+				return ShmemAllocation{}, err
+			}
+			switch {
+			case name != nil:
+				a.Name = *name
+			case off == nil:
+				a.Anonymous = true // name NULL, off NULL
+			default:
+				a.Free = true // name NULL, off set: unused segment tail
+			}
+			if off != nil {
+				a.Off = *off
+			} else {
+				a.Off = -1
+			}
+			return a, nil
+		})
+}

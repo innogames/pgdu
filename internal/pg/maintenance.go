@@ -218,11 +218,14 @@ func (c *Client) ListSettings(ctx context.Context, db string) ([]SettingRow, err
 
 // extCapacity reads the fill level of one statistics extension, returning an
 // ExtCapacity with Installed=false when the extension is absent. sqlCount is
-// the query for (used, max); sqlInfo is optional — when non-empty it must
-// return (dealloc int64, statsReset timestamptz) and requires elevated
-// privilege (pg_read_all_stats or superuser); failure is silently ignored.
-func (c *Client) extCapacity(ctx context.Context, db, name, sqlCount, sqlInfo string) ExtCapacity {
-	cap := ExtCapacity{Name: name, Dealloc: -1}
+// the query for (used, max). The remaining queries are optional (skipped when
+// ""); each requires elevated privilege (pg_read_all_stats or superuser) and is
+// best-effort — a failure leaves the corresponding field zero:
+//   - sqlReset returns one stats_reset timestamptz,
+//   - sqlShmem returns the reserved shared-memory bytes,
+//   - sqlText returns the query-text bytes.
+func (c *Client) extCapacity(ctx context.Context, db, name, sqlCount, sqlReset, sqlShmem, sqlText string) ExtCapacity {
+	cap := ExtCapacity{Name: name}
 	st, err := c.ProbeExtension(ctx, db, name)
 	if err != nil || !st.Installed {
 		return cap
@@ -236,15 +239,19 @@ func (c *Client) extCapacity(ctx context.Context, db, name, sqlCount, sqlInfo st
 
 	_ = pool.QueryRow(ctx, sqlCount).Scan(&cap.Used, &cap.Max)
 
-	if sqlInfo != "" {
-		var dealloc int64
+	if sqlReset != "" {
 		var statsReset time.Time
-		if pool.QueryRow(ctx, sqlInfo).Scan(&dealloc, &statsReset) == nil {
-			cap.Dealloc = dealloc
+		if pool.QueryRow(ctx, sqlReset).Scan(&statsReset) == nil {
 			if !statsReset.IsZero() && statsReset.Year() > 1 {
 				cap.StatsReset = statsReset
 			}
 		}
+	}
+	if sqlShmem != "" {
+		_ = pool.QueryRow(ctx, sqlShmem).Scan(&cap.ShmemBytes)
+	}
+	if sqlText != "" {
+		_ = pool.QueryRow(ctx, sqlText).Scan(&cap.TextBytes)
 	}
 	return cap
 }
@@ -252,14 +259,15 @@ func (c *Client) extCapacity(ctx context.Context, db, name, sqlCount, sqlInfo st
 // statementsCapacity reads the pg_stat_statements fill level.
 // Returns an ExtCapacity with Installed=false when the extension is absent.
 func (c *Client) statementsCapacity(ctx context.Context, db string) ExtCapacity {
-	return c.extCapacity(ctx, db, "pg_stat_statements", sqlStatementsCount, sqlStatementsMaintInfo)
+	return c.extCapacity(ctx, db, "pg_stat_statements", sqlStatementsCount,
+		sqlStatementsReset, sqlStatementsShmem, sqlStatementsTextBytes)
 }
 
 // qualstatsCapacity reads the pg_qualstats fill level.
 // Returns an ExtCapacity with Installed=false when the extension is absent.
 func (c *Client) qualstatsCapacity(ctx context.Context, db string) ExtCapacity {
-	// pg_qualstats has no dealloc/reset-info query.
-	return c.extCapacity(ctx, db, "pg_qualstats", sqlQualstatsCapacity, "")
+	// pg_qualstats has no reset-info or per-entry text; only shmem is available.
+	return c.extCapacity(ctx, db, "pg_qualstats", sqlQualstatsCapacity, "", sqlQualstatsShmem, "")
 }
 
 // resetExtStats runs resetSQL in db, wrapping any error with label.

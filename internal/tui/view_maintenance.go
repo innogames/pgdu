@@ -58,8 +58,11 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	// full width below so they aren't truncated. Narrow terminals fall back to
 	// the single-column stack.
 	if m.width >= 88 {
-		leftW := max(40, min(64, m.width/2-2))
-		rightW := max(20, m.width-leftW-3) // -3 for the "│ " rule + safety
+		// Give the left pane the larger share (it carries the long connections /
+		// sessions breakdowns) while leaving the right pane ≥48 cols for its
+		// longest line (xid age). -3 throughout is the "│ " rule + safety.
+		leftW := max(40, min(m.width-48-3, m.width*3/5))
+		rightW := max(20, m.width-leftW-3)
 		left := renderMaintServer(info) + renderMaintTransactions(info) + renderMaintTableActivity(info)
 		right := renderMaintMemory(info) + renderMaintAutovacuum(info) + renderMaintIO(info)
 		body.WriteString(renderColumns(left, right, leftW, rightW))
@@ -117,7 +120,7 @@ func renderColumns(left, right string, leftW, rightW int) string {
 }
 
 // renderCapacityRow renders one extension capacity row with a fill bar,
-// counts, percentage, dealloc signal, and reset-age. idx is the 0-based row
+// counts, percentage, memory footprint, and reset-age. idx is the 0-based row
 // index within the capacity section; s.maintCursor highlights the selected row.
 func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, cap pg.ExtCapacity) string {
 	mu := styleMuted.Render
@@ -167,12 +170,12 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 	}
 
 	extra := ""
-	if cap.Dealloc >= 0 {
-		if cap.Dealloc > 0 {
-			extra += "  " + styleErr.Render("dealloc "+formatRows(cap.Dealloc))
-		} else {
-			extra += "  " + mu("dealloc 0")
+	if cap.ShmemBytes > 0 {
+		mem := "~" + humanize.Bytes(cap.ShmemBytes) + " shmem"
+		if cap.TextBytes > 0 {
+			mem += " · " + humanize.Bytes(cap.TextBytes) + " text"
 		}
+		extra += "  " + mu(mem)
 	}
 	if !cap.StatsReset.IsZero() {
 		age := time.Since(cap.StatsReset)
@@ -338,9 +341,10 @@ func (m *Model) renderMaintenanceInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" extension capacity ") + "\n")
 	b.WriteString("    " + mu("pg_stat_statements and pg_qualstats both pre-allocate a fixed shared-memory array (the .max") + "\n")
-	b.WriteString("    " + mu("GUC). Once the array is full, new queries either evict old entries (pg_stat_statements,") + "\n")
-	b.WriteString("    " + mu("tracked via dealloc) or are silently dropped (pg_qualstats). A bar near 100% means the") + "\n")
-	b.WriteString("    " + mu("tool is losing data. Reset clears the array; raise .max + restart to prevent recurrence.") + "\n\n")
+	b.WriteString("    " + mu("GUC). Once the array is full, new queries either evict old entries (pg_stat_statements)") + "\n")
+	b.WriteString("    " + mu("or are silently dropped (pg_qualstats). A bar near 100% means the tool is losing data.") + "\n")
+	b.WriteString("    " + mu("Reset clears the array; raise .max + restart to prevent recurrence. The memory figure is") + "\n")
+	b.WriteString("    " + mu("the reserved shared memory (+ deduplicated query-text bytes for pg_stat_statements).") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" xid age ") + "\n")
 	b.WriteString("    " + mu("Postgres uses 32-bit transaction IDs. After ~2 billion transactions the counter wraps") + "\n")

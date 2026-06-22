@@ -39,6 +39,13 @@ type keyMap struct {
 	// WAL-inspector binding.
 	WALByRelation key.Binding // w: open the by-relation breakdown of the window
 
+	// Shared-buffers-tool binding.
+	ShmemMap key.Binding // m: open the shared-memory map (pg_shmem_allocations)
+
+	// shmemInFooter adds the m (memory map) hint to the footer's short help on
+	// the buffer-tables level, where it's the only advertisement for the view.
+	shmemInFooter bool
+
 	// columnsInFooter adds the C (configure columns) hint to the footer's short
 	// help. Set per-screen by applyContext: the activity table has no other
 	// advertisement for the picker, whereas the top-queries table already shows
@@ -85,6 +92,7 @@ func defaultKeys() keyMap {
 		TerminateBackend: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "terminate backend")),
 
 		WALByRelation: key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "by relation")),
+		ShmemMap:      key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "memory map")),
 	}
 }
 
@@ -138,6 +146,11 @@ func (k *keyMap) applyContext(s *screen) {
 	// the physical key stays free for reuse on every other level.
 	k.WALByRelation.SetEnabled(s.level == levelWAL)
 
+	// m opens the shared-memory map from the buffer-tables list; surface it in
+	// the footer there since nothing else advertises it.
+	k.ShmemMap.SetEnabled(s.level == levelBufferTables)
+	k.shmemInFooter = s.level == levelBufferTables
+
 	// s seeks on the index-tuples view: a key value on B-tree, a heap block
 	// number on BRIN. GiST/GIN keys have no total order, so seek is disabled
 	// there (use the / filter). The physical key is otherwise ShowQuery
@@ -151,6 +164,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	if k.columnsInFooter {
 		b = append(b, k.Columns)
 	}
+	if k.shmemInFooter {
+		b = append(b, k.ShmemMap)
+	}
 	return b
 }
 
@@ -161,7 +177,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Filter, k.Seek, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
 		{k.Refresh, k.ToggleBloat, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
-		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation},
+		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation, k.ShmemMap},
 		{k.Help, k.Quit},
 	}
 }

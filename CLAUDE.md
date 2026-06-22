@@ -1,8 +1,10 @@
 # pgdu
 
-ncdu-style TUI for browsing PostgreSQL disk usage and shared_buffers occupancy and other diagnostic data.
+ncdu-style TUI for browsing PostgreSQL disk usage, shared_buffers occupancy, page
+contents, WAL, top queries (pg_stat_statements), maintenance/health, live activity, and
+other diagnostic data.
 Go 1.26, Bubble Tea, pgx/v5. Single binary, no daemon.
-Postgres 17+18+newwer must be supported query wise.
+Postgres 17, 18 and newer must be supported query wise.
 
 ## Layout
 
@@ -10,29 +12,35 @@ Postgres 17+18+newwer must be supported query wise.
 main.go              # CLI entry: parse flags → pg.Client → tea.Program
 internal/cli/        # flag/env parsing → Config (DSN builder, Target string)
 internal/pg/         # pgx wrapper: one *pgxpool.Pool per database, lazy
-  queries.go         #   all SQL lives here as named const strings
-  types.go           #   shared row structs (Database, Schema, Table, Part, …)
-  {entity}.go        #   one file per List*/Fill*/Probe* operation
+  queries.go         #   foundation SQL (databases/schemas/tables) as named const strings
+  types.go           #   foundation row structs (Database, Schema, Table, Part, …)
+  queries_{domain}.go#   per-domain SQL (queries_diag/pages/statements/wal/…)
+  types_{domain}.go  #   per-domain row structs (types_statements/pages/wal/…)
+  {entity}.go        #   one file per entity's List*/Fill*/Probe* operations
 internal/tui/        # Bubble Tea Model/Update/View
   app.go             #   Model, screen, item, level/tool/sortMode + methods
   update.go          #   top-level Update() dispatcher
-  update_msgs.go     #   *LoadedMsg / extStatus / reindexDone handlers
-  update_keys.go     #   handleKey, handleFilterKey, reindex confirm flow
-  update_drill.go    #   drillIn (level ↓), loadCurrent (issue load Cmd)
+  update_msgs*.go    #   *LoadedMsg / extStatus / reindexDone handlers (split per feature)
+  update_keys*.go    #   handleKey, handleFilterKey, confirm flows (split per feature)
+  update_drill*.go   #   drillIn (level ↓), loadCurrent (issue load Cmd)
   update_sort.go     #   applySort + validSorts + cycleSort
-  cmds.go            #   tea.Cmd wrappers around pg.Client (query() helper)
-  view.go            #   View() + per-level renderers
+  cmds*.go           #   tea.Cmd wrappers around pg.Client (query() helper)
+  view.go, view_*.go #   View() + per-level renderers (view_activity/queries/snapshots/…)
   row.go             #   shared row + paintBar/barSegment primitives
   filter.go          #   fuzzy filter, visibleIndexes, viewportRange
+  layout.go          #   layout math, barReserve()
   styles.go, keys.go #   lipgloss styles, keyMap
 internal/humanize/   # Bytes(int64) → "12.34 MB"
+internal/prefs/      # per-user UI prefs (JSON at ~/.config/pgdu, atomic write)
+internal/sysmem/     # host memory stats (used by the maintenance/system overview)
 ```
 
 ## Conventions
 
-- **SQL goes in `internal/pg/queries.go`** as `const sql<Name>`. Functions in
-  the entity files (`tables.go`, `parts.go`, …) just call `pool.Query` /
-  `pool.QueryRow` and scan into types from `types.go`.
+- **SQL goes in `internal/pg/queries.go` or a sibling `queries_<domain>.go`** as
+  `const sql<Name>` (`queries.go` is the foundation; domain SQL lives in the siblings).
+  Functions in the entity files (`tables.go`, `parts.go`, …) just call `pool.Query` /
+  `pool.QueryRow` and scan into types from `types.go` / `types_<domain>.go`.
 - **Identifiers are quoted with `%q.%q` or `quoteIdent()`** when interpolated
   into SQL — never with `%s`. All identifiers come from catalogs or the
   `Table` struct, never raw user input.
@@ -45,9 +53,10 @@ internal/humanize/   # Bytes(int64) → "12.34 MB"
 - **Sort logic is on `sortMode`**: `.label(desc)`, `.less(a,b)`, `.defaultDesc()`,
   `.name()`. Add a new sort by extending the enum + those methods + `validSorts`.
 - **Adding a new entity**: drop a new file in `internal/pg/`, define its type
-  in `types.go`, add `sql<Name>` in `queries.go`, then wire a level in
-  `internal/tui/app.go` (`level` enum + `barReserve`), a Cmd in `cmds.go`,
-  a handler in `update_msgs.go`, and a drill case in `update_drill.go`.
+  in `types.go` (or a `types_<domain>.go`), add `sql<Name>` in `queries.go` (or a
+  `queries_<domain>.go`), then wire a `level` enum value in `internal/tui/app.go`
+  (+ a `barReserve()` case in `layout.go`), a Cmd in `cmds.go`, a handler in
+  `update_msgs.go`, and a drill case in `update_drill.go`.
 - **No comments that just restate the code.** Comments explain the *why*
   (subtle invariants, why we picked a constant, why an obvious thing isn't).
 
@@ -82,6 +91,30 @@ table just needs a `colPrefs<Name>` key + one `saveColPrefs` call.
 
 ## Things to know before touching code
 
+- **Tools & levels**: `levelTools` is the root menu; from it you pick one of the 8 `tool`
+  values (`toolDisk`, `toolBuffers`, `toolPageInspect`, `toolTools` (diagnostics), `toolWAL`,
+  `toolQueries` (top queries), `toolMaintenance`, `toolActivity`) and drill through that
+  tool's own `level*` chain. Both enums live in `app.go`.
+- **Two-step confirm is a shared pattern**: reindex, snapshot delete (`pendingDeleteSnap`),
+  backend cancel/terminate (`pendingBackend*`), streaming VACUUM (`pendingVacuum`), and
+  extension reset all use the same flow — Enter arms a `pending*` field, any next key
+  cancels, `y`/`Y` executes (in the relevant key handler).
+- **Activity** (`toolActivity`, `view_activity.go`): live `pg_stat_activity` browser with a
+  `C` column picker (mirrors top-queries), filter/verbose/auto-refresh cycling, and backend
+  cancel/terminate. Linux derives CPU%/IO from `/proc` (`activity_proc_linux.go`).
+- **Shared-memory map** (`levelShmem`, `view_shmem.go`): from the buffer-tables list,
+  `m` opens the whole shared-memory segment (`pg_shmem_allocations`, not just the buffer
+  pool). Allocations are bucketed by `shmemCatOf` into coarse subsystem categories
+  (buffer pool / WAL / txn-SLRU / locks / backends / stats / other / anonymous / free);
+  a grouped category bar sits above the per-allocation list, with `free` as the bar's
+  muted tail. The view is built-in (no extension) but needs `pg_read_all_stats`/superuser;
+  a lesser role surfaces the permission error. The two NULL-name rows are classified in
+  `pg.ShmemAllocations` (off NULL → anonymous, off set → free).
+- **Streaming VACUUM** (on `levelParts`): live `NOTICE` output streamed into a scrollable
+  pane held in `vacuumState`.
+- **Maintenance / system overview** (`toolMaintenance`, `view_maintenance*.go`): extension
+  capacity stats (pg_stat_statements/pg_qualstats) with a reset confirm, plus a settings
+  browser (`levelSettings`).
 - `screen.table` is the source of truth at `levelParts`/`levelColumns` — there
   used to be redundant `tableName`/`tableOID` fields; they were dropped.
 - `loadCurrent()` clears `extPrompt` and `installing` on entry; any state set

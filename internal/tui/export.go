@@ -182,6 +182,20 @@ func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 				return []string{st.Schema, st.Name, csvUint(st.OID), csvInt(st.BufferedBytes), csvInt(st.TotalBytes), csvInt(st.Hits), csvInt(st.Reads), numStr(st.HitRatio())}
 			}, true
 
+	case levelShmem:
+		return []string{"name", "category", "off", "size_bytes", "allocated_bytes"},
+			func(it item) []string {
+				a, ok := it.data.(pg.ShmemAllocation)
+				if !ok {
+					return nil
+				}
+				off := ""
+				if a.Off >= 0 {
+					off = csvInt(a.Off)
+				}
+				return []string{shmemDisplayName(a), shmemCatOf(a).label(), off, csvInt(a.Size), csvInt(a.AllocatedSize)}
+			}, true
+
 	case levelRelations:
 		return []string{"kind", "schema", "name", "oid", "size_bytes", "est_rows", "pages", "access_method", "parent_name"},
 			func(it item) []string {

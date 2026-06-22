@@ -195,3 +195,21 @@ LEFT   JOIN buffered b ON b.tab_oid = c.oid
 LEFT   JOIN pg_statio_user_tables s ON s.relid = c.oid
 WHERE  c.oid = $1 AND c.relkind IN ('r','m','p')
 `
+
+// sqlShmemAllocations dumps the whole Postgres shared-memory segment from
+// pg_shmem_allocations: every named region (the buffer pool, lock tables, SLRU
+// caches, backend arrays, extension arenas, …) ordered biggest-first.
+//
+// Two rows have name = NULL, distinguished by off:
+//   - off IS NULL → anonymous allocations (the difference between the indexed
+//     allocations and freeoffset: DSA segments, dynamic shared memory, …).
+//   - off IS NOT NULL → the unused tail of the segment (its size = free bytes).
+//
+// The view is built-in (no extension) but reading it needs pg_read_all_stats
+// membership / superuser; a lesser role gets a permission error, which we let
+// flow up to the TUI rather than swallow.
+const sqlShmemAllocations = `
+SELECT name, off, size, allocated_size
+FROM   pg_shmem_allocations
+ORDER  BY allocated_size DESC
+`

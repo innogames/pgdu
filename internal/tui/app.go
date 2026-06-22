@@ -22,6 +22,7 @@ const (
 	levelParts
 	levelBufferTables
 	levelBufferDetail // single table: cache footprint + clock-sweep temperature histogram
+	levelShmem        // whole shared-memory segment map (pg_shmem_allocations), grouped by subsystem
 	levelColumns
 	levelHeapPages
 	levelHeapTuples

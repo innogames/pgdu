@@ -11,7 +11,7 @@ import (
 // Kept in sync with the level set the ? key toggles in handleKey.
 func (m *Model) hasInfoOverlay(s *screen) bool {
 	switch s.level {
-	case levelBufferTables, levelBufferDetail,
+	case levelBufferTables, levelBufferDetail, levelShmem,
 		levelHeapPages, levelHeapTuples,
 		levelIndexPages, levelIndexTuples,
 		levelWAL, levelWALRecords, levelWALBlocks, levelWALRelations, levelWALRelBlocks,
@@ -32,6 +32,8 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 		return m.renderBufferInfo(height)
 	case levelBufferDetail:
 		return m.renderBufferDetailInfo(height)
+	case levelShmem:
+		return m.renderShmemInfo(height)
 	case levelHeapPages:
 		return m.renderHeapPagesInfo(height)
 	case levelHeapTuples:

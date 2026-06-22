@@ -19,13 +19,34 @@ SELECT count(*),
        COALESCE(current_setting('pg_stat_statements.max', true)::bigint, 0)
 FROM   pg_stat_statements`
 
-	// sqlStatementsMaintInfo reads dealloc + stats_reset from pg_stat_statements_info.
+	// sqlStatementsReset reads the last stats_reset from pg_stat_statements_info.
 	// Requires pg_read_all_stats or superuser; callers should handle errors
-	// gracefully and show zero/unknown when unprivileged.
-	sqlStatementsMaintInfo = `
-SELECT COALESCE(dealloc, 0),
-       COALESCE(stats_reset, '-infinity'::timestamptz)
+	// gracefully and show unknown when unprivileged.
+	sqlStatementsReset = `
+SELECT COALESCE(stats_reset, '-infinity'::timestamptz)
 FROM   pg_stat_statements_info`
+
+	// sqlStatementsShmem sums the shared memory pg_stat_statements reserves
+	// (control struct + entry hash). pg_shmem_allocations (PG13+) requires
+	// pg_read_all_stats; failure leaves the figure unknown.
+	sqlStatementsShmem = `
+SELECT COALESCE(sum(allocated_size), 0)
+FROM   pg_shmem_allocations
+WHERE  name LIKE 'pg_stat_statements%'`
+
+	// sqlStatementsTextBytes sums the deduplicated normalized query-text bytes.
+	// This is the part of pg_stat_statements that grows with distinct statements
+	// (texts live in an external file, not the fixed-size entry hash).
+	sqlStatementsTextBytes = `
+SELECT COALESCE(sum(octet_length(query)), 0)
+FROM   pg_stat_statements`
+
+	// sqlQualstatsShmem sums the shared memory pg_qualstats reserves.
+	// pg_shmem_allocations (PG13+) requires pg_read_all_stats.
+	sqlQualstatsShmem = `
+SELECT COALESCE(sum(allocated_size), 0)
+FROM   pg_shmem_allocations
+WHERE  name LIKE '%qualstats%'`
 
 	// sqlQualstatsCapacity reads the entry count and last reset from pg_qualstats.
 	// pg_qualstats() is a set-returning function so COUNT wraps it.

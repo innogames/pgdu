@@ -168,6 +168,22 @@ func (m *Model) onBufferDetailLoaded(msg bufferDetailLoadedMsg) tea.Cmd {
 	return nil
 }
 
+func (m *Model) onShmemLoaded(msg shmemLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelShmem)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	s.err = msg.err
+	s.items = s.items[:0]
+	for _, a := range msg.allocs {
+		s.items = append(s.items, shmemAllocToItem(a))
+	}
+	m.applySort(s)
+	return nil
+}
+
 func (m *Model) onColumnsLoaded(msg columnsLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelColumns)
 	if s == nil || s.table.OID != msg.tableOID {

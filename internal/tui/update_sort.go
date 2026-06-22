@@ -229,6 +229,8 @@ func validSorts(l level) []sortMode {
 		return []sortMode{sortBySize, sortByTables, sortByName}
 	case levelBufferTables:
 		return []sortMode{sortBySize, sortByTotal, sortByCached, sortByHitRatio, sortByDirty, sortByName}
+	case levelShmem:
+		return []sortMode{sortBySize, sortByGroup, sortByName}
 	case levelHeapPages:
 		return []sortMode{sortByBlkno, sortBySize, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByDeadRatio, sortByFreeSpace}
 	case levelHeapTuples:

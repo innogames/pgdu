@@ -87,6 +87,8 @@ func levelLabel(l level) string {
 		return "buffer-tables"
 	case levelBufferDetail:
 		return "buffer-detail"
+	case levelShmem:
+		return "shmem"
 	case levelParts:
 		return "parts"
 	case levelColumns:

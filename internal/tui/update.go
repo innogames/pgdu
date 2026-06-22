@@ -41,6 +41,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onBufferSummaryLoaded(msg)
 	case bufferDetailLoadedMsg:
 		return m, m.onBufferDetailLoaded(msg)
+	case shmemLoadedMsg:
+		return m, m.onShmemLoaded(msg)
 	case columnsLoadedMsg:
 		return m, m.onColumnsLoaded(msg)
 	case bloatFilledMsg:

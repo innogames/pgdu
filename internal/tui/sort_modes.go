@@ -27,6 +27,7 @@ const (
 	sortByLiveLP     // heap pages: live line-pointer count
 	sortByRedirectLP // heap pages: REDIRECT (HOT-hop) line-pointer count
 	sortByDeadLP     // heap pages: DEAD line-pointer count
+	sortByGroup      // shmem: subsystem category (buffer pool/WAL/locks/…)
 )
 
 // defaultDesc is the natural direction for each sort column: bigger-first for
@@ -36,7 +37,7 @@ func (sm sortMode) defaultDesc() bool {
 	switch sm {
 	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty, sortByBloat, sortByHeap, sortByIndex, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP:
 		return true
-	case sortByName, sortByHitRatio, sortByBlkno, sortByLP, sortByLevel, sortByType, sortByColType:
+	case sortByName, sortByHitRatio, sortByBlkno, sortByLP, sortByLevel, sortByType, sortByColType, sortByGroup:
 		return false
 	}
 	return false
@@ -91,6 +92,8 @@ func (sm sortMode) name() string {
 		return "R"
 	case sortByDeadLP:
 		return "dead"
+	case sortByGroup:
+		return "group"
 	default:
 		return "name"
 	}
@@ -160,6 +163,8 @@ func (sm sortMode) less(a, b item) bool {
 		return lessByExtractor(a, b, itemRedirectLP)
 	case sortByDeadLP:
 		return lessByExtractor(a, b, itemDeadLP)
+	case sortByGroup:
+		return lessByExtractor(a, b, itemShmemGroup)
 	}
 	return false
 }

@@ -247,8 +247,9 @@ type BrinItem struct {
 	AllNulls    bool
 	HasNulls    bool
 	Placeholder bool
-	Empty       bool
-	Value       *string
+	// Empty is nil on pageinspect < 1.12, which lacks the column (see sqlBrinItems).
+	Empty *bool
+	Value *string
 }
 
 // --- GIN page inspector ---

@@ -72,6 +72,11 @@ type bufferDetailLoadedMsg struct {
 	blockSize int64
 	err       error
 }
+type shmemLoadedMsg struct {
+	db     string
+	allocs []pg.ShmemAllocation
+	err    error
+}
 type columnsLoadedMsg struct {
 	tableOID uint32
 	columns  []pg.Column
@@ -334,6 +339,13 @@ func (m *Model) loadBufferDetailCmd(db string, oid uint32) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		counts, blockSize, err := m.client.TableBufferUsageCounts(ctx, db, oid)
 		return bufferDetailLoadedMsg{db: db, oid: oid, counts: counts, blockSize: blockSize, err: err}
+	})
+}
+
+func (m *Model) loadShmemCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		allocs, err := m.client.ShmemAllocations(ctx, db)
+		return shmemLoadedMsg{db: db, allocs: allocs, err: err}
 	})
 }
 

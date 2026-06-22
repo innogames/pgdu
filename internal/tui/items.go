@@ -552,6 +552,17 @@ func bufferStatToItem(s pg.TableBufferStat) item {
 	}
 }
 
+func shmemAllocToItem(a pg.ShmemAllocation) item {
+	// name drives the / filter and name-sort; size drives the bar and size-sort.
+	// AllocatedSize (alignment-padded) is what sums to the whole segment, so it's
+	// the honest figure to rank and total by.
+	return item{
+		name: shmemDisplayName(a),
+		size: a.AllocatedSize,
+		data: a,
+	}
+}
+
 func columnToItem(col pg.Column) item {
 	nullPart := ""
 	if col.NullFrac > 0.005 {

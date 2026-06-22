@@ -175,7 +175,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// aren't obvious — use ? to toggle a dedicated reference overlay
 		// instead of expanding the key list. Other levels keep the standard
 		// help-expansion behaviour.
-		if s.level == levelBufferTables || s.level == levelBufferDetail ||
+		if s.level == levelBufferTables || s.level == levelBufferDetail || s.level == levelShmem ||
 			s.level == levelHeapPages || s.level == levelHeapTuples ||
 			s.level == levelIndexPages || s.level == levelIndexTuples ||
 			s.level == levelWAL || s.level == levelWALRecords || s.level == levelWALBlocks ||
@@ -496,6 +496,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			next := &screen{
 				level: levelWALRelations, title: "wal relations", tool: s.tool,
 				db: s.db, walStart: s.walStart, walEnd: s.walEnd,
+				sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
+			}
+			m.stack = append(m.stack, next)
+			return m, m.loadCurrent()
+		}
+	case key.Matches(msg, m.keys.ShmemMap):
+		// From the buffer-tables list, open the whole shared-memory map. Gated to
+		// levelBufferTables via applyContext; require no blocking extension prompt.
+		if s.level == levelBufferTables && (s.extPrompt == nil || !s.extPrompt.blocking) {
+			next := &screen{
+				level: levelShmem, title: "shmem", tool: toolBuffers, db: s.db,
 				sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
 			}
 			m.stack = append(m.stack, next)

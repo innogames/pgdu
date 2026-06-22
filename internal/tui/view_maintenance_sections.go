@@ -346,7 +346,7 @@ func renderMaintAutovacuum(info *pg.MaintenanceInfo) string {
 			}
 			b.WriteString("  " + padRight(mu("xid age"), 24) +
 				fmt.Sprintf("%s / %s  ", formatRows(info.XidAge), formatRows(info.FreezeMaxAge)) +
-				wrapStyle.Render(pctStr+" to freeze_max_age") + "\n")
+				wrapStyle.Render(pctStr) + "\n")
 		} else if info.XidAge > 0 {
 			b.WriteString("  " + padRight(mu("xid age"), 24) + formatRows(info.XidAge) + "\n")
 		}

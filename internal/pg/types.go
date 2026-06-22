@@ -257,6 +257,20 @@ func (b BufferCacheSummary) FreeBytes() int64 {
 	return free
 }
 
+// ShmemAllocation is one row of pg_shmem_allocations: a named region of the
+// Postgres shared-memory segment (the buffer pool, lock tables, SLRU caches,
+// backend arrays, extension arenas, …) plus the two special NULL-name rows.
+// AllocatedSize is Size rounded up to the allocator's alignment, so the
+// allocations' AllocatedSize values sum to the whole segment.
+type ShmemAllocation struct {
+	Name          string // display name; "" only on the special rows below
+	Anonymous     bool   // name NULL, off NULL: arenas allocated outside the shmem index (DSA, extensions)
+	Free          bool   // name NULL, off set: the unused tail of the segment (Size = free bytes)
+	Off           int64  // byte offset into the segment; -1 when NULL (anonymous)
+	Size          int64
+	AllocatedSize int64
+}
+
 // --- describe types (psql \d-style object description) ---
 
 // DescribeKind discriminates a Description: a table or a single index.
