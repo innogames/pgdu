@@ -140,13 +140,20 @@ SELECT
     i.indexrelname AS index_name,
     pg_relation_size(i.indexrelid) AS index_size_bytes,
     i.idx_scan,
+    -- Amortised footprint per scan: how much disk this index costs for each
+    -- time it was actually used. The +1 smooths the 0-scan case (never used →
+    -- ranks at full size) into the same scale as rarely-used ones, so a huge
+    -- index hit only a handful of times floats to the top next to truly unused
+    -- ones, while heavily-scanned indexes collapse toward zero. Naming it with
+    -- the _bytes suffix lets the renderer humanise and sort it as a byte size.
+    pg_relation_size(i.indexrelid) / (COALESCE(i.idx_scan, 0) + 1) AS size_per_scan_bytes,
     t.n_live_tup AS estimated_rows_covered
 FROM pg_catalog.pg_stat_user_indexes i
 JOIN pg_catalog.pg_stat_user_tables t ON t.relid = i.relid
 WHERE i.schemaname NOT IN ('pg_catalog','information_schema')
   AND i.schemaname NOT LIKE 'pg\_toast%'
   AND t.n_live_tup >= 100
-ORDER BY pg_relation_size(i.indexrelid) DESC
+ORDER BY pg_relation_size(i.indexrelid) / (COALESCE(i.idx_scan, 0) + 1) DESC
 `
 
 // sqlDiagIndexShowSize is the single "Indexes" listing. It folds in the scan

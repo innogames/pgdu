@@ -260,6 +260,16 @@ func (m *Model) renderDiagnosticList(s *screen, height int) string {
 // row fits in the terminal.
 const diagColWidth = 36
 
+// diagBarWidthMin/Max bound the headline bar in a diagnostic table. The cap is
+// deliberately smaller than the disk browser's barWidthMax (80): diagnostic
+// rows carry several numeric columns plus wide schema/table/index names, so a
+// long bar would crowd the data columns off the right edge. Width the bar
+// doesn't use is handed back to truncated text columns instead.
+const (
+	diagBarWidthMin = 12
+	diagBarWidthMax = 48
+)
+
 // diagMetrics returns the per-column render metrics renderDiagResult needs:
 // the capped column widths (before the width-dependent last-column grow), the
 // uncapped natural widths, the bar column's numeric max, and the per-column max
@@ -410,7 +420,7 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 		}
 	}
 
-	// Bar width: whatever remains after fixed columns (capped).
+	// Bar width: whatever remains after fixed columns, capped (diagBarWidthMax).
 	// Reserve: 2 (cursor) + sum(colW + 2 gutter) for all cols + 2 (bar brackets) for bar col.
 	// The bar col contributes both barW+brackets and colW[barCol]+gutter, but we
 	// solve for barW so we subtract colW[barCol]+gutter separately.
@@ -421,7 +431,35 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			fixedW += colBrackets // additional [  ] around the bar itself
 		}
 	}
-	barW := min(max(m.width-fixedW, barWidthMin), barWidthMax)
+	// The bar column renders one extra gutter after its number cell that fixedW
+	// doesn't count (a normal column ends in a single gutter; the bar column ends
+	// in bar+gutter+number+gutter). Subtract it here or the line overruns m.width
+	// by a gutter and the trailing column gets clipped.
+	avail := m.width - fixedW - colGutter
+	barW := min(max(avail, diagBarWidthMin), diagBarWidthMax)
+
+	// Hand width the (capped) bar didn't claim back to columns still truncated
+	// below their natural width — the same redistribution the no-bar path does
+	// above, so wide schema/table/index names aren't clipped merely because a bar
+	// column is present. The bar column itself is skipped (its number cell is
+	// already wide enough for any humanized size).
+	for slack := avail - barW; slack > 0; {
+		grew := false
+		for i := range colW {
+			if i == barCol || slack <= 0 {
+				continue
+			}
+			if want := naturalW[i] - colW[i]; want > 0 {
+				give := min(want, slack)
+				colW[i] += give
+				slack -= give
+				grew = true
+			}
+		}
+		if !grew {
+			break
+		}
+	}
 
 	// ── header ──────────────────────────────────────────────────────────────
 	arrow := "↑"

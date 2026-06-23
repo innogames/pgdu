@@ -43,10 +43,17 @@ FROM   pg_stat_statements`
 
 	// sqlQualstatsShmem sums the shared memory pg_qualstats reserves.
 	// pg_shmem_allocations (PG13+) requires pg_read_all_stats.
+	// The extension registers three named allocations — the control struct
+	// (pg_qualstats) plus two dynahash headers (pg_qualstatements_hash,
+	// pg_qualqueryexamples_hash) — so the pattern must match the pg_qual*
+	// prefix, NOT the literal "qualstats" (the hash names lack that substring).
+	// Note this still counts only the named headers: dynahash pre-allocates its
+	// per-entry element blocks via ShmemAlloc as anonymous (NULL-name) rows that
+	// no name filter can attribute back to qualstats.
 	sqlQualstatsShmem = `
 SELECT COALESCE(sum(allocated_size), 0)
 FROM   pg_shmem_allocations
-WHERE  name LIKE '%qualstats%'`
+WHERE  name LIKE 'pg_qual%'`
 
 	// sqlQualstatsCapacity reads the entry count and last reset from pg_qualstats.
 	// pg_qualstats() is a set-returning function so COUNT wraps it.

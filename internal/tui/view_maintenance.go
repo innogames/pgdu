@@ -173,7 +173,7 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 	if cap.ShmemBytes > 0 {
 		mem := "~" + humanize.Bytes(cap.ShmemBytes) + " shmem"
 		if cap.TextBytes > 0 {
-			mem += " · " + humanize.Bytes(cap.TextBytes) + " text"
+			mem += " · " + humanize.Bytes(cap.TextBytes) + " disk"
 		}
 		extra += "  " + mu(mem)
 	}

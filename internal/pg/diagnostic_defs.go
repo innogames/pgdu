@@ -66,9 +66,10 @@ var Diagnostics = []Diagnostic{
 		Key:         "index_show_unused",
 		Title:       "Unused indexes",
 		Category:    "index",
-		Description: "indexes with 0 scans across all user schemas, ordered by size (candidates for removal)",
+		Description: "indexes ranked by disk footprint per scan — big indexes that are never or rarely used (candidates for removal)",
 		SQL:         sqlDiagIndexShowUnused,
 		Bar:         "index_size_bytes",
+		Sort:        "size_per_scan_bytes",
 	},
 	// ── table ─────────────────────────────────────────────────────────────
 	// "Table + index bloat (approx)" overlapped the more precise bloat_table and
