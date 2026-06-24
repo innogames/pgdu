@@ -152,6 +152,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.showColumnConfig && s.level == levelStatements {
 		return m, m.handleColumnConfigKey(s, msg)
 	}
+	// Table overview column-config overlay — mirrors the two above.
+	if m.showTblColumnConfig && s.level == levelTableStats {
+		return m, m.handleTblColumnConfigKey(s, msg)
+	}
 	// The SQL overlay (s on a diagnostic result) is modal: any key dismisses it
 	// so the underlying table bindings don't fire while it's up. Quit still quits.
 	if m.showDiagQuery {
@@ -362,6 +366,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showInfo = false
 			m.showActColumnConfig = true
 			m.actColCfgCursor = 0
+		}
+		if s.level == levelTableStats {
+			m.ensureTblColsInit()
+			m.showInfo = false
+			m.showTblColumnConfig = true
+			m.tblColCfgCursor = 0
 		}
 	case key.Matches(msg, m.keys.ToggleRefresh):
 		// Cycle the live window's auto-refresh cadence (activity: 500ms → 1s → 2s → 5s → 10s → off).
@@ -643,6 +653,20 @@ func describeTarget(s *screen) (descTarget, bool) {
 			DB: st.DB, Schema: st.Schema, Name: st.Name,
 			OID: st.OID, TotalBytes: st.TotalBytes,
 		}}, true
+
+	case levelTableStats:
+		// Generic-table rows carry the relation OID in statQueryID; resolve it
+		// back to the loaded TableStat and describe by exact OID (no name lookup).
+		it, ok := curItem()
+		if !ok {
+			return descTarget{}, false
+		}
+		for i := range s.tblRows {
+			if int64(s.tblRows[i].OID) == it.statQueryID {
+				return descTarget{table: s.tblRows[i].AsTable()}, true
+			}
+		}
+		return descTarget{}, false
 
 	case levelColumns:
 		// The table being described is always s.table at these levels.

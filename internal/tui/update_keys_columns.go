@@ -88,3 +88,40 @@ func (m *Model) handleActColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	}
 	return nil
 }
+
+// handleTblColumnConfigKey drives the modal column-config overlay for the Table
+// overview tool (C on levelTableStats). Mirrors handleActColumnConfigKey.
+func (m *Model) handleTblColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+	reg := tableColumnRegistry()
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return tea.Quit
+	case key.Matches(msg, m.keys.Columns), msg.Type == tea.KeyEsc:
+		m.showTblColumnConfig = false
+	case key.Matches(msg, m.keys.Up):
+		if m.tblColCfgCursor > 0 {
+			m.tblColCfgCursor--
+		}
+	case key.Matches(msg, m.keys.Down):
+		if m.tblColCfgCursor < len(reg)-1 {
+			m.tblColCfgCursor++
+		}
+	case key.Matches(msg, m.keys.Top):
+		m.tblColCfgCursor = 0
+	case key.Matches(msg, m.keys.Bottom):
+		m.tblColCfgCursor = len(reg) - 1
+	case key.Matches(msg, m.keys.Refresh), key.Matches(msg, m.keys.Enter):
+		if m.tblColCfgCursor < 0 || m.tblColCfgCursor >= len(reg) {
+			break
+		}
+		d := reg[m.tblColCfgCursor]
+		if d.mandatory {
+			break
+		}
+		m.ensureTblColsInit()
+		m.tblColsVisible[d.id] = !m.tblColEnabled(d.id, d.defaultOn)
+		m.rebuildTableStatItems(s)
+		m.saveColPrefs(colPrefsTableStats, colVisToStrings(m.tblColsVisible))
+	}
+	return nil
+}

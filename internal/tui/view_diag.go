@@ -572,17 +572,23 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			}
 			display := truncateDiagCell(raw, colW[i])
 			graded := i < nCols && cols[i].Kind == pg.DiagPercentGraded
+			percentBad := i < nCols && cols[i].Kind == pg.DiagPercentBad
 			costGraded := i < nCols && cols[i].Kind == pg.DiagCostGraded
 			duration := i < nCols && cols[i].Kind == pg.DiagDuration
 			isNumeric := cell.HasNum || (i < nCols && (cols[i].Kind == pg.DiagInt ||
 				cols[i].Kind == pg.DiagFloat || cols[i].Kind == pg.DiagPercent ||
-				cols[i].Kind == pg.DiagBytes || graded || costGraded || duration))
+				cols[i].Kind == pg.DiagBytes || graded || percentBad || costGraded || duration))
 
 			// Grade "higher is better" percent cells green→red so the eye can
 			// triage hit ratios without reading digits. Skipped on the selected
 			// row, which renders in the selection style like every other cell.
 			if graded && cell.HasNum && !selected {
 				display = gradedPercentStyle(cell.Num).Render(display)
+			}
+			// Grade "higher is worse" percent cells red→green on an absolute scale
+			// (dead-tuple %, seq-scan %) using the same bands as the bloat column.
+			if percentBad && cell.HasNum && !selected {
+				display = bloatPercentStyle(int(cell.Num)).Render(display)
 			}
 			// Plain percent columns that aren't the headline bar (e.g. the
 			// ins/upd/del split, HOT % when another column is the bar) get the

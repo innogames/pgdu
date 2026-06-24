@@ -287,6 +287,9 @@ func (m *Model) cycleSort(s *screen, dir int) {
 		if s.actCols != nil && s.diagSortCol < len(s.actCols) {
 			m.actSortColID = s.actCols[s.diagSortCol].id
 		}
+		if s.tblCols != nil && s.diagSortCol < len(s.tblCols) {
+			m.tblSortColID = s.tblCols[s.diagSortCol].id
+		}
 		m.applySort(s)
 		return
 	}

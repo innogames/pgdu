@@ -76,6 +76,33 @@ func (m *Model) drillIn() tea.Cmd {
 		}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
+	case levelTableStats:
+		// Drill into the disk "parts" view (heap/index/toast + per-index bloat)
+		// for the table under the cursor. The row carries its OID in statQueryID;
+		// resolve it back to the loaded TableStat (sort-order independent) and
+		// reconstruct a pg.Table. The parts screen is stamped toolDisk — the only
+		// tool that drives levelParts — so it behaves exactly like a disk drill.
+		var ts *pg.TableStat
+		for i := range s.tblRows {
+			if int64(s.tblRows[i].OID) == cur.statQueryID {
+				ts = &s.tblRows[i]
+				break
+			}
+		}
+		if ts == nil {
+			return nil
+		}
+		t := ts.AsTable()
+		if !m.vacuum.running {
+			m.vacuum = vacuumState{}
+		}
+		next := &screen{
+			level: levelParts, title: "parts", tool: toolDisk,
+			db: t.DB, schema: t.Schema, table: t,
+			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
+		}
+		m.stack = append(m.stack, next)
+		return m.loadCurrent()
 	case levelBufferTables:
 		st, ok := cur.data.(pg.TableBufferStat)
 		if !ok {
@@ -618,6 +645,10 @@ func schemaChildScreen(t tool, sc pg.Schema) *screen {
 		return &screen{level: levelBufferTables, title: "buffers", tool: t, db: sc.DB, schema: sc.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 	case toolPageInspect:
 		return &screen{level: levelRelations, title: "relations", tool: t, db: sc.DB, schema: sc.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
+	case toolTableStats:
+		// The table-overview list is a generic (diagCols) table sorted by column,
+		// so the sortMode here is unused — the column sort is tracked separately.
+		return &screen{level: levelTableStats, title: "table overview", tool: t, db: sc.DB, schema: sc.Name}
 	default:
 		return &screen{level: levelTables, title: "tables", tool: t, db: sc.DB, schema: sc.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 	}

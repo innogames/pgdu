@@ -109,6 +109,7 @@ func (k *keyMap) applyContext(s *screen) {
 	snapshots := s.level == levelSnapshots
 	diagResult := s.level == levelDiagnosticResult
 	activity := s.level == levelActivity
+	tableStats := s.level == levelTableStats
 
 	// `s` shows the executed SQL (to copy out) only on a diagnostic result. Sort
 	// cycling moved to the ←/→ arrows (SortNext/SortPrev), which stay globally
@@ -118,11 +119,12 @@ func (k *keyMap) applyContext(s *screen) {
 
 	k.Rebaseline.SetEnabled(stmtTable)
 	k.Snapshots.SetEnabled(stmtTable)
-	// C (Columns) is the column-config picker on the top-queries table and on the
-	// activity table. The picker is hard to find on activity (no header hint), so
-	// surface it in the footer there; the top-queries header already advertises it.
-	k.Columns.SetEnabled(stmtTable || activity)
-	k.columnsInFooter = activity
+	// C (Columns) is the column-config picker on the top-queries table, the
+	// activity table and the table overview. The picker is hard to find on those
+	// last two (no header hint), so surface it in the footer there; the
+	// top-queries header already advertises it.
+	k.Columns.SetEnabled(stmtTable || activity || tableStats)
+	k.columnsInFooter = activity || tableStats
 	// t (ToggleRefresh) cycles the auto-refresh cadence on top-queries levels and
 	// on the activity level.
 	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity)

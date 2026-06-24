@@ -218,6 +218,8 @@ func (m *Model) loadCurrent() tea.Cmd {
 			}
 		}
 		return tea.Batch(cmds...)
+	case levelTableStats:
+		return m.loadTableOverviewCmd(s.db, s.schema)
 	}
 	return nil
 }

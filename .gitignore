@@ -14,3 +14,5 @@
 vendor/
 # DevContainer base layer (fetched by innoclaude)
 .devcontainer/base/
+# Generated devcontainer.json (from template + overrides)
+.devcontainer/devcontainer.json

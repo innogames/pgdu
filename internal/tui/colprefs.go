@@ -4,8 +4,9 @@ package tui
 // the user prefs file. Adding a new persistable table = a new constant here plus
 // one saveColPrefs call in that table's C-picker toggle handler.
 const (
-	colPrefsActivity = "activity"
-	colPrefsQueries  = "queries"
+	colPrefsActivity   = "activity"
+	colPrefsQueries    = "queries"
+	colPrefsTableStats = "tablestats"
 )
 
 // colVisToStrings converts a typed column-visibility map (e.g. map[actColID]bool)

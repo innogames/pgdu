@@ -536,6 +536,23 @@ func (m *Model) onActivityLoaded(msg activityLoadedMsg) tea.Cmd {
 	)
 }
 
+func (m *Model) onTableOverviewLoaded(msg tableOverviewLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelTableStats)
+	if s == nil || s.db != msg.db || s.schema != msg.schema {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if msg.err != nil {
+		s.err = msg.err
+		return nil
+	}
+	s.err = nil
+	s.tblRows = msg.rows
+	m.rebuildTableStatItems(s)
+	return nil
+}
+
 func (m *Model) onActivityTick() tea.Cmd {
 	// Keep the tick alive while the user is anywhere in the activity tool (the
 	// table is the only level). Stop when they navigate fully away so re-entry

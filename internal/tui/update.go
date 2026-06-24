@@ -152,6 +152,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case activityStatementMsg:
 		return m, m.onActivityStatement(msg)
 
+	case tableOverviewLoadedMsg:
+		return m, m.onTableOverviewLoaded(msg)
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}

@@ -46,6 +46,7 @@ const (
 	levelMaintenance      // server-health dashboard (toolMaintenance)
 	levelSettings         // pg_settings browser (child of levelMaintenance)
 	levelActivity         // live server activity from pg_stat_activity (toolActivity)
+	levelTableStats       // per-table statistics overview for one schema (toolTableStats)
 )
 
 // tool identifies which top-level statistic the user is exploring.
@@ -61,6 +62,7 @@ const (
 	toolQueries     // pg_stat_statements top-queries (powa-style)
 	toolMaintenance // server-health dashboard + settings browser
 	toolActivity    // live server activity (pg_stat_activity)
+	toolTableStats  // per-table statistics overview (pg_stat_all_tables + sizes)
 )
 
 func (t tool) Name() string {
@@ -81,6 +83,8 @@ func (t tool) Name() string {
 		return "system overview"
 	case toolActivity:
 		return "activity"
+	case toolTableStats:
+		return "tables"
 	}
 	return "?"
 }
@@ -423,6 +427,14 @@ type screen struct {
 	actVerbose bool
 	actCols    []actColDesc
 
+	// ── Table overview tool (levelTableStats) ────────────────────────────────
+	// tblRows is the last fetched per-table stats snapshot for this schema (the
+	// source of truth for drill-in / describe, looked up by OID). tblCols is the
+	// projected column descriptor slice, kept so the C picker and sort cycling
+	// can map column indices back to stable tblColIDs.
+	tblRows []pg.TableStat
+	tblCols []tblColDesc
+
 	// pendingBackendAction is the PID of the backend the user pressed k/x on,
 	// waiting for a y/Y confirmation.  action is "cancel" or "terminate".
 	pendingBackendPID    int32
@@ -537,6 +549,16 @@ type Model struct {
 	showActColumnConfig bool
 	actColCfgCursor     int
 
+	// Table overview column configuration (C key on levelTableStats). Mirrors
+	// the activity/queries column state: tblColsVisible is the per-column-id
+	// visibility set (nil = registry defaults), tblSortColID tracks the active
+	// sort column by stable id across rebuilds, showTblColumnConfig opens the
+	// C-picker, tblColCfgCursor is its row cursor.
+	tblColsVisible      map[tblColID]bool
+	tblSortColID        tblColID
+	showTblColumnConfig bool
+	tblColCfgCursor     int
+
 	// actProcPrev holds the previous /proc sample per PID, used to compute CPU%
 	// and I/O byte-rate deltas between consecutive samples.
 	actProcPrev map[int32]procRaw
@@ -613,7 +635,7 @@ func (m *Model) vacuumPaneVisible(s *screen) bool {
 // by the --<tool> CLI flags) back to the tool enum. The bool is false for an
 // unknown/empty name so the caller can fall back to the tool picker.
 func toolByName(name string) (tool, bool) {
-	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity} {
+	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity, toolTableStats} {
 		if t.Name() == name {
 			return t, true
 		}
@@ -646,6 +668,9 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 		if v := colPrefs.Columns(colPrefsQueries); len(v) > 0 {
 			m.stmtColsVisible = colVisFromStrings[stmtColID](v)
 		}
+		if v := colPrefs.Columns(colPrefsTableStats); len(v) > 0 {
+			m.tblColsVisible = colVisFromStrings[tblColID](v)
+		}
 	}
 	root := &screen{
 		level:    levelTools,
@@ -671,6 +696,7 @@ func toolItems() []item {
 		{name: "Disk usage", detail: "browse tables by total relation size on disk", hasChildren: true, data: toolDisk},
 		{name: "Top queries", detail: "powa-style top queries from pg_stat_statements — calls, time, I/O; EXPLAIN and sample params on Enter", hasChildren: true, data: toolQueries},
 		{name: "Current Activity", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
+		{name: "Table overview", detail: "per-table stats for a schema: size, write/scan activity, cache hit ratios, bloat, vacuum age, storage options — sortable, customizable columns", hasChildren: true, data: toolTableStats},
 		{name: "System overview", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},

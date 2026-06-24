@@ -193,7 +193,7 @@ func (m *Model) renderShmemSummary(s *screen) string {
 		}
 		stats.WriteString(sw(shmemCatStyle(c)) + muted(fmt.Sprintf("%s %s  ·  ", c.label(), humanize.Bytes(totals[c]))))
 	}
-	stats.WriteString(muted(fmt.Sprintf("░ free %s", humanize.Bytes(totals[catFree]))))
+	stats.WriteString(muted("░ free " + humanize.Bytes(totals[catFree])))
 
 	return summaryRow("shmem", bar) + "\n" + summaryStats(stats.String())
 }

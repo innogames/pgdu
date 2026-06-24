@@ -107,8 +107,8 @@ FROM   pg_control_checkpoint()
 const sqlWALCheckpointer = `SELECT num_timed, num_requested FROM pg_stat_checkpointer`
 
 // sqlWALSettings reads the human-readable form of the WAL/checkpoint GUCs shown
-// in the header. current_setting(name, true) returns NULL (→ '') for an unknown
-// name rather than erroring, so a missing GUC just renders as "unknown".
+// in the header. current_setting(name, true) returns NULL (→ empty string) for an
+// unknown name rather than erroring, so a missing GUC just renders as "unknown".
 const sqlWALSettings = `
 SELECT name, COALESCE(current_setting(name, true), '')
 FROM   pg_settings
