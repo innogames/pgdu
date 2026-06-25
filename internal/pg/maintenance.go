@@ -164,6 +164,12 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 		&info.TupInserted, &info.TupUpdated, &info.TupDeleted, &info.TupHotUpdated,
 		&info.SeqScans, &info.IdxScans, &info.LiveTuples, &info.DeadTuples)
 
+	// --- when the table/index counters above were last reset (current DB) ---
+	var tblReset *time.Time
+	if pool.QueryRow(ctx, sqlMaintTableStatsReset).Scan(&tblReset) == nil && tblReset != nil {
+		info.TableStatsReset = *tblReset
+	}
+
 	// --- I/O stats (pg_stat_io, PG 16+) ---
 	if pool.QueryRow(ctx, sqlMaintIO).Scan(
 		&info.IO.Reads, &info.IO.Writes, &info.IO.Extends, &info.IO.Hits,
@@ -294,4 +300,13 @@ func (c *Client) ResetStatements(ctx context.Context, db string) error {
 // Requires superuser or pg_monitor depending on the qualstats version.
 func (c *Client) ResetQualstats(ctx context.Context, db string) error {
 	return c.resetExtStats(ctx, db, "pg_qualstats", sqlQualstatsResetAll)
+}
+
+// ResetTableStats runs pg_stat_reset() in db, zeroing the cumulative
+// table/index/IO counters behind the Table overview for the whole database
+// (and bumping its stats_reset timestamp). Requires pg_monitor or superuser.
+// Unlike the extension resets, this targets a built-in view, so there is no
+// extension to probe first.
+func (c *Client) ResetTableStats(ctx context.Context, db string) error {
+	return c.resetExtStats(ctx, db, "table statistics", sqlTableStatsResetAll)
 }

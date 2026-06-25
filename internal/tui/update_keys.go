@@ -112,6 +112,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.resetStatementsCmd(s.db)
 			case "qualstats":
 				return m, m.resetQualstatsCmd(s.db)
+			case "tablestats":
+				return m, m.resetTableStatsCmd(s.db)
 			}
 		}
 		return m, nil
@@ -186,7 +188,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.level == levelWALRelations || s.level == levelWALRelBlocks ||
 			s.level == levelStatements || s.level == levelStatementDetail || s.level == levelSnapshots ||
 			s.level == levelMaintenance || s.level == levelSettings ||
-			s.level == levelActivity {
+			s.level == levelActivity || s.level == levelTableStats {
 			m.showInfo = !m.showInfo
 			if m.showInfo {
 				m.infoOffset = 0 // always open scrolled to the top
@@ -209,8 +211,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if s.level == levelMaintenance {
-			// ↑↓ moves the extension capacity cursor (2 rows: statements, qualstats).
-			s.maintCursor = min(s.maintCursor+1, 1)
+			// ↑↓ moves the capacity cursor (3 rows: statements, qualstats, table stats).
+			s.maintCursor = min(s.maintCursor+1, 2)
 			break
 		}
 		if s.cursor < s.visibleLen()-1 {
@@ -550,6 +552,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				s.pendingReset = "statements"
 			case 1:
 				s.pendingReset = "qualstats"
+			case 2:
+				s.pendingReset = "tablestats"
 			}
 			return m, nil
 		}

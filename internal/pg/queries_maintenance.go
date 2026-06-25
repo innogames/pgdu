@@ -216,6 +216,20 @@ ORDER  BY category, name`
 	// Requires superuser or pg_monitor on most versions.
 	sqlQualstatsResetAll = `SELECT pg_qualstats_reset()`
 
+	// sqlTableStatsResetAll resets the cumulative table/index/IO counters that
+	// back the Table overview (pg_stat_all_tables / pg_statio_all_tables). It
+	// zeroes every counter for the *current database* and bumps that database's
+	// stats_reset timestamp. Requires pg_monitor (or superuser on older servers).
+	sqlTableStatsResetAll = `SELECT pg_stat_reset()`
+
+	// sqlMaintTableStatsReset reads the current database's stats_reset — when
+	// pg_stat_reset() last zeroed the table/index/IO counters. NULL (server
+	// never reset) maps to the zero time.
+	sqlMaintTableStatsReset = `
+SELECT stats_reset
+FROM   pg_stat_database
+WHERE  datname = current_database()`
+
 	// sqlMaintRecovery detects whether this node is a standby.
 	sqlMaintRecovery = `SELECT pg_is_in_recovery()`
 

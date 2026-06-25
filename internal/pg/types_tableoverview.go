@@ -12,10 +12,9 @@ type TableStat struct {
 	OID    uint32
 	Name   string
 
-	RelKind        string // 'r' table, 'm' matview, 'p' partitioned
-	RelPersistence string // 'p' permanent, 'u' unlogged, 't' temp
-	RelOptions     []string
-	EstRows        int64 // reltuples (planner estimate)
+	RelKind    string // 'r' table, 'm' matview, 'p' partitioned
+	RelOptions []string
+	EstRows    int64 // reltuples (planner estimate)
 
 	// Sizes (bytes). ToastOID/ToastName let drill-in reconstruct a pg.Table for
 	// the disk "parts" / describe views without a second catalog lookup.
@@ -62,6 +61,11 @@ func (s TableStat) AsTable() Table {
 
 // Writes is total row churn (ins+upd+del) — a quick "how active" measure.
 func (s TableStat) Writes() int64 { return s.NInsert + s.NUpdate + s.NDelete }
+
+// NonHotUpdate is updates that were NOT heap-only (n_tup_upd − n_tup_hot_upd) —
+// the ones that had to touch every index. High values flag index write
+// amplification (a FILLFACTOR / over-indexing candidate).
+func (s TableStat) NonHotUpdate() int64 { return s.NUpdate - s.NHotUpdate }
 
 // DeadPct is dead tuples as a percentage of live+dead (0 when empty). Higher is
 // worse (bloat / vacuum lag).
@@ -139,16 +143,4 @@ func (s TableStat) AutovacuumReloption() (string, bool) {
 		return "on", true
 	}
 	return "off", true
-}
-
-// Persistence renders relpersistence as a word: permanent / unlogged / temp.
-func (s TableStat) Persistence() string {
-	switch s.RelPersistence {
-	case "u":
-		return "unlogged"
-	case "t":
-		return "temp"
-	default:
-		return "permanent"
-	}
 }

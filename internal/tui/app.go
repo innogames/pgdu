@@ -327,9 +327,10 @@ type screen struct {
 	// cycle-sort can record the active column by identity (see m.stmtSortColID).
 	stmtCols []stmtColDesc
 
-	// diagTotalRow, when non-nil, is rendered as a pinned footer summing every
-	// row of the table (whole-table, filter-independent). Only the top-queries
-	// load sites set it; every other diagnostic table leaves it nil.
+	// diagTotalRow, when non-nil, is rendered as a pinned footer aggregating every
+	// row of the table (whole-table, filter-independent). The top-queries and
+	// table-overview load sites set it (sum for additive columns, pooled ratios /
+	// means for the derived ones); every other diagnostic table leaves it nil.
 	diagTotalRow []pg.DiagCell
 
 	// Memoized per-column render metrics for renderDiagResult. These scan every

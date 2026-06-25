@@ -26,6 +26,7 @@ type keyMap struct {
 	Snapshots        key.Binding
 	DeleteSnapshot   key.Binding
 	Columns          key.Binding
+	ResetCols        key.Binding // r: reset column visibility to defaults (inside the C picker)
 	Filter           key.Binding
 	Seek             key.Binding
 	Help             key.Binding
@@ -82,6 +83,7 @@ func defaultKeys() keyMap {
 		Snapshots:      key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "load snapshot")),
 		DeleteSnapshot: key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete snapshot")),
 		Columns:        key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "configure columns")),
+		ResetCols:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reset to defaults")),
 		Filter:         key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		Seek:           key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "seek to key")),
 		Help:           key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),

@@ -51,6 +51,7 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	}
 	body.WriteString(m.renderCapacityRow(s, s.db, 0, "pg_stat_statements", stmtsCap) + "\n")
 	body.WriteString(m.renderCapacityRow(s, s.db, 1, "pg_qualstats", qualsCap) + "\n")
+	body.WriteString(m.renderTableStatsRow(s, info, 2) + "\n")
 	body.WriteString("\n")
 
 	// Wide terminals get a two-pane layout: compact "vitals" sections side by
@@ -187,18 +188,46 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 	return line
 }
 
+// renderTableStatsRow renders the third actionable capacity-section row: the
+// reset for the built-in table/index counters (pg_stat_reset) that back the
+// Table overview. Unlike the two extension rows there is no fill bar — the
+// counters are unbounded — so it shows the database name and the last-reset age
+// only. idx is its position in the maintCursor sequence.
+func (m *Model) renderTableStatsRow(s *screen, info *pg.MaintenanceInfo, idx int) string {
+	mu := styleMuted.Render
+	cursor := "  "
+	if s.maintCursor == idx {
+		cursor = styleSelected.Render("▶ ")
+	}
+	detail := "table & index counters in " + s.db
+	if info != nil && !info.TableStatsReset.IsZero() {
+		detail += "  ·  reset " + relativeAge(time.Since(info.TableStatsReset))
+	}
+	return cursor + padRight(mu("table statistics"), 22) + mu(detail)
+}
+
+// maintResetTarget maps a pendingReset key to the human-readable name shown in
+// the confirm banner.
+func maintResetTarget(which string) string {
+	switch which {
+	case "statements":
+		return "pg_stat_statements"
+	case "qualstats":
+		return "pg_qualstats"
+	case "tablestats":
+		return "table statistics (pg_stat_reset)"
+	default:
+		return which
+	}
+}
+
 // renderMaintHint returns the one-line reset-confirm banner when a reset is
 // armed, or "" otherwise. Mirrors renderReindexBanner.
 func (m *Model) renderMaintHint(s *screen) string {
 	if s.pendingReset == "" {
 		return ""
 	}
-	name := s.pendingReset
-	if name == "statements" {
-		name = "pg_stat_statements"
-	} else {
-		name = "pg_qualstats"
-	}
+	name := maintResetTarget(s.pendingReset)
 	return "  " + styleSelected.Render("confirm: ") +
 		styleMuted.Render("reset "+name+" — press ") +
 		styleBadge.Render("y") +

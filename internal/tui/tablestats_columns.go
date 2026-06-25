@@ -14,40 +14,40 @@ import (
 type tblColID string
 
 const (
-	tblColTable    tblColID = "table"
-	tblColSize     tblColID = "size"
-	tblColHeap     tblColID = "heap"
-	tblColIndexes  tblColID = "indexes"
-	tblColToast    tblColID = "toast"
-	tblColIdxRatio tblColID = "idx_ratio"
-	tblColRows     tblColID = "rows"
-	tblColDead     tblColID = "dead"
-	tblColDeadPct  tblColID = "dead_pct"
-	tblColIns      tblColID = "ins"
-	tblColUpd      tblColID = "upd"
-	tblColDel      tblColID = "del"
-	tblColHotUpd   tblColID = "hot_upd"
-	tblColHotPct   tblColID = "hot_pct"
-	tblColWrites   tblColID = "writes"
-	tblColSeqScan  tblColID = "seq_scan"
-	tblColIdxScan  tblColID = "idx_scan"
-	tblColSeqPct   tblColID = "seq_pct"
-	tblColSeqRead  tblColID = "seq_read"
-	tblColIdxFetch tblColID = "idx_fetch"
-	tblColCache    tblColID = "cache"
-	tblColIdxCache tblColID = "idx_cache"
-	tblColHeapRead tblColID = "heap_read"
-	tblColHeapHit  tblColID = "heap_hit"
-	tblColModSince tblColID = "mod_since_analyze"
-	tblColInsSince tblColID = "ins_since_vacuum"
-	tblColVacAge   tblColID = "vac_age"
-	tblColAnaAge   tblColID = "ana_age"
-	tblColVacuumN  tblColID = "vacuum_count"
-	tblColAutovacN tblColID = "autovacuum_count"
-	tblColXidAge   tblColID = "xid_age"
-	tblColFill     tblColID = "fillfactor"
-	tblColAutovac  tblColID = "autovac"
-	tblColPersist  tblColID = "persistence"
+	tblColTable     tblColID = "table"
+	tblColSize      tblColID = "size"
+	tblColHeap      tblColID = "heap"
+	tblColIndexes   tblColID = "indexes"
+	tblColToast     tblColID = "toast"
+	tblColIdxRatio  tblColID = "idx_ratio"
+	tblColRows      tblColID = "rows"
+	tblColDead      tblColID = "dead"
+	tblColDeadPct   tblColID = "dead_pct"
+	tblColIns       tblColID = "ins"
+	tblColUpd       tblColID = "upd"
+	tblColDel       tblColID = "del"
+	tblColHotUpd    tblColID = "hot_upd"
+	tblColNonHotUpd tblColID = "non_hot_upd"
+	tblColHotPct    tblColID = "hot_pct"
+	tblColWrites    tblColID = "writes"
+	tblColSeqScan   tblColID = "seq_scan"
+	tblColIdxScan   tblColID = "idx_scan"
+	tblColSeqPct    tblColID = "seq_pct"
+	tblColSeqRead   tblColID = "seq_read"
+	tblColIdxFetch  tblColID = "idx_fetch"
+	tblColCache     tblColID = "cache"
+	tblColIdxCache  tblColID = "idx_cache"
+	tblColHeapRead  tblColID = "heap_read"
+	tblColHeapHit   tblColID = "heap_hit"
+	tblColModSince  tblColID = "mod_since_analyze"
+	tblColInsSince  tblColID = "ins_since_vacuum"
+	tblColVacAge    tblColID = "vac_age"
+	tblColAnaAge    tblColID = "ana_age"
+	tblColVacuumN   tblColID = "vacuum_count"
+	tblColAutovacN  tblColID = "autovacuum_count"
+	tblColXidAge    tblColID = "xid_age"
+	tblColFill      tblColID = "fillfactor"
+	tblColAutovac   tblColID = "autovac"
 )
 
 // tblColDesc describes one Table overview column: stable id, header label,
@@ -140,6 +140,9 @@ func tableColumnRegistry() []tblColDesc {
 		{id: tblColHotUpd, name: "hot_upd", kind: pg.DiagInt,
 			desc: "HOT (heap-only-tuple) updates — index-free, cheap updates (n_tup_hot_upd)",
 			cell: func(r pg.TableStat) pg.DiagCell { return tblCount(r.NHotUpdate) }},
+		{id: tblColNonHotUpd, name: "non_hot_upd", kind: pg.DiagInt,
+			desc: "non-HOT updates (upd − hot_upd) — touched every index; high = index write amplification",
+			cell: func(r pg.TableStat) pg.DiagCell { return tblCount(r.NonHotUpdate()) }},
 		{id: tblColHotPct, name: "hot%", kind: pg.DiagPercentGraded, defaultOn: true,
 			desc: "HOT share of updates — low on a hot table = FILLFACTOR / over-indexing candidate",
 			cell: func(r pg.TableStat) pg.DiagCell { v, ok := r.HotPct(); return tblPct(v, ok) }},
@@ -185,7 +188,7 @@ func tableColumnRegistry() []tblColDesc {
 		{id: tblColInsSince, name: "ins_vac", kind: pg.DiagInt,
 			desc: "rows inserted since the last VACUUM (n_ins_since_vacuum)",
 			cell: func(r pg.TableStat) pg.DiagCell { return tblCount(r.NInsSinceVacuum) }},
-		{id: tblColVacAge, name: "vac_age", kind: pg.DiagDuration, defaultOn: true,
+		{id: tblColVacAge, name: "vac_age", kind: pg.DiagDuration,
 			desc: "time since the most recent (auto)vacuum — stale = vacuum lag",
 			cell: func(r pg.TableStat) pg.DiagCell { return tblAge(r.VacAgeMs) }},
 		{id: tblColAnaAge, name: "ana_age", kind: pg.DiagDuration,
@@ -217,9 +220,6 @@ func tableColumnRegistry() []tblColDesc {
 				}
 				return pg.DiagCell{Display: v}
 			}},
-		{id: tblColPersist, name: "persist", kind: pg.DiagText,
-			desc: "relpersistence: permanent / unlogged (crash-unsafe) / temp",
-			cell: func(r pg.TableStat) pg.DiagCell { return pg.DiagCell{Display: r.Persistence()} }},
 	}
 }
 
@@ -305,6 +305,89 @@ func (m *Model) buildTableStatItems(rows []pg.TableStat) ([]item, []tblColDesc) 
 	return items, descs
 }
 
+// sumTableStats aggregates rows into a single TableStat for the pinned footer.
+// Every additive counter (sizes, row counts, scan/block counters, vacuum runs)
+// is summed, so running the column cell builders over the result yields true
+// totals for the additive columns and correctly pooled ratios for the derived
+// ones for free: dead% = Σdead ÷ Σ(live+dead), cache = Σhit ÷ Σ(hit+read),
+// idx/heap = Σidx ÷ Σheap, and so on. The non-additive fields can't be summed:
+// the two age columns get the mean over rows that have a value, and xid_age the
+// max — the worst (closest-to-wraparound) relation in view, which is the number
+// that matters — since adding transaction ages together is meaningless.
+func sumTableStats(rows []pg.TableStat) pg.TableStat {
+	var t pg.TableStat
+	var vacSum, anaSum float64
+	var vacN, anaN int
+	for _, r := range rows {
+		t.HeapBytes += r.HeapBytes
+		t.IndexesBytes += r.IndexesBytes
+		t.ToastBytes += r.ToastBytes
+		t.TotalBytes += r.TotalBytes
+		t.NLive += r.NLive
+		t.NDead += r.NDead
+		t.NInsert += r.NInsert
+		t.NUpdate += r.NUpdate
+		t.NDelete += r.NDelete
+		t.NHotUpdate += r.NHotUpdate
+		t.NModSinceAnalyze += r.NModSinceAnalyze
+		t.NInsSinceVacuum += r.NInsSinceVacuum
+		t.SeqScan += r.SeqScan
+		t.IdxScan += r.IdxScan
+		t.SeqTupRead += r.SeqTupRead
+		t.IdxTupFetch += r.IdxTupFetch
+		t.VacuumCount += r.VacuumCount
+		t.AutovacuumCount += r.AutovacuumCount
+		t.AnalyzeCount += r.AnalyzeCount
+		t.AutoanalyzeCount += r.AutoanalyzeCount
+		t.HeapBlksRead += r.HeapBlksRead
+		t.HeapBlksHit += r.HeapBlksHit
+		t.IdxBlksRead += r.IdxBlksRead
+		t.IdxBlksHit += r.IdxBlksHit
+		if r.FrozenXIDAge > t.FrozenXIDAge {
+			t.FrozenXIDAge = r.FrozenXIDAge
+		}
+		if r.VacAgeMs != nil {
+			vacSum += *r.VacAgeMs
+			vacN++
+		}
+		if r.AnaAgeMs != nil {
+			anaSum += *r.AnaAgeMs
+			anaN++
+		}
+	}
+	if vacN > 0 {
+		v := vacSum / float64(vacN)
+		t.VacAgeMs = &v
+	}
+	if anaN > 0 {
+		a := anaSum / float64(anaN)
+		t.AnaAgeMs = &a
+	}
+	return t
+}
+
+// tblFooterCells builds the pinned footer row for the Table overview, projecting
+// the per-column aggregate (sumTableStats) through the same cell builders as the
+// data rows so the cells stay parallel to descs by construction. Returns nil when
+// there are no rows. The leading table column carries a "Σ N tables" label; the
+// two storage-option columns (fillfactor, autovac) are blanked because their
+// per-row default ("100" / "—") would otherwise read as a real aggregate.
+func tblFooterCells(descs []tblColDesc, rows []pg.TableStat) []pg.DiagCell {
+	if len(rows) == 0 {
+		return nil
+	}
+	total := tblCellsFor(descs, sumTableStats(rows))
+	for i, d := range descs {
+		switch d.id {
+		case tblColTable:
+			total[i] = pg.DiagCell{Display: "Σ " + formatRows(int64(len(rows))) + " tables"}
+		case tblColFill, tblColAutovac:
+			total[i] = pg.DiagCell{Display: ""}
+		}
+	}
+	return total
+}
+
 // rebuildTableStatItems rebuilds the generic-table items for the table-overview
 // screen from its cached tblRows, applying the current column selection. Call it
 // after a fresh load or any column toggle so projection + sort stay in sync.
@@ -312,8 +395,11 @@ func (m *Model) rebuildTableStatItems(s *screen) {
 	items, descs := m.buildTableStatItems(s.tblRows)
 	s.tblCols = descs
 	s.diagCols = tblDiagColumnsFrom(descs)
-	// Headline bar = total size, but only while that column is visible.
-	s.diagBarCol = indexOfTblCol(descs, tblColSize)
+	s.diagTotalRow = tblFooterCells(descs, s.tblRows)
+	// No headline bar here: the table overview carries many numeric columns, so
+	// -1 lets the diag renderer hand the bar's width back to the data columns
+	// (view_diag.go's no-bar path). size still renders as a humanized number.
+	s.diagBarCol = -1
 	m.syncTblSort(s, descs)
 	s.items = items
 	s.diagMetricsDirty = true

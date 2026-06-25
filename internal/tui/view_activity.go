@@ -114,6 +114,7 @@ func (m *Model) renderActColumnConfig(s *screen, height int) string {
 	b.WriteString("  " + styleSelected.Render("configure columns") + mu("  ·  ") +
 		styleBadge.Render("space") + mu(" toggles · ") +
 		styleBadge.Render("↑/↓") + mu(" move · ") +
+		styleBadge.Render("r") + mu(" reset · ") +
 		styleBadge.Render("C") + mu(" or ") + styleBadge.Render("esc") + mu(" to close") + "\n")
 	b.WriteString("  " + mu("choose which columns the activity table shows") + "\n\n")
 

@@ -45,7 +45,7 @@ func TestVisibleTblColsDefaults(t *testing.T) {
 	if !has(tblColSize) || !has(tblColDeadPct) || !has(tblColCache) {
 		t.Errorf("default-on columns missing from projection")
 	}
-	if has(tblColHeap) || has(tblColFill) || has(tblColPersist) {
+	if has(tblColHeap) || has(tblColFill) || has(tblColNonHotUpd) {
 		t.Errorf("default-off columns should not appear by default")
 	}
 }

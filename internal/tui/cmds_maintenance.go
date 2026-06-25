@@ -23,7 +23,7 @@ type settingsLoadedMsg struct {
 }
 
 type maintResetDoneMsg struct {
-	which string // "statements" or "qualstats"
+	which string // "statements", "qualstats", or "tablestats"
 	err   error
 }
 
@@ -76,6 +76,13 @@ func (m *Model) resetQualstatsCmd(db string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		err := m.client.ResetQualstats(ctx, db)
 		return maintResetDoneMsg{which: "qualstats", err: err}
+	})
+}
+
+func (m *Model) resetTableStatsCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		err := m.client.ResetTableStats(ctx, db)
+		return maintResetDoneMsg{which: "tablestats", err: err}
 	})
 }
 

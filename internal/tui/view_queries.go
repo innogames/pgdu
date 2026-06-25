@@ -346,6 +346,7 @@ func (m *Model) renderColumnConfig(s *screen, height int) string {
 	b.WriteString("\n")
 	b.WriteString("  " + styleSelected.Render("configure columns") + mu("  ·  ") +
 		styleBadge.Render("space") + mu(" toggles · ") + styleBadge.Render("↑/↓") + mu(" move · ") +
+		styleBadge.Render("r") + mu(" reset · ") +
 		styleBadge.Render("C") + mu(" or ") + styleBadge.Render("esc") + mu(" to close") + "\n")
 	b.WriteString("  " + mu("choose which columns the top-queries table shows — opt-in metrics are off by default") + "\n\n")
 

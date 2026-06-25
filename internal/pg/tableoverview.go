@@ -20,7 +20,7 @@ func (c *Client) ListTableStats(ctx context.Context, db, schema string) ([]Table
 		func(row pgx.CollectableRow) (TableStat, error) {
 			t := TableStat{DB: db, Schema: schema}
 			err := row.Scan(
-				&t.OID, &t.Name, &t.RelKind, &t.RelPersistence, &t.RelOptions,
+				&t.OID, &t.Name, &t.RelKind, &t.RelOptions,
 				&t.EstRows, &t.ToastOID, &t.ToastName,
 				&t.HeapBytes, &t.IndexesBytes, &t.ToastBytes, &t.TotalBytes,
 				&t.FrozenXIDAge,

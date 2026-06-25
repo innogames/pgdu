@@ -14,7 +14,6 @@ SELECT
     c.oid,
     c.relname,
     c.relkind::text,
-    c.relpersistence::text,
     COALESCE(c.reloptions, '{}'),
     c.reltuples::bigint,
     COALESCE(c.reltoastrelid, 0)::oid,

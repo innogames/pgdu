@@ -439,10 +439,10 @@ func (m *Model) onMaintResetDone(msg maintResetDoneMsg) tea.Cmd {
 	s.pendingReset = ""
 	if msg.err != nil {
 		// Surface the error as a transient notice so the dashboard stays visible.
-		m.notice = fmt.Sprintf("reset %s failed: %s", msg.which, msg.err)
+		m.notice = fmt.Sprintf("reset %s failed: %s", maintResetTarget(msg.which), msg.err)
 		return nil
 	}
-	m.notice = msg.which + " stats reset"
+	m.notice = maintResetTarget(msg.which) + " reset"
 	// Reload the maintenance view so the updated capacity numbers are visible.
 	return m.loadCurrent()
 }

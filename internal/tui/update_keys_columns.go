@@ -30,6 +30,12 @@ func (m *Model) handleColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 		m.colCfgCursor = 0
 	case key.Matches(msg, m.keys.Bottom):
 		m.colCfgCursor = len(reg) - 1
+	case key.Matches(msg, m.keys.ResetCols):
+		// Re-seed from the registry defaults (nil → ensure*Init rebuilds the map).
+		m.stmtColsVisible = nil
+		m.ensureStmtColsInit()
+		m.rebuildStatementItems(s)
+		m.saveColPrefs(colPrefsQueries, colVisToStrings(m.stmtColsVisible))
 	case key.Matches(msg, m.keys.Refresh), key.Matches(msg, m.keys.Enter):
 		// Refresh is space — the natural htop toggle; Enter also toggles.
 		if m.colCfgCursor < 0 || m.colCfgCursor >= len(reg) {
@@ -71,6 +77,13 @@ func (m *Model) handleActColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 		m.actColCfgCursor = 0
 	case key.Matches(msg, m.keys.Bottom):
 		m.actColCfgCursor = len(reg) - 1
+	case key.Matches(msg, m.keys.ResetCols):
+		m.actColsVisible = nil
+		m.ensureActColsInit()
+		if s.actRows != nil {
+			m.rebuildActivityItems(s)
+		}
+		m.saveColPrefs(colPrefsActivity, colVisToStrings(m.actColsVisible))
 	case key.Matches(msg, m.keys.Refresh), key.Matches(msg, m.keys.Enter):
 		if m.actColCfgCursor < 0 || m.actColCfgCursor >= len(reg) {
 			break
@@ -110,6 +123,11 @@ func (m *Model) handleTblColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 		m.tblColCfgCursor = 0
 	case key.Matches(msg, m.keys.Bottom):
 		m.tblColCfgCursor = len(reg) - 1
+	case key.Matches(msg, m.keys.ResetCols):
+		m.tblColsVisible = nil
+		m.ensureTblColsInit()
+		m.rebuildTableStatItems(s)
+		m.saveColPrefs(colPrefsTableStats, colVisToStrings(m.tblColsVisible))
 	case key.Matches(msg, m.keys.Refresh), key.Matches(msg, m.keys.Enter):
 		if m.tblColCfgCursor < 0 || m.tblColCfgCursor >= len(reg) {
 			break

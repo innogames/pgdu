@@ -74,6 +74,10 @@ type MaintenanceInfo struct {
 	IdxScans      int64
 	LiveTuples    int64
 	DeadTuples    int64
+	// TableStatsReset is pg_stat_database.stats_reset for the current database —
+	// when the counters above (and the Table overview's) were last zeroed by
+	// pg_stat_reset(). Zero when the server has never reset them.
+	TableStatsReset time.Time
 
 	// Autovacuum / wraparound
 	XidAge       int64 // max(age(datfrozenxid)) over pg_database
