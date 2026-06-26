@@ -468,7 +468,7 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 	}
 	mark := func(label string, colIdx int) string {
 		if colIdx == s.diagSortCol {
-			return label + arrow
+			return boldSeg(label + arrow)
 		}
 		return label
 	}

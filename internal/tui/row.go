@@ -358,17 +358,32 @@ func padRight(s string, n int) string {
 	return s + strings.Repeat(" ", n-w)
 }
 
-// sortMark appends the active-sort arrow to label when active is true. The
-// arrow points up for ascending order, down for descending. Replaces the
-// repeated inline "arrow := … mark := func …" preamble in every list header.
+// SGR intensity toggles for emboldening the active-sort column label inside a
+// header line that is rendered as one styleMuted.Render(line). \x1b[22m turns
+// bold off again *without* resetting the foreground — a nested lipgloss style
+// would emit \x1b[0m, dropping the muted colour for the rest of the line. Same
+// raw-escape approach as layout.go's truncation reset.
+const (
+	ansiBold    = "\x1b[1m"
+	ansiBoldOff = "\x1b[22m"
+)
+
+// boldSeg embeds s between the bold-on/bold-off SGR codes so it composes inside
+// an enclosing styleMuted.Render without clearing the surrounding colour.
+func boldSeg(s string) string { return ansiBold + s + ansiBoldOff }
+
+// sortMark appends the active-sort arrow to label and emboldens it when active
+// is true, so the currently-sorted column stands out in the header. The arrow
+// points up for ascending order, down for descending. Replaces the repeated
+// inline "arrow := … mark := func …" preamble in every list header.
 func sortMark(label string, active, sortDesc bool) string {
 	if !active {
 		return label
 	}
 	if sortDesc {
-		return label + "↓"
+		return boldSeg(label + "↓")
 	}
-	return label + "↑"
+	return boldSeg(label + "↑")
 }
 
 // styleAccentCursor is the "▶ " row-selection indicator, allocated once so

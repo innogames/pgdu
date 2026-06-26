@@ -36,15 +36,7 @@ func (m *Model) drillIn() tea.Cmd {
 		return m.loadCurrent()
 	case levelDatabases:
 		d := cur.data.(pg.Database)
-		if s.tool == toolQueries {
-			// Queries has no schema/table hierarchy — drill straight to the
-			// top-queries table for the chosen database.
-			next := &screen{level: levelStatements, title: "queries", tool: toolQueries, db: d.Name}
-			m.stack = append(m.stack, next)
-			return m.loadCurrent()
-		}
-		next := &screen{level: levelSchemas, title: "schemas", tool: s.tool, db: d.Name, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
-		m.stack = append(m.stack, next)
+		m.stack = append(m.stack, databaseChildScreen(s.tool, d.Name))
 		return m.loadCurrent()
 	case levelSchemas:
 		sc := cur.data.(pg.Schema)
@@ -202,11 +194,18 @@ func (m *Model) drillIn() tea.Cmd {
 		case pg.RelBTreeIndex, pg.RelGist, pg.RelBrin, pg.RelGin:
 			// Every drillable index AM uses the shared levelIndexPages screen;
 			// the loader/renderer branch on r.AccessMethod from here on.
+			// B-trees open level-first so the root sits at the top (read the tree
+			// top-down); GiST/BRIN/GIN have no meaningful tree level, so a
+			// level sort there would be an inert no-op — keep them block-ordered.
+			pageSort := sortByBlkno
+			if r.Kind == pg.RelBTreeIndex {
+				pageSort = sortByLevel
+			}
 			next := &screen{
 				level: levelIndexPages, title: "index pages", tool: s.tool,
 				db: r.DB, schema: r.Schema, index: r,
 				heapWindowStart: 0, heapWindowCount: heapWindowDefault,
-				sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
+				sort: pageSort, sortDesc: pageSort.defaultDesc(),
 			}
 			m.stack = append(m.stack, next)
 			return m.loadCurrent()
@@ -635,6 +634,18 @@ func (m *Model) toolEntryScreen(t tool) *screen {
 	default:
 		return &screen{level: levelDatabases, title: "databases", tool: t, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 	}
+}
+
+// databaseChildScreen builds the next screen when drilling into a database,
+// varying by tool. Used by drillIn and the single-database fast path in
+// onDatabasesLoaded.
+func databaseChildScreen(t tool, db string) *screen {
+	if t == toolQueries {
+		// Queries has no schema/table hierarchy — drill straight to the
+		// top-queries table for the chosen database.
+		return &screen{level: levelStatements, title: "queries", tool: toolQueries, db: db}
+	}
+	return &screen{level: levelSchemas, title: "schemas", tool: t, db: db, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 }
 
 // schemaChildScreen builds the next screen when drilling into a schema, varying

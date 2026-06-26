@@ -455,10 +455,14 @@ func renderWALBlockRow(it item, blk pg.WALBlockRef, maxSize int64, barW int, sel
 func (m *Model) renderWALRelationsHeader(s *screen) string {
 	mu := styleMuted.Render
 	var combined, fpi int64
+	var unresolved int
 	for _, it := range s.items {
 		if st, ok := it.data.(pg.WALRelStat); ok {
 			combined += st.CombinedSize()
 			fpi += st.FPIBytes
+			if st.RelName == "" {
+				unresolved++
+			}
 		}
 	}
 	share := mu("—")
@@ -466,10 +470,31 @@ func (m *Model) renderWALRelationsHeader(s *screen) string {
 		pct := 100 * float64(fpi) / float64(combined)
 		share = gradeStyle(pct, 20, 50).Render(fmt1(pct) + "%")
 	}
-	return "  " + styleHeader.Render(" by relation ") + "  " +
+	header := "  " + styleHeader.Render(" by relation ") + "  " +
 		mu("WAL generated per table/index in this window  ·  ") +
 		styleSelected.Render(humanize.Bytes(combined)) + mu(" total · fpi ") + share +
 		mu("  ·  ") + styleBadge.Render("↵") + mu(" block refs")
+	// Names resolve only for the connected database (pg_filenode_relation is
+	// database-local), but WAL is cluster-wide — rows for other databases fall
+	// back to "relfilenode N". Flag it so the numeric rows don't read as a bug.
+	if unresolved > 0 {
+		header += "\n" + strings.Repeat(" ", 8) +
+			mu(fmt.Sprintf("%d shown as relfilenode N — connect to that db (e.g. -d %s) to resolve names",
+				unresolved, walFirstOtherDB(s)))
+	}
+	return header
+}
+
+// walFirstOtherDB returns the database name of the first relation whose name
+// didn't resolve, to seed the "-d <db>" hint. Falls back to "<db>" when even
+// the db name is unknown (shared catalog / dropped, reldatabase 0).
+func walFirstOtherDB(s *screen) string {
+	for _, it := range s.items {
+		if st, ok := it.data.(pg.WALRelStat); ok && st.RelName == "" && st.DBName != "" {
+			return st.DBName
+		}
+	}
+	return "<db>"
 }
 
 func (m *Model) renderWALRelationsList(s *screen, height int) string {

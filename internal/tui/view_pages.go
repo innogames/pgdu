@@ -43,14 +43,27 @@ func (m *Model) renderIndexPagesInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" columns ") + "  " +
 		mu("one row per index page in the loaded window") + "\n")
-	b.WriteString("    " + padRight("level", 8) +
+	b.WriteString("    " + padRight("level", 10) +
 		mu("btpo_level: depth from the leaves — L0 is a leaf, L1 sits one above, etc.") + "\n")
-	b.WriteString("    " + padRight("used", 8) +
+	b.WriteString("    " + padRight("used", 10) +
 		mu("BLCKSZ − free_size, i.e. how much of the 8 KiB page is actually populated") + "\n")
-	b.WriteString("    " + padRight("live/dead", 8) +
+	b.WriteString("    " + padRight("avg", 10) +
+		mu("avg_item_size: mean bytes per item on the page") + "\n")
+	b.WriteString("    " + padRight("live/dead", 10) +
 		mu("counts from bt_page_stats — live and LP_DEAD items on this page") + "\n")
-	b.WriteString("    " + padRight("free", 8) +
-		mu("free_size as a percent of pagesize; high values on leaf pages signal bloat") + "\n\n")
+	b.WriteString("    " + padRight("free", 10) +
+		mu("free_size as a percent of pagesize; high values on leaf pages signal bloat") + "\n")
+	b.WriteString("    " + padRight("links", 10) +
+		mu("btpo_prev↔btpo_next: the page's left/right siblings on its level (· = an end)") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" flags ") + "  " +
+		mu("the leftmost ! column flags rare structural states from btpo_flags") + "\n")
+	b.WriteString("    " + styleBloat.Render("!") + "  " + padRight("", 6) +
+		mu("incomplete split — a page split that never finished; needs cleanup") + "\n")
+	b.WriteString("    " + styleBloat.Render("½") + "  " + padRight("", 6) +
+		mu("half-dead — page emptied, deletion not yet completed by VACUUM") + "\n")
+	b.WriteString("    " + styleMuted.Render("*") + "  " + padRight("", 6) +
+		mu("has garbage — carries LP_DEAD items reclaimable on the next vacuum") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" banner ") + "  " +
 		mu("the lines above the table summarise the whole index") + "\n")
@@ -314,12 +327,16 @@ func (m *Model) renderIndexPagesList(s *screen, height int) string {
 }
 
 func renderIndexPagesHeader(sort sortMode, sortDesc bool, barW int) string {
+	// "!" (flag), avg and links are display-only columns — no sortMark.
 	line := headerIndent(barW) +
+		padRight("!", idxPageFlagColW) + "  " +
 		padRight(sortMark("type", sort == sortByType, sortDesc), idxPageTypeColW) + "  " +
 		padRight(sortMark("level", sort == sortByLevel, sortDesc), idxPageLevelColW) + "  " +
 		padRight(sortMark("used", sort == sortBySize, sortDesc), idxPageUsedColW) + "  " +
+		padRight("avg", idxPageAvgColW) + "  " +
 		padRight(sortMark("live/dead", sort == sortByDeadRatio, sortDesc), idxPageItemsColW) + "  " +
 		padRight(sortMark("free", sort == sortByFreeSpace, sortDesc), idxPageFreeColW) + "  " +
+		padRight("links", idxPageLinksColW) + "  " +
 		sortMark("page", sort == sortByBlkno, sortDesc)
 	return styleMuted.Render(line)
 }
@@ -373,9 +390,17 @@ func indexPageTypeStyle(t string) lipgloss.Style {
 func renderIndexPageRow(it item, p pg.IndexPageStat, barW int, selected bool) string {
 	cursor := selectedCursor(selected)
 	bar := renderIndexPageBar(p, barW)
+	flag := indexPageFlagGlyph(p.BtpoFlags)
 	typ := indexPageTypeStyle(p.Type).Render(indexPageTypeLabel(p.Type))
 	lvl := fmt.Sprintf("L%d", p.BtpoLevel)
 	used := humanize.Bytes(it.size)
+
+	// avg item size (bytes/item); 0 on meta/deleted pages with no items.
+	avg := styleMuted.Render("—")
+	if p.AvgItemSize > 0 {
+		avg = strconv.Itoa(int(p.AvgItemSize))
+	}
+	links := siblingLinks(p.BtpoPrev, p.BtpoNext)
 
 	// live/dead echo the bar's colours: live stays plain, dead turns the bloat
 	// red whenever a page is carrying reclaimable items so it pops at a glance.
@@ -403,12 +428,46 @@ func renderIndexPageRow(it item, p pg.IndexPageStat, barW int, selected bool) st
 	}
 	name := highlightName(it.name, selected)
 	return cursor + bar + "  " +
+		padRight(flag, idxPageFlagColW) + "  " +
 		padRight(typ, idxPageTypeColW) + "  " +
 		padRight(lvl, idxPageLevelColW) + "  " +
 		padRight(used, idxPageUsedColW) + "  " +
+		padRight(avg, idxPageAvgColW) + "  " +
 		padRight(items, idxPageItemsColW) + "  " +
 		padRight(free, idxPageFreeColW) + "  " +
+		padRight(links, idxPageLinksColW) + "  " +
 		name
+}
+
+// indexPageFlagGlyph renders a single priority-ordered glyph from a B-tree
+// page's btpo_flags, mirroring the heap-pages "!" column. Only the rare
+// structural anomalies get a glyph; an ordinary page stays blank. Priority:
+// incomplete-split and half-dead (real "cleanup pending" signals) outrank
+// has-garbage, which the dead-items column already conveys.
+func indexPageFlagGlyph(flags int32) string {
+	switch {
+	case flags&btpoIncompleteSplit != 0:
+		return styleBloat.Render("!")
+	case flags&btpoHalfDead != 0:
+		return styleBloat.Render("½")
+	case flags&btpoHasGarbage != 0:
+		return styleMuted.Render("*")
+	}
+	return " "
+}
+
+// siblingLinks formats a B-tree page's left/right links (btpo_prev / btpo_next)
+// as "prev↔next". pageinspect returns P_NONE (InvalidBlockNumber, 0xFFFFFFFF)
+// as -1 after the ::int cast, so any negative value is a chain end (the
+// leftmost / rightmost page on its level) and renders as "·".
+func siblingLinks(prev, next int32) string {
+	end := func(blk int32) string {
+		if blk < 0 {
+			return "·"
+		}
+		return strconv.Itoa(int(blk))
+	}
+	return styleMuted.Render(end(prev) + "↔" + end(next))
 }
 
 // renderIndexPageBar paints one B-tree page as live | dead | free, scaled
@@ -599,6 +658,15 @@ const (
 	btPivotHeapTIDAttr = 0x1000 // BT_PIVOT_HEAP_TID_ATTR — pivot with heap-tid attr
 	btOffsetMask       = 0x0FFF // BT_OFFSET_MASK — low bits of a posting tuple's
 	// ctid offset word hold its heap-tid count (BTreeTupleGetNPosting).
+)
+
+// btpo_flags bits from src/include/access/nbtree.h, decoded by
+// indexPageFlagGlyph for the page-list "!" column. BTP_LEAF/ROOT/DELETED/META
+// are already conveyed by the type tag, so only the diagnostic bits are named.
+const (
+	btpoHalfDead        = 0x10 // BTP_HALF_DEAD — emptied, deletion not yet finished
+	btpoHasGarbage      = 0x40 // BTP_HAS_GARBAGE — has LP_DEAD items reclaimable on vacuum
+	btpoIncompleteSplit = 0x80 // BTP_INCOMPLETE_SPLIT — split not yet completed
 )
 
 // parseCtidBlock extracts the block number from a "(blk,off)" ctid text. On a

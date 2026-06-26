@@ -35,9 +35,11 @@ const (
 // ratio so the worst-cached tables bubble to the top.
 func (sm sortMode) defaultDesc() bool {
 	switch sm {
-	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty, sortByBloat, sortByHeap, sortByIndex, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP:
+	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty, sortByBloat, sortByHeap, sortByIndex, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByLevel:
+		// sortByLevel is descending so the B-tree page view opens root-first
+		// (highest btpo_level at the top), reading the tree top-down.
 		return true
-	case sortByName, sortByHitRatio, sortByBlkno, sortByLP, sortByLevel, sortByType, sortByColType, sortByGroup:
+	case sortByName, sortByHitRatio, sortByBlkno, sortByLP, sortByType, sortByColType, sortByGroup:
 		return false
 	}
 	return false

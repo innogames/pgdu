@@ -24,6 +24,13 @@ func (m *Model) onDatabasesLoaded(msg databasesLoadedMsg) tea.Cmd {
 		s.items = append(s.items, item{name: d.Name, size: d.SizeBytes, hasChildren: true, data: d})
 	}
 	m.applySort(s)
+	// Single-database fast path: with only one connectable database, skip the
+	// one-row picker and drill straight in (its schemas, or the top-queries
+	// table for toolQueries). Back/Esc then returns to the tool menu.
+	if msg.err == nil && len(msg.dbs) == 1 && s == m.top() {
+		m.stack[len(m.stack)-1] = databaseChildScreen(s.tool, msg.dbs[0].Name)
+		return m.loadCurrent()
+	}
 	return nil
 }
 
@@ -35,8 +42,17 @@ func (m *Model) onSchemasLoaded(msg schemasLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	s.err = msg.err
-	s.items = s.items[:0]
+	// Drop schemas with no tables (relkind r/m/p): every tool that drills
+	// through a schema operates on tables, so an empty namespace — e.g. an
+	// extension's schema like pg_repack — is a dead end in the picker.
+	var schemas []pg.Schema
 	for _, sc := range msg.schemas {
+		if sc.TableCount > 0 {
+			schemas = append(schemas, sc)
+		}
+	}
+	s.items = s.items[:0]
+	for _, sc := range schemas {
 		s.items = append(s.items, item{
 			name: sc.Name, size: sc.SizeBytes, hasChildren: true,
 			tableCount: sc.TableCount, hasTableCount: true, data: sc,
@@ -45,8 +61,8 @@ func (m *Model) onSchemasLoaded(msg schemasLoadedMsg) tea.Cmd {
 	m.applySort(s)
 	// Single-schema fast path: skip the one-row schema picker by replacing it
 	// in-place. Back/Esc then returns to the database list, not a dead-end schema view.
-	if msg.err == nil && len(msg.schemas) == 1 && s == m.top() {
-		m.stack[len(m.stack)-1] = schemaChildScreen(s.tool, msg.schemas[0])
+	if msg.err == nil && len(schemas) == 1 && s == m.top() {
+		m.stack[len(m.stack)-1] = schemaChildScreen(s.tool, schemas[0])
 		return m.loadCurrent()
 	}
 	return nil

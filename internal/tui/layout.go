@@ -118,10 +118,14 @@ func barReserve(s *screen) int {
 			return base + ginPageTypeColW + colGutter + idxPageItemsColW + colGutter +
 				idxPageUsedColW + colGutter + idxPageFreeColW + colGutter + idxPageNameColW
 		default:
-			// btree: cursor + bar(brackets) + type + level + used + items + free% + name
-			return base + idxPageTypeColW + colGutter +
+			// btree: cursor + bar(brackets) + flag + type + level + used + avg +
+			// items + free% + links + name
+			return base + idxPageFlagColW + colGutter +
+				idxPageTypeColW + colGutter +
 				idxPageLevelColW + colGutter + idxPageUsedColW + colGutter +
+				idxPageAvgColW + colGutter +
 				idxPageItemsColW + colGutter + idxPageFreeColW + colGutter +
+				idxPageLinksColW + colGutter +
 				idxPageNameColW
 		}
 	case levelIndexTuples:
@@ -177,11 +181,14 @@ const (
 
 // Column widths shared by the index-pages header and rows.
 const (
+	idxPageFlagColW  = 1 // single priority glyph (incomplete-split / half-dead / garbage)
 	idxPageTypeColW  = 4 // "leaf" / "intr" / "root" / "del"
 	idxPageLevelColW = 5 // "L 12"
 	idxPageUsedColW  = 10
+	idxPageAvgColW   = 5  // avg_item_size in bytes ("2700")
 	idxPageItemsColW = 12 // "###L ###D"
 	idxPageFreeColW  = 7
+	idxPageLinksColW = 13 // "prev↔next" sibling links ("999999↔999999")
 	idxPageNameColW  = 16
 
 	// Per-AM page-type column widths (GiST reuses idxPageTypeColW).
