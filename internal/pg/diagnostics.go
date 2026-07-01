@@ -71,8 +71,17 @@ func (c *Client) RunDiagnostic(ctx context.Context, db string, d Diagnostic) (*D
 		return nil, fmt.Errorf("run diagnostic %q: %w", d.Key, err)
 	}
 
-	// Resolve bar column from the Diagnostic definition.
-	barCol := -1
+	barCol, sortCol := resolveBarSort(cols, d)
+	return &DiagResult{Columns: cols, Rows: resultRows, BarCol: barCol, SortCol: sortCol}, nil
+}
+
+// resolveBarSort maps the Diagnostic's Bar/Sort column names onto indices in
+// cols. Bar is -1 when unset or not found; Sort falls back to the bar column
+// when unset. Resolving by name (rather than a fixed index) means callers that
+// prepend columns — e.g. RunDiagnosticAllDBs' leading "database" column — get
+// the right index for free.
+func resolveBarSort(cols []DiagColumn, d Diagnostic) (barCol, sortCol int) {
+	barCol = -1
 	if d.Bar != "" {
 		for i, c := range cols {
 			if c.Name == d.Bar {
@@ -82,8 +91,7 @@ func (c *Client) RunDiagnostic(ctx context.Context, db string, d Diagnostic) (*D
 		}
 	}
 
-	// Resolve the default sort column. Falls back to the bar column when unset.
-	sortCol := -1
+	sortCol = -1
 	if d.Sort != "" {
 		for i, c := range cols {
 			if c.Name == d.Sort {
@@ -94,8 +102,89 @@ func (c *Client) RunDiagnostic(ctx context.Context, db string, d Diagnostic) (*D
 	} else {
 		sortCol = barCol
 	}
+	return barCol, sortCol
+}
 
-	return &DiagResult{Columns: cols, Rows: resultRows, BarCol: barCol, SortCol: sortCol}, nil
+// RunDiagnosticAllDBs runs a per-database diagnostic against every database the
+// current user can connect to and merges the results into one table with a
+// leading "database" column identifying each row's origin. It backs the "all
+// databases" choice offered when a per-database diagnostic is selected. A
+// database that fails to connect or query is skipped, its error remembered and
+// surfaced only if no database yields a result. The whole sweep runs under the
+// caller's single 30-second query() budget.
+func (c *Client) RunDiagnosticAllDBs(ctx context.Context, d Diagnostic) (*DiagResult, error) {
+	dbs, err := c.ListDatabases(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	const dbColName = "database"
+	var (
+		cols     []DiagColumn // merged columns, led by the "database" column
+		rows     [][]DiagCell
+		firstErr error
+		ran      int
+	)
+	for _, db := range dbs {
+		pool, perr := c.PoolFor(ctx, db.Name)
+		if perr != nil {
+			if firstErr == nil {
+				firstErr = perr
+			}
+			continue
+		}
+		rs, qerr := pool.Query(ctx, d.SQL)
+		if qerr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("run diagnostic %q in %q: %w", d.Key, db.Name, qerr)
+			}
+			continue
+		}
+		dcols, drows, _, serr := scanDiagRows(rs, 0)
+		rs.Close()
+		if serr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("run diagnostic %q in %q: %w", d.Key, db.Name, serr)
+			}
+			continue
+		}
+		ran++
+
+		if cols == nil {
+			// Establish the merged column set from the first database that
+			// answered: the leading text column, then this query's columns.
+			cols = make([]DiagColumn, 0, len(dcols)+1)
+			cols = append(cols, DiagColumn{Name: dbColName, Kind: DiagText})
+			cols = append(cols, dcols...)
+		} else {
+			// Identical SQL everywhere, so columns line up by position. Promote
+			// a merged column's kind when a later database sees a numeric value
+			// where earlier ones had only text/NULL (mirrors scanDiagRows).
+			for i, dc := range dcols {
+				mc := i + 1 // offset past the leading "database" column
+				if mc < len(cols) && cols[mc].Kind == DiagText && dc.Kind != DiagText {
+					cols[mc].Kind = dc.Kind
+				}
+			}
+		}
+
+		for _, row := range drows {
+			merged := make([]DiagCell, 0, len(row)+1)
+			merged = append(merged, DiagCell{Display: db.Name})
+			merged = append(merged, row...)
+			rows = append(rows, merged)
+		}
+	}
+
+	if ran == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return &DiagResult{Columns: []DiagColumn{{Name: dbColName, Kind: DiagText}}, BarCol: -1, SortCol: -1}, nil
+	}
+
+	barCol, sortCol := resolveBarSort(cols, d)
+	return &DiagResult{Columns: cols, Rows: rows, BarCol: barCol, SortCol: sortCol}, nil
 }
 
 // scanDiagRows drains rows into generic column/cell form: column metadata comes

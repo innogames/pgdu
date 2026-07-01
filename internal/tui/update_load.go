@@ -167,6 +167,9 @@ func (m *Model) loadCurrent() tea.Cmd {
 			// Reset generic-table state so a Refresh shows a clean load.
 			s.diagCols = nil
 			s.diagBarCol = -1
+			if s.diagAllDBs {
+				return m.loadDiagnosticAllDBsCmd(*s.diag)
+			}
 			return m.loadDiagnosticCmd(*s.diag, s.db)
 		}
 	case levelWAL:

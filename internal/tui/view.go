@@ -303,8 +303,17 @@ func (m *Model) renderStatus(s *screen) string {
 		positionLabel(s),
 		"level: " + levelLabel(s.level),
 	}
-	if s.level == levelDiagnosticResult && s.diag != nil {
+	if s.diag != nil {
 		parts = append(parts, "query: "+s.diag.Title)
+	}
+	if s.level == levelDiagnosticResult && s.diag != nil {
+		db := "all"
+		if !s.diagAllDBs {
+			if db = s.db; db == "" {
+				db = m.client.DefaultDB()
+			}
+		}
+		parts = append(parts, "db: "+db)
 	}
 	if (s.level == levelParts || s.level == levelColumns) && s.table.Name != "" {
 		parts = append(parts, "table: "+s.table.Name)

@@ -591,6 +591,16 @@ func (m *Model) loadDiagnosticCmd(d pg.Diagnostic, db string) tea.Cmd {
 	})
 }
 
+// loadDiagnosticAllDBsCmd runs a per-database diagnostic against every
+// connectable database and merges the results (leading "database" column). The
+// same diagnosticLoadedMsg/onDiagnosticLoaded path renders the generic table.
+func (m *Model) loadDiagnosticAllDBsCmd(d pg.Diagnostic) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		result, err := m.client.RunDiagnosticAllDBs(ctx, d)
+		return diagnosticLoadedMsg{key: d.Key, result: result, err: err}
+	})
+}
+
 // walWindowBytes is how much recent WAL the inspector analyses by default:
 // one 16 MiB segment up to the current write head. Big enough to be
 // interesting, small enough that pg_get_wal_stats / _records_info stay snappy

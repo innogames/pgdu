@@ -25,16 +25,31 @@ func (m *Model) drillIn() tea.Cmd {
 		return m.loadCurrent()
 	case levelDiagnostics:
 		d := cur.data.(pg.Diagnostic)
-		next := &screen{
-			level:      levelDiagnosticResult,
-			title:      d.Title,
-			tool:       toolTools,
-			diag:       &d,
-			diagBarCol: -1,
+		// Per-database queries only describe the connected database, so ask
+		// which one to run against via the common database picker (with an
+		// "all databases" option). Cluster-wide queries run straight away.
+		if d.PerDB {
+			m.stack = append(m.stack, &screen{
+				level: levelDatabases, title: "database", tool: toolTools, diag: &d,
+				sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
+			})
+			return m.loadCurrent()
 		}
-		m.stack = append(m.stack, next)
+		m.stack = append(m.stack, diagnosticResultScreen(&d, "", false))
 		return m.loadCurrent()
 	case levelDatabases:
+		// In the diagnostics tool the database list is a picker for a
+		// per-database query, not the disk-usage tree: drill into the result.
+		if s.tool == toolTools && s.diag != nil {
+			var next *screen
+			if _, ok := cur.data.(allDBsChoice); ok {
+				next = diagnosticResultScreen(s.diag, "", true)
+			} else {
+				next = diagnosticResultScreen(s.diag, cur.data.(pg.Database).Name, false)
+			}
+			m.stack = append(m.stack, next)
+			return m.loadCurrent()
+		}
 		d := cur.data.(pg.Database)
 		m.stack = append(m.stack, databaseChildScreen(s.tool, d.Name))
 		return m.loadCurrent()
@@ -633,6 +648,21 @@ func (m *Model) toolEntryScreen(t tool) *screen {
 		}
 	default:
 		return &screen{level: levelDatabases, title: "databases", tool: t, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
+	}
+}
+
+// diagnosticResultScreen builds the levelDiagnosticResult screen for diagnostic
+// d against database db (empty = default DB). allDBs runs it across every
+// connectable database, merging the results under a leading "database" column.
+func diagnosticResultScreen(d *pg.Diagnostic, db string, allDBs bool) *screen {
+	return &screen{
+		level:      levelDiagnosticResult,
+		title:      d.Title,
+		tool:       toolTools,
+		diag:       d,
+		db:         db,
+		diagAllDBs: allDBs,
+		diagBarCol: -1,
 	}
 }
 

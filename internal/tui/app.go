@@ -142,6 +142,12 @@ type item struct {
 	snapPath string
 }
 
+// allDBsChoice is the item.data sentinel for the synthetic "(all databases)"
+// row prepended to the database picker when choosing a target for a
+// per-database diagnostic. Drilling into it runs the query across every
+// connectable database (see RunDiagnosticAllDBs).
+type allDBsChoice struct{}
+
 type screen struct {
 	level    level
 	title    string
@@ -318,8 +324,9 @@ type screen struct {
 	// diagSortCol is the index of the currently active sort column.
 	diag        *pg.Diagnostic
 	diagCols    []pg.DiagColumn
-	diagBarCol  int // headline bar column index, or -1
-	diagSortCol int // active sort column index for the generic table
+	diagBarCol  int  // headline bar column index, or -1
+	diagSortCol int  // active sort column index for the generic table
+	diagAllDBs  bool // true when this result runs the query across all databases (leading "database" column)
 
 	// stmtCols is the projected top-queries column descriptors, parallel to
 	// diagCols (same length/order). Non-nil only on levelStatements; it maps the
