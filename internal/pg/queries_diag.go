@@ -181,6 +181,56 @@ GROUP BY n.nspname, t.relname, i.relname, i.oid, ix.indisunique, psai.idx_scan, 
 ORDER BY pg_relation_size(i.oid) DESC
 `
 
+// sqlDiagIndexBrinCandidates flags btree indexes whose leading column is highly
+// correlated with the table's physical row order (|correlation| ≥ 0.7). Such an
+// index is the textbook case where a BRIN index would be a fraction of the size
+// while still pruning blocks effectively, so these are candidates for a
+// btree → BRIN conversion. Unique and primary-key indexes are excluded (BRIN
+// cannot enforce uniqueness). correlation_pct (abs correlation × 100) is the
+// headline bar: the _pct suffix classifies it as DiagPercent so it renders as a
+// 0–100 bar graded green→yellow, mirroring the STRONG/Possible split.
+const sqlDiagIndexBrinCandidates = `
+SELECT
+    t.relname                                          AS table_name,
+    i.relname                                          AS index_name,
+    a.attname                                          AS column_name,
+    s.correlation                                      AS correlation,
+    round((abs(s.correlation) * 100)::numeric, 1)      AS correlation_pct,
+    pg_size_pretty(pg_relation_size(i.oid))            AS index_size,
+    pg_size_pretty(pg_relation_size(t.oid))            AS table_size,
+    CASE
+        WHEN abs(s.correlation) >= 0.9
+            THEN 'STRONG candidate'
+        ELSE 'Possible candidate'
+    END                                                AS brin_recommendation
+FROM pg_index idx
+JOIN pg_class i        ON i.oid = idx.indexrelid          -- the index
+JOIN pg_class t        ON t.oid = idx.indrelid            -- the table
+JOIN pg_namespace n    ON n.oid = t.relnamespace
+JOIN pg_am am          ON am.oid = i.relam                -- access method
+JOIN LATERAL unnest(idx.indkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+JOIN pg_attribute a    ON a.attrelid = t.oid AND a.attnum = k.attnum
+LEFT JOIN pg_stats s   ON s.schemaname = n.nspname
+                       AND s.tablename  = t.relname
+                       AND s.attname    = a.attname
+WHERE am.amname = 'btree'                       -- only B-tree indexes
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND a.attnum > 0                              -- skip system columns
+  AND NOT idx.indisunique                       -- exclude unique
+  AND NOT idx.indisprimary                      -- exclude primary keys
+  AND t.reltuples > 100000                       -- only tables big enough for BRIN to pay off
+  AND s.correlation IS NOT NULL
+  AND abs(s.correlation) >= 0.7                 -- hide low-correlation "NO" rows
+  -- Require high cardinality. A near-constant column (boolean, enum, status
+  -- flag) reports a trivially high correlation but is a poor BRIN candidate:
+  -- its per-block min/max summary can prune almost nothing. n_distinct < 0 is a
+  -- fraction-of-rows estimate (so it scales with the table, always plenty
+  -- distinct); n_distinct > 0 is an absolute count, which we require to clear a
+  -- floor. Low-cardinality columns are better served by a partial index.
+  AND (s.n_distinct < 0 OR s.n_distinct > 100)
+ORDER BY abs(s.correlation) DESC, pg_relation_size(t.oid) DESC
+`
+
 // sqlDiagIndexShowAll was the old per-index listing (public schema only). Its
 // useful columns (scan count, tuples read, unique flag) were folded into
 // sqlDiagIndexShowSize, so it is no longer registered. Kept commented for

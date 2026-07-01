@@ -25,11 +25,23 @@ func (m *Model) onDatabasesLoaded(msg databasesLoadedMsg) tea.Cmd {
 	}
 	m.applySort(s)
 	// Single-database fast path: with only one connectable database, skip the
-	// one-row picker and drill straight in (its schemas, or the top-queries
-	// table for toolQueries). Back/Esc then returns to the tool menu.
+	// one-row picker and drill straight in (its schemas, the top-queries table
+	// for toolQueries, or the diagnostic result for toolTools). Back/Esc then
+	// returns to the tool menu (or diagnostic list).
 	if msg.err == nil && len(msg.dbs) == 1 && s == m.top() {
-		m.stack[len(m.stack)-1] = databaseChildScreen(s.tool, msg.dbs[0].Name)
+		if s.tool == toolTools && s.diag != nil {
+			m.stack[len(m.stack)-1] = diagnosticResultScreen(s.diag, msg.dbs[0].Name, false)
+		} else {
+			m.stack[len(m.stack)-1] = databaseChildScreen(s.tool, msg.dbs[0].Name)
+		}
 		return m.loadCurrent()
+	}
+	// In the diagnostics tool, offer running the query across every database as
+	// a synthetic row pinned to the top of the picker.
+	if msg.err == nil && s.tool == toolTools && s.diag != nil && len(msg.dbs) > 1 {
+		allRow := item{name: "(all databases)", hasChildren: true, data: allDBsChoice{}}
+		s.items = append([]item{allRow}, s.items...)
+		s.itemsRev++ // items no longer match the applySort order; invalidate the filter cache
 	}
 	return nil
 }

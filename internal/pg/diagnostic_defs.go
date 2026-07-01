@@ -12,6 +12,7 @@ type Diagnostic struct {
 	SQL         string // the query to run (no parameters)
 	Bar         string // headline column name rendered as a bar, or ""
 	Sort        string // default sort column name (descending); "" falls back to Bar, then column 0 ascending
+	PerDB       bool   // true = query reads only the connected database; the TUI prompts for which database to run against (or all)
 }
 
 // Diagnostics is the ordered registry of all built-in diagnostic queries.
@@ -21,11 +22,21 @@ var Diagnostics = []Diagnostic{
 	// ── index ─────────────────────────────────────────────────────────────
 	{
 		Key:         "bloat_index",
+		PerDB:       true,
 		Title:       "Index bloat (btree)",
 		Category:    "index",
 		Description: "estimated bloat % and wasted MB for btree indexes (>50% bloat, >10 MB waste)",
 		SQL:         sqlDiagBloatIndex,
 		Bar:         "bloat_pct",
+	},
+	{
+		Key:         "index_brin_candidates",
+		PerDB:       true,
+		Title:       "BRIN candidates (btree)",
+		Category:    "index",
+		Description: "non-unique btree indexes on high-correlation columns (|corr| ≥ 0.7) — candidates to replace with a smaller BRIN index",
+		SQL:         sqlDiagIndexBrinCandidates,
+		Bar:         "correlation_pct",
 	},
 	// "All indexes" was merged into "Index sizes" below (which now also carries
 	// scan counts and the unique flag, across all schemas), so it is no longer a
@@ -40,6 +51,7 @@ var Diagnostics = []Diagnostic{
 	// },
 	{
 		Key:         "index_show_definitions",
+		PerDB:       true,
 		Title:       "Index definitions",
 		Category:    "index",
 		Description: "CREATE INDEX statement for every index in every user schema",
@@ -48,6 +60,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "index_show_duplicate",
+		PerDB:       true,
 		Title:       "Duplicate indexes",
 		Category:    "index",
 		Description: "indexes with identical column sets (candidates for removal)",
@@ -56,6 +69,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "index_show_size",
+		PerDB:       true,
 		Title:       "Indexes",
 		Category:    "index",
 		Description: "every index sorted by size, with scan count, unique flag and column list",
@@ -64,6 +78,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "index_show_unused",
+		PerDB:       true,
 		Title:       "Unused indexes",
 		Category:    "index",
 		Description: "indexes ranked by disk footprint per scan — big indexes that are never or rarely used (candidates for removal)",
@@ -85,6 +100,7 @@ var Diagnostics = []Diagnostic{
 	// },
 	{
 		Key:         "bloat_table",
+		PerDB:       true,
 		Title:       "Table bloat (detailed)",
 		Category:    "table",
 		Description: "detailed table bloat estimate (>50% and >10 MB, or >25% and >1 GB)",
@@ -93,6 +109,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "table_scan_types",
+		PerDB:       true,
 		Title:       "Sequential scan candidates",
 		Category:    "table",
 		Description: "tables with >20% sequential reads and >800 kB — potential missing-index candidates",
@@ -101,6 +118,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "table_show_hitratio",
+		PerDB:       true,
 		Title:       "Table cache hit ratio",
 		Category:    "table",
 		Description: "tables with heap cache hit ratio below 80%, ordered by blocks read from disk",
@@ -109,6 +127,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "table_show_hot_ratio",
+		PerDB:       true,
 		Title:       "Table HOT update ratio",
 		Category:    "table",
 		Description: "HOT vs non-HOT update split per table; sorted by absolute non-HOT updates (index-churn offenders first)",
@@ -118,6 +137,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "table_show_modify_ratio",
+		PerDB:       true,
 		Title:       "Table modification ratio",
 		Category:    "table",
 		Description: "insert / update / delete split per table (since last stats reset)",
@@ -126,6 +146,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "table_show_size",
+		PerDB:       true,
 		Title:       "Table sizes (with partitions)",
 		Category:    "table",
 		Description: "total, index, toast and heap sizes rolled up across partition trees",
@@ -134,6 +155,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "toast_show_size",
+		PerDB:       true,
 		Title:       "TOAST table sizes",
 		Category:    "table",
 		Description: "TOAST tables with their owning table, toastable columns, and live/dead tuple counts",
@@ -159,6 +181,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "vacuum_stats",
+		PerDB:       true,
 		Title:       "Vacuum stats",
 		Category:    "vacuum",
 		Description: "last vacuum/analyze timestamps, dead tuple counts and autovacuum threshold per table",
@@ -212,6 +235,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "foreignkeys_show_all",
+		PerDB:       true,
 		Title:       "Foreign keys",
 		Category:    "server",
 		Description: "all foreign-key constraints in every schema",
@@ -220,6 +244,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "grants_show_all",
+		PerDB:       true,
 		Title:       "Grants",
 		Category:    "server",
 		Description: "all explicit grants on schemas, tables, views, sequences, and functions",
@@ -236,6 +261,7 @@ var Diagnostics = []Diagnostic{
 	},
 	{
 		Key:         "sequences",
+		PerDB:       true,
 		Title:       "Sequence usage",
 		Category:    "server",
 		Description: "how much of each sequence's range is consumed (last_value needs SELECT/USAGE)",
