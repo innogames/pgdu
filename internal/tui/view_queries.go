@@ -2,9 +2,7 @@ package tui
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -97,22 +95,6 @@ func flattenQuery(q string) string {
 	return strings.Join(strings.Fields(q), " ")
 }
 
-// fmtFloat renders a number with up to 1 decimals, trailing zeros stripped.
-func fmtFloat(f float64) string {
-	s := strconv.FormatFloat(f, 'f', 1, 64)
-	if strings.ContainsRune(s, '.') {
-		s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
-	}
-	return s
-}
-
-// fmt1 renders a number with exactly one decimal place (60 → "60.0", 98.51 →
-// "98.5"). The top-queries numeric columns use it so every value shows a single
-// fractional digit rather than a ragged mix of 0/1/2 places.
-func fmt1(f float64) string {
-	return strconv.FormatFloat(f, 'f', 1, 64)
-}
-
 // planTimeMetric renders the detail-view plan-time line, distinguishing a real
 // zero from "not collected" (pg_stat_statements.track_planning off).
 func planTimeMetric(q pg.QueryStat, trackPlanning bool, mu func(...string) string) string {
@@ -120,34 +102,6 @@ func planTimeMetric(q pg.QueryStat, trackPlanning bool, mu func(...string) strin
 		return "—" + mu("  (track_planning off — not collected)")
 	}
 	return fmtMs(q.TotalPlanTime) + " ms" + mu(fmt.Sprintf("  (%s plans)", formatRows(q.Plans)))
-}
-
-// fmtMs formats a millisecond duration compactly: sub-millisecond and small
-// values keep ms; large values switch to seconds so the column stays narrow.
-func fmtMs(ms float64) string {
-	if ms >= 100000 {
-		return fmt1(ms/1000) + "s"
-	}
-	return fmt1(ms)
-}
-
-// fmtAge formats an elapsed time (in ms) as an age with an explicit, scale-
-// appropriate unit so values never read ambiguously: "850ms", "31.1s", "11.2m",
-// "3.1h", "2.4d". Unlike fmtMs the unit is always present, which is what lets the
-// reader tell 105ms from 105s at a glance (paired with durationStyle colouring).
-func fmtAge(ms float64) string {
-	switch {
-	case ms < 1000:
-		return fmt.Sprintf("%.0fms", ms)
-	case ms < 60*1000:
-		return fmt1(ms/1000) + "s"
-	case ms < 60*60*1000:
-		return fmt1(ms/(60*1000)) + "m"
-	case ms < 24*60*60*1000:
-		return fmt1(ms/(60*60*1000)) + "h"
-	default:
-		return fmt1(ms/(24*60*60*1000)) + "d"
-	}
 }
 
 // --- window-status header (levelStatements) ---
@@ -212,33 +166,13 @@ func (m *Model) refreshSentence() string {
 	return "It re-samples every " + m.statRefresh.String() + " — press t to cycle the cadence (2s → 60s → off)."
 }
 
-// fmtDuration renders a window span with explicit units — "45s", "13m 12s",
-// "2h 05m", "3d 4h" — so it never reads as a wall-clock time. The old H:MM:SS
-// form made "13:12" ambiguous with a start timestamp, which is the whole reason
-// it sits next to "since 05:56:46".
-func fmtDuration(d time.Duration) string {
-	d = d.Round(time.Second)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d/time.Second))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm %02ds", int(d/time.Minute), int(d%time.Minute/time.Second))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh %02dm", int(d/time.Hour), int(d%time.Hour/time.Minute))
-	default:
-		return fmt.Sprintf("%dd %dh", int(d/(24*time.Hour)), int(d%(24*time.Hour)/time.Hour))
-	}
-}
-
 // renderStatementsInfo is the ? overlay for the top-queries tool: it explains
 // the window model (which is the subtle part — pg_stat_statements has no time
 // axis) and every column.
 func (m *Model) renderStatementsInfo(height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("Top queries reference") + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "Top queries reference")
 
 	b.WriteString("  " + styleHeader.Render(" the window ") + "  " +
 		mu("why numbers start at zero and grow") + "\n")

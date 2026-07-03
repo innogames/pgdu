@@ -62,10 +62,7 @@ func (m *Model) renderTableStatsInfo(height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
 
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("table overview reference") +
-		mu("  ·  press ") + styleBadge.Render("?") + mu(" or ") +
-		styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "table overview reference")
 	b.WriteString("  " + mu("One row per base / partitioned / materialized table in the schema. Write and") + "\n")
 	b.WriteString("  " + mu("scan counters (ins/upd/del, seq/idx, cache) are cumulative since the last stats") + "\n")
 	b.WriteString("  " + mu("reset; sizes and ages are point-in-time. Press ") + styleBadge.Render("C") +

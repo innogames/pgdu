@@ -184,7 +184,7 @@ func (m *Model) renderShmemSummary(s *screen) string {
 	bar := paintBar(barW, segs...)
 
 	muted := styleMuted.Render
-	sw := func(style lipgloss.Style) string { return style.Render("▇") + " " }
+	sw := func(style lipgloss.Style) string { return swatch(style) + " " }
 	var stats strings.Builder
 	stats.WriteString(muted(fmt.Sprintf("total %s  ·  ", humanize.Bytes(grand))))
 	for _, c := range shmemCatOrder {
@@ -255,10 +255,8 @@ func renderShmemRow(it item, a pg.ShmemAllocation, maxSize, grand int64, barW in
 func (m *Model) renderShmemInfo(height int) string {
 	var b strings.Builder
 	mu := styleMuted.Render
-	sw := func(c shmemCat) string { return shmemCatStyle(c).Render("▇") }
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("Shared-memory map") + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	sw := func(c shmemCat) string { return swatch(shmemCatStyle(c)) }
+	infoHeader(&b, "Shared-memory map")
 
 	b.WriteString("  " + mu("Every region of the Postgres shared-memory segment (pg_shmem_allocations),") + "\n")
 	b.WriteString("  " + mu("not just the buffer pool. The bar groups allocations by subsystem; the muted") + "\n")
@@ -286,9 +284,5 @@ func (m *Model) renderShmemInfo(height int) string {
 	b.WriteString("\n  " + mu("Reading pg_shmem_allocations needs pg_read_all_stats / superuser; without it") + "\n")
 	b.WriteString("  " + mu("the view shows a permission error instead of the map.") + "\n")
 
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }

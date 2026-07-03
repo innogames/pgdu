@@ -1,6 +1,9 @@
 package tui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFuzzyMatch(t *testing.T) {
 	cases := []struct {
@@ -42,6 +45,33 @@ func TestSubstringMatch(t *testing.T) {
 	}
 }
 
+// TestContainsFold checks the allocation-free fast path against the
+// lowercased strings.Contains it replaces, including the non-ASCII needle
+// that must take the unicode-correct fallback.
+func TestContainsFold(t *testing.T) {
+	cases := []struct{ s, substr string }{
+		{"SELECT * FROM Users", "users"},
+		{"select * from users", "USERS"},
+		{"select * from users", "orders"},
+		{"", ""},
+		{"abc", ""},
+		{"", "a"},
+		{"ab", "abc"}, // needle longer than haystack
+		{"alpha", "a"},
+		{"alpha", "A"},
+		{"alph", "ph"},           // match at the very end
+		{"NAÏVE query", "naïve"}, // non-ASCII needle → fallback path
+		{"multibyte żółć in the haystack", "haystack"}, // ASCII needle over UTF-8 haystack
+		{"żółć", "x"},
+	}
+	for _, c := range cases {
+		want := strings.Contains(strings.ToLower(c.s), strings.ToLower(c.substr))
+		if got := containsFold(c.s, c.substr); got != want {
+			t.Errorf("containsFold(%q, %q) = %v, want %v", c.s, c.substr, got, want)
+		}
+	}
+}
+
 func TestMatchFilterPerLevel(t *testing.T) {
 	// b…a…t…t…l…e is a subsequence of this query but not a substring.
 	const q = "select b1_0.id, b1_0.created_at from player_state where a > $1"
@@ -68,6 +98,10 @@ func TestViewportRange(t *testing.T) {
 		{"cursor above window scrolls up", 1, 5, 10, 20, 1, 11},
 		{"end clamped to length", 0, 0, 10, 4, 0, 4},
 		{"negative offset clamped", 0, -3, 10, 20, 0, 10},
+		{"cursor on last item", 19, 0, 10, 20, 10, 20},
+		{"cursor exactly at viewport tail", 9, 0, 10, 20, 0, 10},
+		{"list shorter than viewport", 2, 0, 10, 3, 0, 3},
+		{"height one pins offset to cursor", 7, 3, 1, 20, 7, 8},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

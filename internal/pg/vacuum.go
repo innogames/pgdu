@@ -31,7 +31,7 @@ func (c *Client) VacuumTable(ctx context.Context, t Table, onLine func(string)) 
 	}
 	defer func() { _ = conn.Close(context.Background()) }()
 	_, _ = conn.Exec(ctx, "SET pg_stat_statements.track = 'none'")
-	stmt := fmt.Sprintf("VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) %q.%q", t.Schema, t.Name)
+	stmt := "VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) " + qualifiedIdent(t.Schema, t.Name)
 	if _, err := conn.Exec(ctx, stmt); err != nil {
 		return fmt.Errorf("vacuum %q.%q: %w", t.Schema, t.Name, err)
 	}

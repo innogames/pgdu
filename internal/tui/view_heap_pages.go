@@ -16,12 +16,10 @@ import (
 // so the help row stays pinned to the bottom. Shown when the user toggles
 // `?` on levelHeapPages.
 func (m *Model) renderHeapPagesInfo(height int) string {
-	sw := func(style lipgloss.Style) string { return style.Render("▇") }
+	sw := swatch
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("Page reference") + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "Page reference")
 
 	b.WriteString("  " + styleHeader.Render(" page bar ") + "  " +
 		mu("each row is one 8 KiB heap page — the bar shows how that page is packed") + "\n")
@@ -50,11 +48,7 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+strconv.Itoa(int(heapWindowDefault))+" pages per step).") + "\n")
 	b.WriteString("  " + mu("Within a window, j/k or arrows move the cursor; Enter drills into one page.") + "\n")
 
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // renderHeapTuplesInfo draws a static explainer for the per-tuple drill view:
@@ -65,9 +59,7 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 func (m *Model) renderHeapTuplesInfo(height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("Tuple reference") + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "Tuple reference")
 
 	b.WriteString("  " + styleHeader.Render(" columns ") + "  " +
 		mu("one row per item-pointer in the page's LP array") + "\n")
@@ -115,11 +107,7 @@ func (m *Model) renderHeapTuplesInfo(height int) string {
 	b.WriteString("    " + padRight("lifecycle:", 12) + mu("MVCC story — who inserted it (and if that committed), then deleted/locked/live") + "\n")
 	b.WriteString("    " + padRight("layout:", 12) + mu("header vs payload bytes (split at t_hoff) with a bar, plus the page byte span") + "\n")
 
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // heapPageTableLabel reports the qualified relation name for the status line

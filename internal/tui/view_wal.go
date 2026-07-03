@@ -556,12 +556,10 @@ func renderWALRelRow(it item, st pg.WALRelStat, maxSize int64, barW int, selecte
 // the record-vs-FPI byte split means, and why FPI matters for tuning. Sized
 // to fill `height` lines so the help row stays pinned to the bottom.
 func (m *Model) renderWALInfo(height int) string {
-	sw := func(style lipgloss.Style) string { return style.Render("▇") }
+	sw := swatch
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("WAL inspector reference") + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "WAL inspector reference")
 
 	b.WriteString("  " + styleHeader.Render(" what WAL is ") + "  " +
 		mu("the write-ahead log — Postgres's durability & replication journal") + "\n")
@@ -621,9 +619,7 @@ func (m *Model) renderWALInfo(height int) string {
 func (m *Model) renderWALRecordsInfo(height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("WAL records reference") + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "WAL records reference")
 
 	b.WriteString("  " + styleHeader.Render(" this view ") + "  " +
 		mu("every WAL record the selected resource manager wrote in the window, oldest first") + "\n")
@@ -639,7 +635,7 @@ func (m *Model) renderWALRecordsInfo(height int) string {
 	b.WriteString("    " + padRight("description", 12) + mu("pg_walinspect's human-readable decode of the record's payload") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" the bar ") + "  " +
-		styleBar.Render("▇") + mu(" record bytes  ·  ") + styleBarAlt.Render("▇") +
+		swatch(styleBar) + mu(" record bytes  ·  ") + swatch(styleBarAlt) +
 		mu(" FPI bytes — scaled to the biggest record in this list") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" summary table ") + "  " +
@@ -659,9 +655,7 @@ func (m *Model) renderWALRecordsInfo(height int) string {
 func (m *Model) renderWALBlocksInfo(height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("WAL block references reference") + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "WAL block references reference")
 
 	b.WriteString("  " + styleHeader.Render(" this view ") + "  " +
 		mu("the page(s) one WAL record modified — its tie-back from the log to physical storage") + "\n")
@@ -681,7 +675,7 @@ func (m *Model) renderWALBlocksInfo(height int) string {
 	b.WriteString("    " + padRight("db", 12) + mu("reldatabase OID — 0 for shared catalogs that live outside any one database") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" the bar & fpi ") + "  " +
-		styleBarAlt.Render("▇") + mu(" full-page-image bytes for this block (empty = the record logged only the change)") + "\n")
+		swatch(styleBarAlt) + mu(" full-page-image bytes for this block (empty = the record logged only the change)") + "\n")
 	b.WriteString("    " + padRight("data", 12) + mu("block_data_length — bytes of per-block change data (tuple, offsets, …)") + "\n")
 	b.WriteString("    " + padRight("fpi-info", 12) + mu("flags on the page image, e.g. APPLY (replayed) / HAS_HOLE / COMPRESS_*") + "\n\n")
 
@@ -707,12 +701,10 @@ func (m *Model) renderWALBlocksInfo(height int) string {
 // renderWALRelationsInfo explains the by-relation breakdown: how the window is
 // re-aggregated per table/index, what the columns mean, and how to drill.
 func (m *Model) renderWALRelationsInfo(height int) string {
-	sw := func(style lipgloss.Style) string { return style.Render("▇") }
+	sw := swatch
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("WAL by relation reference") + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "WAL by relation reference")
 
 	b.WriteString("  " + styleHeader.Render(" this view ") + "  " +
 		mu("which table/index generated the WAL in the window — \"what caused the change\"") + "\n")
@@ -735,15 +727,4 @@ func (m *Model) renderWALRelationsInfo(height int) string {
 	b.WriteString("  " + mu("first); a relation that resolves to a dropped/other-database relfilenode shows the number.") + "\n")
 
 	return padInfo(&b, height)
-}
-
-// padInfo pads an info overlay's builder to exactly `height` lines so the
-// help row stays pinned to the bottom of the screen. Mirrors the inline
-// padding loop the other render*Info helpers use.
-func padInfo(b *strings.Builder, height int) string {
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
 }

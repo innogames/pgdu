@@ -13,7 +13,7 @@ func (c *Client) ReindexIndex(ctx context.Context, t Table, indexName string) er
 	if err != nil {
 		return err
 	}
-	stmt := fmt.Sprintf("REINDEX INDEX CONCURRENTLY %q.%q", t.Schema, indexName)
+	stmt := "REINDEX INDEX CONCURRENTLY " + qualifiedIdent(t.Schema, indexName)
 	if _, err := pool.Exec(ctx, stmt); err != nil {
 		return fmt.Errorf("reindex %q.%q: %w", t.Schema, indexName, err)
 	}

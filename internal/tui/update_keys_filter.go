@@ -14,16 +14,14 @@ func (m *Model) handleFilterKey(s *screen, msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	case tea.KeyEsc:
 		s.filter = ""
 		s.filterFocused = false
-		s.cursor = 0
-		s.offset = 0
+		s.resetCursor()
 	case tea.KeyEnter:
 		s.filterFocused = false
 		s.clampCursor()
 	case tea.KeyBackspace, tea.KeyDelete:
 		if r := []rune(s.filter); len(r) > 0 {
 			s.filter = string(r[:len(r)-1])
-			s.cursor = 0
-			s.offset = 0
+			s.resetCursor()
 		} else {
 			s.filterFocused = false
 		}
@@ -40,8 +38,7 @@ func (m *Model) handleFilterKey(s *screen, msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 			return m, nil
 		}
 		s.filter += string(msg.Runes)
-		s.cursor = 0
-		s.offset = 0
+		s.resetCursor()
 	}
 	return m, nil
 }

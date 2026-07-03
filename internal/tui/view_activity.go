@@ -158,9 +158,7 @@ func (m *Model) renderActivityInfo(height int) string {
 	mu := styleMuted.Render
 	badge := func(s string) string { return styleBadge.Render(s) }
 	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("Activity reference") + mu("  ·  press ") +
-		badge("?") + mu(" or ") + badge("esc") + mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "Activity reference")
 
 	b.WriteString("  " + styleHeader.Render(" what you're seeing ") + "\n")
 	b.WriteString("    " + mu("Live view of pg_stat_activity. Rows are backends connected to the selected database.") + "\n")

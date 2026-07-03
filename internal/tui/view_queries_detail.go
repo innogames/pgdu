@@ -381,12 +381,7 @@ func (m *Model) renderStatementSamples(s *screen, height int) string {
 			styleErr.Render("executes the query for real") + "\n")
 	}
 
-	// Pad to fill the content area so the help row stays pinned.
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // wrapDetail hard-wraps text to the detail panel's usable width (terminal minus
