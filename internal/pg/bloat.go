@@ -54,7 +54,7 @@ func (c *Client) FillBloat(ctx context.Context, t Table, parts []Part) error {
 	if err != nil {
 		return err
 	}
-	qualified := fmt.Sprintf("%q.%q", t.Schema, t.Name)
+	qualified := qualifiedIdent(t.Schema, t.Name)
 
 	for i := range parts {
 		p := &parts[i]
@@ -83,7 +83,7 @@ func (c *Client) FillBloat(ctx context.Context, t Table, parts []Part) error {
 				}
 			}
 		case PartIndex:
-			indexRef := fmt.Sprintf("%q.%q", t.Schema, p.Name)
+			indexRef := qualifiedIdent(t.Schema, p.Name)
 			if mode == BloatExact && p.AccessMethod == "btree" {
 				if err := pool.QueryRow(ctx, sqlBloatIndex, indexRef).Scan(&p.WastedBytes); err == nil {
 					p.HasBloat = true

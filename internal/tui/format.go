@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -46,8 +47,8 @@ func positionLabel(s *screen) string {
 }
 
 // bloatScanLabel returns a short status indicator for the bloat fetch on
-// the parts level. FillBloat is a single round trip that covers every
-// part, so the states are "scanning…" (in flight) or "ready" (done) —
+// the parts level. FillBloat is a single Cmd that covers every part, so
+// the states are "scanning…" (in flight) or "ready" (done) —
 // any partial scanned count comes from individual rows whose bloat could
 // not be measured (e.g. unsupported index access methods).
 func bloatScanLabel(s *screen) string {
@@ -161,4 +162,66 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// fmtFloat renders a number with up to 1 decimals, trailing zeros stripped.
+func fmtFloat(f float64) string {
+	s := strconv.FormatFloat(f, 'f', 1, 64)
+	if strings.ContainsRune(s, '.') {
+		s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+	}
+	return s
+}
+
+// fmt1 renders a number with exactly one decimal place (60 → "60.0", 98.51 →
+// "98.5"). The top-queries numeric columns use it so every value shows a single
+// fractional digit rather than a ragged mix of 0/1/2 places.
+func fmt1(f float64) string {
+	return strconv.FormatFloat(f, 'f', 1, 64)
+}
+
+// fmtMs formats a millisecond duration compactly: sub-millisecond and small
+// values keep ms; large values switch to seconds so the column stays narrow.
+func fmtMs(ms float64) string {
+	if ms >= 100000 {
+		return fmt1(ms/1000) + "s"
+	}
+	return fmt1(ms)
+}
+
+// fmtAge formats an elapsed time (in ms) as an age with an explicit, scale-
+// appropriate unit so values never read ambiguously: "850ms", "31.1s", "11.2m",
+// "3.1h", "2.4d". Unlike fmtMs the unit is always present, which is what lets the
+// reader tell 105ms from 105s at a glance (paired with durationStyle colouring).
+func fmtAge(ms float64) string {
+	switch {
+	case ms < 1000:
+		return fmt.Sprintf("%.0fms", ms)
+	case ms < 60*1000:
+		return fmt1(ms/1000) + "s"
+	case ms < 60*60*1000:
+		return fmt1(ms/(60*1000)) + "m"
+	case ms < 24*60*60*1000:
+		return fmt1(ms/(60*60*1000)) + "h"
+	default:
+		return fmt1(ms/(24*60*60*1000)) + "d"
+	}
+}
+
+// fmtDuration renders a window span with explicit units — "45s", "13m 12s",
+// "2h 05m", "3d 4h" — so it never reads as a wall-clock time. The old H:MM:SS
+// form made "13:12" ambiguous with a start timestamp, which is the whole reason
+// it sits next to "since 05:56:46".
+func fmtDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm %02ds", int(d/time.Minute), int(d%time.Minute/time.Second))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh %02dm", int(d/time.Hour), int(d%time.Hour/time.Minute))
+	default:
+		return fmt.Sprintf("%dd %dh", int(d/(24*time.Hour)), int(d%(24*time.Hour)/time.Hour))
+	}
 }

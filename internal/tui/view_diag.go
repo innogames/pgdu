@@ -150,12 +150,7 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 		}
 	}
 
-	// Pad to fill the content area so the help row stays pinned.
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // renderDescribeBufferRows renders the body of the describe-table cache-footprint

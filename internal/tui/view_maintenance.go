@@ -363,10 +363,7 @@ func (m *Model) renderSettingsList(s *screen, height int) string {
 func (m *Model) renderMaintenanceInfo(height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("system overview reference") +
-		mu("  ·  press ") + styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") +
-		mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "system overview reference")
 
 	b.WriteString("  " + styleHeader.Render(" extension capacity ") + "\n")
 	b.WriteString("    " + mu("pg_stat_statements and pg_qualstats both pre-allocate a fixed shared-memory array (the .max") + "\n")

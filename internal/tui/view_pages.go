@@ -17,12 +17,10 @@ import (
 // view. Sized to fill `height` lines so the help row stays pinned to the
 // bottom. Shown when the user toggles `?` on levelIndexPages.
 func (m *Model) renderIndexPagesInfo(height int) string {
-	sw := func(style lipgloss.Style) string { return style.Render("▇") }
+	sw := swatch
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("B-tree page reference") + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "B-tree page reference")
 
 	b.WriteString("  " + styleHeader.Render(" page bar ") + "  " +
 		mu("each row is one 8 KiB index page — the bar shows how that page is packed") + "\n")
@@ -77,11 +75,7 @@ func (m *Model) renderIndexPagesInfo(height int) string {
 	b.WriteString("  " + mu("Within a window, j/k or arrows move the cursor; Enter drills into one page's items.") + "\n")
 	b.WriteString("  " + mu("Block 0 is the metapage — skipped here; it carries the root pointer, not a tree page.") + "\n")
 
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // renderIndexTuplesInfo explains what the user is looking at on a B-tree
@@ -93,9 +87,7 @@ func (m *Model) renderIndexPagesInfo(height int) string {
 func (m *Model) renderIndexTuplesInfo(height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("Index-tuple reference") + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "Index-tuple reference")
 
 	b.WriteString("  " + styleHeader.Render(" tuple kinds ") + "  " +
 		mu("the ctid column reveals which kind each row is") + "\n")
@@ -148,11 +140,7 @@ func (m *Model) renderIndexTuplesInfo(height int) string {
 	b.WriteString("    " + mu("don't drill — there's no single heap row to land on.") + "\n\n")
 	b.WriteString("    " + mu("Reading bt_page_items / bt_metap needs a superuser (or pg_read_server_files).") + "\n")
 
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // renderRelationsList draws the page-inspector tool's flat list of heap
@@ -1338,23 +1326,6 @@ func renderGinTupleRow(t pg.GinItem, sampleW, tidW, bytesW, countW int, selected
 
 // ─── per-AM ? reference overlays ─────────────────────────────────────────────
 
-// infoHeader writes the standard overlay title + dismiss-hint line into b.
-// Shared by the gist/brin/gin reference overlays.
-func infoHeader(b *strings.Builder, title string) {
-	mu := styleMuted.Render
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render(title) + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
-}
-
-func infoPad(b *strings.Builder, height int) string {
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
 func (m *Model) renderGistInfo(height int, tuples bool) string {
 	mu := styleMuted.Render
 	var b strings.Builder
@@ -1368,7 +1339,7 @@ func (m *Model) renderGistInfo(height int, tuples bool) string {
 		b.WriteString("  " + mu("Enter descends an internal downlink toward the leaves, or opens the heap row a") + "\n")
 		b.WriteString("  " + mu("leaf entry points at. GiST keys have no total order, so there's no key-seek —") + "\n")
 		b.WriteString("  " + mu("use the ") + styleBadge.Render("/") + mu(" filter to search the rendered keys text.") + "\n")
-		return infoPad(&b, height)
+		return padInfo(&b, height)
 	}
 	infoHeader(&b, "GiST page reference")
 	b.WriteString("  " + mu("GiST has no metapage — block 0 is the root, so every page is browsable.") + "\n\n")
@@ -1378,7 +1349,7 @@ func (m *Model) renderGistInfo(height int, tuples bool) string {
 	b.WriteString("    " + padRight("free", 8) + mu("free space as a percent of the page") + "\n\n")
 	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+strconv.Itoa(int(heapWindowDefault))+" pages per step); Enter drills a page's items.") + "\n")
 	b.WriteString("  " + mu("Reading gist_page_* needs a superuser (or pg_read_server_files).") + "\n")
-	return infoPad(&b, height)
+	return padInfo(&b, height)
 }
 
 func (m *Model) renderBrinInfo(height int, tuples bool) string {
@@ -1394,7 +1365,7 @@ func (m *Model) renderBrinInfo(height int, tuples bool) string {
 		b.WriteString("    " + padRight("summary", 12) + mu("the opclass-rendered summary value (e.g. a min…max range)") + "\n\n")
 		b.WriteString("  " + mu("Press ") + styleBadge.Render("s") + mu(" to seek to the range covering a heap block number.") + "\n")
 		b.WriteString("  " + mu("Enter jumps to the heap pages of the summarised block range.") + "\n")
-		return infoPad(&b, height)
+		return padInfo(&b, height)
 	}
 	infoHeader(&b, "BRIN page reference")
 	b.WriteString("  " + mu("BRIN pages come in three kinds; the banner above carries the metapage summary.") + "\n\n")
@@ -1403,7 +1374,7 @@ func (m *Model) renderBrinInfo(height int, tuples bool) string {
 	b.WriteString("    " + styleBarAlt.Render(padRight("meta", 9)) + mu("metapage (block 0): pages-per-range, version") + "\n\n")
 	b.WriteString("  " + mu("PgUp/PgDn slides the load window; Enter on a regular page lists its summaries.") + "\n")
 	b.WriteString("  " + mu("Reading brin_* needs a superuser (or pg_read_server_files).") + "\n")
-	return infoPad(&b, height)
+	return padInfo(&b, height)
 }
 
 func (m *Model) renderGinInfo(height int, tuples bool) string {
@@ -1418,7 +1389,7 @@ func (m *Model) renderGinInfo(height int, tuples bool) string {
 		b.WriteString("    " + padRight("tids", 12) + mu("number of heap TIDs packed into the segment") + "\n\n")
 		b.WriteString("  " + styleHeapToastTag.Render("Note") + mu(": pageinspect cannot list GIN entry-tree keys, so only data-leaf") + "\n")
 		b.WriteString("  " + mu("pages are itemizable. These rows are terminal (no per-row drill).") + "\n")
-		return infoPad(&b, height)
+		return padInfo(&b, height)
 	}
 	infoHeader(&b, "GIN page reference")
 	b.WriteString("  " + mu("A GIN index is an entry tree (keys) over posting trees/lists (heap tids).") + "\n\n")
@@ -1428,5 +1399,5 @@ func (m *Model) renderGinInfo(height int, tuples bool) string {
 	b.WriteString("    " + styleBarAlt.Render(padRight("meta", 10)) + mu("metapage (block 0): entry/data page counts, pending list") + "\n\n")
 	b.WriteString("  " + mu("The banner shows entry/data page counts and pending-list size. PgUp/PgDn slides") + "\n")
 	b.WriteString("  " + mu("the window; Enter on a data-leaf page lists its posting segments.") + "\n")
-	return infoPad(&b, height)
+	return padInfo(&b, height)
 }

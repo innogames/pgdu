@@ -52,10 +52,7 @@ func (m *Model) renderStatementSnapshots(s *screen, height int) string {
 	if len(s.items) == 0 {
 		b.WriteString("  " + mu("no snapshots yet — press ") + styleBadge.Render("S") +
 			mu(" in the queries view to save one") + "\n")
-		for i := strings.Count(b.String(), "\n"); i < height; i++ {
-			b.WriteString("\n")
-		}
-		return b.String()
+		return padInfo(&b, height)
 	}
 
 	listH := max(height-used, 1)
@@ -120,12 +117,7 @@ func (m *Model) renderStatementSnapshots(s *screen, height int) string {
 		b.WriteString("\n")
 	}
 
-	// Pad to fill the content area so the help row stays pinned.
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // snapshotAge renders the age column for a browser row. The synthetic anchors

@@ -68,6 +68,49 @@ func TestSortModeLess(t *testing.T) {
 	}
 }
 
+// TestLessByExtractor pins the generic comparator behind most sort modes,
+// in particular the "unknown sorts below known" rule: less(unknown, known)
+// is true and less(known, unknown) false, mirroring the itemRows check above.
+func TestLessByExtractor(t *testing.T) {
+	// The test extractor treats negative sizes as "no value".
+	ext := func(it item) (int64, bool) { return it.size, it.size >= 0 }
+	small, big, unknown := item{size: 10}, item{size: 20}, item{size: -1}
+
+	if !lessByExtractor(small, big, ext) {
+		t.Error("10 should be < 20")
+	}
+	if lessByExtractor(big, small, ext) {
+		t.Error("20 should not be < 10")
+	}
+	if lessByExtractor(small, small, ext) {
+		t.Error("equal values are not less")
+	}
+	if lessByExtractor(small, unknown, ext) {
+		t.Error("known should not sort below unknown")
+	}
+	if !lessByExtractor(unknown, small, ext) {
+		t.Error("unknown should sort below known")
+	}
+	if lessByExtractor(unknown, unknown, ext) {
+		t.Error("two unknowns are equal, not less")
+	}
+}
+
+func TestLessByStringExtractor(t *testing.T) {
+	ext := func(it item) (string, bool) { return it.name, it.name != "" }
+	a, b, unknown := item{name: "alpha"}, item{name: "beta"}, item{}
+
+	if !lessByStringExtractor(a, b, ext) || lessByStringExtractor(b, a, ext) {
+		t.Error("want lexicographic order: alpha < beta only")
+	}
+	if lessByStringExtractor(a, unknown, ext) || !lessByStringExtractor(unknown, a, ext) {
+		t.Error("unknown-below-known rule must match the numeric variant")
+	}
+	if lessByStringExtractor(unknown, unknown, ext) {
+		t.Error("two unknowns are equal, not less")
+	}
+}
+
 func TestItemRows(t *testing.T) {
 	cases := []struct {
 		name   string

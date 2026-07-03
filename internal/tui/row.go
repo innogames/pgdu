@@ -234,21 +234,8 @@ func renderSegmentedBar(heap, idx, toast, max int64, width int) string {
 // styleBloat for semantic parity with the parts view's bloat overlay.
 func renderHeapPageBar(live, dead int64, width int) string {
 	const blockSize int64 = 8192
-	bytesToCells := func(b int64) int {
-		if b <= 0 {
-			return 0
-		}
-		c := int(float64(width) * float64(b) / float64(blockSize))
-		if c < 0 {
-			return 0
-		}
-		if c > width {
-			return width
-		}
-		return c
-	}
-	l := bytesToCells(live)
-	d := bytesToCells(dead)
+	l := bytesToCells(live, blockSize, width)
+	d := bytesToCells(dead, blockSize, width)
 	if l+d > width {
 		// Rounding can push us one cell over; trim the dead segment last
 		// since live is the dominant visual.
@@ -281,26 +268,23 @@ func renderBufferBar(slices []bufferSlice, thisDBRemainder, otherDB, total int64
 	if total <= 0 {
 		total = 1
 	}
-	bytesToCells := func(b int64) int {
-		return max0(int(float64(width) * float64(b) / float64(total)))
-	}
 	segs := make([]barSegment, 0, len(slices)+2)
 	used := 0
 	for i, sl := range slices {
-		c := bytesToCells(sl.bytes)
+		c := bytesToCells(sl.bytes, total, width)
 		if used+c > width {
 			c = width - used
 		}
 		segs = append(segs, barSegment{cells: c, style: bufferSliceStyle(i)})
 		used += c
 	}
-	rem := bytesToCells(thisDBRemainder)
+	rem := bytesToCells(thisDBRemainder, total, width)
 	if used+rem > width {
 		rem = width - used
 	}
 	segs = append(segs, barSegment{cells: rem, style: styleBar})
 	used += rem
-	other := bytesToCells(otherDB)
+	other := bytesToCells(otherDB, total, width)
 	if used+other > width {
 		other = width - used
 	}
@@ -317,9 +301,6 @@ func renderServerMemBar(sbUsed, sbFree, otherUsed, cache, total int64, width int
 	if total <= 0 {
 		total = 1
 	}
-	bytesToCells := func(b int64) int {
-		return max0(int(float64(width) * float64(b) / float64(total)))
-	}
 	used := 0
 	clamp := func(c int) int {
 		if used+c > width {
@@ -331,10 +312,10 @@ func renderServerMemBar(sbUsed, sbFree, otherUsed, cache, total int64, width int
 		used += c
 		return c
 	}
-	a := clamp(bytesToCells(sbUsed))
-	b := clamp(bytesToCells(sbFree))
-	c := clamp(bytesToCells(otherUsed))
-	d := clamp(bytesToCells(cache))
+	a := clamp(bytesToCells(sbUsed, total, width))
+	b := clamp(bytesToCells(sbFree, total, width))
+	c := clamp(bytesToCells(otherUsed, total, width))
+	d := clamp(bytesToCells(cache, total, width))
 	return paintBar(width,
 		barSegment{cells: a, style: styleBar},
 		barSegment{cells: b, style: styleSBFree},
@@ -350,6 +331,15 @@ func max0(n int) int {
 	return n
 }
 
+// bytesToCells scales a byte count to bar cells proportionally to total,
+// clamped to [0, width]. Callers guarantee total > 0.
+func bytesToCells(b, total int64, width int) int {
+	if b <= 0 {
+		return 0
+	}
+	return min(max0(int(float64(width)*float64(b)/float64(total))), width)
+}
+
 func padRight(s string, n int) string {
 	w := displayWidth(s)
 	if w >= n {
@@ -357,6 +347,27 @@ func padRight(s string, n int) string {
 	}
 	return s + strings.Repeat(" ", n-w)
 }
+
+// infoHeader writes the standard `?`-overlay title + dismiss-hint line into b.
+func infoHeader(b *strings.Builder, title string) {
+	mu := styleMuted.Render
+	b.WriteString("\n")
+	b.WriteString("  " + styleSelected.Render(title) + mu("  ·  press ") +
+		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+}
+
+// padInfo pads an info overlay's builder to exactly `height` lines so the
+// help row stays pinned to the bottom of the screen.
+func padInfo(b *strings.Builder, height int) string {
+	rendered := strings.Count(b.String(), "\n")
+	for i := rendered; i < height; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// swatch renders the legend colour block used by the `?` reference overlays.
+func swatch(style lipgloss.Style) string { return style.Render("▇") }
 
 // SGR intensity toggles for emboldening the active-sort column label inside a
 // header line that is rendered as one styleMuted.Render(line). \x1b[22m turns

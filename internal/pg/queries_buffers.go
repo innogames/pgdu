@@ -1,5 +1,7 @@
 package pg
 
+import "fmt"
+
 // --- shared-buffers view ---
 
 // sqlExtensionProbe returns two booleans: whether the named extension is
@@ -85,7 +87,14 @@ ORDER  BY g.usagecount
 // pg_buffercache.reldatabase = 0 is the shared catalog buffer pool — included
 // so system relations a user owns aren't double-counted oddly, though for
 // user schemas the join via relfilenode usually filters those out.
-const sqlBufferStats = `
+//
+// sqlBufferStatsTmpl is the shared body of the two variants below, which
+// differ only in how rows are picked: by schema (needs the extra pg_namespace
+// join in the filenodes arms, %[1]s, and an nspname predicate) or by a single
+// relation OID. %[2]s is the row predicate, %[3]s the trailing ORDER BY
+// (pointless for the single-row variant). The fragments are the fixed strings
+// in the var block below — nothing user-supplied is ever spliced in.
+const sqlBufferStatsTmpl = `
 WITH bc AS (
   SELECT relfilenode,
          COUNT(*)                        AS bufs,
@@ -97,20 +106,17 @@ WITH bc AS (
 ),
 filenodes AS (
   SELECT c.oid AS tab_oid, pg_relation_filenode(c.oid) AS fn
-  FROM   pg_class c
-  JOIN   pg_namespace n ON n.oid = c.relnamespace
-  WHERE  n.nspname = $1 AND c.relkind IN ('r','m','p')
+  FROM   pg_class c%[1]s
+  WHERE  %[2]s AND c.relkind IN ('r','m','p')
   UNION ALL
   SELECT c.oid, pg_relation_filenode(c.reltoastrelid)
-  FROM   pg_class c
-  JOIN   pg_namespace n ON n.oid = c.relnamespace
-  WHERE  n.nspname = $1 AND c.relkind IN ('r','m','p') AND c.reltoastrelid <> 0
+  FROM   pg_class c%[1]s
+  WHERE  %[2]s AND c.relkind IN ('r','m','p') AND c.reltoastrelid <> 0
   UNION ALL
   SELECT c.oid, pg_relation_filenode(i.indexrelid)
-  FROM   pg_class c
-  JOIN   pg_namespace n ON n.oid = c.relnamespace
+  FROM   pg_class c%[1]s
   JOIN   pg_index i ON i.indrelid = c.oid
-  WHERE  n.nspname = $1 AND c.relkind IN ('r','m','p')
+  WHERE  %[2]s AND c.relkind IN ('r','m','p')
 ),
 buffered AS (
   SELECT f.tab_oid,
@@ -136,65 +142,21 @@ FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 LEFT   JOIN buffered b ON b.tab_oid = c.oid
 LEFT   JOIN pg_statio_user_tables s ON s.relid = c.oid
-WHERE  n.nspname = $1 AND c.relkind IN ('r','m','p')
-ORDER  BY buffered_bytes DESC, c.relname
+WHERE  %[2]s AND c.relkind IN ('r','m','p')%[3]s
 `
 
-// sqlBufferStatByOID is sqlBufferStats scoped to a single relation by OID
-// instead of a whole schema — the natural shape for the describe-table view,
-// which has the OID but wants only that one table's cache footprint. The
-// filenodes CTEs and final SELECT filter on c.oid = $1; the rest matches
-// sqlBufferStats so the scanned column list is identical.
-const sqlBufferStatByOID = `
-WITH bc AS (
-  SELECT relfilenode,
-         COUNT(*)                        AS bufs,
-         COUNT(*) FILTER (WHERE isdirty)  AS dirty_bufs,
-         SUM(usagecount)::bigint          AS usage_sum
-  FROM   pg_buffercache
-  WHERE  reldatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
-  GROUP  BY relfilenode
-),
-filenodes AS (
-  SELECT c.oid AS tab_oid, pg_relation_filenode(c.oid) AS fn
-  FROM   pg_class c
-  WHERE  c.oid = $1 AND c.relkind IN ('r','m','p')
-  UNION ALL
-  SELECT c.oid, pg_relation_filenode(c.reltoastrelid)
-  FROM   pg_class c
-  WHERE  c.oid = $1 AND c.relkind IN ('r','m','p') AND c.reltoastrelid <> 0
-  UNION ALL
-  SELECT c.oid, pg_relation_filenode(i.indexrelid)
-  FROM   pg_class c
-  JOIN   pg_index i ON i.indrelid = c.oid
-  WHERE  c.oid = $1 AND c.relkind IN ('r','m','p')
-),
-buffered AS (
-  SELECT f.tab_oid,
-         COALESCE(SUM(bc.bufs), 0)::bigint        AS bufs,
-         COALESCE(SUM(bc.dirty_bufs), 0)::bigint  AS dirty_bufs,
-         COALESCE(SUM(bc.usage_sum), 0)::bigint   AS usage_sum
-  FROM   filenodes f
-  LEFT   JOIN bc ON bc.relfilenode = f.fn
-  GROUP  BY f.tab_oid
+var (
+	// sqlBufferStats lists every table in one schema ($1 = nspname).
+	sqlBufferStats = fmt.Sprintf(sqlBufferStatsTmpl,
+		"\n  JOIN   pg_namespace n ON n.oid = c.relnamespace",
+		"n.nspname = $1",
+		"\nORDER  BY buffered_bytes DESC, c.relname")
+	// sqlBufferStatByOID is the same query scoped to a single relation
+	// ($1 = oid) — the natural shape for the describe-table view, which has
+	// the OID but wants only that one table's cache footprint. The scanned
+	// column list is identical to sqlBufferStats.
+	sqlBufferStatByOID = fmt.Sprintf(sqlBufferStatsTmpl, "", "c.oid = $1", "")
 )
-SELECT c.oid,
-       n.nspname,
-       c.relname,
-       COALESCE(b.bufs, 0) * current_setting('block_size')::int      AS buffered_bytes,
-       pg_total_relation_size(c.oid)                                 AS total_bytes,
-       COALESCE(s.heap_blks_hit, 0) + COALESCE(s.idx_blks_hit, 0)    AS hits,
-       COALESCE(s.heap_blks_read, 0) + COALESCE(s.idx_blks_read, 0)  AS reads,
-       COALESCE(b.dirty_bufs, 0) * current_setting('block_size')::int AS dirty_bytes,
-       CASE WHEN COALESCE(b.bufs, 0) > 0
-            THEN b.usage_sum::float8 / b.bufs
-            ELSE 0 END                                               AS usage_avg
-FROM   pg_class c
-JOIN   pg_namespace n ON n.oid = c.relnamespace
-LEFT   JOIN buffered b ON b.tab_oid = c.oid
-LEFT   JOIN pg_statio_user_tables s ON s.relid = c.oid
-WHERE  c.oid = $1 AND c.relkind IN ('r','m','p')
-`
 
 // sqlShmemAllocations dumps the whole Postgres shared-memory segment from
 // pg_shmem_allocations: every named region (the buffer pool, lock tables, SLRU

@@ -17,12 +17,10 @@ import (
 // pinned to the bottom. Shown when the user toggles `?` on
 // levelBufferTables.
 func (m *Model) renderBufferInfo(height int) string {
-	sw := func(style lipgloss.Style) string { return style.Render("▇") }
+	sw := swatch
 	var b strings.Builder
 	mu := styleMuted.Render
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("Bar reference") + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	infoHeader(&b, "Bar reference")
 
 	b.WriteString("  " + styleHeader.Render(" server memory ") + "  " +
 		mu("the whole host's RAM (MemTotal) — the superset") + "\n")
@@ -51,11 +49,7 @@ func (m *Model) renderBufferInfo(height int) string {
 	b.WriteString("  " + mu("Tables ranked 11+ use the default bar colour.  ") +
 		styleBadge.Render("enter") + mu(" opens a per-table breakdown.") + "\n")
 
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // renderUsageHeatBar paints the cluster (or any) usagecount histogram as one
@@ -227,15 +221,11 @@ func (m *Model) renderBufferDetail(s *screen, height int) string {
 				b.WriteString(line + "\n")
 			}
 			b.WriteString("\n  " + mu("0 = cold (evictable) → 5 = hot (frequently reused)  ·  ") +
-				styleDirty.Render("▇") + mu(" dirty (modified, awaiting flush)") + "\n")
+				swatch(styleDirty) + mu(" dirty (modified, awaiting flush)") + "\n")
 		}
 	}
 
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // renderBufferDetailInfo is the ? overlay for the per-table buffer-detail
@@ -244,10 +234,8 @@ func (m *Model) renderBufferDetail(s *screen, height int) string {
 func (m *Model) renderBufferDetailInfo(height int) string {
 	var b strings.Builder
 	mu := styleMuted.Render
-	sw := func(style lipgloss.Style) string { return style.Render("▇") }
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("Buffer detail reference") + mu("  ·  press ") +
-		styleBadge.Render("?") + mu(" or ") + styleBadge.Render("esc") + mu(" to dismiss") + "\n\n")
+	sw := swatch
+	infoHeader(&b, "Buffer detail reference")
 
 	b.WriteString("  " + styleHeader.Render(" cache footprint ") + "  " +
 		mu("how much of this table lives in shared_buffers") + "\n")
@@ -268,11 +256,7 @@ func (m *Model) renderBufferDetailInfo(height int) string {
 	b.WriteString("    " + mu("                 checkpointer still owes a write; lots of hot+dirty = write pressure") + "\n")
 	b.WriteString("    " + mu("each row's bar is scaled to the table's busiest band, so band sizes compare.") + "\n")
 
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // summaryBarWidth picks the bar width for the two stacked summary bars.
@@ -325,7 +309,7 @@ func (m *Model) renderBufferSummary(s *screen) (string, map[uint32]int) {
 		cache := max(sum.ServerMemAvailableBytes-sum.ServerMemFreeBytes, 0)
 		bar := renderServerMemBar(sbUsed, sbFree, otherUsed, cache, sum.ServerMemBytes, barW)
 		muted := styleMuted.Render
-		sw := func(style lipgloss.Style) string { return style.Render("▇") + " " }
+		sw := func(style lipgloss.Style) string { return swatch(style) + " " }
 		stats := muted(fmt.Sprintf("shared buffer %s (", humanize.Bytes(sbTotal))) +
 			sw(styleBar) + muted(fmt.Sprintf("used %s / ", humanize.Bytes(sbUsed))) +
 			sw(styleSBFree) + muted(fmt.Sprintf("free %s)  ·  ", humanize.Bytes(sbFree))) +
@@ -351,7 +335,7 @@ func (m *Model) renderBufferSummary(s *screen) (string, map[uint32]int) {
 	usedPct := float64(sum.ThisDBBytes+sum.OtherDBBytes) * 100 / float64(sum.TotalBytes)
 	usedStr := percentStyle(usedPct).Render(fmt.Sprintf("%.1f%% used", usedPct))
 	muted := styleMuted.Render
-	sw := func(style lipgloss.Style) string { return style.Render("▇") + " " }
+	sw := func(style lipgloss.Style) string { return swatch(style) + " " }
 	sbStats := usedStr + muted("  ·  ") +
 		sw(styleBar) + muted(fmt.Sprintf("this db %s  ·  ", humanize.Bytes(sum.ThisDBBytes))) +
 		sw(styleBarAlt) + muted(fmt.Sprintf("other %s  ·  ", humanize.Bytes(sum.OtherDBBytes))) +
@@ -392,7 +376,7 @@ func (m *Model) bufferTemperatureLines(sum *pg.BufferCacheSummary, barW int) str
 	cold := sum.UsageCounts[0].Buffers
 	hot := sum.UsageCounts[len(sum.UsageCounts)-1].Buffers
 	muted := styleMuted.Render
-	sw := func(style lipgloss.Style) string { return style.Render("▇") + " " }
+	sw := func(style lipgloss.Style) string { return swatch(style) + " " }
 	stats := muted(fmt.Sprintf("avg %.1f/5  ·  ", avg)) +
 		sw(usageHeatStyle(0)) + muted(fmt.Sprintf("cold %.0f%%  ·  ", float64(cold)*100/float64(totBufs))) +
 		sw(usageHeatStyle(len(usageHeatPalette)-1)) + muted(fmt.Sprintf("hot %.0f%%  ·  ", float64(hot)*100/float64(totBufs))) +

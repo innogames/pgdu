@@ -158,6 +158,14 @@ func (s *screen) clampCursor() {
 	}
 }
 
+// resetCursor jumps the selection back to the top of the list. cursor and
+// offset move together so the viewport can't be left scrolled past the
+// selection.
+func (s *screen) resetCursor() {
+	s.cursor = 0
+	s.offset = 0
+}
+
 // viewportRange adjusts offset so cursor stays inside [offset, offset+height)
 // and returns the new offset plus the half-open end. Callers use the offset
 // to scroll the list and the end (clamped to the underlying length elsewhere)

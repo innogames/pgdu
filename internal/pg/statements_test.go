@@ -329,6 +329,40 @@ func TestQueryStatHitRatioAndDerived(t *testing.T) {
 	}
 }
 
+func TestQueryStatDerivedEdgeCases(t *testing.T) {
+	// BlocksPerRow: undefined without result rows, defined otherwise.
+	if _, ok := (QueryStat{SharedBlksHit: 10}).BlocksPerRow(); ok {
+		t.Error("BlocksPerRow should be undefined with zero rows")
+	}
+	if _, ok := (QueryStat{Rows: -1, SharedBlksHit: 10}).BlocksPerRow(); ok {
+		t.Error("BlocksPerRow should be undefined with negative rows")
+	}
+	if bpr, ok := (QueryStat{Rows: 4, SharedBlksHit: 6, SharedBlksRead: 2}).BlocksPerRow(); !ok || bpr != 2 {
+		t.Errorf("BlocksPerRow = %v ok=%v, want 2 true", bpr, ok)
+	}
+
+	// IOTime sums all six timing counters; zero when none are set.
+	if got := (QueryStat{}).IOTime(); got != 0 {
+		t.Errorf("IOTime zero = %v, want 0", got)
+	}
+	full := QueryStat{
+		SharedBlkReadTime: 1, SharedBlkWriteTime: 2,
+		LocalBlkReadTime: 4, LocalBlkWriteTime: 8,
+		TempBlkReadTime: 16, TempBlkWriteTime: 32,
+	}
+	if got := full.IOTime(); got != 63 {
+		t.Errorf("IOTime = %v, want 63", got)
+	}
+
+	// HitRatio boundaries: all-hit and all-miss are both defined ratios.
+	if hr, ok := (QueryStat{SharedBlksHit: 5}).HitRatio(); !ok || hr != 100 {
+		t.Errorf("HitRatio all-hit = %v ok=%v, want 100 true", hr, ok)
+	}
+	if hr, ok := (QueryStat{SharedBlksRead: 5}).HitRatio(); !ok || hr != 0 {
+		t.Errorf("HitRatio all-miss = %v ok=%v, want 0 true", hr, ok)
+	}
+}
+
 func TestBuildSampleCall(t *testing.T) {
 	cases := []struct {
 		name   string

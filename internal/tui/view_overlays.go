@@ -83,7 +83,7 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 // levels whose bars are monochrome (no legend needed).
 func renderLegend(s *screen) string {
 	swatch := func(style lipgloss.Style, label string) string {
-		return style.Render("▇") + " " + styleMuted.Render(label)
+		return swatch(style) + " " + styleMuted.Render(label)
 	}
 	sep := styleMuted.Render("  ·  ")
 	switch s.level {
@@ -255,11 +255,7 @@ func (m *Model) renderExtPrompt(s *screen, height int) string {
 	default:
 		b.WriteString("  " + styleErr.Render(p.name+" is not available on this server — ask the DBA to install it") + "\n")
 	}
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // renderUpgradePrompt renders the blocking "extension outdated" screen for the
@@ -294,9 +290,5 @@ func (m *Model) renderUpgradePrompt(s *screen, height int) string {
 		b.WriteString("  " + styleErr.Render("the server's own "+p.name+" ("+p.available+
 			") is older than pgdu needs — upgrade PostgreSQL / the extension package") + "\n")
 	}
-	rendered := strings.Count(b.String(), "\n")
-	for i := rendered; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }

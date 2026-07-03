@@ -248,8 +248,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if s.heapWindowStart >= s.heapPageCount {
 				s.heapWindowStart = max32(s.heapPageCount-s.heapWindowCount, 0)
 			}
-			s.cursor = 0
-			s.offset = 0
+			s.resetCursor()
 			return m, m.loadCurrent()
 		}
 		s.cursor = max(min(s.cursor+m.pageStep(), s.visibleLen()-1), 0)
@@ -264,8 +263,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if (s.level == levelHeapPages || s.level == levelIndexPages) && s.heapWindowStart > 0 {
 			s.heapWindowStart = max32(s.heapWindowStart-s.heapWindowCount, 0)
-			s.cursor = 0
-			s.offset = 0
+			s.resetCursor()
 			return m, m.loadCurrent()
 		}
 		s.cursor = max(s.cursor-m.pageStep(), 0)
@@ -534,8 +532,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Type == tea.KeyEsc && s.filter != "" {
 			s.filter = ""
-			s.cursor = 0
-			s.offset = 0
+			s.resetCursor()
 			break
 		}
 		if len(m.stack) > 1 {
