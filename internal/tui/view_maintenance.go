@@ -91,7 +91,10 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	if hintLine != "" {
 		full.WriteString(hintLine + "\n")
 	}
-	full.WriteString("  " + mu("↑↓ select capacity row  ·  ↵ arm reset  ·  space refresh  ·  pgdn/pgup scroll") + "\n")
+	full.WriteString("  " + mu("↑↓ select capacity row  ·  ↵ settings  ·  ") +
+		styleBadge.Render("a") + mu(" activity  ·  ") +
+		styleBadge.Render("w") + mu(" wal  ·  ") +
+		styleBadge.Render("r") + mu(" replication  ·  space refresh") + "\n")
 	full.WriteString(body.String())
 
 	return scrollWindow(full.String(), &s.offset, height)

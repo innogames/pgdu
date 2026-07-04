@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"pgdu/internal/pg"
 )
 
@@ -172,6 +174,20 @@ func (m *Model) maintReindexHint(s *screen) string {
 		styleBadge.Render("enter") + mu(" to REINDEX it CONCURRENTLY")
 }
 
+// maintAgeStr renders a "last <age>" fragment with the age graded by how stale
+// it is: under a week stays muted (routine), over a week yellow, over a month
+// red — the same instinct a DBA applies reading last_autovacuum by hand.
+func maintAgeStr(age time.Duration) string {
+	s := relativeAge(age)
+	switch {
+	case age >= 30*24*time.Hour:
+		return styleBloat.Render(s)
+	case age >= 7*24*time.Hour:
+		return styleBarAlt.Render(s)
+	}
+	return styleMuted.Render(s)
+}
+
 func (m *Model) maintVacuumLine(st *pg.TableMaintStats) string {
 	mu := styleMuted.Render
 	var parts []string
@@ -179,11 +195,11 @@ func (m *Model) maintVacuumLine(st *pg.TableMaintStats) string {
 	// Last vacuum with source tag.
 	switch {
 	case st.LastVacuum != nil && (st.LastAutovacuum == nil || st.LastVacuum.After(*st.LastAutovacuum)):
-		parts = append(parts, mu("last ")+relativeAge(time.Since(*st.LastVacuum))+mu(" (manual)"))
+		parts = append(parts, mu("last ")+maintAgeStr(time.Since(*st.LastVacuum))+mu(" (manual)"))
 	case st.LastAutovacuum != nil:
-		parts = append(parts, mu("last ")+relativeAge(time.Since(*st.LastAutovacuum))+mu(" (auto)"))
+		parts = append(parts, mu("last ")+maintAgeStr(time.Since(*st.LastAutovacuum))+mu(" (auto)"))
 	default:
-		parts = append(parts, mu("never vacuumed"))
+		parts = append(parts, styleBarAlt.Render("never vacuumed"))
 	}
 
 	// Insert-based trigger progress.
@@ -205,11 +221,11 @@ func (m *Model) maintAnalyzeLine(st *pg.TableMaintStats) string {
 
 	switch {
 	case st.LastAnalyze != nil && (st.LastAutoanalyze == nil || st.LastAnalyze.After(*st.LastAutoanalyze)):
-		parts = append(parts, mu("last ")+relativeAge(time.Since(*st.LastAnalyze))+mu(" (manual)"))
+		parts = append(parts, mu("last ")+maintAgeStr(time.Since(*st.LastAnalyze))+mu(" (manual)"))
 	case st.LastAutoanalyze != nil:
-		parts = append(parts, mu("last ")+relativeAge(time.Since(*st.LastAutoanalyze))+mu(" (auto)"))
+		parts = append(parts, mu("last ")+maintAgeStr(time.Since(*st.LastAutoanalyze))+mu(" (auto)"))
 	default:
-		parts = append(parts, mu("never analyzed"))
+		parts = append(parts, styleBarAlt.Render("never analyzed"))
 	}
 
 	if st.NModSinceAnalyze > 0 {
@@ -233,9 +249,16 @@ func (m *Model) maintTuplesLine(st *pg.TableMaintStats) string {
 		deadPct := int(float64(st.NDead) / float64(total) * 100)
 		parts = append(parts, mu(formatRows(st.NLive)+" live · "+formatRows(st.NDead)+" dead"))
 		if deadPct > 0 {
+			// Grade dead share by absolute band: past the default autovacuum
+			// scale factor (20%) is a real problem, double that is red.
 			s := mu(fmt.Sprintf("(%d%%)", deadPct))
-			if deadPct >= 10 {
-				s = styleBarAlt.Render(fmt.Sprintf("(%d%%)", deadPct))
+			switch {
+			case deadPct >= 40:
+				s = styleBloat.Render(fmt.Sprintf("(%d%% dead)", deadPct))
+			case deadPct >= 20:
+				s = styleBarAlt.Render(fmt.Sprintf("(%d%% dead)", deadPct))
+			case deadPct >= 10:
+				s = lipgloss.NewStyle().Foreground(colorCostLow).Render(fmt.Sprintf("(%d%%)", deadPct))
 			}
 			parts = append(parts, s)
 		}

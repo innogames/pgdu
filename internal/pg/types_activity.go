@@ -83,5 +83,6 @@ type ActivityRow struct {
 	XactAgeMs     float64 // now() - xact_start in ms; 0 when xact_start is NULL
 	StateAgeMs    float64 // now() - state_change in ms; 0 when state_change is NULL
 	QueryID       int64   // pg_stat_statements queryid (PG 14+); 0 when unknown
+	BlockedBy     string  // space-separated PIDs blocking this backend (pg_blocking_pids); empty when unblocked
 	Query         string  // truncated normalized query text
 }

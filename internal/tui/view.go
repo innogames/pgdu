@@ -141,6 +141,8 @@ func (m *Model) View() string {
 		b.WriteString(m.renderColumnConfig(s, contentHeight))
 	case m.showTblColumnConfig && s.level == levelTableStats:
 		b.WriteString(m.renderTblColumnConfig(s, contentHeight))
+	case m.showDiagColumnConfig && s.level == levelDiagnosticResult:
+		b.WriteString(m.renderDiagColumnConfig(s, contentHeight))
 	case m.showDiagQuery && s.level == levelDiagnosticResult && s.diag != nil:
 		b.WriteString(m.renderDiagQuery(s, contentHeight))
 	case m.showInfo && m.hasInfoOverlay(s):
@@ -164,7 +166,7 @@ func (m *Model) View() string {
 		s.level != levelStatements && s.level != levelStatementDetail &&
 		s.level != levelStatementResult && s.level != levelSnapshots &&
 		s.level != levelBufferDetail && s.level != levelMaintenance && s.level != levelSettings &&
-		s.level != levelActivity && s.level != levelTableStats:
+		s.level != levelActivity && s.level != levelLockTree && s.level != levelTableStats:
 		// levelDescribe never populates items — it renders from s.describe.
 		// levelDiagnosticResult and levelStatementResult with 0 items mean the
 		// query returned no rows, which is valid; fall through to the renderer
@@ -255,6 +257,8 @@ func (m *Model) View() string {
 			// The activity table is a generic diagnostic-style table — same
 			// renderer as levelStatements and levelDiagnosticResult.
 			b.WriteString(m.renderDiagResult(s, contentHeight))
+		case levelLockTree:
+			b.WriteString(m.renderLockTree(s, contentHeight))
 		case levelTableStats:
 			// The table overview is a generic diagnostic-style table too.
 			b.WriteString(m.renderDiagResult(s, contentHeight))

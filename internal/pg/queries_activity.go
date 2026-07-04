@@ -27,6 +27,9 @@ SELECT
         EXTRACT(epoch FROM now() - a.state_change) * 1000, 0
     )::float8 AS state_age_ms,
     coalesce(a.query_id, 0) AS query_id,
+    -- PIDs blocking this backend (pg_blocking_pids); empty when nobody blocks it.
+    -- Rendered as an opt-in column so the lock-wait relationship reads inline.
+    coalesce(array_to_string(pg_blocking_pids(a.pid), ' '), '') AS blocked_by,
     coalesce(left(regexp_replace(a.query, '\s+', ' ', 'g'), 300), '') AS query
 FROM pg_stat_activity a
 WHERE a.pid <> pg_backend_pid()

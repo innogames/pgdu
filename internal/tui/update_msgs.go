@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"maps"
-	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -386,30 +385,10 @@ func (m *Model) onDiagnosticLoaded(msg diagnosticLoadedMsg) tea.Cmd {
 	if msg.err != nil || msg.result == nil {
 		return nil
 	}
-	s.diagCols = msg.result.Columns
-	s.diagBarCol = msg.result.BarCol
-	// Default sort: the result's SortCol (biggest first) if present, else col 0.
-	if msg.result.SortCol >= 0 {
-		s.diagSortCol = msg.result.SortCol
-		s.sortDesc = true
-	} else {
-		s.diagSortCol = 0
-		s.sortDesc = false
-	}
-	// Convert each result row to an item. item.name is the space-joined cell
-	// display so the existing fuzzy filter can match any column value.
-	for _, row := range msg.result.Rows {
-		parts := make([]string, len(row))
-		for i, cell := range row {
-			parts[i] = cell.Display
-		}
-		s.items = append(s.items, item{
-			name: strings.Join(parts, " "),
-			data: row, // []pg.DiagCell
-		})
-	}
-	s.diagMetricsDirty = true
-	m.applySort(s)
+	// Retain the full result and project it through the column-visibility
+	// selection; rebuildDiagItems also resolves bar/sort indices and the footer.
+	s.diagResult = msg.result
+	m.rebuildDiagItems(s)
 	return nil
 }
 
@@ -582,11 +561,11 @@ func (m *Model) onTableOverviewLoaded(msg tableOverviewLoadedMsg) tea.Cmd {
 }
 
 func (m *Model) onActivityTick() tea.Cmd {
-	// Keep the tick alive while the user is anywhere in the activity tool (the
-	// table is the only level). Stop when they navigate fully away so re-entry
-	// can start a fresh loop.
+	// Keep the tick alive while the user is in the activity table or its
+	// lock-tree child. Stop when they navigate fully away so re-entry can start a
+	// fresh loop.
 	top := m.top()
-	if top.level != levelActivity {
+	if top.level != levelActivity && top.level != levelLockTree {
 		m.activityTicking = false
 		return nil
 	}
@@ -596,7 +575,27 @@ func (m *Model) onActivityTick() tea.Cmd {
 		m.activityTicking = false
 		return nil
 	}
+	if top.level == levelLockTree {
+		return tea.Batch(m.loadLockTreeCmd(top.db), next)
+	}
 	return tea.Batch(m.loadActivityCmd(top.db, top.actFilter), next)
+}
+
+func (m *Model) onLockTreeLoaded(msg lockTreeLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelLockTree)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if msg.err != nil {
+		s.lockErr = msg.err
+		return nil
+	}
+	s.lockErr = nil
+	s.lockNodes = msg.nodes
+	m.rebuildLockTreeItems(s)
+	return nil
 }
 
 func (m *Model) onActivityHosts(msg activityHostsMsg) tea.Cmd {
@@ -615,7 +614,12 @@ func (m *Model) onActivityHosts(msg activityHostsMsg) tea.Cmd {
 }
 
 func (m *Model) onBackendAction(msg backendActionMsg) tea.Cmd {
-	s := m.findLevel(levelActivity)
+	// The action may have been fired from the activity table or the lock tree;
+	// act on whichever is on top so the right list refreshes.
+	s := m.findLevel(levelLockTree)
+	if s == nil {
+		s = m.findLevel(levelActivity)
+	}
 	if s == nil {
 		return nil
 	}
@@ -630,6 +634,9 @@ func (m *Model) onBackendAction(msg backendActionMsg) tea.Cmd {
 		m.notice = fmt.Sprintf("%s sent to backend %d", msg.action, msg.pid)
 	}
 	// Refresh the list so the terminated/cancelled backend disappears or changes state.
+	if s.level == levelLockTree {
+		return m.loadLockTreeCmd(s.db)
+	}
 	return m.loadActivityCmd(s.db, s.actFilter)
 }
 

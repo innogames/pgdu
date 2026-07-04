@@ -16,6 +16,10 @@ const (
 	colTotalMs     stmtColID = "total_ms"
 	colPctTime     stmtColID = "time%"
 	colMeanMs      stmtColID = "mean_ms"
+	colMinMs       stmtColID = "min_ms"
+	colMaxMs       stmtColID = "max_ms"
+	colStddevMs    stmtColID = "stddev_ms"
+	colCV          stmtColID = "cv"
 	colPlanMs      stmtColID = "plan_ms"
 	colMeanPlanMs  stmtColID = "mean_plan_ms"
 	colPlans       stmtColID = "plans"
@@ -86,6 +90,43 @@ func stmtColumnRegistry() []stmtColDesc {
 		{id: colMeanMs, name: "mean_ms", kind: pg.DiagCostGraded, defaultOn: true,
 			desc: "average execution time per call",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return diagNum(fmtMs(q.MeanTime()), q.MeanTime()) }},
+		// The extrema/stddev are cumulative since the last stats reset — they can't
+		// be windowed (you can't subtract two extrema), so the diff zeroes them and
+		// these cells show "—" on windowed rows. They carry real values on the
+		// cumulative "since last reset" anchor and on queries new since the baseline.
+		{id: colMinMs, name: "min_ms", kind: pg.DiagDuration,
+			desc: "fastest single call (cumulative since stats reset — on windowed rows)",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				if q.MinExecTime <= 0 {
+					return pg.DiagCell{Display: "—"}
+				}
+				return diagNum(fmtMs(q.MinExecTime), q.MinExecTime)
+			}},
+		{id: colMaxMs, name: "max_ms", kind: pg.DiagDuration,
+			desc: "slowest single call (cumulative since stats reset) — spots outlier spikes a mean hides",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				if q.MaxExecTime <= 0 {
+					return pg.DiagCell{Display: "—"}
+				}
+				return diagNum(fmtMs(q.MaxExecTime), q.MaxExecTime)
+			}},
+		{id: colStddevMs, name: "stddev_ms", kind: pg.DiagDuration,
+			desc: "standard deviation of execution time (cumulative since stats reset)",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				if q.StddevExecTime <= 0 {
+					return pg.DiagCell{Display: "—"}
+				}
+				return diagNum(fmtMs(q.StddevExecTime), q.StddevExecTime)
+			}},
+		{id: colCV, name: "cv", kind: pg.DiagCostGraded,
+			desc: "coefficient of variation (stddev ÷ mean, cumulative) — high = erratic runtime, plan flips or lock waits",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				if q.StddevExecTime <= 0 || q.MeanExecTime <= 0 {
+					return pg.DiagCell{Display: "—"}
+				}
+				v := q.StddevExecTime / q.MeanExecTime
+				return diagNum(fmtFloat(v), v)
+			}},
 		{id: colPlanMs, name: "plan_ms", kind: pg.DiagFloat, available: planningOnly,
 			desc: "total planning time (needs track_planning)",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return diagNum(fmtMs(q.TotalPlanTime), q.TotalPlanTime) }},

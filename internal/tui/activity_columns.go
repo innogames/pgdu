@@ -29,6 +29,7 @@ const (
 	actColStateAge    actColID = "state_age"
 	actColBackendXid  actColID = "xid"
 	actColBackendXmin actColID = "xmin"
+	actColBlockedBy   actColID = "blocked_by"
 	actColTable       actColID = "table"
 	actColQuery       actColID = "query"
 	// OS-level proc columns (Linux only, local server; show — otherwise).
@@ -139,9 +140,20 @@ func actColumnRegistry() []actColDesc {
 		{id: actColBackendXmin, name: "xmin", kind: pg.DiagText,
 			desc: "oldest transaction whose row versions this backend may still need (backend_xmin)",
 			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: r.BackendXmin} }},
+		{id: actColBlockedBy, name: "blocked_by", kind: pg.DiagText,
+			desc: "PIDs blocking this backend on a lock (pg_blocking_pids); empty when it isn't waiting on anyone",
+			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell {
+				if r.BlockedBy == "" {
+					return pg.DiagCell{Display: ""}
+				}
+				// Pre-style: this column is only non-empty for a genuinely blocked
+				// backend, so paint it red to draw the eye. It's a short PID list,
+				// so ANSI-in-Display survives the no-truncate path for narrow cells.
+				return pg.DiagCell{Display: styleErr.Render(r.BlockedBy)}
+			}},
 		// OS-level columns sourced from /proc — opt-in, show — on non-Linux or
 		// remote connections where the local /proc PIDs don't match.
-		{id: actColRSS, name: "mem", kind: pg.DiagFloat,
+		{id: actColRSS, name: "mem", kind: pg.DiagCostGraded,
 			desc: "resident memory (RSS = physical RAM held by the backend process) from /proc/<pid>/status (Linux, local server only)",
 			cell: func(r pg.ActivityRow, ctx actCtx) pg.DiagCell {
 				d, ok := ctx.proc[r.PID]
@@ -159,7 +171,7 @@ func actColumnRegistry() []actColDesc {
 				}
 				return pg.DiagCell{Display: fmt.Sprintf("%.1f%%", d.CPUPct), Num: d.CPUPct, HasNum: true}
 			}},
-		{id: actColReadBps, name: "read/s", kind: pg.DiagFloat,
+		{id: actColReadBps, name: "read/s", kind: pg.DiagCostGraded,
 			desc: "storage read throughput from /proc/<pid>/io (Linux, same UID as postgres or root)",
 			cell: func(r pg.ActivityRow, ctx actCtx) pg.DiagCell {
 				d, ok := ctx.proc[r.PID]
@@ -168,7 +180,7 @@ func actColumnRegistry() []actColDesc {
 				}
 				return pg.DiagCell{Display: humanize.Bytes(int64(d.ReadBps)) + "/s", Num: d.ReadBps, HasNum: true}
 			}},
-		{id: actColWriteBps, name: "write/s", kind: pg.DiagFloat,
+		{id: actColWriteBps, name: "write/s", kind: pg.DiagCostGraded,
 			desc: "storage write throughput from /proc/<pid>/io (Linux, same UID as postgres or root)",
 			cell: func(r pg.ActivityRow, ctx actCtx) pg.DiagCell {
 				d, ok := ctx.proc[r.PID]

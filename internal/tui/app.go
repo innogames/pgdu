@@ -46,6 +46,7 @@ const (
 	levelMaintenance      // server-health dashboard (toolMaintenance)
 	levelSettings         // pg_settings browser (child of levelMaintenance)
 	levelActivity         // live server activity from pg_stat_activity (toolActivity)
+	levelLockTree         // blocking-chain forest from pg_locks (child of levelActivity)
 	levelTableStats       // per-table statistics overview for one schema (toolTableStats)
 )
 
@@ -328,6 +329,17 @@ type screen struct {
 	diagSortCol int  // active sort column index for the generic table
 	diagAllDBs  bool // true when this result runs the query across all databases (leading "database" column)
 
+	// diagResult retains the full unprojected result on levelDiagnosticResult so
+	// the C column picker can re-project the visible subset without re-running
+	// the query. diagSortName tracks the active sort column by name (diagnostic
+	// columns have no stable ids) so the sort survives a visibility rebuild.
+	diagResult   *pg.DiagResult
+	diagSortName string
+
+	// diagCatFilter restricts the levelDiagnostics list to one category
+	// (f cycles all → index → table → …); "" shows every diagnostic.
+	diagCatFilter string
+
 	// stmtCols is the projected top-queries column descriptors, parallel to
 	// diagCols (same length/order). Non-nil only on levelStatements; it maps the
 	// renderer's column index (diagSortCol) back to a stable column id so the
@@ -434,6 +446,13 @@ type screen struct {
 	actFilter  pg.ActivityFilter
 	actVerbose bool
 	actCols    []actColDesc
+
+	// ── Lock tree (levelLockTree) ─────────────────────────────────────────────
+	// lockNodes is the last fetched set of blocking-chain backends; lockErr is
+	// non-nil when the load failed. The items list is the forest flattened in
+	// DFS order (item.data = lockTreeRow carrying the node and its indent depth).
+	lockNodes []pg.LockNode
+	lockErr   error
 
 	// ── Table overview tool (levelTableStats) ────────────────────────────────
 	// tblRows is the last fetched per-table stats snapshot for this schema (the
@@ -566,6 +585,16 @@ type Model struct {
 	tblSortColID        tblColID
 	showTblColumnConfig bool
 	tblColCfgCursor     int
+
+	// Diagnostic-result column configuration (C on levelDiagnosticResult).
+	// Diagnostic columns are dynamic (server field descriptions), so unlike the
+	// three static registries above, visibility is kept per diagnostic key and
+	// by column name. A missing inner map (or missing name) means visible;
+	// entries are lazily seeded from prefs by diagVis. diagColCfgCursor is the
+	// C-picker row cursor; showDiagColumnConfig opens it.
+	diagColsVisible      map[string]map[string]bool
+	showDiagColumnConfig bool
+	diagColCfgCursor     int
 
 	// actProcPrev holds the previous /proc sample per PID, used to compute CPU%
 	// and I/O byte-rate deltas between consecutive samples.
@@ -713,20 +742,39 @@ func toolItems() []item {
 	}
 }
 
-// diagnosticItems builds the static list of available diagnostic queries shown
-// at levelDiagnostics. Each item carries the Diagnostic value as its .data so
-// drillIn can type-assert it and push a result screen.
-func diagnosticItems() []item {
-	items := make([]item, len(pg.Diagnostics))
-	for i, d := range pg.Diagnostics {
-		items[i] = item{
+// diagnosticItems builds the list of available diagnostic queries shown at
+// levelDiagnostics, restricted to one category when cat is non-empty (the f
+// cycle). Each item carries the Diagnostic value as its .data so drillIn can
+// type-assert it and push a result screen; the category renders as a coloured
+// badge in renderDiagnosticList.
+func diagnosticItems(cat string) []item {
+	items := make([]item, 0, len(pg.Diagnostics))
+	for _, d := range pg.Diagnostics {
+		if cat != "" && d.Category != cat {
+			continue
+		}
+		items = append(items, item{
 			name:        d.Title,
-			detail:      "[" + d.Category + "]  " + d.Description,
+			detail:      d.Description,
 			hasChildren: true,
 			data:        d,
-		}
+		})
 	}
 	return items
+}
+
+// diagCategories returns the distinct diagnostic categories in registry order —
+// the f key cycles through them (prefixed by "" = all).
+func diagCategories() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, d := range pg.Diagnostics {
+		if !seen[d.Category] {
+			seen[d.Category] = true
+			out = append(out, d.Category)
+		}
+	}
+	return out
 }
 
 func (m *Model) Init() tea.Cmd {

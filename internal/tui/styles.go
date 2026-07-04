@@ -82,6 +82,25 @@ var (
 	}
 )
 
+// diagCatStyle tints a diagnostics-list category badge, one hue per domain so
+// the list scans by colour before reading. Unmapped categories (and the "all"
+// filter label) render muted.
+func diagCatStyle(cat string) lipgloss.Style {
+	switch cat {
+	case "index":
+		return styleBar
+	case "table":
+		return lipgloss.NewStyle().Foreground(colorOK)
+	case "vacuum":
+		return lipgloss.NewStyle().Foreground(colorAccent)
+	case "activity":
+		return lipgloss.NewStyle().Foreground(colorCostLow)
+	case "wal":
+		return lipgloss.NewStyle().Foreground(colorBloat)
+	}
+	return styleMuted
+}
+
 // bufferSliceStyle returns the palette colour for slice index i, cycling on
 // overflow. Callers should still cap N to a sensible number so legends stay
 // readable.

@@ -766,3 +766,233 @@ SELECT
 FROM pg_sequences
 ORDER BY consumed_pct DESC NULLS LAST
 `
+
+// sqlDiagFKMissingIndex finds foreign keys on the referencing side that have no
+// supporting index: no valid index whose leading columns contain the FK columns
+// (any order — a btree lookup works for any permutation, hence the two-way
+// prefix containment via @> on the 0-based smallint[] slice of indkey). Without
+// one, every DELETE/UPDATE on the referenced table sequentially scans the
+// referencing table per row.
+const sqlDiagFKMissingIndex = `
+SELECT
+    n.nspname AS schema,
+    t.relname AS table_name,
+    c.conname AS fk_name,
+    string_agg(a.attname, ', ' ORDER BY x.n) AS fk_columns,
+    c.confrelid::regclass::text AS referenced_table,
+    ps.n_tup_upd + ps.n_tup_del AS referenced_writes,
+    pg_relation_size(c.conrelid) AS table_size_bytes
+FROM pg_constraint c
+CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS x(attnum, n)
+JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = x.attnum
+JOIN pg_class t ON t.oid = c.conrelid
+JOIN pg_namespace n ON n.oid = t.relnamespace
+LEFT JOIN pg_stat_all_tables ps ON ps.relid = c.confrelid
+WHERE c.contype = 'f'
+  AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM pg_index i
+      WHERE i.indrelid = c.conrelid
+        AND i.indisvalid
+        AND (i.indkey::smallint[])[0:cardinality(c.conkey)-1] OPERATOR(pg_catalog.@>) c.conkey
+  )
+GROUP BY n.nspname, t.relname, c.oid, c.conname, c.confrelid, c.conrelid, ps.n_tup_upd, ps.n_tup_del
+ORDER BY pg_relation_size(c.conrelid) DESC
+`
+
+// sqlDiagIndexRedundantPrefix finds btree indexes whose key columns are a strict
+// leading prefix of another valid btree index on the same table (same column
+// order, opclasses, sort options and partial predicate) — the wider index can
+// serve every query the narrower one can, so the narrower one usually just costs
+// write amplification and disk. Unique / constraint-backed indexes are excluded
+// (they enforce something the wider index doesn't); exact duplicates are covered
+// by the separate duplicate-indexes diagnostic. Expression indexes are skipped
+// (their indkey entries are 0 and would compare equal across different
+// expressions).
+const sqlDiagIndexRedundantPrefix = `
+SELECT
+    n.nspname AS schema,
+    t.relname AS table_name,
+    ri.relname AS redundant_index,
+    ci.relname AS covered_by,
+    s.idx_scan AS redundant_scans,
+    pg_relation_size(a.indexrelid) AS redundant_size_bytes
+FROM pg_index a
+JOIN pg_index b
+    ON a.indrelid = b.indrelid
+    AND a.indexrelid <> b.indexrelid
+    AND b.indisvalid
+    AND b.indnkeyatts > a.indnkeyatts
+    AND (b.indkey::smallint[])[0:a.indnkeyatts-1] = (a.indkey::smallint[])[0:a.indnkeyatts-1]
+    AND (b.indclass::oid[])[0:a.indnkeyatts-1] = (a.indclass::oid[])[0:a.indnkeyatts-1]
+    AND (b.indoption::smallint[])[0:a.indnkeyatts-1] = (a.indoption::smallint[])[0:a.indnkeyatts-1]
+JOIN pg_class ri ON ri.oid = a.indexrelid
+JOIN pg_class ci ON ci.oid = b.indexrelid
+JOIN pg_class t ON t.oid = a.indrelid
+JOIN pg_namespace n ON n.oid = t.relnamespace
+JOIN pg_am ra ON ra.oid = ri.relam AND ra.amname = 'btree'
+JOIN pg_am ca ON ca.oid = ci.relam AND ca.amname = 'btree'
+LEFT JOIN pg_stat_user_indexes s ON s.indexrelid = a.indexrelid
+WHERE a.indisvalid
+  AND NOT a.indisunique
+  AND a.indexprs IS NULL AND b.indexprs IS NULL
+  AND coalesce(pg_get_expr(a.indpred, a.indrelid), '') = coalesce(pg_get_expr(b.indpred, b.indrelid), '')
+  AND NOT EXISTS (SELECT 1 FROM pg_constraint cc WHERE cc.conindid = a.indexrelid)
+  AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+ORDER BY pg_relation_size(a.indexrelid) DESC
+`
+
+// sqlDiagIndexIO reports per-index buffer I/O from pg_statio_user_indexes: how
+// often index blocks came from cache vs disk, next to the scan count and size —
+// a hot index with a poor hit ratio is a shared_buffers sizing signal.
+const sqlDiagIndexIO = `
+SELECT
+    io.schemaname AS schema,
+    io.relname AS table_name,
+    io.indexrelname AS index_name,
+    io.idx_blks_read AS blks_read,
+    io.idx_blks_hit AS blks_hit,
+    round(100.0 * io.idx_blks_hit / NULLIF(io.idx_blks_hit + io.idx_blks_read, 0), 2) AS hit_pct,
+    st.idx_scan AS scans,
+    pg_relation_size(io.indexrelid) AS index_size_bytes
+FROM pg_statio_user_indexes io
+JOIN pg_stat_user_indexes st USING (indexrelid)
+ORDER BY io.idx_blks_read DESC
+`
+
+// sqlDiagStaleStatistics ranks tables by how stale their planner statistics
+// are: rows modified since the last ANALYZE relative to the live row count.
+// Tables past autovacuum_analyze_scale_factor (10% by default) risk bad plans.
+const sqlDiagStaleStatistics = `
+SELECT
+    schemaname AS schema,
+    relname AS table_name,
+    n_live_tup AS live_rows,
+    n_mod_since_analyze AS modified_rows,
+    round(100.0 * n_mod_since_analyze / GREATEST(n_live_tup, 1), 1) AS stale_pct,
+    date_trunc('second', now() - GREATEST(last_analyze, last_autoanalyze)) AS analyzed_ago
+FROM pg_stat_user_tables
+WHERE n_mod_since_analyze > 0
+   OR (last_analyze IS NULL AND last_autoanalyze IS NULL AND n_live_tup > 0)
+ORDER BY stale_pct DESC NULLS LAST
+`
+
+// sqlDiagProgressAll unifies every pg_stat_progress_* view into one normalized
+// live-operations table: what long-running maintenance/DDL is in flight and how
+// far along it is. done/total pick each command's most representative counter
+// (blocks for vacuum/index/analyze/cluster, bytes for COPY and base backups).
+const sqlDiagProgressAll = `
+WITH prog AS (
+    SELECT pid, 'VACUUM' AS command, relid, phase,
+           heap_blks_scanned::numeric AS done, heap_blks_total::numeric AS total
+    FROM pg_stat_progress_vacuum
+    UNION ALL
+    SELECT pid, 'CREATE INDEX', relid, phase, blocks_done::numeric, blocks_total::numeric
+    FROM pg_stat_progress_create_index
+    UNION ALL
+    SELECT pid, 'ANALYZE', relid, phase, sample_blks_scanned::numeric, sample_blks_total::numeric
+    FROM pg_stat_progress_analyze
+    UNION ALL
+    SELECT pid, 'CLUSTER', relid, phase, heap_blks_scanned::numeric, heap_blks_total::numeric
+    FROM pg_stat_progress_cluster
+    UNION ALL
+    SELECT pid, 'COPY', relid, ''::text, bytes_processed::numeric, bytes_total::numeric
+    FROM pg_stat_progress_copy
+    UNION ALL
+    SELECT pid, 'BASE BACKUP', NULL::oid, phase, backup_streamed::numeric, backup_total::numeric
+    FROM pg_stat_progress_basebackup
+)
+SELECT
+    p.pid,
+    p.command,
+    CASE WHEN p.relid IS NOT NULL AND p.relid <> 0 THEN p.relid::regclass::text ELSE '' END AS relation,
+    p.phase,
+    round(100.0 * p.done / NULLIF(p.total, 0), 1) AS done_pct,
+    date_trunc('second', now() - a.xact_start) AS running_for,
+    a.usename AS username
+FROM prog p
+LEFT JOIN pg_stat_activity a USING (pid)
+ORDER BY done_pct DESC NULLS LAST
+`
+
+// sqlDiagLockSummary aggregates pg_locks by lock type and mode: how many locks
+// are out, how many backends hold them, and whether anyone is waiting — the
+// one-glance contention read before drilling into per-backend detail.
+const sqlDiagLockSummary = `
+SELECT
+    l.locktype,
+    l.mode,
+    count(*) AS locks,
+    count(*) FILTER (WHERE NOT l.granted) AS waiting,
+    count(DISTINCT l.pid) AS backends,
+    min(l.relation::regclass::text) FILTER (WHERE l.locktype = 'relation') AS sample_relation
+FROM pg_locks l
+GROUP BY l.locktype, l.mode
+ORDER BY count(*) DESC
+`
+
+// sqlDiagIdleInXactHolders lists idle-in-transaction backends together with the
+// locks their open transaction is still holding — the usual answer to "why is
+// this DDL/autovacuum stuck" and "why is bloat growing". xact_age_secs carries
+// the numeric sort/bar; locked_relations resolves names only for the current
+// database (other databases' relations show as bare OIDs).
+const sqlDiagIdleInXactHolders = `
+SELECT
+    a.pid,
+    a.usename AS username,
+    a.datname AS database,
+    a.state,
+    round(EXTRACT(epoch FROM now() - a.xact_start))::bigint AS xact_age_secs,
+    date_trunc('second', now() - a.state_change) AS idle_for,
+    count(*) FILTER (WHERE l.granted) AS locks_held,
+    string_agg(DISTINCT l.relation::regclass::text, ', ')
+        FILTER (WHERE l.granted AND l.locktype = 'relation') AS locked_relations,
+    a.query AS last_query
+FROM pg_stat_activity a
+LEFT JOIN pg_locks l ON l.pid = a.pid
+WHERE a.state IN ('idle in transaction', 'idle in transaction (aborted)')
+GROUP BY a.pid, a.usename, a.datname, a.state, a.xact_start, a.state_change, a.query
+ORDER BY a.xact_start
+`
+
+// sqlDiagSLRU reports the SLRU (simple LRU) cache counters — transaction status
+// (Xact), multixacts, subtransactions, notify, etc. A poor hit ratio or heavy
+// blks_read on MultiXact/Subtrans is otherwise-invisible pressure from long
+// transactions, SELECT FOR SHARE, or deep savepoint nesting.
+const sqlDiagSLRU = `
+SELECT
+    name,
+    blks_hit,
+    blks_read,
+    round(100.0 * blks_hit / NULLIF(blks_hit + blks_read, 0), 2) AS hit_pct,
+    blks_written,
+    blks_exists,
+    flushes,
+    truncates,
+    stats_reset
+FROM pg_stat_slru
+ORDER BY blks_read DESC
+`
+
+// sqlDiagSubscriptionStats shows logical-replication subscriptions in the
+// current database with their worker state and error counters. Lag toward the
+// publisher can't be computed on the subscriber; the message/report ages are the
+// staleness signal instead.
+const sqlDiagSubscriptionStats = `
+SELECT
+    su.subname AS subscription,
+    su.subenabled AS enabled,
+    st.pid AS worker_pid,
+    CASE WHEN st.relid IS NOT NULL THEN st.relid::regclass::text ELSE '' END AS syncing_table,
+    st.received_lsn::text AS received_lsn,
+    date_trunc('second', now() - st.last_msg_receipt_time) AS last_msg_age,
+    date_trunc('second', now() - st.latest_end_time) AS report_age,
+    ss.apply_error_count AS apply_errors,
+    ss.sync_error_count AS sync_errors
+FROM pg_subscription su
+LEFT JOIN pg_stat_subscription st ON st.subid = su.oid
+LEFT JOIN pg_stat_subscription_stats ss ON ss.subid = su.oid
+WHERE su.subdbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+ORDER BY su.subname
+`

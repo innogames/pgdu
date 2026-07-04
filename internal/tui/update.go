@@ -141,6 +141,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case activityLoadedMsg:
 		return m, m.onActivityLoaded(msg)
+	case lockTreeLoadedMsg:
+		return m, m.onLockTreeLoaded(msg)
 	case activityTickMsg:
 		return m, m.onActivityTick()
 	case activityHostsMsg:

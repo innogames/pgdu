@@ -158,6 +158,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.showTblColumnConfig && s.level == levelTableStats {
 		return m, m.handleTblColumnConfigKey(s, msg)
 	}
+	// Diagnostic-result column-config overlay — same modal pattern, but over the
+	// result's dynamic column set instead of a static registry.
+	if m.showDiagColumnConfig && s.level == levelDiagnosticResult {
+		return m, m.handleDiagColumnConfigKey(s, msg)
+	}
 	// The SQL overlay (s on a diagnostic result) is modal: any key dismisses it
 	// so the underlying table bindings don't fire while it's up. Quit still quits.
 	if m.showDiagQuery {
@@ -286,6 +291,22 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.diag != nil {
 			m.showDiagQuery = true
 		}
+	case key.Matches(msg, m.keys.JumpActivity):
+		// System-overview cross-link: open the live Activity tool for the detail
+		// behind the dashboard's connection/blocked/long-xact figures.
+		m.stack = append(m.stack, m.toolEntryScreen(toolActivity))
+		return m, m.loadCurrent()
+	case key.Matches(msg, m.keys.JumpWAL):
+		m.stack = append(m.stack, m.toolEntryScreen(toolWAL))
+		return m, m.loadCurrent()
+	case key.Matches(msg, m.keys.JumpReplication):
+		// Open the replication-slots diagnostic against the default database.
+		for i := range pg.Diagnostics {
+			if pg.Diagnostics[i].Key == "replication_slots" {
+				m.stack = append(m.stack, diagnosticResultScreen(&pg.Diagnostics[i], "", false))
+				return m, m.loadCurrent()
+			}
+		}
 	case key.Matches(msg, m.keys.SortNext):
 		m.cycleSort(s, +1)
 	case key.Matches(msg, m.keys.SortPrev):
@@ -295,6 +316,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.applySort(s)
 	case key.Matches(msg, m.keys.Refresh):
 		return m, m.loadCurrent()
+	case key.Matches(msg, m.keys.LockTree):
+		// Open the blocking-chain tree over the activity table. Matched before
+		// ToggleBloat since both use "b"; LockTree is enabled only on levelActivity.
+		if s.level == levelActivity {
+			next := &screen{
+				level: levelLockTree, title: "lock tree", tool: toolActivity,
+				db: s.db, loading: true,
+			}
+			m.stack = append(m.stack, next)
+			return m, m.loadCurrent()
+		}
 	case key.Matches(msg, m.keys.ToggleBloat):
 		m.fetchBloat = !m.fetchBloat
 	case key.Matches(msg, m.keys.Install):
@@ -336,21 +368,35 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Reload immediately with the new filter.
 			return m, m.loadActivityCmd(s.db, s.actFilter)
 		}
-	case key.Matches(msg, m.keys.CancelBackend):
-		if s.level == levelActivity {
-			// Arm the two-step confirmation for pg_cancel_backend.
-			if pid := activitySelectedPID(s); pid != 0 {
-				s.pendingBackendPID = pid
-				s.pendingBackendAction = "cancel"
+		if s.level == levelDiagnostics {
+			// Cycle the category filter (all → index → table → …) client-side.
+			cats := diagCategories()
+			next := ""
+			for i, c := range cats {
+				if c == s.diagCatFilter && i+1 < len(cats) {
+					next = cats[i+1]
+					break
+				}
 			}
+			if s.diagCatFilter == "" && len(cats) > 0 {
+				next = cats[0]
+			}
+			s.diagCatFilter = next
+			s.items = diagnosticItems(s.diagCatFilter)
+			s.itemsRev++
+			s.resetCursor()
+		}
+	case key.Matches(msg, m.keys.CancelBackend):
+		// Arm the two-step confirmation for pg_cancel_backend, from the activity
+		// table or the lock tree.
+		if pid := backendActionPID(s); pid != 0 {
+			s.pendingBackendPID = pid
+			s.pendingBackendAction = "cancel"
 		}
 	case key.Matches(msg, m.keys.TerminateBackend):
-		if s.level == levelActivity {
-			// Arm the two-step confirmation for pg_terminate_backend.
-			if pid := activitySelectedPID(s); pid != 0 {
-				s.pendingBackendPID = pid
-				s.pendingBackendAction = "terminate"
-			}
+		if pid := backendActionPID(s); pid != 0 {
+			s.pendingBackendPID = pid
+			s.pendingBackendAction = "terminate"
 		}
 	case key.Matches(msg, m.keys.Columns):
 		// Open the htop-style column picker — on the top-queries table or on
@@ -372,6 +418,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showInfo = false
 			m.showTblColumnConfig = true
 			m.tblColCfgCursor = 0
+		}
+		if s.level == levelDiagnosticResult && s.diagResult != nil {
+			m.showInfo = false
+			m.showDiagColumnConfig = true
+			m.diagColCfgCursor = 0
 		}
 	case key.Matches(msg, m.keys.ToggleRefresh):
 		// Cycle the live window's auto-refresh cadence (activity: 500ms → 1s → 2s → 5s → 10s → off).
@@ -471,6 +522,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			loading: true,
 		}
 		m.stack = append(m.stack, next)
+		if t.indexByName {
+			return m, m.loadDescribeIndexByNameCmd(t.db, t.indexName)
+		}
 		if t.isIndex {
 			return m, m.loadDescribeIndexCmd(t.db, t.indexOID, t.indexName)
 		}
@@ -582,13 +636,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // descTarget holds the resolved target for a describe action.
 type descTarget struct {
-	isIndex   bool
-	byName    bool     // when the relation is known only by name (top-queries view)
-	table     pg.Table // when !isIndex && !byName
-	db        string   // when isIndex || byName
-	tableName string   // when byName — resolved server-side via ResolveTable
-	indexOID  uint32   // when isIndex
-	indexName string   // when isIndex
+	isIndex     bool
+	byName      bool     // when the relation is known only by name (top-queries view)
+	indexByName bool     // when only an index name is known (diagnostic result) — resolved via ResolveIndex
+	table       pg.Table // when !isIndex && !byName
+	db          string   // when isIndex || byName || indexByName
+	tableName   string   // when byName — resolved server-side via ResolveTable
+	indexOID    uint32   // when isIndex
+	indexName   string   // when isIndex or indexByName
 }
 
 // describeTarget resolves what `d` should describe given the top screen. It
@@ -650,6 +705,18 @@ func describeTarget(s *screen) (descTarget, bool) {
 			return descTarget{}, false
 		}
 		// TableBufferStat has no pg.Table field; reconstruct from its own fields.
+		return descTarget{table: pg.Table{
+			DB: st.DB, Schema: st.Schema, Name: st.Name,
+			OID: st.OID, TotalBytes: st.TotalBytes,
+		}}, true
+
+	case levelBufferDetail:
+		// The inspected table is carried on the screen; same reconstruction as
+		// the buffer-tables list row.
+		if s.bufDetail == nil {
+			return descTarget{}, false
+		}
+		st := s.bufDetail
 		return descTarget{table: pg.Table{
 			DB: st.DB, Schema: st.Schema, Name: st.Name,
 			OID: st.OID, TotalBytes: st.TotalBytes,
@@ -729,6 +796,29 @@ func describeTarget(s *screen) (descTarget, bool) {
 			indexName: s.index.Qualified(),
 		}, true
 
+	case levelActivity:
+		// Describe the main table of the highlighted backend's query, in that
+		// backend's database (which may differ from the screen's connection).
+		pid := activitySelectedPID(s)
+		if pid == 0 {
+			return descTarget{}, false
+		}
+		for i := range s.actRows {
+			if s.actRows[i].PID != pid {
+				continue
+			}
+			name := pg.MainTable(s.actRows[i].Query)
+			if name == "" {
+				return descTarget{}, false
+			}
+			db := s.actRows[i].Database
+			if db == "" {
+				db = s.db
+			}
+			return descTarget{byName: true, db: db, tableName: name}, true
+		}
+		return descTarget{}, false
+
 	case levelDiagnosticResult:
 		// Generic diagnostic rows carry no pg.Table — resolve the relation by
 		// the name in the row (server-side, like the top-queries view). Only
@@ -742,11 +832,16 @@ func describeTarget(s *screen) (descTarget, bool) {
 		if !ok {
 			return descTarget{}, false
 		}
-		name, ok := diagDescribeName(s.diagCols, cells)
-		if !ok {
-			return descTarget{}, false
+		// Prefer a table column; fall back to an index column (index-only
+		// diagnostics: unused/duplicate/redundant/index-I/O), resolved via
+		// ResolveIndex into a DescribeIndex panel.
+		if name, ok := diagDescribeName(s.diagCols, cells); ok {
+			return descTarget{byName: true, db: s.db, tableName: name}, true
 		}
-		return descTarget{byName: true, db: s.db, tableName: name}, true
+		if name, ok := diagDescribeIndexName(s.diagCols, cells); ok {
+			return descTarget{indexByName: true, db: s.db, indexName: name}, true
+		}
+		return descTarget{}, false
 	}
 
 	return descTarget{}, false
@@ -794,6 +889,43 @@ func diagDescribeName(cols []pg.DiagColumn, cells []pg.DiagCell) (string, bool) 
 	return quoteDiagIdent(table), true
 }
 
+// diagDescribeIndexName extracts an index name from a diagnostic result row (the
+// index-only diagnostics: unused / duplicate / redundant-prefix / index I/O).
+// Qualified with a sibling schema column when present, the same way
+// diagDescribeName handles tables. Returns ("", false) when no index column
+// exists, so table describe stays the default.
+func diagDescribeIndexName(cols []pg.DiagColumn, cells []pg.DiagCell) (string, bool) {
+	idxIdx, schemaIdx := -1, -1
+	for i, c := range cols {
+		switch strings.ToLower(c.Name) {
+		case "index", "index_name", "indexname", "indexrelname", "redundant_index":
+			if idxIdx == -1 {
+				idxIdx = i
+			}
+		case "schema", "schemaname", "schema_name", "table_schema":
+			if schemaIdx == -1 {
+				schemaIdx = i
+			}
+		}
+	}
+	if idxIdx < 0 || idxIdx >= len(cells) {
+		return "", false
+	}
+	name := strings.TrimSpace(cells[idxIdx].Display)
+	if name == "" || name == "—" {
+		return "", false
+	}
+	if strings.Contains(name, ".") {
+		return name, true
+	}
+	if schemaIdx >= 0 && schemaIdx < len(cells) {
+		if schema := strings.TrimSpace(cells[schemaIdx].Display); schema != "" && schema != "—" {
+			return quoteDiagIdent(schema) + "." + quoteDiagIdent(name), true
+		}
+	}
+	return quoteDiagIdent(name), true
+}
+
 // quoteDiagIdent double-quotes a single SQL identifier so it round-trips through
 // to_regclass unchanged regardless of case or special characters.
 func quoteDiagIdent(s string) string {
@@ -814,6 +946,19 @@ func (m *Model) triggerInstall(s *screen) tea.Cmd {
 		return m.upgradeExtensionCmd(s.extPrompt.db, s.extPrompt.name)
 	}
 	return m.installExtensionCmd(s.extPrompt.db, s.extPrompt.name)
+}
+
+// backendActionPID resolves the PID that k/x should act on for the current
+// screen: the activity table's selected row or the lock tree's selected node.
+// Returns 0 on any other level or when nothing is selected.
+func backendActionPID(s *screen) int32 {
+	switch s.level {
+	case levelActivity:
+		return activitySelectedPID(s)
+	case levelLockTree:
+		return lockTreeSelectedPID(s)
+	}
+	return 0
 }
 
 // activitySelectedPID returns the PID of the currently highlighted backend in
