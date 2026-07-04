@@ -547,6 +547,9 @@ func (m *Model) onActivityLoaded(msg activityLoadedMsg) tea.Cmd {
 		s.actHosts = make(map[string]string)
 	}
 	m.rebuildActivityItems(s)
+	// Feed the wait-event profile: every snapshot becomes one histogram bucket,
+	// whether or not the profile screen is open.
+	m.pushWaitBucket(msg.rows)
 
 	// Collect PIDs for proc sampling and IPs for DNS resolution, both in background.
 	pids := make([]int32, len(msg.rows))
@@ -587,7 +590,8 @@ func (m *Model) onActivityTick() tea.Cmd {
 	// lock-tree child, or the progress monitor. Stop when they navigate fully
 	// away so re-entry can start a fresh loop.
 	top := m.top()
-	if top.level != levelActivity && top.level != levelLockTree && top.level != levelProgress {
+	if top.level != levelActivity && top.level != levelLockTree && top.level != levelProgress &&
+		top.level != levelWaitProfile {
 		m.activityTicking = false
 		return nil
 	}

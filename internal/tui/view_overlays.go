@@ -18,7 +18,7 @@ func (m *Model) hasInfoOverlay(s *screen) bool {
 		levelWAL, levelWALRecords, levelWALBlocks, levelWALRelations, levelWALRelBlocks,
 		levelStatements, levelStatementDetail, levelStatementSamples, levelStatementResult, levelSnapshots,
 		levelMaintenance, levelSettings,
-		levelActivity, levelTableStats:
+		levelActivity, levelTableStats, levelWaitProfile:
 		return true
 	}
 	return false
@@ -75,6 +75,8 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 		return m.renderActivityInfo(height)
 	case levelTableStats:
 		return m.renderTableStatsInfo(height)
+	case levelWaitProfile:
+		return m.renderWaitProfileInfo(height)
 	}
 	return ""
 }

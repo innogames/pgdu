@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 
 	"pgdu/internal/cli"
@@ -219,4 +220,22 @@ func diagByKey(t *testing.T, key string) Diagnostic {
 	}
 	t.Fatalf("diagnostic %q not registered", key)
 	panic("unreachable")
+}
+
+// TestIntegration_Triage runs the whole health battery against the live test
+// cluster. Severities are data-dependent (a small test DB can legitimately
+// grade red on e.g. cache hit ratio), so the assertion is only that every
+// check evaluated — nothing may degrade to "could not evaluate".
+func TestIntegration_Triage(t *testing.T) {
+	c, _ := diagTestClient(t)
+	results := c.Triage(context.Background())
+	if len(results) != 10 {
+		t.Fatalf("Triage returned %d results, want 10", len(results))
+	}
+	for _, r := range results {
+		if strings.HasPrefix(r.Detail, "could not evaluate") {
+			t.Errorf("%s: %s", r.Check, r.Detail)
+		}
+		t.Logf("%-24s sev=%d  %s", r.Check, r.Severity, r.Detail)
+	}
 }

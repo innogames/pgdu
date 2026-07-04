@@ -142,6 +142,10 @@ func levelLabel(l level) string {
 		return "settings"
 	case levelProgress:
 		return "progress"
+	case levelTriage:
+		return "triage"
+	case levelWaitProfile:
+		return "wait-profile"
 	}
 	return "?"
 }

@@ -196,7 +196,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.level == levelWALRelations || s.level == levelWALRelBlocks ||
 			s.level == levelStatements || s.level == levelStatementDetail || s.level == levelSnapshots ||
 			s.level == levelMaintenance || s.level == levelSettings ||
-			s.level == levelActivity || s.level == levelTableStats {
+			s.level == levelActivity || s.level == levelTableStats || s.level == levelWaitProfile {
 			m.showInfo = !m.showInfo
 			if m.showInfo {
 				m.infoOffset = 0 // always open scrolled to the top
@@ -309,6 +309,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.stack = append(m.stack, diagnosticResultScreen(&pg.Diagnostics[i], "", false))
 				return m, m.loadCurrent()
 			}
+		}
+	case key.Matches(msg, m.keys.WaitProfile):
+		// Open the wait-event profile over the activity sample stream. No load
+		// Cmd: it renders from Model.waitRing, which the activity tick keeps
+		// feeding while the profile is on top (see onActivityTick).
+		if s.level == levelActivity {
+			next := &screen{
+				level: levelWaitProfile, title: "wait profile", tool: toolActivity,
+				db: s.db, loaded: true,
+			}
+			m.stack = append(m.stack, next)
+			return m, nil
 		}
 	case key.Matches(msg, m.keys.Progress):
 		// Open the live progress monitor over the pg_stat_progress_* views.

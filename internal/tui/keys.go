@@ -53,6 +53,12 @@ type keyMap struct {
 	JumpReplication key.Binding // r: open the replication-slots diagnostic
 	Progress        key.Binding // p: open the live progress monitor
 
+	// Wait-event profiler over the Activity tool's sample stream.
+	WaitProfile key.Binding // W: open the wait-event profile
+
+	// waitProfileInFooter adds the W hint to the footer on the activity table.
+	waitProfileInFooter bool
+
 	// shmemInFooter adds the m (memory map) hint to the footer's short help on
 	// the buffer-tables level, where it's the only advertisement for the view.
 	shmemInFooter bool
@@ -111,6 +117,8 @@ func defaultKeys() keyMap {
 		JumpWAL:         key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wal")),
 		JumpReplication: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "replication")),
 		Progress:        key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "progress")),
+
+		WaitProfile: key.NewBinding(key.WithKeys("W"), key.WithHelp("W", "wait profile")),
 	}
 }
 
@@ -187,6 +195,10 @@ func (k *keyMap) applyContext(s *screen) {
 	// key stays free for Params (captured values) on statement detail.
 	k.Progress.SetEnabled(maint)
 
+	// W opens the wait-event profile over the activity table's sample stream.
+	k.WaitProfile.SetEnabled(activity)
+	k.waitProfileInFooter = activity
+
 	// s seeks on the index-tuples view: a key value on B-tree, a heap block
 	// number on BRIN. GiST/GIN keys have no total order, so seek is disabled
 	// there (use the / filter). The physical key is otherwise ShowQuery
@@ -203,6 +215,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	if k.shmemInFooter {
 		b = append(b, k.ShmemMap)
 	}
+	if k.waitProfileInFooter {
+		b = append(b, k.WaitProfile)
+	}
 	return b
 }
 
@@ -213,7 +228,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Filter, k.Seek, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
 		{k.Refresh, k.ToggleBloat, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
-		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree},
+		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
 		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation, k.ShmemMap},
 		{k.Help, k.Quit},
 	}

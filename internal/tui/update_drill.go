@@ -411,6 +411,33 @@ func (m *Model) drillIn() tea.Cmd {
 		next := &screen{level: levelStatementDetail, title: "query", tool: s.tool, db: s.db, loading: true}
 		m.stack = append(m.stack, next)
 		return m.loadActivityStatementCmd(s.db, backendPID, cur.statQueryID, queryText)
+	case levelTriage:
+		// Drill into the screen that backs the selected triage line. The
+		// collapsed "N checks ok" summary row carries no TriageResult and is
+		// inert.
+		r, ok := cur.data.(pg.TriageResult)
+		if !ok {
+			return nil
+		}
+		switch r.Target {
+		case pg.TriageTargetLockTree:
+			m.stack = append(m.stack, &screen{
+				level: levelLockTree, title: "lock tree", tool: toolActivity,
+				db: s.db, loading: true,
+			})
+			return m.loadCurrent()
+		case pg.TriageTargetMaintenance:
+			m.stack = append(m.stack, m.toolEntryScreen(toolMaintenance))
+			return m.loadCurrent()
+		default:
+			for i := range pg.Diagnostics {
+				if pg.Diagnostics[i].Key == r.DiagKey {
+					m.stack = append(m.stack, diagnosticResultScreen(&pg.Diagnostics[i], "", false))
+					return m.loadCurrent()
+				}
+			}
+			return nil
+		}
 	case levelParts:
 		// Only the heap row drills further — into per-column space estimates.
 		// Toast and index rows have no meaningful sub-breakdown.
@@ -635,6 +662,10 @@ func (m *Model) toolEntryScreen(t tool) *screen {
 	case toolMaintenance:
 		// Maintenance dashboard is cluster-wide: skip the database picker.
 		return &screen{level: levelMaintenance, title: "system overview", tool: toolMaintenance, db: m.client.DefaultDB()}
+	case toolTriage:
+		// Triage runs its battery cluster-wide: skip the database picker and go
+		// straight to the report, loading asynchronously (loadTriageCmd).
+		return &screen{level: levelTriage, title: "triage", tool: toolTriage, db: m.client.DefaultDB(), loading: true}
 	case toolActivity:
 		// Activity tool is cluster-wide: skip the database picker and go
 		// directly to the live pg_stat_activity list.

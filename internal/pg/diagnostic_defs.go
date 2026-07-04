@@ -21,6 +21,16 @@ type Diagnostic struct {
 	Kinds map[string]DiagColumnKind
 }
 
+// DiagnosticByKey looks a diagnostic up in the registry by its stable key.
+func DiagnosticByKey(key string) (Diagnostic, bool) {
+	for _, d := range Diagnostics {
+		if d.Key == key {
+			return d, true
+		}
+	}
+	return Diagnostic{}, false
+}
+
 // Diagnostics is the ordered registry of all built-in diagnostic queries.
 // Queries are grouped by category and sorted alphabetically within each group;
 // the TUI list renders them in this order.
@@ -64,6 +74,15 @@ var Diagnostics = []Diagnostic{
 	// 	SQL:         sqlDiagIndexShowAll,
 	// 	Bar:         "number_of_scans",
 	// },
+	{
+		Key:         "index_invalid",
+		PerDB:       true,
+		Title:       "Invalid indexes",
+		Category:    "index",
+		Description: "indexes left INVALID by a failed CREATE/REINDEX CONCURRENTLY — unusable by plans but still maintained on writes",
+		SQL:         sqlDiagIndexInvalid,
+		Bar:         "index_size_bytes",
+	},
 	{
 		Key:         "index_io",
 		PerDB:       true,

@@ -1,6 +1,6 @@
 # Future: wait-event sampling profiler ("poor man's ASH")
 
-Status: design only (not implemented).
+Status: implemented (`W` on the Activity view → levelWaitProfile; see internal/tui/waitprofile.go).
 
 ## Motivation
 

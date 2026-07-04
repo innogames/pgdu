@@ -1024,3 +1024,25 @@ LEFT JOIN pg_stat_subscription_stats ss ON ss.subid = su.oid
 WHERE su.subdbid = (SELECT oid FROM pg_database WHERE datname = current_database())
 ORDER BY su.subname
 `
+
+// sqlDiagIndexInvalid lists indexes flagged NOT indisvalid — the residue of a
+// failed CREATE INDEX CONCURRENTLY / REINDEX CONCURRENTLY. Plans never use
+// them but every write still maintains them, so they are pure overhead until
+// rebuilt or dropped. pg_toast is included on purpose (REINDEX CONCURRENTLY
+// can strand TOAST indexes too); catalog and temp schemas are not.
+const sqlDiagIndexInvalid = `
+SELECT
+    n.nspname AS schema,
+    t.relname AS table_name,
+    ic.relname AS index_name,
+    pg_relation_size(i.indexrelid) AS index_size_bytes,
+    pg_get_indexdef(i.indexrelid) AS definition
+FROM pg_index i
+JOIN pg_class ic ON ic.oid = i.indexrelid
+JOIN pg_class t ON t.oid = i.indrelid
+JOIN pg_namespace n ON n.oid = t.relnamespace
+WHERE NOT i.indisvalid
+  AND n.nspname <> 'information_schema'
+  AND n.nspname !~ '^pg_(catalog|temp_)'
+ORDER BY pg_relation_size(i.indexrelid) DESC
+`

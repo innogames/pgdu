@@ -49,6 +49,8 @@ const (
 	levelLockTree         // blocking-chain forest from pg_locks (child of levelActivity)
 	levelTableStats       // per-table statistics overview for one schema (toolTableStats)
 	levelProgress         // live pg_stat_progress_* monitor (child of levelMaintenance)
+	levelTriage           // one-key health-triage report (toolTriage)
+	levelWaitProfile      // wait-event sampling profile ('W' on levelActivity)
 )
 
 // tool identifies which top-level statistic the user is exploring.
@@ -65,6 +67,7 @@ const (
 	toolMaintenance // server-health dashboard + settings browser
 	toolActivity    // live server activity (pg_stat_activity)
 	toolTableStats  // per-table statistics overview (pg_stat_all_tables + sizes)
+	toolTriage      // one-key health-triage report (levelTriage)
 )
 
 func (t tool) Name() string {
@@ -87,6 +90,8 @@ func (t tool) Name() string {
 		return "activity"
 	case toolTableStats:
 		return "tables"
+	case toolTriage:
+		return "triage"
 	}
 	return "?"
 }
@@ -484,6 +489,11 @@ type screen struct {
 	// settingRows is the full pg_settings list for levelSettings.
 	settingRows []pg.SettingRow
 
+	// ── Health triage (levelTriage) ───────────────────────────────────────────
+	// triageResults is the loaded battery result, severity-sorted; items are
+	// derived from it with green checks collapsed (see triageItems).
+	triageResults []pg.TriageResult
+
 	// ── Progress monitor (levelProgress) ──────────────────────────────────────
 	// progressRows is the last fetched set of running operations from the
 	// pg_stat_progress_* views; progressErr is non-nil when the load failed.
@@ -614,6 +624,12 @@ type Model struct {
 	// write/s) from the most recent sample pair. nil = not yet sampled.
 	actProcStats map[int32]procDerived
 
+	// waitRing accumulates per-tick wait-event samples from every activity
+	// refresh (see pushWaitBucket). Model-level so the histogram survives
+	// screen pushes/pops and already has history when the profile opens;
+	// lazily allocated on the first activity snapshot.
+	waitRing *waitRing
+
 	// activityTicking is true while a self-rescheduling refresh tick is running
 	// for the Activity tool, so re-entering levelActivity doesn't spawn a second
 	// loop.
@@ -683,7 +699,7 @@ func (m *Model) vacuumPaneVisible(s *screen) bool {
 // by the --<tool> CLI flags) back to the tool enum. The bool is false for an
 // unknown/empty name so the caller can fall back to the tool picker.
 func toolByName(name string) (tool, bool) {
-	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity, toolTableStats} {
+	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity, toolTableStats, toolTriage} {
 		if t.Name() == name {
 			return t, true
 		}
@@ -746,6 +762,7 @@ func toolItems() []item {
 		{name: "Current Activity", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
 		{name: "Table overview", detail: "per-table stats for a schema: size, write/scan activity, cache hit ratios, bloat, vacuum age, storage options — sortable, customizable columns", hasChildren: true, data: toolTableStats},
 		{name: "System overview", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
+		{name: "Health triage", detail: "one-key red/yellow/green health report: runs the whole diagnostic battery concurrently; Enter drills into the check that fired", hasChildren: true, data: toolTriage},
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},

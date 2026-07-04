@@ -1,6 +1,6 @@
 # Future: one-key health triage report
 
-Status: design only (not implemented).
+Status: implemented ("Health triage" tool on the root picker → levelTriage; see internal/pg/triage.go).
 
 ## Motivation
 
@@ -29,7 +29,7 @@ Reuse existing diagnostics/queries so the thresholds live in one place:
 
 ## UX sketch
 
-`!` on `levelTools` (or `levelMaintenance`) runs the battery and pushes a
+Selecting "Health triage" on `levelTools` runs the battery and pushes a
 `levelTriage` screen:
 
 ```
@@ -50,8 +50,9 @@ severity; green lines collapse to a summary count so the eye lands on red first.
   `[]TriageResult{Check, Severity, Detail, DiagKey}`.
 - `levelTriage` enum; `view_triage.go` renderer (reuse `stateStyle`-like
   severity colours and the graded styles from `styles.go`).
-- `!` key bound + enabled on `levelTools`; Enter maps `DiagKey` back to a
-  `diagnosticResultScreen` push (or the lock tree for the blocked-backends line).
+- `toolTriage` entry on the root tool picker → `toolEntryScreen` pushes
+  `levelTriage`; Enter maps `DiagKey` back to a `diagnosticResultScreen` push
+  (or the lock tree for the blocked-backends line).
 
 ## Effort
 

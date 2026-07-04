@@ -167,7 +167,7 @@ func (m *Model) View() string {
 		s.level != levelStatementResult && s.level != levelSnapshots &&
 		s.level != levelBufferDetail && s.level != levelMaintenance && s.level != levelSettings &&
 		s.level != levelActivity && s.level != levelLockTree && s.level != levelTableStats &&
-		s.level != levelProgress:
+		s.level != levelProgress && s.level != levelWaitProfile:
 		// levelDescribe never populates items — it renders from s.describe.
 		// levelDiagnosticResult and levelStatementResult with 0 items mean the
 		// query returned no rows, which is valid; fall through to the renderer
@@ -262,6 +262,10 @@ func (m *Model) View() string {
 			b.WriteString(m.renderLockTree(s, contentHeight))
 		case levelProgress:
 			b.WriteString(m.renderProgress(s, contentHeight))
+		case levelTriage:
+			b.WriteString(m.renderTriageList(s, contentHeight))
+		case levelWaitProfile:
+			b.WriteString(m.renderWaitProfile(s, contentHeight))
 		case levelTableStats:
 			// The table overview is a generic diagnostic-style table too.
 			b.WriteString(m.renderDiagResult(s, contentHeight))
@@ -437,6 +441,10 @@ func (m *Model) breadcrumb() string {
 			parts = append(parts, "system overview")
 		case levelSettings:
 			parts = append(parts, "settings")
+		case levelTriage:
+			parts = append(parts, "triage")
+		case levelWaitProfile:
+			parts = append(parts, "wait profile")
 		}
 	}
 	out := make([]string, len(parts))
