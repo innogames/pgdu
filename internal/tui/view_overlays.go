@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -193,7 +194,22 @@ func (m *Model) renderReindexBanner(s *screen) string {
 	}
 	switch {
 	case s.reindexing != "":
-		return "  " + styleMuted.Render(m.spinner.View()+" REINDEX INDEX CONCURRENTLY "+s.reindexing+"…")
+		mu := styleMuted.Render
+		line := "  " + m.spinner.View() + " " +
+			styleSelected.Render("REINDEX") + mu(" CONCURRENTLY "+s.reindexing)
+		// Live progress, once pg_stat_progress_create_index starts reporting.
+		if p := s.reindexProg; p != nil {
+			if p.Phase != "" {
+				line += mu("  ·  " + p.Phase)
+			}
+			if pct := p.Pct(); pct >= 0 {
+				const barW = 32
+				filled := min(int(float64(barW)*pct/100), barW)
+				line += "  " + paintBar(barW, barSegment{cells: filled, style: styleBar}) +
+					mu(fmt.Sprintf(" %.0f%%", pct))
+			}
+		}
+		return line
 	case s.pendingReindex != "":
 		return "  " + styleSelected.Render("confirm: ") +
 			styleMuted.Render("REINDEX INDEX CONCURRENTLY "+s.pendingReindex+" — press ") +

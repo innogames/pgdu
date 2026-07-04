@@ -235,6 +235,16 @@ func (m *Model) loadCurrent() tea.Cmd {
 		return tea.Batch(cmds...)
 	case levelTableStats:
 		return m.loadTableOverviewCmd(s.db, s.schema)
+	case levelProgress:
+		// Same live-refresh pattern as the activity table, reusing its tick loop.
+		cmds := []tea.Cmd{m.loadProgressCmd(s.db)}
+		if !m.activityTicking {
+			if tick := m.activityTick(); tick != nil {
+				m.activityTicking = true
+				cmds = append(cmds, tick)
+			}
+		}
+		return tea.Batch(cmds...)
 	}
 	return nil
 }

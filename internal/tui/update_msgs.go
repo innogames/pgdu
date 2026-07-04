@@ -363,7 +363,9 @@ func (m *Model) onReindexDone(msg reindexDoneMsg) tea.Cmd {
 	if s == nil || s.table.OID != msg.tableOID {
 		return nil
 	}
+	// Clearing reindexing stops the progress-poll tick on its next fire.
 	s.reindexing = ""
+	s.reindexProg = nil
 	if msg.err != nil {
 		s.reindexErr = msg.err
 		return nil
@@ -371,6 +373,26 @@ func (m *Model) onReindexDone(msg reindexDoneMsg) tea.Cmd {
 	s.reindexErr = nil
 	// Refresh: the index has been rebuilt, so size and bloat have changed.
 	return m.loadCurrent()
+}
+
+// onReindexTick re-polls the progress view while a REINDEX is in flight and
+// reschedules itself; it stops (returns nil) once reindexing clears, so no
+// stray tick outlives the rebuild.
+func (m *Model) onReindexTick() tea.Cmd {
+	s := m.findLevel(levelParts)
+	if s == nil || s.reindexing == "" {
+		return nil
+	}
+	return tea.Batch(m.loadReindexProgressCmd(s.db, s.table.OID), m.reindexTick())
+}
+
+func (m *Model) onReindexProgress(msg reindexProgressMsg) tea.Cmd {
+	s := m.findLevel(levelParts)
+	if s == nil || s.table.OID != msg.tableOID || s.reindexing == "" {
+		return nil
+	}
+	s.reindexProg = msg.row
+	return nil
 }
 
 func (m *Model) onDiagnosticLoaded(msg diagnosticLoadedMsg) tea.Cmd {
@@ -561,11 +583,11 @@ func (m *Model) onTableOverviewLoaded(msg tableOverviewLoadedMsg) tea.Cmd {
 }
 
 func (m *Model) onActivityTick() tea.Cmd {
-	// Keep the tick alive while the user is in the activity table or its
-	// lock-tree child. Stop when they navigate fully away so re-entry can start a
-	// fresh loop.
+	// Keep the tick alive while the user is in the activity table, its
+	// lock-tree child, or the progress monitor. Stop when they navigate fully
+	// away so re-entry can start a fresh loop.
 	top := m.top()
-	if top.level != levelActivity && top.level != levelLockTree {
+	if top.level != levelActivity && top.level != levelLockTree && top.level != levelProgress {
 		m.activityTicking = false
 		return nil
 	}
@@ -575,8 +597,11 @@ func (m *Model) onActivityTick() tea.Cmd {
 		m.activityTicking = false
 		return nil
 	}
-	if top.level == levelLockTree {
+	switch top.level {
+	case levelLockTree:
 		return tea.Batch(m.loadLockTreeCmd(top.db), next)
+	case levelProgress:
+		return tea.Batch(m.loadProgressCmd(top.db), next)
 	}
 	return tea.Batch(m.loadActivityCmd(top.db, top.actFilter), next)
 }
@@ -595,6 +620,23 @@ func (m *Model) onLockTreeLoaded(msg lockTreeLoadedMsg) tea.Cmd {
 	s.lockErr = nil
 	s.lockNodes = msg.nodes
 	m.rebuildLockTreeItems(s)
+	return nil
+}
+
+func (m *Model) onProgressLoaded(msg progressLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelProgress)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	s.loading = false
+	s.loaded = true
+	if msg.err != nil {
+		s.progressErr = msg.err
+		return nil
+	}
+	s.progressErr = nil
+	s.progressRows = msg.rows
+	m.rebuildProgressItems(s)
 	return nil
 }
 

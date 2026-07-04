@@ -1,9 +1,10 @@
 # Future: unified live progress monitor
 
-Status: design only (not implemented). Precursor shipped: the `progress_all`
-diagnostic (`internal/pg/queries_diag.go`, registered in `diagnostic_defs.go`)
-already UNIONs every `pg_stat_progress_*` view into one table you can run today
-from **Other Tools → Running operations (progress)**.
+Status: implemented — `levelProgress` (`internal/tui/view_progress.go`), opened
+with `p` from the maintenance dashboard, live-refreshing on the activity tick.
+The `progress_all` diagnostic (`internal/pg/queries_diag.go`, registered in
+`diagnostic_defs.go`) remains as the point-in-time variant under
+**Other Tools → Running operations (progress)**; both share `sqlProgressBase`.
 
 ## Motivation
 

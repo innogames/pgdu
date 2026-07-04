@@ -51,6 +51,7 @@ type keyMap struct {
 	JumpActivity    key.Binding // a: open the Activity tool
 	JumpWAL         key.Binding // w: open the WAL inspector
 	JumpReplication key.Binding // r: open the replication-slots diagnostic
+	Progress        key.Binding // p: open the live progress monitor
 
 	// shmemInFooter adds the m (memory map) hint to the footer's short help on
 	// the buffer-tables level, where it's the only advertisement for the view.
@@ -109,6 +110,7 @@ func defaultKeys() keyMap {
 		JumpActivity:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "activity")),
 		JumpWAL:         key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wal")),
 		JumpReplication: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "replication")),
+		Progress:        key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "progress")),
 	}
 }
 
@@ -142,8 +144,8 @@ func (k *keyMap) applyContext(s *screen) {
 	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult)
 	k.columnsInFooter = activity || tableStats || diagResult
 	// t (ToggleRefresh) cycles the auto-refresh cadence on top-queries levels and
-	// on the activity level.
-	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity)
+	// on the live activity/progress levels.
+	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity || s.level == levelProgress)
 	k.SaveSnapshot.SetEnabled(stmtTable || stmtDetail)
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
 	k.Params.SetEnabled(stmtDetail)
@@ -181,6 +183,9 @@ func (k *keyMap) applyContext(s *screen) {
 	k.JumpActivity.SetEnabled(maint)
 	k.JumpWAL.SetEnabled(maint)
 	k.JumpReplication.SetEnabled(maint)
+	// p opens the live progress monitor; gated to the dashboard so the physical
+	// key stays free for Params (captured values) on statement detail.
+	k.Progress.SetEnabled(maint)
 
 	// s seeks on the index-tuples view: a key value on B-tree, a heap block
 	// number on BRIN. GiST/GIN keys have no total order, so seek is disabled

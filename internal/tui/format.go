@@ -132,12 +132,16 @@ func levelLabel(l level) string {
 		return "snapshots"
 	case levelActivity:
 		return "activity"
+	case levelLockTree:
+		return "lock-tree"
 	case levelTableStats:
 		return "table overview"
 	case levelMaintenance:
 		return "system overview"
 	case levelSettings:
 		return "settings"
+	case levelProgress:
+		return "progress"
 	}
 	return "?"
 }

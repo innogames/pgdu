@@ -878,31 +878,38 @@ WHERE n_mod_since_analyze > 0
 ORDER BY stale_pct DESC NULLS LAST
 `
 
-// sqlDiagProgressAll unifies every pg_stat_progress_* view into one normalized
-// live-operations table: what long-running maintenance/DDL is in flight and how
-// far along it is. done/total pick each command's most representative counter
-// (blocks for vacuum/index/analyze/cluster, bytes for COPY and base backups).
-const sqlDiagProgressAll = `
+// sqlProgressBase unifies every pg_stat_progress_* view into one normalized
+// live-operations CTE: what long-running maintenance/DDL is in flight and how
+// far along it is. done/total pick each command's most representative counter,
+// and unit records what they count (blocks for vacuum/index/analyze/cluster,
+// bytes for COPY and base backups) so callers can format them.
+const sqlProgressBase = `
 WITH prog AS (
     SELECT pid, 'VACUUM' AS command, relid, phase,
-           heap_blks_scanned::numeric AS done, heap_blks_total::numeric AS total
+           heap_blks_scanned::numeric AS done, heap_blks_total::numeric AS total,
+           'blocks'::text AS unit
     FROM pg_stat_progress_vacuum
     UNION ALL
-    SELECT pid, 'CREATE INDEX', relid, phase, blocks_done::numeric, blocks_total::numeric
+    SELECT pid, 'CREATE INDEX', relid, phase, blocks_done::numeric, blocks_total::numeric, 'blocks'
     FROM pg_stat_progress_create_index
     UNION ALL
-    SELECT pid, 'ANALYZE', relid, phase, sample_blks_scanned::numeric, sample_blks_total::numeric
+    SELECT pid, 'ANALYZE', relid, phase, sample_blks_scanned::numeric, sample_blks_total::numeric, 'blocks'
     FROM pg_stat_progress_analyze
     UNION ALL
-    SELECT pid, 'CLUSTER', relid, phase, heap_blks_scanned::numeric, heap_blks_total::numeric
+    SELECT pid, 'CLUSTER', relid, phase, heap_blks_scanned::numeric, heap_blks_total::numeric, 'blocks'
     FROM pg_stat_progress_cluster
     UNION ALL
-    SELECT pid, 'COPY', relid, ''::text, bytes_processed::numeric, bytes_total::numeric
+    SELECT pid, 'COPY', relid, ''::text, bytes_processed::numeric, bytes_total::numeric, 'bytes'
     FROM pg_stat_progress_copy
     UNION ALL
-    SELECT pid, 'BASE BACKUP', NULL::oid, phase, backup_streamed::numeric, backup_total::numeric
+    SELECT pid, 'BASE BACKUP', NULL::oid, phase, backup_streamed::numeric, backup_total::numeric, 'bytes'
     FROM pg_stat_progress_basebackup
 )
+`
+
+// sqlDiagProgressAll is the point-in-time diagnostic over sqlProgressBase; the
+// live progress monitor uses sqlProgressOps for the same rows with raw counters.
+const sqlDiagProgressAll = sqlProgressBase + `
 SELECT
     p.pid,
     p.command,
@@ -914,6 +921,27 @@ SELECT
 FROM prog p
 LEFT JOIN pg_stat_activity a USING (pid)
 ORDER BY done_pct DESC NULLS LAST
+`
+
+// sqlProgressOps feeds the live progress monitor: same operations as the
+// diagnostic but with raw done/total counters (so the bar can show
+// blocks-done/blocks-total) and running_ms in the activity view's float8
+// epoch-ms convention. The pid tiebreak keeps equal-pct rows from swapping
+// places between refresh ticks.
+const sqlProgressOps = sqlProgressBase + `
+SELECT
+    p.pid,
+    p.command,
+    CASE WHEN p.relid IS NOT NULL AND p.relid <> 0 THEN p.relid::regclass::text ELSE '' END AS relation,
+    p.phase,
+    p.unit,
+    coalesce(p.done, 0)::bigint AS done,
+    coalesce(p.total, 0)::bigint AS total,
+    coalesce(EXTRACT(epoch FROM now() - a.xact_start) * 1000, 0)::float8 AS running_ms,
+    coalesce(a.usename::text, '') AS username
+FROM prog p
+LEFT JOIN pg_stat_activity a USING (pid)
+ORDER BY p.done / NULLIF(p.total, 0) DESC NULLS LAST, p.pid
 `
 
 // sqlDiagLockSummary aggregates pg_locks by lock type and mode: how many locks

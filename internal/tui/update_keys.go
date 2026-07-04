@@ -88,8 +88,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			idx := s.pendingReindex
 			s.pendingReindex = ""
 			s.reindexing = idx
+			s.reindexProg = nil
 			s.reindexErr = nil
-			return m, m.reindexIndexCmd(s.table, idx)
+			// Run the (blocking) REINDEX and, alongside it, start polling
+			// pg_stat_progress_create_index so the banner shows a live bar.
+			return m, tea.Batch(m.reindexIndexCmd(s.table, idx), m.reindexTick())
 		}
 		s.pendingReindex = ""
 		return m, nil
@@ -307,6 +310,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.loadCurrent()
 			}
 		}
+	case key.Matches(msg, m.keys.Progress):
+		// Open the live progress monitor over the pg_stat_progress_* views.
+		// Enabled only on levelMaintenance, so it never shadows Params.
+		next := &screen{
+			level: levelProgress, title: "progress", tool: toolMaintenance,
+			db: s.db, loading: true,
+		}
+		m.stack = append(m.stack, next)
+		return m, m.loadCurrent()
 	case key.Matches(msg, m.keys.SortNext):
 		m.cycleSort(s, +1)
 	case key.Matches(msg, m.keys.SortPrev):
@@ -437,7 +449,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if s.level == levelActivity {
+		if s.level == levelActivity || s.level == levelProgress {
 			m.cycleActivityRefresh()
 			if m.activityRefresh > 0 && !m.activityTicking {
 				if tick := m.activityTick(); tick != nil {
@@ -683,6 +695,20 @@ func describeTarget(s *screen) (descTarget, bool) {
 			return descTarget{}, false
 		}
 		return descTarget{byName: true, db: s.db, tableName: name}, true
+
+	case levelProgress:
+		// Describe the operation's target relation by name (basebackup rows have
+		// none). The name comes from regclass in the operation's own database, so
+		// resolve it against the screen's db like the other by-name paths.
+		it, ok := curItem()
+		if !ok {
+			return descTarget{}, false
+		}
+		r, ok := it.data.(pg.ProgressRow)
+		if !ok || r.Relation == "" {
+			return descTarget{}, false
+		}
+		return descTarget{byName: true, db: s.db, tableName: r.Relation}, true
 
 	case levelTables:
 		it, ok := curItem()

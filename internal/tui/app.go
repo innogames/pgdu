@@ -48,6 +48,7 @@ const (
 	levelActivity         // live server activity from pg_stat_activity (toolActivity)
 	levelLockTree         // blocking-chain forest from pg_locks (child of levelActivity)
 	levelTableStats       // per-table statistics overview for one schema (toolTableStats)
+	levelProgress         // live pg_stat_progress_* monitor (child of levelMaintenance)
 )
 
 // tool identifies which top-level statistic the user is exploring.
@@ -233,6 +234,10 @@ type screen struct {
 	pendingReindex string
 	// reindexing is the index currently being rebuilt (empty when idle).
 	reindexing string
+	// reindexProg is the last-polled live progress of the running REINDEX from
+	// pg_stat_progress_create_index; nil until the first sample lands (or
+	// between phases where the view reports no counters).
+	reindexProg *pg.ProgressRow
 	// reindexErr is the last REINDEX failure, shown until the next attempt.
 	reindexErr error
 
@@ -478,6 +483,12 @@ type screen struct {
 	pendingReset string
 	// settingRows is the full pg_settings list for levelSettings.
 	settingRows []pg.SettingRow
+
+	// ── Progress monitor (levelProgress) ──────────────────────────────────────
+	// progressRows is the last fetched set of running operations from the
+	// pg_stat_progress_* views; progressErr is non-nil when the load failed.
+	progressRows []pg.ProgressRow
+	progressErr  error
 
 	// ── Table maintenance panel (levelParts) ──────────────────────────────────
 	// tableStats is the maintenance snapshot for the current table, loaded
