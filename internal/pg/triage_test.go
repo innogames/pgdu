@@ -110,15 +110,87 @@ func TestSequenceSeverity(t *testing.T) {
 	}
 }
 
-func TestTempDeadlockSeverity(t *testing.T) {
-	if got := tempDeadlockSeverity(0, 1<<20); got != SevOK {
-		t.Errorf("clean = %v, want SevOK", got)
+func TestDeadlockSeverity(t *testing.T) {
+	if got := deadlockSeverity(0); got != SevOK {
+		t.Errorf("none = %v, want SevOK", got)
 	}
-	if got := tempDeadlockSeverity(3, 0); got != SevWarn {
-		t.Errorf("a few deadlocks = %v, want SevWarn", got)
+	if got := deadlockSeverity(3); got != SevWarn {
+		t.Errorf("a few = %v, want SevWarn", got)
 	}
-	if got := tempDeadlockSeverity(0, 200<<30); got != SevCrit {
-		t.Errorf("200GB temp = %v, want SevCrit", got)
+	if got := deadlockSeverity(200); got != SevCrit {
+		t.Errorf("many = %v, want SevCrit", got)
+	}
+}
+
+func TestTempBytesSeverity(t *testing.T) {
+	if got := tempBytesSeverity(1 << 20); got != SevOK {
+		t.Errorf("1MB = %v, want SevOK", got)
+	}
+	if got := tempBytesSeverity(20 << 30); got != SevWarn {
+		t.Errorf("20GB = %v, want SevWarn", got)
+	}
+	if got := tempBytesSeverity(200 << 30); got != SevCrit {
+		t.Errorf("200GB = %v, want SevCrit", got)
+	}
+}
+
+func TestArchiverSeverity(t *testing.T) {
+	if got := archiverSeverity(0); got != SevOK {
+		t.Errorf("no failures = %v, want SevOK", got)
+	}
+	if got := archiverSeverity(1); got != SevCrit {
+		t.Errorf("one failure = %v, want SevCrit", got)
+	}
+}
+
+func TestConnSaturationSeverity(t *testing.T) {
+	if got := connSaturationSeverity(50, 100); got != SevOK {
+		t.Errorf("half = %v, want SevOK", got)
+	}
+	if got := connSaturationSeverity(85, 100); got != SevWarn {
+		t.Errorf("85%% = %v, want SevWarn", got)
+	}
+	if got := connSaturationSeverity(98, 100); got != SevCrit {
+		t.Errorf("98%% = %v, want SevCrit", got)
+	}
+	if got := connSaturationSeverity(10, 0); got != SevOK {
+		t.Errorf("unknown max = %v, want SevOK", got)
+	}
+}
+
+func TestCheckpointSeverity(t *testing.T) {
+	if got := checkpointSeverity(3, 4); got != SevOK {
+		t.Errorf("too few to judge = %v, want SevOK", got)
+	}
+	if got := checkpointSeverity(1, 100); got != SevOK {
+		t.Errorf("mostly timed = %v, want SevOK", got)
+	}
+	if got := checkpointSeverity(40, 100); got != SevWarn {
+		t.Errorf("40%% requested = %v, want SevWarn", got)
+	}
+	if got := checkpointSeverity(70, 100); got != SevCrit {
+		t.Errorf("70%% requested = %v, want SevCrit", got)
+	}
+}
+
+func TestPreparedXactSeverity(t *testing.T) {
+	if got := preparedXactSeverity(5); got != SevWarn {
+		t.Errorf("young = %v, want SevWarn", got)
+	}
+	if got := preparedXactSeverity(600); got != SevCrit {
+		t.Errorf("10m old = %v, want SevCrit", got)
+	}
+}
+
+func TestRollbackSeverity(t *testing.T) {
+	if got := rollbackSeverity(0.05); got != SevOK {
+		t.Errorf("5%% = %v, want SevOK", got)
+	}
+	if got := rollbackSeverity(0.30); got != SevWarn {
+		t.Errorf("30%% = %v, want SevWarn", got)
+	}
+	if got := rollbackSeverity(0.60); got != SevCrit {
+		t.Errorf("60%% = %v, want SevCrit", got)
 	}
 }
 
@@ -166,8 +238,8 @@ func TestTriageDegradesOnFailure(t *testing.T) {
 	cancel()
 
 	results := c.Triage(ctx)
-	if len(results) != 10 {
-		t.Fatalf("Triage returned %d results, want 10", len(results))
+	if len(results) != 18 {
+		t.Fatalf("Triage returned %d results, want 18", len(results))
 	}
 	for _, r := range results {
 		if r.Check == "" {

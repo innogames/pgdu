@@ -86,6 +86,31 @@ const (
 	tempBytesWarn = 10 << 30
 	tempBytesCrit = 100 << 30
 
+	// connection saturation: fraction of max_connections in use. Past ~80% a
+	// spike risks "too many clients"; superuser-reserved slots are the last line.
+	connSaturationWarnFrac = 0.80
+	connSaturationCritFrac = 0.95
+
+	// checkpoints: a high share of "requested" (as opposed to timed) checkpoints
+	// means WAL volume keeps hitting max_wal_size before checkpoint_timeout —
+	// max_wal_size is too small. The floor keeps a freshly-started cluster (where
+	// the first checkpoint is often requested) green until there's a real sample.
+	checkpointReqWarnFrac = 0.30
+	checkpointReqCritFrac = 0.50
+	checkpointMinTotal    = 10
+
+	// prepared (2PC) transactions: any open prepared xact pins the xmin horizon
+	// and delays autovacuum, so its mere presence is a warning; one left open for
+	// minutes is a coordinator that forgot to COMMIT/ROLLBACK.
+	preparedXactCritSecs = 300
+
+	// rollback ratio: a high share of transactions rolling back can mean app
+	// errors or serialization failures. Gated on a minimum volume so a nearly
+	// idle database (a handful of rollbacks) never trips it.
+	rollbackWarnFrac = 0.25
+	rollbackCritFrac = 0.50
+	rollbackMinXacts = 1000
+
 	// fan-out: enough parallelism to finish fast without stampeding a server
 	// that is already unwell; each check also gets its own sub-budget so one
 	// hung catalog query degrades to "could not evaluate" instead of eating
@@ -111,16 +136,81 @@ func (c *Client) Triage(ctx context.Context) []TriageResult {
 	}
 
 	db := c.DefaultDB()
+
+	// Shared inputs, each an expensive one-shot, are fetched once here and handed
+	// to the pure graders below — several checks read the same MaintenanceInfo or
+	// database_stats view, and calling those N times would multiply the load on a
+	// server we may already suspect is unwell.
+	var (
+		info    *MaintenanceInfo
+		infoErr error
+		dbStats *DiagResult
+		dbErr   error
+	)
+	var pre errgroup.Group
+	pre.Go(func() error {
+		cctx, cancel := context.WithTimeout(ctx, triageCheckTimeout)
+		defer cancel()
+		info, infoErr = c.Maintenance(cctx, "")
+		// Maintenance is best-effort: it absorbs every sub-query failure and
+		// returns a zero struct with a nil error when the connection is dead.
+		// version() is always populated over a live connection, so an empty
+		// Version means "unreachable" — degrade every MaintenanceInfo-backed
+		// check uniformly instead of reporting false greens.
+		if infoErr == nil && (info == nil || info.Version == "") {
+			infoErr = errors.New("server unreachable")
+		}
+		return nil
+	})
+	pre.Go(func() error {
+		cctx, cancel := context.WithTimeout(ctx, triageCheckTimeout)
+		defer cancel()
+		dbStats, dbErr = c.runTriageDiag(cctx, "", "database_stats")
+		return nil
+	})
+	_ = pre.Wait()
+
+	// mgrade/dgrade adapt a pure grader over a shared input into a check.run,
+	// short-circuiting to "could not evaluate" when that input failed to load.
+	mgrade := func(g func(*MaintenanceInfo) (Severity, string, error)) func(context.Context) (Severity, string, error) {
+		return func(context.Context) (Severity, string, error) {
+			if infoErr != nil {
+				return 0, "", infoErr
+			}
+			return g(info)
+		}
+	}
+	dgrade := func(g func(*DiagResult) (Severity, string, error)) func(context.Context) (Severity, string, error) {
+		return func(context.Context) (Severity, string, error) {
+			if dbErr != nil {
+				return 0, "", dbErr
+			}
+			return g(dbStats)
+		}
+	}
+
 	checks := []check{
-		{"wraparound", TriageTargetMaintenance, "", c.triageWraparound},
+		{"wraparound", TriageTargetMaintenance, "", mgrade(wraparoundGrade)},
+		{"WAL archiver", TriageTargetMaintenance, "", mgrade(archiverGrade)},
+		{"connection saturation", TriageTargetMaintenance, "", mgrade(connSaturationGrade)},
+		{"checkpoint pressure", TriageTargetMaintenance, "", mgrade(checkpointGrade)},
+		{"prepared transactions", TriageTargetMaintenance, "", mgrade(preparedXactGrade)},
 		{"blocked backends", TriageTargetLockTree, "", c.triageBlocked},
 		{"idle-in-xact", TriageTargetDiagnostic, "idle_in_xact_holders", c.triageIdleInXact},
 		{"replication slots", TriageTargetDiagnostic, "replication_slots", c.triageReplicationSlots},
-		{"cache hit ratio", TriageTargetDiagnostic, "database_stats", c.triageCacheHit},
+		{"cache hit ratio", TriageTargetDiagnostic, "database_stats", dgrade(cacheHitGrade)},
 		{"SLRU pressure", TriageTargetDiagnostic, "slru_stats", c.triageSLRU},
-		{"temp files / deadlocks", TriageTargetDiagnostic, "database_stats", c.triageTempDeadlocks},
+		{"deadlocks", TriageTargetDiagnostic, "database_stats", dgrade(deadlockGrade)},
+		{"temp files", TriageTargetDiagnostic, "database_stats", dgrade(tempFilesGrade)},
+		{"rollback ratio", TriageTargetDiagnostic, "database_stats", dgrade(rollbackGrade)},
 		{"sequence exhaustion", TriageTargetDiagnostic, "sequences", func(ctx context.Context) (Severity, string, error) {
 			return c.triageSequences(ctx, db)
+		}},
+		{"stale statistics", TriageTargetDiagnostic, "stale_statistics", func(ctx context.Context) (Severity, string, error) {
+			return c.triageStaleStats(ctx, db)
+		}},
+		{"FK missing index", TriageTargetDiagnostic, "fk_missing_index", func(ctx context.Context) (Severity, string, error) {
+			return c.triageFKMissingIndex(ctx, db)
 		}},
 		{"bloat", TriageTargetDiagnostic, "bloat_table", func(ctx context.Context) (Severity, string, error) {
 			return c.triageBloat(ctx, db)
@@ -159,20 +249,110 @@ func (c *Client) Triage(ctx context.Context) []TriageResult {
 	return results
 }
 
-func (c *Client) triageWraparound(ctx context.Context) (Severity, string, error) {
-	info, err := c.Maintenance(ctx, "")
-	if err != nil {
-		return 0, "", err
-	}
-	// Maintenance is best-effort and absorbs sub-query failures; a zero
-	// FreezeMaxAge means the settings read itself failed, so degrade honestly
-	// instead of reporting a green 0%.
+func wraparoundGrade(info *MaintenanceInfo) (Severity, string, error) {
+	// A zero FreezeMaxAge means the settings read failed even though the server
+	// is reachable, so degrade honestly instead of reporting a green 0%.
 	if info.FreezeMaxAge <= 0 {
 		return 0, "", errors.New("autovacuum_freeze_max_age unavailable")
 	}
 	sev := wraparoundSeverity(info.XidAge, info.FreezeMaxAge)
 	pct := 100 * float64(info.XidAge) / float64(info.FreezeMaxAge)
 	return sev, fmt.Sprintf("oldest datfrozenxid at %.0f%% of autovacuum_freeze_max_age", pct), nil
+}
+
+// archiverGrade flags a stalled WAL archiver: pg_wal fills up silently when
+// archiving fails, so any failure count is critical.
+func archiverGrade(info *MaintenanceInfo) (Severity, string, error) {
+	sev := archiverSeverity(info.ArchiveFailed)
+	if sev == SevOK {
+		return sev, "no WAL archive failures", nil
+	}
+	detail := fmt.Sprintf("%d WAL archive failure(s)", info.ArchiveFailed)
+	if info.ArchiveLastFailed != "" {
+		detail += ", last " + info.ArchiveLastFailed
+	}
+	return sev, detail, nil
+}
+
+func archiverSeverity(failed int64) Severity {
+	if failed > 0 {
+		return SevCrit
+	}
+	return SevOK
+}
+
+func connSaturationGrade(info *MaintenanceInfo) (Severity, string, error) {
+	if info.MaxConns <= 0 {
+		return 0, "", errors.New("max_connections unavailable")
+	}
+	used := 0
+	for _, n := range info.ConnByState {
+		used += n
+	}
+	sev := connSaturationSeverity(used, info.MaxConns)
+	pct := 100 * float64(used) / float64(info.MaxConns)
+	return sev, fmt.Sprintf("%d of %d connections in use (%.0f%%)", used, info.MaxConns, pct), nil
+}
+
+func connSaturationSeverity(used, maxConns int) Severity {
+	if maxConns <= 0 {
+		return SevOK
+	}
+	frac := float64(used) / float64(maxConns)
+	switch {
+	case frac >= connSaturationCritFrac:
+		return SevCrit
+	case frac >= connSaturationWarnFrac:
+		return SevWarn
+	}
+	return SevOK
+}
+
+// checkpointGrade watches the share of checkpoints forced by WAL volume rather
+// than checkpoint_timeout — a high share means max_wal_size is too small.
+func checkpointGrade(info *MaintenanceInfo) (Severity, string, error) {
+	total := info.CheckpointsTimed + info.CheckpointsReq
+	if total == 0 {
+		return SevOK, "no checkpoints recorded yet", nil
+	}
+	sev := checkpointSeverity(info.CheckpointsReq, total)
+	pct := 100 * float64(info.CheckpointsReq) / float64(total)
+	return sev, fmt.Sprintf("%d of %d checkpoints forced by WAL volume (%.0f%%)",
+		info.CheckpointsReq, total, pct), nil
+}
+
+func checkpointSeverity(requested, total int64) Severity {
+	if total < checkpointMinTotal {
+		return SevOK
+	}
+	frac := float64(requested) / float64(total)
+	switch {
+	case frac >= checkpointReqCritFrac:
+		return SevCrit
+	case frac >= checkpointReqWarnFrac:
+		return SevWarn
+	}
+	return SevOK
+}
+
+// preparedXactGrade flags open two-phase-commit transactions, which pin the
+// xmin horizon and stall autovacuum until they are committed or rolled back.
+func preparedXactGrade(info *MaintenanceInfo) (Severity, string, error) {
+	if info.PreparedXacts == 0 {
+		return SevOK, "no prepared transactions", nil
+	}
+	sev := preparedXactSeverity(info.OldestPrepSec)
+	return sev, fmt.Sprintf("%d prepared transaction(s), oldest %s",
+		info.PreparedXacts, triageDuration(info.OldestPrepSec)), nil
+}
+
+// preparedXactSeverity is only called when at least one prepared xact exists, so
+// the presence alone earns a warning and age escalates it.
+func preparedXactSeverity(oldestSecs float64) Severity {
+	if oldestSecs > preparedXactCritSecs {
+		return SevCrit
+	}
+	return SevWarn
 }
 
 func wraparoundSeverity(xidAge, freezeMaxAge int64) Severity {
@@ -317,11 +497,7 @@ func slotSeverity(inactive, lost int, overCap bool) Severity {
 	return SevOK
 }
 
-func (c *Client) triageCacheHit(ctx context.Context) (Severity, string, error) {
-	res, err := c.runTriageDiag(ctx, "", "database_stats")
-	if err != nil {
-		return 0, "", err
-	}
+func cacheHitGrade(res *DiagResult) (Severity, string, error) {
 	hitCol := diagColIdx(res, "hit_pct")
 	dbCol := diagColIdx(res, "database")
 	minHit, worstDB, seen := 100.0, "", false
@@ -397,35 +573,93 @@ func slruSeverity(hitPct, blksRead float64) Severity {
 	return SevOK
 }
 
-func (c *Client) triageTempDeadlocks(ctx context.Context) (Severity, string, error) {
-	res, err := c.runTriageDiag(ctx, "", "database_stats")
-	if err != nil {
-		return 0, "", err
-	}
+func deadlockGrade(res *DiagResult) (Severity, string, error) {
 	dlCol := diagColIdx(res, "deadlocks")
-	tmpCol := diagColIdx(res, "temp_bytes")
-	var deadlocks, tempBytes float64
+	var deadlocks float64
 	for _, row := range res.Rows {
 		if v, ok := diagNum(row, dlCol); ok {
 			deadlocks += v
 		}
+	}
+	sev := deadlockSeverity(deadlocks)
+	if deadlocks == 0 {
+		return sev, "no deadlocks since stats reset", nil
+	}
+	return sev, fmt.Sprintf("%d deadlock(s) since stats reset", int64(deadlocks)), nil
+}
+
+func deadlockSeverity(deadlocks float64) Severity {
+	switch {
+	case deadlocks >= deadlocksCrit:
+		return SevCrit
+	case deadlocks >= deadlocksWarn:
+		return SevWarn
+	}
+	return SevOK
+}
+
+func tempFilesGrade(res *DiagResult) (Severity, string, error) {
+	tmpCol := diagColIdx(res, "temp_bytes")
+	var tempBytes float64
+	for _, row := range res.Rows {
 		if v, ok := diagNum(row, tmpCol); ok {
 			tempBytes += v
 		}
 	}
-	sev := tempDeadlockSeverity(deadlocks, tempBytes)
-	if sev == SevOK {
-		return sev, "no deadlocks, little temp-file spill", nil
-	}
-	return sev, fmt.Sprintf("%d deadlock(s), %s spilled to temp files since stats reset",
-		int64(deadlocks), humanize.Bytes(int64(tempBytes))), nil
+	sev := tempBytesSeverity(tempBytes)
+	return sev, humanize.Bytes(int64(tempBytes)) + " spilled to temp files since stats reset", nil
 }
 
-func tempDeadlockSeverity(deadlocks, tempBytes float64) Severity {
+func tempBytesSeverity(tempBytes float64) Severity {
 	switch {
-	case deadlocks >= deadlocksCrit || tempBytes >= tempBytesCrit:
+	case tempBytes >= tempBytesCrit:
 		return SevCrit
-	case deadlocks >= deadlocksWarn || tempBytes >= tempBytesWarn:
+	case tempBytes >= tempBytesWarn:
+		return SevWarn
+	}
+	return SevOK
+}
+
+// rollbackGrade reports the database with the worst rollback ratio, ignoring
+// databases below a minimum transaction volume so a quiet cluster stays green.
+func rollbackGrade(res *DiagResult) (Severity, string, error) {
+	commitCol := diagColIdx(res, "commits")
+	rollbackCol := diagColIdx(res, "rollbacks")
+	dbCol := diagColIdx(res, "database")
+	worstFrac, worstDB, seen := 0.0, "", false
+	for _, row := range res.Rows {
+		commits, ok1 := diagNum(row, commitCol)
+		rollbacks, ok2 := diagNum(row, rollbackCol)
+		if !ok1 || !ok2 {
+			continue
+		}
+		total := commits + rollbacks
+		if total < rollbackMinXacts {
+			continue
+		}
+		seen = true
+		if frac := rollbacks / total; frac > worstFrac {
+			worstFrac = frac
+			if dbCol >= 0 {
+				worstDB = row[dbCol].Display
+			}
+		}
+	}
+	if !seen {
+		return SevOK, "not enough transactions to judge rollback ratio", nil
+	}
+	sev := rollbackSeverity(worstFrac)
+	if worstDB != "" {
+		return sev, fmt.Sprintf("worst rollback ratio %.1f%% (%s)", 100*worstFrac, worstDB), nil
+	}
+	return sev, fmt.Sprintf("worst rollback ratio %.1f%%", 100*worstFrac), nil
+}
+
+func rollbackSeverity(frac float64) Severity {
+	switch {
+	case frac >= rollbackCritFrac:
+		return SevCrit
+	case frac >= rollbackWarnFrac:
 		return SevWarn
 	}
 	return SevOK
@@ -484,6 +718,37 @@ func (c *Client) triageInvalidIndexes(ctx context.Context, db string) (Severity,
 		return SevOK, fmt.Sprintf("no invalid indexes (in %s)", db), nil
 	}
 	return SevCrit, fmt.Sprintf("%d index(es) left INVALID by a failed concurrent build (in %s)",
+		len(res.Rows), db), nil
+}
+
+// triageStaleStats leans on the stale_statistics diagnostic's own server-side
+// filter (rows modified since ANALYZE outgrow live rows): any returned row is
+// already a table the planner is reasoning about with stale statistics. Stale
+// stats degrade plans rather than break the server, so it grades as a warning.
+func (c *Client) triageStaleStats(ctx context.Context, db string) (Severity, string, error) {
+	res, err := c.runTriageDiag(ctx, db, "stale_statistics")
+	if err != nil {
+		return 0, "", err
+	}
+	if len(res.Rows) == 0 {
+		return SevOK, fmt.Sprintf("no tables with stale planner statistics (in %s)", db), nil
+	}
+	return SevWarn, fmt.Sprintf("%d table(s) with stale planner statistics (in %s)",
+		len(res.Rows), db), nil
+}
+
+// triageFKMissingIndex flags foreign keys whose referencing columns have no
+// supporting index — a footgun for cascading updates/deletes and join plans.
+// It is a performance risk, not an outage, so it grades as a warning.
+func (c *Client) triageFKMissingIndex(ctx context.Context, db string) (Severity, string, error) {
+	res, err := c.runTriageDiag(ctx, db, "fk_missing_index")
+	if err != nil {
+		return 0, "", err
+	}
+	if len(res.Rows) == 0 {
+		return SevOK, fmt.Sprintf("all foreign keys have a supporting index (in %s)", db), nil
+	}
+	return SevWarn, fmt.Sprintf("%d foreign key(s) without a supporting index (in %s)",
 		len(res.Rows), db), nil
 }
 
