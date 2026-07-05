@@ -183,6 +183,8 @@ func (m *Model) renderActivityInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" navigation ") + "\n")
 	b.WriteString("    " + badge("↵") + mu("  drill into top-queries detail for the selected row's query_id (when available)") + "\n")
+	b.WriteString("    " + badge("b") + mu("  open the blocking-chain lock tree (who is blocking whom)") + "\n")
+	b.WriteString("    " + badge("d") + mu("  describe the main table of the selected row's query (in that backend's database)") + "\n")
 	b.WriteString("    " + badge("C") + mu("  configure visible columns") + "\n")
 	b.WriteString("    " + badge("←") + mu("/") + badge("→") + mu("  cycle sort column · ") +
 		badge("r") + mu(" reverse sort order") + "\n\n")

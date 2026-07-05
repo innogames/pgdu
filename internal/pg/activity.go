@@ -33,7 +33,7 @@ func (c *Client) ListActivity(ctx context.Context, db string, mode ActivityFilte
 				&r.BackendType, &r.State, &r.WaitEventType, &r.WaitEvent,
 				&r.BackendXid, &r.BackendXmin,
 				&r.QueryAgeMs, &r.XactAgeMs, &r.StateAgeMs,
-				&r.QueryID, &r.Query,
+				&r.QueryID, &r.BlockedBy, &r.Query,
 			)
 			return r, err
 		})

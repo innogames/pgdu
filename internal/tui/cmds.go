@@ -98,6 +98,16 @@ type reindexDoneMsg struct {
 	indexName string
 	err       error
 }
+
+// reindexTickMsg drives the progress poll while a REINDEX is in flight.
+type reindexTickMsg struct{}
+
+// reindexProgressMsg carries one poll of pg_stat_progress_create_index for the
+// reindexing table. row is nil when nothing is reporting (yet / any more).
+type reindexProgressMsg struct {
+	tableOID uint32
+	row      *pg.ProgressRow
+}
 type heapPagesLoadedMsg struct {
 	table      pg.Table
 	start      int32
@@ -556,6 +566,20 @@ func (m *Model) loadDescribeTableByNameCmd(db, name string) tea.Cmd {
 	})
 }
 
+// loadDescribeIndexByNameCmd resolves an index name (from a diagnostic result
+// row that carries only the index name) to its OID, then describes it — the
+// index analogue of loadDescribeTableByNameCmd.
+func (m *Model) loadDescribeIndexByNameCmd(db, name string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		oid, qualified, err := m.client.ResolveIndex(ctx, db, name)
+		if err != nil {
+			return describeLoadedMsg{err: err}
+		}
+		d, err := m.client.DescribeIndex(ctx, db, oid, qualified)
+		return describeLoadedMsg{oid: oid, desc: d, err: err}
+	})
+}
+
 // resolveDiskTableCmd resolves a relation name (parsed out of a query in the
 // top-queries view) to its catalog metadata so the caller can open the
 // disk-usage (parts) view for it. Only the resolve step runs here; a placeholder
@@ -582,6 +606,25 @@ func (m *Model) reindexIndexCmd(t pg.Table, indexName string) tea.Cmd {
 		err := m.client.ReindexIndex(context.Background(), t, indexName)
 		return reindexDoneMsg{tableOID: t.OID, indexName: indexName, err: err}
 	}
+}
+
+// reindexProgressInterval is how often the REINDEX banner re-polls
+// pg_stat_progress_create_index — slow enough not to load the server, fast
+// enough that the bar visibly moves on a multi-minute rebuild.
+const reindexProgressInterval = 500 * time.Millisecond
+
+func (m *Model) reindexTick() tea.Cmd {
+	return tea.Tick(reindexProgressInterval, func(time.Time) tea.Msg { return reindexTickMsg{} })
+}
+
+func (m *Model) loadReindexProgressCmd(db string, tableOID uint32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		r, ok, err := m.client.ReindexProgress(ctx, db, tableOID)
+		if err != nil || !ok {
+			return reindexProgressMsg{tableOID: tableOID, row: nil}
+		}
+		return reindexProgressMsg{tableOID: tableOID, row: &r}
+	})
 }
 
 func (m *Model) loadDiagnosticCmd(d pg.Diagnostic, db string) tea.Cmd {

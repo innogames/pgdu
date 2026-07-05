@@ -71,6 +71,7 @@ func (c *Client) RunDiagnostic(ctx context.Context, db string, d Diagnostic) (*D
 		return nil, fmt.Errorf("run diagnostic %q: %w", d.Key, err)
 	}
 
+	applyKindOverrides(cols, d.Kinds)
 	barCol, sortCol := resolveBarSort(cols, d)
 	return &DiagResult{Columns: cols, Rows: resultRows, BarCol: barCol, SortCol: sortCol}, nil
 }
@@ -183,8 +184,24 @@ func (c *Client) RunDiagnosticAllDBs(ctx context.Context, d Diagnostic) (*DiagRe
 		return &DiagResult{Columns: []DiagColumn{{Name: dbColName, Kind: DiagText}}, BarCol: -1, SortCol: -1}, nil
 	}
 
+	applyKindOverrides(cols, d.Kinds)
 	barCol, sortCol := resolveBarSort(cols, d)
 	return &DiagResult{Columns: cols, Rows: rows, BarCol: barCol, SortCol: sortCol}, nil
+}
+
+// applyKindOverrides replaces inferred column kinds with the diagnostic's
+// declared ones (Diagnostic.Kinds). Applied after scanning: Kind only drives
+// rendering, so a post-scan overwrite is safe and also wins over the
+// text→numeric promotion done while scanning.
+func applyKindOverrides(cols []DiagColumn, kinds map[string]DiagColumnKind) {
+	if len(kinds) == 0 {
+		return
+	}
+	for i, c := range cols {
+		if k, ok := kinds[c.Name]; ok {
+			cols[i].Kind = k
+		}
+	}
 }
 
 // scanDiagRows drains rows into generic column/cell form: column metadata comes

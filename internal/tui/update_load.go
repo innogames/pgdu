@@ -25,7 +25,7 @@ func (m *Model) loadCurrent() tea.Cmd {
 		s.loaded = true
 		return nil
 	case levelDiagnostics:
-		s.items = diagnosticItems()
+		s.items = diagnosticItems(s.diagCatFilter)
 		s.itemsRev++ // doesn't go through applySort; invalidate the filter cache
 		s.loading = false
 		s.loaded = true
@@ -167,6 +167,8 @@ func (m *Model) loadCurrent() tea.Cmd {
 			// Reset generic-table state so a Refresh shows a clean load.
 			s.diagCols = nil
 			s.diagBarCol = -1
+			s.diagResult = nil
+			s.diagTotalRow = nil
 			if s.diagAllDBs {
 				return m.loadDiagnosticAllDBsCmd(*s.diag)
 			}
@@ -221,8 +223,30 @@ func (m *Model) loadCurrent() tea.Cmd {
 			}
 		}
 		return tea.Batch(cmds...)
+	case levelLockTree:
+		// Same live-refresh pattern as the activity table, reusing its tick loop.
+		cmds := []tea.Cmd{m.loadLockTreeCmd(s.db)}
+		if !m.activityTicking {
+			if tick := m.activityTick(); tick != nil {
+				m.activityTicking = true
+				cmds = append(cmds, tick)
+			}
+		}
+		return tea.Batch(cmds...)
 	case levelTableStats:
 		return m.loadTableOverviewCmd(s.db, s.schema)
+	case levelTriage:
+		return m.loadTriageCmd()
+	case levelProgress:
+		// Same live-refresh pattern as the activity table, reusing its tick loop.
+		cmds := []tea.Cmd{m.loadProgressCmd(s.db)}
+		if !m.activityTicking {
+			if tick := m.activityTick(); tick != nil {
+				m.activityTicking = true
+				cmds = append(cmds, tick)
+			}
+		}
+		return tea.Batch(cmds...)
 	}
 	return nil
 }

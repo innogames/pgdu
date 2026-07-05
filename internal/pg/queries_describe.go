@@ -18,6 +18,19 @@ WHERE  c.oid = to_regclass($1)
   AND  c.relkind IN ('r', 'p', 'm', 'f')
 `
 
+// sqlResolveIndex resolves an (optionally schema-qualified) index name to its
+// OID and qualified name — sqlResolveTable's sibling for relkind 'i'/'I'.
+// $1 = name.
+const sqlResolveIndex = `
+SELECT c.oid,
+       n.nspname,
+       c.relname
+FROM   pg_class c
+JOIN   pg_namespace n ON n.oid = c.relnamespace
+WHERE  c.oid = to_regclass($1)
+  AND  c.relkind IN ('i', 'I')
+`
+
 // sqlDescribeColumns lists a table's live columns in declaration order with
 // NOT NULL and the column default expression. $1 = table oid. PG 12+.
 const sqlDescribeColumns = `

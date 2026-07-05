@@ -171,12 +171,19 @@ func (m *Model) renderBufferDetail(s *screen, height int) string {
 		pct := hr * 100
 		hitVal = gradedPercentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct))
 	}
+	// Grade the dirty figure by its share of this table's buffered pages: a
+	// mostly-dirty footprint means checkpoint/bgwriter flush pressure ahead.
+	dirtyVal := humanize.Bytes(dirtyBytes)
+	if dirtyBytes > 0 && bufferedBytes > 0 {
+		pct := float64(dirtyBytes) / float64(bufferedBytes) * 100
+		dirtyVal = bloatPercentStyle(int(pct)).Render(fmt.Sprintf("%s (%.1f%% of buffered)", humanize.Bytes(dirtyBytes), pct))
+	}
 	rows := [][2]string{
 		{"buffered", humanize.Bytes(bufferedBytes)},
 		{"table size", humanize.Bytes(st.TotalBytes)},
 		{"cached", cachedVal},
 		{"hit ratio", hitVal},
-		{"dirty", humanize.Bytes(dirtyBytes)},
+		{"dirty", dirtyVal},
 		{"avg usage", fmt.Sprintf("%.1f / 5", avgUsage)},
 	}
 	labelW := 0

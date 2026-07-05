@@ -219,8 +219,32 @@ func (m *Model) renderDescribeBufferRows(s *screen) string {
 }
 
 // renderDiagnosticList renders the flat list of available diagnostic queries at
-// levelDiagnostics. Layout: cursor | [category] | title | muted description.
+// levelDiagnostics. Layout: cursor | category badge | title | muted description,
+// under a one-line category-filter hint (f cycles all → index → table → …).
 func (m *Model) renderDiagnosticList(s *screen, height int) string {
+	var b strings.Builder
+
+	label := "all"
+	if s.diagCatFilter != "" {
+		label = s.diagCatFilter
+	}
+	b.WriteString("  " + styleMuted.Render("category: ") + diagCatStyle(label).Render(label) +
+		styleMuted.Render("  ·  ") + styleBadge.Render("f") + styleMuted.Render(" cycles") + "\n")
+	height--
+
+	catW := 0
+	for _, c := range diagCategories() {
+		if len(c) > catW {
+			catW = len(c)
+		}
+	}
+	nameW := 0
+	for i := range s.items {
+		if n := displayWidth(s.items[i].name); n > nameW {
+			nameW = n
+		}
+	}
+
 	vis := s.visibleIndexes()
 	rowsH := height
 	if rowsH > 0 {
@@ -228,26 +252,79 @@ func (m *Model) renderDiagnosticList(s *screen, height int) string {
 	}
 	end := min(s.offset+rowsH, len(vis))
 
-	var b strings.Builder
 	for vi := s.offset; vi < end; vi++ {
 		it := s.items[vis[vi]]
 		selected := vi == s.cursor
 		cursor := "  "
-		name := it.name
+		name := padRight(it.name, nameW)
 		if selected {
 			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
 			name = styleSelected.Render(name)
 		}
+		cat := ""
+		if d, ok := it.data.(pg.Diagnostic); ok {
+			cat = d.Category
+		}
+		badge := diagCatStyle(cat).Render(padRight(cat, catW))
 		detail := ""
 		if it.detail != "" {
 			detail = "  " + styleMuted.Render(it.detail)
 		}
-		b.WriteString(cursor + name + detail + "\n")
+		b.WriteString(cursor + badge + "  " + name + detail + "\n")
 	}
 	for i := end - s.offset; i < rowsH; i++ {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// renderDiagColumnConfig draws the htop-style column picker for a diagnostic
+// result (C on levelDiagnosticResult). Same look-and-feel as the three
+// registry-backed pickers, but the rows come from the result's dynamic column
+// set and the selection is remembered per diagnostic key.
+func (m *Model) renderDiagColumnConfig(s *screen, height int) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+
+	b.WriteString("\n")
+	b.WriteString("  " + styleSelected.Render("configure columns") + mu("  ·  ") +
+		styleBadge.Render("space") + mu(" toggles · ") +
+		styleBadge.Render("↑/↓") + mu(" move · ") +
+		styleBadge.Render("r") + mu(" reset · ") +
+		styleBadge.Render("C") + mu(" or ") + styleBadge.Render("esc") + mu(" to close") + "\n")
+	title := "this diagnostic"
+	if s.diag != nil {
+		title = s.diag.Title
+	}
+	b.WriteString("  " + mu("choose which columns "+title+" shows (remembered per diagnostic)") + "\n\n")
+
+	res := s.diagResult
+	if res == nil || s.diag == nil {
+		return padInfo(&b, height)
+	}
+	vis := m.diagVis(s.diag.Key)
+	nameW := 0
+	for _, c := range res.Columns {
+		if n := len(c.Name); n > nameW {
+			nameW = n
+		}
+	}
+	for i, c := range res.Columns {
+		box := "[ ]"
+		if diagColOn(vis, c.Name) {
+			box = "[x]"
+		}
+		cursor := "  "
+		if i == m.diagColCfgCursor {
+			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
+		}
+		label := box + "  " + padRight(c.Name, nameW)
+		if i == m.diagColCfgCursor {
+			label = styleSelected.Render(label)
+		}
+		b.WriteString(cursor + label + "\n")
+	}
+	return padInfo(&b, height)
 }
 
 // diagColWidth is the maximum per-column display width in the result table.
@@ -372,8 +449,12 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 	barCol := s.diagBarCol
 
 	// Determine bar column type up front — needed in the colW computation below.
-	barIsPercent := barCol >= 0 && barCol < nCols && cols[barCol].Kind == pg.DiagPercent
-	barIsBytes := barCol >= 0 && barCol < nCols && cols[barCol].Kind == pg.DiagBytes
+	barKind := pg.DiagText
+	if barCol >= 0 && barCol < nCols {
+		barKind = cols[barCol].Kind
+	}
+	barIsPercent := barKind == pg.DiagPercent || barKind == pg.DiagPercentGraded || barKind == pg.DiagPercentBad
+	barIsBytes := barKind == pg.DiagBytes
 
 	// Per-column display widths (capped at diagColWidth), uncapped natural widths,
 	// the bar column's numeric max, and the per-column cost-grade maxima. These
@@ -535,7 +616,7 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 					filled := max(min(int(float64(barW)*cell.Num/scaleMax), barW), 0)
 					style := styleBar
 					if barIsPercent {
-						style = percentStyle(cell.Num)
+						style = diagPercentBarStyle(barKind, cell.Num)
 					}
 					barStr = paintBar(barW, barSegment{cells: filled, style: style})
 				} else {
@@ -547,9 +628,9 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 					numStr = humanize.Bytes(int64(cell.Num))
 				}
 				// Colour the percentage next to its bar the same way the bar is
-				// graded (percentStyle), so the digits read at a glance too.
+				// graded, so the digits read at a glance too.
 				if barIsPercent && cell.HasNum && !selected {
-					numStr = percentStyle(cell.Num).Render(numStr)
+					numStr = diagPercentBarStyle(barKind, cell.Num).Render(numStr)
 				}
 				if selected {
 					numStr = styleSelected.Render(numStr)
@@ -681,6 +762,20 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 		b.WriteString(lineStr + "\n")
 	}
 	return b.String()
+}
+
+// diagPercentBarStyle picks the colour scale for a percent-typed headline bar:
+// plain percents grade by fullness (percentStyle), "higher is better" columns
+// green→red (gradedPercentStyle), "higher is worse" columns by the bloat bands.
+func diagPercentBarStyle(kind pg.DiagColumnKind, pct float64) lipgloss.Style {
+	switch kind {
+	case pg.DiagPercentGraded:
+		return gradedPercentStyle(pct)
+	case pg.DiagPercentBad:
+		return bloatPercentStyle(int(pct))
+	default:
+		return percentStyle(pct)
+	}
 }
 
 // truncateDiagCell clips a cell value to maxW cells, appending "…" when the

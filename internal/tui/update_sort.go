@@ -294,6 +294,11 @@ func (m *Model) cycleSort(s *screen, dir int) {
 		if s.tblCols != nil && s.diagSortCol < len(s.tblCols) {
 			m.tblSortColID = s.tblCols[s.diagSortCol].id
 		}
+		// Diagnostic results track the sort column by name (no stable ids), so a
+		// later column hide/show can re-pin it (see rebuildDiagItems).
+		if s.diag != nil && s.diagSortCol < len(s.diagCols) {
+			s.diagSortName = s.diagCols[s.diagSortCol].Name
+		}
 		m.applySort(s)
 		return
 	}

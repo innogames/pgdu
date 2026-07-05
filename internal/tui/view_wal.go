@@ -35,9 +35,9 @@ const (
 // Column widths for the WAL by-relation view (levelWALRelations).
 const (
 	walRelCombinedColW = 11
-	walRelFPIColW      = 11
-	walRelRecColW      = 9 // record count
-	walRelBlkColW      = 9 // distinct pages touched
+	walRelFPIColW      = 17 // "1023.99 MB (99%)" — fpi bytes plus its graded share
+	walRelRecColW      = 9  // record count
+	walRelBlkColW      = 9  // distinct pages touched
 )
 
 // renderWALBar paints one row's WAL bytes as record-data | FPI, scaled to the
@@ -522,7 +522,14 @@ func renderWALRelRow(it item, st pg.WALRelStat, maxSize int64, barW int, selecte
 	bar := renderWALBar(st.DataBytes, st.FPIBytes, maxSize, barW)
 	fpiStr := styleMuted.Render("—")
 	if st.FPIBytes > 0 {
+		// Grade the FPI share of this relation's WAL: full-page images are
+		// checkpoint write amplification, so a high share flags a hot relation
+		// worth a longer checkpoint interval or a fillfactor tweak.
 		fpiStr = styleBarAlt.Render(humanize.Bytes(st.FPIBytes))
+		if combined := st.CombinedSize(); combined > 0 {
+			pct := int(float64(st.FPIBytes) / float64(combined) * 100)
+			fpiStr = bloatPercentStyle(pct).Render(fmt.Sprintf("%s (%d%%)", humanize.Bytes(st.FPIBytes), pct))
+		}
 	}
 	childMark := "  "
 	if it.hasChildren {

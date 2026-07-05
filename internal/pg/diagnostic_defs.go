@@ -13,6 +13,22 @@ type Diagnostic struct {
 	Bar         string // headline column name rendered as a bar, or ""
 	Sort        string // default sort column name (descending); "" falls back to Bar, then column 0 ascending
 	PerDB       bool   // true = query reads only the connected database; the TUI prompts for which database to run against (or all)
+
+	// Kinds overrides the name-heuristic column kind (colKindFromName) per
+	// column, so a diagnostic can opt into graded rendering the suffix rules
+	// can't infer — e.g. hit ratios as DiagPercentGraded (higher is better) or
+	// dead-tuple % as DiagPercentBad (higher is worse). Keys are column names.
+	Kinds map[string]DiagColumnKind
+}
+
+// DiagnosticByKey looks a diagnostic up in the registry by its stable key.
+func DiagnosticByKey(key string) (Diagnostic, bool) {
+	for _, d := range Diagnostics {
+		if d.Key == key {
+			return d, true
+		}
+	}
+	return Diagnostic{}, false
 }
 
 // Diagnostics is the ordered registry of all built-in diagnostic queries.
@@ -28,6 +44,15 @@ var Diagnostics = []Diagnostic{
 		Description: "estimated bloat % and wasted MB for btree indexes (>50% bloat, >10 MB waste)",
 		SQL:         sqlDiagBloatIndex,
 		Bar:         "bloat_pct",
+	},
+	{
+		Key:         "fk_missing_index",
+		PerDB:       true,
+		Title:       "FKs without index",
+		Category:    "index",
+		Description: "foreign keys whose referencing columns have no supporting index — parent deletes/updates seq-scan the child table",
+		SQL:         sqlDiagFKMissingIndex,
+		Bar:         "table_size_bytes",
 	},
 	{
 		Key:         "index_brin_candidates",
@@ -49,6 +74,34 @@ var Diagnostics = []Diagnostic{
 	// 	SQL:         sqlDiagIndexShowAll,
 	// 	Bar:         "number_of_scans",
 	// },
+	{
+		Key:         "index_invalid",
+		PerDB:       true,
+		Title:       "Invalid indexes",
+		Category:    "index",
+		Description: "indexes left INVALID by a failed CREATE/REINDEX CONCURRENTLY — unusable by plans but still maintained on writes",
+		SQL:         sqlDiagIndexInvalid,
+		Bar:         "index_size_bytes",
+	},
+	{
+		Key:         "index_io",
+		PerDB:       true,
+		Title:       "Index I/O",
+		Category:    "index",
+		Description: "per-index buffer cache hits vs disk reads — hot indexes with poor hit ratios are shared_buffers pressure",
+		SQL:         sqlDiagIndexIO,
+		Bar:         "blks_read",
+		Kinds:       map[string]DiagColumnKind{"hit_pct": DiagPercentGraded},
+	},
+	{
+		Key:         "index_redundant_prefix",
+		PerDB:       true,
+		Title:       "Redundant indexes (prefix)",
+		Category:    "index",
+		Description: "btree indexes whose key columns are a leading prefix of a wider index — usually droppable write amplification",
+		SQL:         sqlDiagIndexRedundantPrefix,
+		Bar:         "redundant_size_bytes",
+	},
 	{
 		Key:         "index_show_definitions",
 		PerDB:       true,
@@ -108,6 +161,16 @@ var Diagnostics = []Diagnostic{
 		Bar:         "pct_bloat",
 	},
 	{
+		Key:         "stale_statistics",
+		PerDB:       true,
+		Title:       "Stale planner statistics",
+		Category:    "table",
+		Description: "tables whose row modifications since the last ANALYZE outgrow their live rows — bad-plan risk",
+		SQL:         sqlDiagStaleStatistics,
+		Bar:         "stale_pct",
+		Kinds:       map[string]DiagColumnKind{"stale_pct": DiagPercentBad},
+	},
+	{
 		Key:         "table_scan_types",
 		PerDB:       true,
 		Title:       "Sequential scan candidates",
@@ -115,6 +178,7 @@ var Diagnostics = []Diagnostic{
 		Description: "tables with >20% sequential reads and >800 kB — potential missing-index candidates",
 		SQL:         sqlDiagTableScanTypes,
 		Bar:         "index_read_pct",
+		Kinds:       map[string]DiagColumnKind{"index_read_pct": DiagPercentGraded},
 	},
 	{
 		Key:         "table_show_hitratio",
@@ -124,6 +188,7 @@ var Diagnostics = []Diagnostic{
 		Description: "tables with heap cache hit ratio below 80%, ordered by blocks read from disk",
 		SQL:         sqlDiagTableShowHitratio,
 		Bar:         "hit_pct",
+		Kinds:       map[string]DiagColumnKind{"hit_pct": DiagPercentGraded},
 	},
 	{
 		Key:         "table_show_hot_ratio",
@@ -134,6 +199,7 @@ var Diagnostics = []Diagnostic{
 		SQL:         sqlDiagTableShowHotRatio,
 		Bar:         "hot_pct",
 		Sort:        "non_hot_updates",
+		Kinds:       map[string]DiagColumnKind{"hot_pct": DiagPercentGraded},
 	},
 	{
 		Key:         "table_show_modify_ratio",
@@ -170,6 +236,15 @@ var Diagnostics = []Diagnostic{
 		Description: "currently running autovacuum workers with scan and vacuum progress",
 		SQL:         sqlDiagAutovacuumProgress,
 		Bar:         "scanned_pct",
+		Kinds:       map[string]DiagColumnKind{"dead_pct": DiagPercentBad},
+	},
+	{
+		Key:         "progress_all",
+		Title:       "Running operations (progress)",
+		Category:    "vacuum",
+		Description: "everything with a pg_stat_progress_* view — VACUUM, CREATE INDEX, ANALYZE, CLUSTER, COPY, base backups — with % done",
+		SQL:         sqlDiagProgressAll,
+		Bar:         "done_pct",
 	},
 	{
 		Key:         "vacuum_running",
@@ -198,6 +273,27 @@ var Diagnostics = []Diagnostic{
 		Description: "connection count per database and state (active, idle, idle in transaction, …)",
 		SQL:         sqlDiagConnections,
 		Bar:         "connections",
+	},
+	{
+		Key:         "idle_in_xact_holders",
+		Title:       "Idle-in-transaction lock holders",
+		Category:    "activity",
+		Description: "open transactions sitting idle, with the locks they still hold — the usual 'why is this stuck / why is bloat growing' answer",
+		SQL:         sqlDiagIdleInXactHolders,
+		Bar:         "xact_age_secs",
+		Kinds: map[string]DiagColumnKind{
+			"xact_age_secs": DiagCostGraded,
+			"state":         DiagBackendState,
+		},
+	},
+	{
+		Key:         "lock_summary",
+		Title:       "Lock summary",
+		Category:    "activity",
+		Description: "pg_locks grouped by lock type and mode with waiter counts — the one-glance contention read",
+		SQL:         sqlDiagLockSummary,
+		Bar:         "locks",
+		Kinds:       map[string]DiagColumnKind{"waiting": DiagCostGraded},
 	},
 	// ── wal ───────────────────────────────────────────────────────────────
 	{
@@ -232,6 +328,7 @@ var Diagnostics = []Diagnostic{
 		Description: "per-database commits, rollbacks, cache hit ratio, deadlocks and temp-file usage",
 		SQL:         sqlDiagDatabaseStats,
 		Bar:         "hit_pct",
+		Kinds:       map[string]DiagColumnKind{"hit_pct": DiagPercentGraded},
 	},
 	{
 		Key:         "foreignkeys_show_all",
@@ -267,6 +364,7 @@ var Diagnostics = []Diagnostic{
 		Description: "how much of each sequence's range is consumed (last_value needs SELECT/USAGE)",
 		SQL:         sqlDiagSequences,
 		Bar:         "consumed_pct",
+		Kinds:       map[string]DiagColumnKind{"consumed_pct": DiagPercentBad},
 	},
 	{
 		Key:         "settings_show_pending",
@@ -275,5 +373,27 @@ var Diagnostics = []Diagnostic{
 		Description: "settings that differ from the configured value and need reload or restart",
 		SQL:         sqlDiagSettingsShowPending,
 		Bar:         "",
+	},
+	{
+		Key:         "slru_stats",
+		Title:       "SLRU caches",
+		Category:    "server",
+		Description: "transaction-status / multixact / subtransaction cache traffic — invisible pressure from long transactions and savepoints",
+		SQL:         sqlDiagSLRU,
+		Bar:         "blks_read",
+		Kinds:       map[string]DiagColumnKind{"hit_pct": DiagPercentGraded},
+	},
+	{
+		Key:         "subscription_stats",
+		PerDB:       true,
+		Title:       "Logical subscriptions",
+		Category:    "server",
+		Description: "logical-replication subscriptions with worker state, message staleness and apply/sync error counts",
+		SQL:         sqlDiagSubscriptionStats,
+		Bar:         "",
+		Kinds: map[string]DiagColumnKind{
+			"apply_errors": DiagCostGraded,
+			"sync_errors":  DiagCostGraded,
+		},
 	},
 }

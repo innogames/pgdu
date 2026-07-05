@@ -195,7 +195,16 @@ func (m *Model) renderShmemSummary(s *screen) string {
 	}
 	stats.WriteString(muted("░ free " + humanize.Bytes(totals[catFree])))
 
-	return summaryRow("shmem", bar) + "\n" + summaryStats(stats.String())
+	// One-line orientation: how much of the whole segment the buffer pool is —
+	// the usual first question when reading pg_shmem_allocations.
+	poolLine := ""
+	if totals[catBuffer] > 0 {
+		pct := float64(totals[catBuffer]) * 100 / float64(grand)
+		poolLine = "\n" + summaryStats(muted(fmt.Sprintf("buffer pool %s = %.1f%% of the segment; the rest is WAL, locks, per-backend and bookkeeping structures",
+			humanize.Bytes(totals[catBuffer]), pct)))
+	}
+
+	return summaryRow("shmem", bar) + "\n" + summaryStats(stats.String()) + poolLine
 }
 
 // Column widths for the shared-memory map list; kept beside the header/row

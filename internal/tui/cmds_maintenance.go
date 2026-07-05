@@ -22,6 +22,12 @@ type settingsLoadedMsg struct {
 	err  error
 }
 
+type progressLoadedMsg struct {
+	db   string
+	rows []pg.ProgressRow
+	err  error
+}
+
 type maintResetDoneMsg struct {
 	which string // "statements", "qualstats", or "tablestats"
 	err   error
@@ -62,6 +68,13 @@ func (m *Model) loadSettingsCmd(db string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		rows, err := m.client.ListSettings(ctx, db)
 		return settingsLoadedMsg{db: db, rows: rows, err: err}
+	})
+}
+
+func (m *Model) loadProgressCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		rows, err := m.client.ListProgress(ctx, db)
+		return progressLoadedMsg{db: db, rows: rows, err: err}
 	})
 }
 

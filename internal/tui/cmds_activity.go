@@ -20,6 +20,13 @@ type activityLoadedMsg struct {
 
 type activityTickMsg struct{}
 
+// lockTreeLoadedMsg carries a fresh blocking-chain snapshot for levelLockTree.
+type lockTreeLoadedMsg struct {
+	db    string
+	nodes []pg.LockNode
+	err   error
+}
+
 // activityHostsMsg delivers newly resolved hostnames from the background DNS
 // resolver so they can be merged into the activity table without a DB round-trip.
 type activityHostsMsg struct {
@@ -55,6 +62,15 @@ func (m *Model) loadActivityCmd(db string, mode pg.ActivityFilter) tea.Cmd {
 		// blank the list, so a summary error degrades to zero counts.
 		summary, _ := m.client.ActivitySummary(ctx, db)
 		return activityLoadedMsg{db: db, rows: rows, summary: summary}
+	})
+}
+
+// loadLockTreeCmd fetches the current blocking-chain backends for the lock-tree
+// view. Shares the Activity tool's 30 s query() budget.
+func (m *Model) loadLockTreeCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		nodes, err := m.client.ListLockWaiters(ctx, db)
+		return lockTreeLoadedMsg{db: db, nodes: nodes, err: err}
 	})
 }
 

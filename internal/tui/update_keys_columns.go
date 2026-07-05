@@ -102,6 +102,70 @@ func (m *Model) handleActColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+// handleDiagColumnConfigKey drives the modal column-config overlay for a
+// diagnostic result (C on levelDiagnosticResult). Unlike the registry-backed
+// pickers it operates on the result's dynamic column set; visibility is kept
+// per diagnostic key and by column name (see diagVis). The last visible column
+// can't be hidden.
+func (m *Model) handleDiagColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+	res := s.diagResult
+	if res == nil || s.diag == nil {
+		m.showDiagColumnConfig = false
+		return nil
+	}
+	cols := res.Columns
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return tea.Quit
+	case key.Matches(msg, m.keys.Columns), msg.Type == tea.KeyEsc:
+		m.showDiagColumnConfig = false
+	case key.Matches(msg, m.keys.Up):
+		if m.diagColCfgCursor > 0 {
+			m.diagColCfgCursor--
+		}
+	case key.Matches(msg, m.keys.Down):
+		if m.diagColCfgCursor < len(cols)-1 {
+			m.diagColCfgCursor++
+		}
+	case key.Matches(msg, m.keys.Top):
+		m.diagColCfgCursor = 0
+	case key.Matches(msg, m.keys.Bottom):
+		m.diagColCfgCursor = len(cols) - 1
+	case key.Matches(msg, m.keys.ResetCols):
+		m.diagColsVisible[s.diag.Key] = nil
+		m.rebuildDiagItems(s)
+		m.saveColPrefs(diagPrefsKey(s.diag.Key), map[string]bool{})
+	case key.Matches(msg, m.keys.Refresh), key.Matches(msg, m.keys.Enter):
+		if m.diagColCfgCursor < 0 || m.diagColCfgCursor >= len(cols) {
+			break
+		}
+		name := cols[m.diagColCfgCursor].Name
+		vis := m.diagVis(s.diag.Key)
+		if vis == nil {
+			vis = make(map[string]bool, len(cols))
+			for _, c := range cols {
+				vis[c.Name] = true
+			}
+		}
+		if diagColOn(vis, name) {
+			visible := 0
+			for _, c := range cols {
+				if diagColOn(vis, c.Name) {
+					visible++
+				}
+			}
+			if visible <= 1 {
+				break // keep at least one column on screen
+			}
+		}
+		vis[name] = !diagColOn(vis, name)
+		m.diagColsVisible[s.diag.Key] = vis
+		m.rebuildDiagItems(s)
+		m.saveColPrefs(diagPrefsKey(s.diag.Key), vis)
+	}
+	return nil
+}
+
 // handleTblColumnConfigKey drives the modal column-config overlay for the Table
 // overview tool (C on levelTableStats). Mirrors handleActColumnConfigKey.
 func (m *Model) handleTblColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {

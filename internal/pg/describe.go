@@ -32,6 +32,25 @@ func (c *Client) ResolveTable(ctx context.Context, db, name string) (Table, erro
 	return t, nil
 }
 
+// ResolveIndex resolves an index name (optionally schema-qualified) to its OID
+// and qualified display name, so `d` on rows that only carry an index name
+// (diagnostic results) can reach DescribeIndex.
+func (c *Client) ResolveIndex(ctx context.Context, db, name string) (oid uint32, qualified string, err error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return 0, "", err
+	}
+	var schema, rel string
+	err = pool.QueryRow(ctx, sqlResolveIndex, name).Scan(&oid, &schema, &rel)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", &MissingRelationError{Name: name}
+	}
+	if err != nil {
+		return 0, "", fmt.Errorf("resolve index %q in %q: %w", name, db, err)
+	}
+	return oid, schema + "." + rel, nil
+}
+
 // MissingRelationError reports that a name couldn't be resolved to a describable
 // relation (e.g. it's a CTE alias, a view, or simply doesn't exist).
 type MissingRelationError struct{ Name string }

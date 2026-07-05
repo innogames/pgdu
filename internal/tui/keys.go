@@ -36,12 +36,28 @@ type keyMap struct {
 	ActivityFilter   key.Binding // f: cycle backend filter mode
 	CancelBackend    key.Binding // k: send pg_cancel_backend (SIGINT)
 	TerminateBackend key.Binding // x: send pg_terminate_backend (SIGTERM)
+	LockTree         key.Binding // b: open the blocking-chain lock tree
 
 	// WAL-inspector binding.
 	WALByRelation key.Binding // w: open the by-relation breakdown of the window
 
 	// Shared-buffers-tool binding.
 	ShmemMap key.Binding // m: open the shared-memory map (pg_shmem_allocations)
+
+	// System-overview cross-links: jump from the maintenance dashboard into the
+	// live tools that show the detail behind a summary row. Enabled only on
+	// levelMaintenance (so they don't clash with r/reverse-sort and w/by-relation
+	// elsewhere) and dispatched before those cases.
+	JumpActivity    key.Binding // a: open the Activity tool
+	JumpWAL         key.Binding // w: open the WAL inspector
+	JumpReplication key.Binding // r: open the replication-slots diagnostic
+	Progress        key.Binding // p: open the live progress monitor
+
+	// Wait-event profiler over the Activity tool's sample stream.
+	WaitProfile key.Binding // W: open the wait-event profile
+
+	// waitProfileInFooter adds the W hint to the footer on the activity table.
+	waitProfileInFooter bool
 
 	// shmemInFooter adds the m (memory map) hint to the footer's short help on
 	// the buffer-tables level, where it's the only advertisement for the view.
@@ -92,9 +108,17 @@ func defaultKeys() keyMap {
 		ActivityFilter:   key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "cycle filter")),
 		CancelBackend:    key.NewBinding(key.WithKeys("k"), key.WithHelp("k", "cancel backend")),
 		TerminateBackend: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "terminate backend")),
+		LockTree:         key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "lock tree")),
 
 		WALByRelation: key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "by relation")),
 		ShmemMap:      key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "memory map")),
+
+		JumpActivity:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "activity")),
+		JumpWAL:         key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wal")),
+		JumpReplication: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "replication")),
+		Progress:        key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "progress")),
+
+		WaitProfile: key.NewBinding(key.WithKeys("W"), key.WithHelp("W", "wait profile")),
 	}
 }
 
@@ -122,14 +146,14 @@ func (k *keyMap) applyContext(s *screen) {
 	k.Rebaseline.SetEnabled(stmtTable)
 	k.Snapshots.SetEnabled(stmtTable)
 	// C (Columns) is the column-config picker on the top-queries table, the
-	// activity table and the table overview. The picker is hard to find on those
-	// last two (no header hint), so surface it in the footer there; the
-	// top-queries header already advertises it.
-	k.Columns.SetEnabled(stmtTable || activity || tableStats)
-	k.columnsInFooter = activity || tableStats
+	// activity table, the table overview and diagnostic results. The picker is
+	// hard to find without a header hint, so surface it in the footer everywhere
+	// but the top-queries table, whose header already advertises it.
+	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult)
+	k.columnsInFooter = activity || tableStats || diagResult
 	// t (ToggleRefresh) cycles the auto-refresh cadence on top-queries levels and
-	// on the activity level.
-	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity)
+	// on the live activity/progress levels.
+	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity || s.level == levelProgress)
 	k.SaveSnapshot.SetEnabled(stmtTable || stmtDetail)
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
 	k.Params.SetEnabled(stmtDetail)
@@ -142,9 +166,15 @@ func (k *keyMap) applyContext(s *screen) {
 	// (the prompt renders its own `i` hint); keep it out of the footer otherwise.
 	k.Install.SetEnabled(s.extPrompt != nil && s.extPrompt.installable)
 
-	k.ActivityFilter.SetEnabled(activity)
-	k.CancelBackend.SetEnabled(activity)
-	k.TerminateBackend.SetEnabled(activity)
+	// f cycles the backend filter on the activity table and the category filter
+	// on the diagnostics list.
+	k.ActivityFilter.SetEnabled(activity || s.level == levelDiagnostics)
+	// Cancel/terminate act on the selected backend from both the activity table
+	// and its lock-tree child.
+	k.CancelBackend.SetEnabled(activity || s.level == levelLockTree)
+	k.TerminateBackend.SetEnabled(activity || s.level == levelLockTree)
+	// b opens the lock tree from the activity table.
+	k.LockTree.SetEnabled(activity)
 
 	// w opens the by-relation WAL breakdown — only from the rmgr overview, so
 	// the physical key stays free for reuse on every other level.
@@ -154,6 +184,20 @@ func (k *keyMap) applyContext(s *screen) {
 	// the footer there since nothing else advertises it.
 	k.ShmemMap.SetEnabled(s.level == levelBufferTables)
 	k.shmemInFooter = s.level == levelBufferTables
+
+	// System-overview cross-links only exist on the maintenance dashboard; gating
+	// them here keeps r/w free for reverse-sort and WAL-by-relation everywhere else.
+	maint := s.level == levelMaintenance
+	k.JumpActivity.SetEnabled(maint)
+	k.JumpWAL.SetEnabled(maint)
+	k.JumpReplication.SetEnabled(maint)
+	// p opens the live progress monitor; gated to the dashboard so the physical
+	// key stays free for Params (captured values) on statement detail.
+	k.Progress.SetEnabled(maint)
+
+	// W opens the wait-event profile over the activity table's sample stream.
+	k.WaitProfile.SetEnabled(activity)
+	k.waitProfileInFooter = activity
 
 	// s seeks on the index-tuples view: a key value on B-tree, a heap block
 	// number on BRIN. GiST/GIN keys have no total order, so seek is disabled
@@ -171,6 +215,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	if k.shmemInFooter {
 		b = append(b, k.ShmemMap)
 	}
+	if k.waitProfileInFooter {
+		b = append(b, k.WaitProfile)
+	}
 	return b
 }
 
@@ -181,6 +228,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Filter, k.Seek, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
 		{k.Refresh, k.ToggleBloat, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
+		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
 		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation, k.ShmemMap},
 		{k.Help, k.Quit},
 	}

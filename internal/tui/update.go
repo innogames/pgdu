@@ -53,6 +53,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onExtInstalled(msg)
 	case reindexDoneMsg:
 		return m, m.onReindexDone(msg)
+	case reindexTickMsg:
+		return m, m.onReindexTick()
+	case reindexProgressMsg:
+		return m, m.onReindexProgress(msg)
 	case heapPagesLoadedMsg:
 		return m, m.onHeapPagesLoaded(msg)
 	case heapTuplesLoadedMsg:
@@ -128,6 +132,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onMaintLoaded(msg)
 	case settingsLoadedMsg:
 		return m, m.onSettingsLoaded(msg)
+	case progressLoadedMsg:
+		return m, m.onProgressLoaded(msg)
 	case maintResetDoneMsg:
 		return m, m.onMaintResetDone(msg)
 	case tableStatsLoadedMsg:
@@ -141,6 +147,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case activityLoadedMsg:
 		return m, m.onActivityLoaded(msg)
+	case lockTreeLoadedMsg:
+		return m, m.onLockTreeLoaded(msg)
 	case activityTickMsg:
 		return m, m.onActivityTick()
 	case activityHostsMsg:
@@ -154,6 +162,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tableOverviewLoadedMsg:
 		return m, m.onTableOverviewLoaded(msg)
+
+	case triageLoadedMsg:
+		return m, m.onTriageLoaded(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)

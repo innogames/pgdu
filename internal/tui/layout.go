@@ -132,9 +132,13 @@ func barReserve(s *screen) int {
 		// cursor + offset + len + nulls/vars flags + ctid + key preview
 		const idxTupleReserve = 2 + 6 + 8 + 8 + 14 + 4
 		return idxTupleReserve
-	case levelDescribe:
-		// Plain-text panel — no bar drawn, so no space needs reserving.
+	case levelDescribe, levelTriage:
+		// Plain-text panels — no bar drawn, so no space needs reserving.
 		return 0
+	case levelWaitProfile:
+		// cursor + share% + sparkline + class name + gloss text
+		return colCursor + waitPctColW + colGutter + waitSparkColW + colGutter +
+			colName + colDetail
 	case levelWAL:
 		// cursor + bar(brackets) + combined + record + fpi + count + mark + name
 		return colCursor + colBrackets + walColCombined + colGutter +
@@ -149,6 +153,13 @@ func barReserve(s *screen) int {
 		// cursor + bar(brackets) + fpi + data + name + detail
 		return colCursor + colBrackets + walBlkFPIColW + colGutter +
 			walBlkDataColW + colGutter + colName + colDetail
+	case levelProgress:
+		// cursor + bar(brackets) + command + relation + phase + done/total +
+		// pct + age + user
+		return colCursor + colBrackets + progColCmd + colGutter +
+			colName + progColPhase +
+			progColDoneTotal + colGutter +
+			progColPct + colGutter + progColAge + progColUser
 	case levelWALRelations:
 		// cursor + bar(brackets) + combined + fpi + records + pages + mark + name
 		return colCursor + colBrackets + walRelCombinedColW + colGutter +
