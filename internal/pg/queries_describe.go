@@ -75,3 +75,44 @@ JOIN   pg_class c  ON c.oid = idx.indexrelid
 JOIN   pg_am am    ON am.oid = c.relam
 WHERE  idx.indexrelid = $1
 `
+
+// sqlDescribeFKOutgoing lists foreign keys this table declares (it is the
+// referencing side, conrelid = $1). Column lists are rebuilt from conkey/confkey
+// via unnest WITH ORDINALITY so multi-column keys keep their declared order.
+// Action codes (confdeltype/confupdtype) are cast to text and mapped to labels
+// in Go. $1 = table oid. PG 12+.
+const sqlDescribeFKOutgoing = `
+SELECT c.conname,
+       (SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
+          FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+          JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum) AS local_cols,
+       c.confrelid::regclass::text AS other_table,
+       (SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
+          FROM unnest(c.confkey) WITH ORDINALITY AS k(attnum, ord)
+          JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum) AS other_cols,
+       c.confdeltype::text,
+       c.confupdtype::text
+FROM   pg_constraint c
+WHERE  c.conrelid = $1 AND c.contype = 'f'
+ORDER  BY c.conname
+`
+
+// sqlDescribeFKIncoming lists foreign keys other tables declare against this one
+// (it is the referenced side, confrelid = $1). Roles are swapped relative to the
+// outgoing query: LocalCols come from confkey on this table, OtherTable/OtherCols
+// from the referencing child (conrelid/conkey). $1 = table oid. PG 12+.
+const sqlDescribeFKIncoming = `
+SELECT c.conname,
+       (SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
+          FROM unnest(c.confkey) WITH ORDINALITY AS k(attnum, ord)
+          JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum) AS local_cols,
+       c.conrelid::regclass::text AS other_table,
+       (SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
+          FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+          JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum) AS other_cols,
+       c.confdeltype::text,
+       c.confupdtype::text
+FROM   pg_constraint c
+WHERE  c.confrelid = $1 AND c.contype = 'f'
+ORDER  BY c.conrelid::regclass::text, c.conname
+`

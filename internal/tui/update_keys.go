@@ -288,10 +288,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		s.cursor = max(s.visibleLen()-1, 0)
 	case key.Matches(msg, m.keys.ShowQuery):
-		// Pop up the executed SQL for the current diagnostic so it can be
-		// selected/copied. Enabled only on levelDiagnosticResult (applyContext);
-		// sort cycling lives on the ←/→ arrows, so the two no longer share a key.
-		if s.diag != nil {
+		// Pop up the SQL for the current diagnostic so it can be selected/copied
+		// (e.g. to run on another server). Enabled on levelDiagnosticResult (the
+		// running query) and levelDiagnostics (the highlighted query, previewed
+		// before running) via applyContext; sort cycling lives on the ←/→ arrows,
+		// so the two no longer share a key.
+		if s.diagForShowQuery() != nil {
 			m.showDiagQuery = true
 		}
 	case key.Matches(msg, m.keys.JumpActivity):
@@ -606,6 +608,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// muscle memory for "go up a level" is preserved.
 		if msg.Type == tea.KeyEsc && m.showInfo {
 			m.showInfo = false
+			break
+		}
+		// The expanded help footer eats most of the screen; Esc collapses it
+		// too (not just a second ?) since the list underneath is unusable.
+		if msg.Type == tea.KeyEsc && m.help.ShowAll {
+			m.help.ShowAll = false
 			break
 		}
 		if msg.Type == tea.KeyEsc && s.filter != "" {

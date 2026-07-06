@@ -48,8 +48,11 @@ func TestIdleInXactSeverity(t *testing.T) {
 	if got := idleInXactSeverity(0, 0); got != SevOK {
 		t.Errorf("no holders = %v, want SevOK", got)
 	}
-	if got := idleInXactSeverity(1, 30); got != SevWarn {
-		t.Errorf("young holder = %v, want SevWarn", got)
+	if got := idleInXactSeverity(9, 1); got != SevOK {
+		t.Errorf("young holders (1s) = %v, want SevOK", got)
+	}
+	if got := idleInXactSeverity(1, 120); got != SevWarn {
+		t.Errorf("2m holder = %v, want SevWarn", got)
 	}
 	if got := idleInXactSeverity(1, 660); got != SevCrit {
 		t.Errorf("11m holder = %v, want SevCrit", got)

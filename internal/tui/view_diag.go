@@ -10,20 +10,50 @@ import (
 	"pgdu/internal/pg"
 )
 
-// renderDiagQuery prints the executed SQL for the current diagnostic so it can
-// be selected and copied out of the terminal. It replaces the result table
-// while open (s key on levelDiagnosticResult); any key dismisses it. The query
-// text is shown verbatim (server-side formatting) padded to `height` lines so
-// the help row stays pinned to the bottom.
+// diagForShowQuery returns the diagnostic whose SQL the show-SQL overlay should
+// display for screen s: the running query on a result screen, or the highlighted
+// entry on the diagnostics list (so its SQL can be grabbed to run elsewhere
+// without running it here first). Returns nil when neither applies or the cursor
+// is out of range.
+func (s *screen) diagForShowQuery() *pg.Diagnostic {
+	switch s.level {
+	case levelDiagnosticResult:
+		return s.diag
+	case levelDiagnostics:
+		vis := s.visibleIndexes()
+		if s.cursor < 0 || s.cursor >= len(vis) {
+			return nil
+		}
+		if d, ok := s.items[vis[s.cursor]].data.(pg.Diagnostic); ok {
+			return &d
+		}
+	}
+	return nil
+}
+
+// renderDiagQuery prints the SQL of the diagnostic resolved by diagForShowQuery
+// so it can be selected and copied out of the terminal. It replaces the list or
+// result table while open (s key on levelDiagnosticResult / levelDiagnostics);
+// any key dismisses it. The query text is shown verbatim (server-side
+// formatting) padded to `height` lines so the help row stays pinned to the
+// bottom.
 func (m *Model) renderDiagQuery(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
+	d := s.diagForShowQuery()
+	if d == nil {
+		// Guarded by the View switch, but stay defensive rather than panic.
+		for range height {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
 	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render(s.diag.Title+" — SQL") + mu("  ·  press ") +
+	b.WriteString("  " + styleSelected.Render(d.Title+" — SQL") + mu("  ·  press ") +
 		styleBadge.Render("s") + mu(" or any key to dismiss") + "\n\n")
 
 	used := 2 // the two lines written above
-	for line := range strings.SplitSeq(strings.Trim(s.diag.SQL, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.Trim(d.SQL, "\n"), "\n") {
 		b.WriteString("  " + line + "\n")
 		used++
 	}
@@ -32,6 +62,11 @@ func (m *Model) renderDiagQuery(s *screen, height int) string {
 	}
 	return b.String()
 }
+
+// describeFKMaxIncoming caps the "referenced by" list: a hub table can be
+// referenced by dozens of others and the describe panel has no scroll, so the
+// overflow is summarised as "… and N more" rather than pushing the help row off.
+const describeFKMaxIncoming = 12
 
 // renderDescribe draws the \d-style description panel for levelDescribe. It
 // is a plain-text free-form view (no bars) padded to `height` lines so the
@@ -115,6 +150,18 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 				b.WriteString("    " + idx.Name + badges + "\n")
 				b.WriteString("      " + mu(truncLine(idx.Def)) + "\n")
 			}
+		}
+
+		// --- foreign keys (outgoing: this table references others) ---
+		if len(d.FKOutgoing) > 0 {
+			b.WriteString("\n  " + styleHeader.Render(" foreign keys ") + "\n")
+			b.WriteString(renderFKRows(d.FKOutgoing, false))
+		}
+
+		// --- referenced by (incoming: others reference this table) ---
+		if len(d.FKIncoming) > 0 {
+			b.WriteString("\n  " + styleHeader.Render(" referenced by ") + "\n")
+			b.WriteString(renderFKRows(d.FKIncoming, true))
 		}
 
 		// --- summary ---
@@ -214,6 +261,58 @@ func (m *Model) renderDescribeBufferRows(s *screen) string {
 	var b strings.Builder
 	for _, kv := range rows {
 		b.WriteString("    " + mu(padRight(kv[0], labelW)) + "  " + kv[1] + "\n")
+	}
+	return b.String()
+}
+
+// renderFKRows renders one foreign-key section of the describe-table view (the
+// "foreign keys" outgoing list or, with incoming=true, the "referenced by"
+// list). incoming flips which side supplies the muted, aligned leading name —
+// the constraint name for outgoing, the referencing child table for incoming —
+// and the arrow orientation so both read referencer→referenced. The incoming
+// list is capped by describeFKMaxIncoming. Lines are left untruncated to match
+// the columns section (truncLine rune-slices and would corrupt the styled
+// spans); the describe panel already tolerates wide styled lines.
+func renderFKRows(fks []pg.DescribeFK, incoming bool) string {
+	mu := styleMuted.Render
+	lead := func(fk pg.DescribeFK) string {
+		if incoming {
+			return fk.OtherTable // the referencing child table
+		}
+		return fk.Name // the constraint name
+	}
+
+	leadW := 0
+	for _, fk := range fks {
+		if n := lipgloss.Width(lead(fk)); n > leadW {
+			leadW = n
+		}
+	}
+
+	shown := len(fks)
+	if incoming && shown > describeFKMaxIncoming {
+		shown = describeFKMaxIncoming
+	}
+
+	var b strings.Builder
+	for _, fk := range fks[:shown] {
+		var body string
+		if incoming {
+			body = fk.OtherCols + " → " + fk.LocalCols
+		} else {
+			body = fk.LocalCols + " → " + fk.OtherTable + "(" + fk.OtherCols + ")"
+		}
+		line := "    " + mu(padRight(lead(fk), leadW)) + "  " + body
+		if fk.OnDelete != "" {
+			line += "  " + mu("on delete "+fk.OnDelete)
+		}
+		if fk.OnUpdate != "" {
+			line += "  " + mu("on update "+fk.OnUpdate)
+		}
+		b.WriteString(line + "\n")
+	}
+	if n := len(fks); n > shown {
+		b.WriteString("    " + mu(fmt.Sprintf("… and %d more", n-shown)) + "\n")
 	}
 	return b.String()
 }
@@ -627,6 +726,9 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 				if barIsBytes && cell.HasNum {
 					numStr = humanize.Bytes(int64(cell.Num))
 				}
+				if barIsPercent && cell.HasNum {
+					numStr = formatDiagPercent(cell)
+				}
 				// Colour the percentage next to its bar the same way the bar is
 				// graded, so the digits read at a glance too.
 				if barIsPercent && cell.HasNum && !selected {
@@ -645,6 +747,9 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			raw := cell.Display
 			if cell.HasNum && i < nCols && cols[i].Kind == pg.DiagBytes {
 				raw = humanize.Bytes(int64(cell.Num))
+			}
+			if cell.HasNum && i < nCols && isDiagPercentKind(cols[i].Kind) {
+				raw = formatDiagPercent(cell)
 			}
 			display := truncateDiagCell(raw, colW[i])
 			graded := i < nCols && cols[i].Kind == pg.DiagPercentGraded
@@ -764,6 +869,29 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 	return b.String()
 }
 
+// isDiagPercentKind reports whether k is one of the percentage column kinds
+// (plain, higher-is-better graded, or higher-is-worse graded).
+func isDiagPercentKind(k pg.DiagColumnKind) bool {
+	return k == pg.DiagPercent || k == pg.DiagPercentGraded || k == pg.DiagPercentBad
+}
+
+// diagPercentDecimals is the fixed number of decimal places every percentage
+// cell renders with, so a %-column reads with a consistent digit count down the
+// column ("9.0" beside "10.5", never a bare "9") and the values line up when
+// right-aligned. Server-side round() only bounds the precision; the shared float
+// formatter's trailing-zero stripping is what made it ragged, so a fixed width
+// is re-imposed here at render time.
+const diagPercentDecimals = 1
+
+// formatDiagPercent renders a percentage cell's numeric value to a fixed decimal
+// count. A non-numeric cell (a NULL rendered as "—") keeps its placeholder.
+func formatDiagPercent(cell pg.DiagCell) string {
+	if !cell.HasNum {
+		return cell.Display
+	}
+	return fmt.Sprintf("%.*f", diagPercentDecimals, cell.Num)
+}
+
 // diagPercentBarStyle picks the colour scale for a percent-typed headline bar:
 // plain percents grade by fullness (percentStyle), "higher is better" columns
 // green→red (gradedPercentStyle), "higher is worse" columns by the bloat bands.
@@ -779,21 +907,31 @@ func diagPercentBarStyle(kind pg.DiagColumnKind, pct float64) lipgloss.Style {
 }
 
 // truncateDiagCell clips a cell value to maxW cells, appending "…" when the
-// value is wider than the cap.
+// value is wider than the cap. It also guarantees the result is a single line:
+// a table cell that kept embedded newlines would wrap the whole row across
+// several terminal lines, overflowing the content budget and scrolling the
+// header off-screen (raw query text — e.g. idle-in-xact "last_query" — is the
+// usual source of these newlines).
 func truncateDiagCell(s string, maxW int) string {
 	if maxW <= 0 {
 		return ""
 	}
-	// Fast path for the common ASCII cell (query text, numbers, identifiers):
-	// display width is the byte length, so we can slice directly and skip the
-	// per-rune grapheme-width scans that made this the hottest frame in the
-	// profile. Keep maxW-1 columns for text plus one for the ellipsis.
+	// Fast path for the common single-line ASCII cell (numbers, identifiers,
+	// already-flattened query text): display width is the byte length, so we can
+	// slice directly and skip the per-rune grapheme-width scans that made this
+	// the hottest frame in the profile. asciiWidth rejects any control byte, so a
+	// newline never reaches here. Keep maxW-1 columns for text plus the ellipsis.
 	if w, ok := asciiWidth(s); ok {
 		if w <= maxW {
 			return s
 		}
 		return s[:maxW-1] + "…"
 	}
+	// Slow path: non-ASCII or control bytes. Fold any whitespace run (newlines,
+	// tabs, indentation) to a single space so the cell stays one line — the same
+	// normalisation the top-queries table applies to its query column — then
+	// measure with grapheme-aware widths.
+	s = flattenQuery(s)
 	if lipgloss.Width(s) <= maxW {
 		return s
 	}

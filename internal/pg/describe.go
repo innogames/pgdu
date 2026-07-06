@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ResolveTable looks up a relation by (optionally schema-qualified) name and
@@ -113,7 +114,56 @@ func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, erro
 	}
 	idxRows.Close()
 
+	// Foreign keys, both directions. Both are cheap pg_constraint scans, so
+	// they ride this same describe round-trip rather than a separate Cmd.
+	if d.FKOutgoing, err = queryFKs(ctx, pool, sqlDescribeFKOutgoing, t.OID); err != nil {
+		return nil, fmt.Errorf("describe foreign keys for %q.%q: %w", t.Schema, t.Name, err)
+	}
+	if d.FKIncoming, err = queryFKs(ctx, pool, sqlDescribeFKIncoming, t.OID); err != nil {
+		return nil, fmt.Errorf("describe foreign keys for %q.%q: %w", t.Schema, t.Name, err)
+	}
+
 	return d, nil
+}
+
+// queryFKs runs one of the describe FK queries (outgoing/incoming share a column
+// shape) against a table oid and maps the action codes to labels.
+func queryFKs(ctx context.Context, pool *pgxpool.Pool, sql string, oid uint32) ([]DescribeFK, error) {
+	rows, err := pool.Query(ctx, sql, oid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var fks []DescribeFK
+	for rows.Next() {
+		var fk DescribeFK
+		var delCode, updCode string
+		if err := rows.Scan(&fk.Name, &fk.LocalCols, &fk.OtherTable, &fk.OtherCols, &delCode, &updCode); err != nil {
+			return nil, err
+		}
+		fk.OnDelete = fkAction(delCode)
+		fk.OnUpdate = fkAction(updCode)
+		fks = append(fks, fk)
+	}
+	return fks, rows.Err()
+}
+
+// fkAction maps a pg_constraint confdeltype/confupdtype code to a label,
+// returning "" for 'a' (NO ACTION, the default) so callers can skip it.
+func fkAction(code string) string {
+	switch code {
+	case "c":
+		return "cascade"
+	case "n":
+		return "set null"
+	case "d":
+		return "set default"
+	case "r":
+		return "restrict"
+	default: // 'a' NO ACTION
+		return ""
+	}
 }
 
 // DescribeIndex fetches a psql-\d-style description of one index: the full

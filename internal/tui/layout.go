@@ -155,11 +155,11 @@ func barReserve(s *screen) int {
 			walBlkDataColW + colGutter + colName + colDetail
 	case levelProgress:
 		// cursor + bar(brackets) + command + relation + phase + done/total +
-		// pct + age + user
+		// pct + age + eta + user
 		return colCursor + colBrackets + progColCmd + colGutter +
 			colName + progColPhase +
 			progColDoneTotal + colGutter +
-			progColPct + colGutter + progColAge + progColUser
+			progColPct + colGutter + progColAge + progColEta + progColUser
 	case levelWALRelations:
 		// cursor + bar(brackets) + combined + fpi + records + pages + mark + name
 		return colCursor + colBrackets + walRelCombinedColW + colGutter +

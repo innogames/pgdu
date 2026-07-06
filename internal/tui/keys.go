@@ -68,6 +68,26 @@ type keyMap struct {
 	// advertisement for the picker, whereas the top-queries table already shows
 	// "C columns" in its header, so it stays out of the footer there.
 	columnsInFooter bool
+
+	// showQueryInFooter adds the s (show SQL) hint to the footer on the
+	// diagnostics list and a diagnostic result — the only advertisement for the
+	// copy-the-SQL overlay.
+	showQueryInFooter bool
+
+	// toggleRefreshInFooter adds the t (refresh cadence) hint to the footer on
+	// the live monitors (activity/progress), where the header shows the current
+	// cadence but nothing advertises that t cycles it — including down to "off"
+	// to freeze the view and read a query.
+	toggleRefreshInFooter bool
+
+	// lockTreeInFooter adds the b (lock tree) hint to the footer on the activity
+	// table, its only advertisement for the blocking-chains view.
+	lockTreeInFooter bool
+
+	// describeInFooter adds the d (describe) hint to the footer on the progress
+	// monitor, where describing the operation's target relation is the only
+	// drill action (Enter is a no-op there) and nothing else advertises it.
+	describeInFooter bool
 }
 
 func defaultKeys() keyMap {
@@ -137,11 +157,13 @@ func (k *keyMap) applyContext(s *screen) {
 	activity := s.level == levelActivity
 	tableStats := s.level == levelTableStats
 
-	// `s` shows the executed SQL (to copy out) only on a diagnostic result. Sort
-	// cycling moved to the ←/→ arrows (SortNext/SortPrev), which stay globally
-	// enabled — so even the diagnostic-result table is sortable, with no clash
-	// against the show-SQL key.
-	k.ShowQuery.SetEnabled(diagResult)
+	// `s` shows the SQL (to copy out) on a diagnostic result and previews the
+	// highlighted query's SQL on the diagnostics list. Sort cycling moved to the
+	// ←/→ arrows (SortNext/SortPrev), which stay globally enabled — so even the
+	// diagnostic-result table is sortable, with no clash against the show-SQL key.
+	diagList := s.level == levelDiagnostics
+	k.ShowQuery.SetEnabled(diagResult || diagList)
+	k.showQueryInFooter = diagResult || diagList
 
 	k.Rebaseline.SetEnabled(stmtTable)
 	k.Snapshots.SetEnabled(stmtTable)
@@ -152,8 +174,11 @@ func (k *keyMap) applyContext(s *screen) {
 	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult)
 	k.columnsInFooter = activity || tableStats || diagResult
 	// t (ToggleRefresh) cycles the auto-refresh cadence on top-queries levels and
-	// on the live activity/progress levels.
+	// on the live activity/progress levels. Surface it in the footer on the pure
+	// live monitors, whose header shows the cadence but not the key that changes
+	// it; the top-queries levels keep it to the ? help to avoid a crowded footer.
 	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity || s.level == levelProgress)
+	k.toggleRefreshInFooter = activity || s.level == levelProgress
 	k.SaveSnapshot.SetEnabled(stmtTable || stmtDetail)
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
 	k.Params.SetEnabled(stmtDetail)
@@ -175,6 +200,7 @@ func (k *keyMap) applyContext(s *screen) {
 	k.TerminateBackend.SetEnabled(activity || s.level == levelLockTree)
 	// b opens the lock tree from the activity table.
 	k.LockTree.SetEnabled(activity)
+	k.lockTreeInFooter = activity
 
 	// w opens the by-relation WAL breakdown — only from the rmgr overview, so
 	// the physical key stays free for reuse on every other level.
@@ -195,6 +221,17 @@ func (k *keyMap) applyContext(s *screen) {
 	// key stays free for Params (captured values) on statement detail.
 	k.Progress.SetEnabled(maint)
 
+	// The progress monitor orders rows in SQL (pct DESC, pid) with no user sort,
+	// and its rows don't drill (Enter is a no-op) — describing the target relation
+	// via d is the only action. Drop the misleading drill/sort hints from its
+	// footer and surface d instead, so the footer matches what the level does.
+	progress := s.level == levelProgress
+	k.Enter.SetEnabled(!progress)
+	k.SortPrev.SetEnabled(!progress)
+	k.SortNext.SetEnabled(!progress)
+	k.ReverseSort.SetEnabled(!progress)
+	k.describeInFooter = progress
+
 	// W opens the wait-event profile over the activity table's sample stream.
 	k.WaitProfile.SetEnabled(activity)
 	k.waitProfileInFooter = activity
@@ -209,14 +246,26 @@ func (k *keyMap) applyContext(s *screen) {
 
 func (k keyMap) ShortHelp() []key.Binding {
 	b := []key.Binding{k.Up, k.Down, k.Enter, k.Back, k.Filter, k.SortPrev, k.SortNext, k.ReverseSort, k.Refresh}
+	if k.toggleRefreshInFooter {
+		b = append(b, k.ToggleRefresh)
+	}
 	if k.columnsInFooter {
 		b = append(b, k.Columns)
 	}
 	if k.shmemInFooter {
 		b = append(b, k.ShmemMap)
 	}
+	if k.lockTreeInFooter {
+		b = append(b, k.LockTree)
+	}
 	if k.waitProfileInFooter {
 		b = append(b, k.WaitProfile)
+	}
+	if k.showQueryInFooter {
+		b = append(b, k.ShowQuery)
+	}
+	if k.describeInFooter {
+		b = append(b, k.Describe)
 	}
 	return b
 }

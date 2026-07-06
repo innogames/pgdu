@@ -50,7 +50,7 @@ var Diagnostics = []Diagnostic{
 		PerDB:       true,
 		Title:       "FKs without index",
 		Category:    "index",
-		Description: "foreign keys whose referencing columns have no supporting index — parent deletes/updates seq-scan the child table",
+		Description: "foreign keys on tables >10k rows whose referencing columns have no supporting index — parent deletes/updates seq-scan the child table",
 		SQL:         sqlDiagFKMissingIndex,
 		Bar:         "table_size_bytes",
 	},
@@ -159,13 +159,14 @@ var Diagnostics = []Diagnostic{
 		Description: "detailed table bloat estimate (>50% and >10 MB, or >25% and >1 GB)",
 		SQL:         sqlDiagBloatTable,
 		Bar:         "pct_bloat",
+		Sort:        "mb_bloat",
 	},
 	{
 		Key:         "stale_statistics",
 		PerDB:       true,
 		Title:       "Stale planner statistics",
 		Category:    "table",
-		Description: "tables whose row modifications since the last ANALYZE outgrow their live rows — bad-plan risk",
+		Description: "tables (≥10k live rows) with >5% of rows modified since the last ANALYZE — bad-plan risk",
 		SQL:         sqlDiagStaleStatistics,
 		Bar:         "stale_pct",
 		Kinds:       map[string]DiagColumnKind{"stale_pct": DiagPercentBad},
@@ -263,6 +264,25 @@ var Diagnostics = []Diagnostic{
 		SQL:         sqlDiagVacuumStats,
 		Bar:         "dead_tuples",
 	},
+	{
+		Key:         "wraparound_tables",
+		PerDB:       true,
+		Title:       "Wraparound freeze age",
+		Category:    "vacuum",
+		Description: "tables ranked by XID freeze age as % of autovacuum_freeze_max_age — the drill-down for the wraparound health check (last_autovacuum tells a pinned horizon from a lagging autovacuum)",
+		SQL:         sqlDiagWraparoundTables,
+		Bar:         "pct_freeze_max",
+		Kinds: map[string]DiagColumnKind{
+			"pct_freeze_max": DiagPercentBad, // higher is worse, graded on an absolute scale
+			// XID ages and the per-table autovacuum counter are counts, but summing
+			// them across tables is meaningless — DiagFloat renders them right-aligned
+			// yet keeps them out of the Σ footer (which still totals dead_tuples and
+			// size_bytes).
+			"xid_age":          DiagFloat,
+			"toast_xid_age":    DiagFloat,
+			"autovacuum_count": DiagFloat,
+		},
+	},
 	// ── activity ──────────────────────────────────────────────────────────
 	// Note: the "running queries" view is now the dedicated Activity tool
 	// (toolActivity), which auto-refreshes and has configurable columns.
@@ -325,10 +345,23 @@ var Diagnostics = []Diagnostic{
 		Key:         "database_stats",
 		Title:       "Database stats",
 		Category:    "server",
-		Description: "per-database commits, rollbacks, cache hit ratio, deadlocks and temp-file usage",
+		Description: "per-database transactions & rollback %, cache hit ratio, tuple I/O, conflicts, deadlocks, temp files, and block/session time",
 		SQL:         sqlDiagDatabaseStats,
 		Bar:         "hit_pct",
-		Kinds:       map[string]DiagColumnKind{"hit_pct": DiagPercentGraded},
+		Kinds: map[string]DiagColumnKind{
+			"hit_pct":      DiagPercentGraded, // higher is better
+			"rollback_pct": DiagPercentBad,    // higher is worse
+			// 0-is-good counter: green at zero, graded up to the worst database
+			// in the window so a nonzero value stands out.
+			"conflicts": DiagCostGraded,
+			// Cumulative time totals: plain floats (no bogus Σ footer, no
+			// magnitude colouring — they are always large on a long-lived cluster).
+			"blk_read_secs":     DiagFloat,
+			"blk_write_secs":    DiagFloat,
+			"active_secs":       DiagFloat,
+			"idle_in_xact_secs": DiagFloat,
+			"session_secs":      DiagFloat,
+		},
 	},
 	{
 		Key:         "foreignkeys_show_all",
@@ -361,7 +394,7 @@ var Diagnostics = []Diagnostic{
 		PerDB:       true,
 		Title:       "Sequence usage",
 		Category:    "server",
-		Description: "how much of each sequence's range is consumed (last_value needs SELECT/USAGE)",
+		Description: "sequences more than 30% through their range, with the table each backs (last_value needs SELECT/USAGE)",
 		SQL:         sqlDiagSequences,
 		Bar:         "consumed_pct",
 		Kinds:       map[string]DiagColumnKind{"consumed_pct": DiagPercentBad},

@@ -298,6 +298,20 @@ type DescribeIndexDef struct {
 	Clustered bool // pg_index.indisclustered: table is CLUSTERed on this index
 }
 
+// DescribeFK is one foreign-key relationship in the describe-table view, used
+// for both directions. Outgoing (this table references another): LocalCols are
+// this table's columns, OtherTable/OtherCols the referenced side. Incoming
+// (another table references this one): OtherTable/OtherCols are the referencing
+// child, LocalCols this table's referenced columns.
+type DescribeFK struct {
+	Name       string // constraint name (conname)
+	LocalCols  string // comma-joined columns on this table's side
+	OtherTable string // schema-qualified other table (regclass text)
+	OtherCols  string // comma-joined columns on the other table's side
+	OnDelete   string // "cascade"/"set null"/"set default"/"restrict"; "" for default NO ACTION
+	OnUpdate   string // same coding as OnDelete
+}
+
 // Description is the fully-loaded \d-style payload for one object.
 // Kind discriminates which fields are populated: DescribeTable uses
 // Columns/Indexes/SizeBytes/EstRows; DescribeIndex uses the Index* fields.
@@ -307,10 +321,12 @@ type Description struct {
 	Title string // qualified object name for the panel header
 
 	// Table describe fields.
-	Columns   []DescribeColumn
-	Indexes   []DescribeIndexDef
-	SizeBytes int64
-	EstRows   int64
+	Columns    []DescribeColumn
+	Indexes    []DescribeIndexDef
+	FKOutgoing []DescribeFK // FKs this table declares (references other tables)
+	FKIncoming []DescribeFK // FKs other tables declare against this table
+	SizeBytes  int64
+	EstRows    int64
 
 	// Index describe fields.
 	IndexDef     string // pg_get_indexdef(oid) — full CREATE INDEX statement

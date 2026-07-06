@@ -194,7 +194,6 @@ SELECT
     t.relname                                          AS table_name,
     i.relname                                          AS index_name,
     a.attname                                          AS column_name,
-    s.correlation                                      AS correlation,
     round((abs(s.correlation) * 100)::numeric, 1)      AS correlation_pct,
     pg_size_pretty(pg_relation_size(i.oid))            AS index_size,
     pg_size_pretty(pg_relation_size(t.oid))            AS table_size,
@@ -399,8 +398,11 @@ null_headers AS (
     LEFT OUTER JOIN no_stats ON schemaname = no_stats.table_schema AND tablename = no_stats.table_name
     WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
       AND no_stats.table_name IS NULL
-      AND EXISTS (SELECT 1 FROM information_schema.columns
-                  WHERE schemaname = columns.table_schema AND tablename = columns.table_name)
+      -- No EXISTS against information_schema.columns here: every pg_stats row is
+      -- already an existing, privilege-visible column (that is how the pg_stats
+      -- view is defined), so the check filtered nothing but forced a second full
+      -- evaluation of that expensive view. The only relations it excluded were
+      -- matviews, which table_estimates already drops via relkind = 'r'.
     GROUP BY schemaname, tablename, hdr, ma, bs
 ),
 data_headers AS (
@@ -496,6 +498,50 @@ FROM pg_stat_user_tables PSUT
 JOIN pg_class C ON PSUT.relid = C.oid
 JOIN rel_set RS ON PSUT.relid = RS.oid
 ORDER BY C.reltuples DESC
+`
+
+// sqlDiagWraparoundTables ranks tables by transaction-ID freeze age — how far
+// their oldest unfrozen XID (relfrozenxid, folded together with the table's
+// TOAST relation, whichever is older) has drifted behind the current XID.
+// pct_freeze_max expresses that age as a fraction of autovacuum_freeze_max_age,
+// the age at which PostgreSQL forces an anti-wraparound autovacuum; a table at
+// (or past) 100% is one freezing can't keep up with. It is the drill-down for
+// the cluster-wide "wraparound" health check.
+//
+// last_autovacuum and autovacuum_count separate the root causes: a high age
+// next to a recent autovacuum, or a large autovacuum_count that still hasn't
+// dropped the age, means the vacuums that ran were non-aggressive and skipped
+// all-visible pages (a low-churn table below vacuum_freeze_table_age never gets
+// its relfrozenxid advanced until the anti-wraparound trigger at
+// autovacuum_freeze_max_age forces a full scan) — or, more rarely, the horizon
+// is pinned by an old snapshot (chase it with the idle-in-xact and
+// replication-slot diagnostics — VACUUM can't freeze past the oldest live xmin).
+// An old/absent last_autovacuum instead means autovacuum isn't reaching the
+// table at all (throughput, or a table it keeps failing to vacuum).
+//
+// Only ordinary tables and matviews are considered; TOAST is attributed to its
+// parent via reltoastrelid, and partitioned parents (relfrozenxid 0, so age() is
+// meaninglessly huge) are excluded.
+const sqlDiagWraparoundTables = `
+SELECT
+    n.nspname AS schema,
+    c.relname AS table_name,
+    greatest(age(c.relfrozenxid), COALESCE(age(tc.relfrozenxid), 0)) AS xid_age,
+    round(100.0 * greatest(age(c.relfrozenxid), COALESCE(age(tc.relfrozenxid), 0))
+          / current_setting('autovacuum_freeze_max_age')::numeric, 1) AS pct_freeze_max,
+    COALESCE(age(tc.relfrozenxid), 0) AS toast_xid_age,
+    pg_table_size(c.oid) AS size_bytes,
+    st.n_dead_tup AS dead_tuples,
+    st.autovacuum_count,
+    st.last_autovacuum
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_class tc ON tc.oid = c.reltoastrelid
+LEFT JOIN pg_stat_all_tables st ON st.relid = c.oid
+WHERE c.relkind IN ('r', 'm')
+  AND c.relfrozenxid <> 0
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY xid_age DESC
 `
 
 const sqlDiagVacuumRunning = `
@@ -736,43 +782,99 @@ SELECT
 FROM pg_stat_wal
 `
 
-// sqlDiagDatabaseStats reports per-database commit/rollback, cache hit ratio,
-// deadlocks and temp-file usage from pg_stat_database.
+// sqlDiagDatabaseStats reports the per-database picture from pg_stat_database:
+// transaction volume with a derived rollback %, cache hit ratio, tuple I/O,
+// recovery-conflict and deadlock counters, temp-file pressure, block- and
+// session-time totals, and the live session count. The *_time counters are
+// cumulative milliseconds since stats_reset; they are divided down to seconds
+// (round() needs a numeric, hence the ::numeric cast on the double-precision
+// source) so the values stay readable. All columns beyond the headline hit_pct
+// bar are opt-out via the C column picker.
 const sqlDiagDatabaseStats = `
 SELECT
     datname AS database,
     numbackends AS backends,
     xact_commit AS commits,
     xact_rollback AS rollbacks,
+    round(100.0 * xact_rollback / NULLIF(xact_commit + xact_rollback, 0), 2) AS rollback_pct,
     round(100.0 * blks_hit / NULLIF(blks_hit + blks_read, 0), 2) AS hit_pct,
+    blks_read,
+    tup_returned,
+    tup_fetched,
+    tup_inserted,
+    tup_updated,
+    tup_deleted,
+    conflicts,
     deadlocks,
     temp_files,
-    temp_bytes
+    temp_bytes,
+    round(blk_read_time::numeric / 1000.0, 1) AS blk_read_secs,
+    round(blk_write_time::numeric / 1000.0, 1) AS blk_write_secs,
+    sessions,
+    round(active_time::numeric / 1000.0, 1) AS active_secs,
+    round(idle_in_transaction_time::numeric / 1000.0, 1) AS idle_in_xact_secs,
+    round(session_time::numeric / 1000.0, 1) AS session_secs,
+    stats_reset
 FROM pg_stat_database
 WHERE datname IS NOT NULL
 ORDER BY xact_commit + xact_rollback DESC
 `
 
-// sqlDiagSequences reports how much of each sequence's range has been consumed.
-// last_value is null without SELECT/USAGE on the sequence, leaving consumed_pct
-// null for those rows.
+// sqlDiagSequences reports how much of each sequence's range has been consumed,
+// restricted to sequences already past 30% so the list surfaces only the ones
+// worth watching for exhaustion. last_value is null without SELECT/USAGE on the
+// sequence; those rows have an unknown consumed_pct and so fall below the filter
+// (NULL > 30 is not true) and are excluded along with the low-usage sequences.
+//
+// owned_by_table resolves the table each sequence backs via pg_depend — the
+// auto/internal dependency SERIAL, GENERATED … AS IDENTITY and explicit OWNED BY
+// all create from the sequence to its owning column. A standalone sequence has
+// no such dependency and shows "—". The lookup is a LEFT JOIN LATERAL so those
+// unowned sequences still appear.
 const sqlDiagSequences = `
 SELECT
-    schemaname AS schema,
-    sequencename AS sequence,
-    last_value,
-    max_value,
-    round(100.0 * last_value / NULLIF(max_value, 0), 2) AS consumed_pct
-FROM pg_sequences
+    s.schemaname AS schema,
+    s.sequencename AS sequence,
+    dep.table_name AS owned_by_table,
+    s.last_value,
+    s.max_value,
+    round(100.0 * s.last_value / NULLIF(s.max_value, 0), 2) AS consumed_pct
+FROM pg_sequences s
+LEFT JOIN LATERAL (
+    SELECT refc.relname AS table_name
+    FROM pg_class seqc
+    JOIN pg_namespace seqn ON seqn.oid = seqc.relnamespace
+    JOIN pg_depend d ON d.objid = seqc.oid
+        AND d.classid = 'pg_class'::regclass
+        AND d.refclassid = 'pg_class'::regclass
+        AND d.deptype IN ('a', 'i')
+    JOIN pg_class refc ON refc.oid = d.refobjid
+    WHERE seqc.relkind = 'S'
+      AND seqc.relname = s.sequencename
+      AND seqn.nspname = s.schemaname
+    LIMIT 1
+) dep ON true
+WHERE 100.0 * s.last_value / NULLIF(s.max_value, 0) > 30
 ORDER BY consumed_pct DESC NULLS LAST
 `
 
 // sqlDiagFKMissingIndex finds foreign keys on the referencing side that have no
 // supporting index: no valid index whose leading columns contain the FK columns
-// (any order — a btree lookup works for any permutation, hence the two-way
-// prefix containment via @> on the 0-based smallint[] slice of indkey). Without
-// one, every DELETE/UPDATE on the referenced table sequentially scans the
-// referencing table per row.
+// (any order — a btree lookup works for any permutation, hence the
+// unnest/EXCEPT set-containment check on the 0-based smallint[] slice of
+// indkey, rather than the @>/<@ operators). Some clusters have a third-party
+// extension (e.g. intarray) registering its own smallint[]-compatible @>
+// overload — even schema-qualified as OPERATOR(pg_catalog.@>) that overload
+// can still tie with the built-in one and PostgreSQL reports "operator is not
+// unique", so containment is spelled out with core relational operations that
+// have no competing overload instead. Without a supporting index, every
+// DELETE/UPDATE on the referenced table sequentially scans the referencing
+// table per row.
+//
+// Only referencing tables estimated at more than 10k rows (t.reltuples) are
+// reported: on a small child table the per-row seq scan is cheap enough not to
+// matter, so a missing FK index there is noise. reltuples is -1 on a
+// never-analyzed table, which is below the floor and so excluded.
 const sqlDiagFKMissingIndex = `
 SELECT
     n.nspname AS schema,
@@ -790,12 +892,17 @@ JOIN pg_namespace n ON n.oid = t.relnamespace
 LEFT JOIN pg_stat_all_tables ps ON ps.relid = c.confrelid
 WHERE c.contype = 'f'
   AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+  AND t.reltuples > 10000
   AND NOT EXISTS (
       SELECT 1
       FROM pg_index i
       WHERE i.indrelid = c.conrelid
         AND i.indisvalid
-        AND (i.indkey::smallint[])[0:cardinality(c.conkey)-1] OPERATOR(pg_catalog.@>) c.conkey
+        AND NOT EXISTS (
+            SELECT unnest(c.conkey)
+            EXCEPT
+            SELECT unnest((i.indkey::smallint[])[0:cardinality(c.conkey)-1])
+        )
   )
 GROUP BY n.nspname, t.relname, c.oid, c.conname, c.confrelid, c.conrelid, ps.n_tup_upd, ps.n_tup_del
 ORDER BY pg_relation_size(c.conrelid) DESC
@@ -864,6 +971,14 @@ ORDER BY io.idx_blks_read DESC
 // sqlDiagStaleStatistics ranks tables by how stale their planner statistics
 // are: rows modified since the last ANALYZE relative to the live row count.
 // Tables past autovacuum_analyze_scale_factor (10% by default) risk bad plans.
+// Two floors keep the list to tables where staleness actually matters:
+//   - under 10k live rows a seq scan is cheap regardless of stats, so a high
+//     stale_pct there is noise;
+//   - under 5% modified the planner's row estimates are still close enough.
+//
+// The 5% floor is applied to the same expression that computes stale_pct (a
+// column alias can't be referenced in WHERE). A never-analyzed table surfaces
+// only once its modifications push it past 5% too.
 const sqlDiagStaleStatistics = `
 SELECT
     schemaname AS schema,
@@ -873,8 +988,8 @@ SELECT
     round(100.0 * n_mod_since_analyze / GREATEST(n_live_tup, 1), 1) AS stale_pct,
     date_trunc('second', now() - GREATEST(last_analyze, last_autoanalyze)) AS analyzed_ago
 FROM pg_stat_user_tables
-WHERE n_mod_since_analyze > 0
-   OR (last_analyze IS NULL AND last_autoanalyze IS NULL AND n_live_tup > 0)
+WHERE n_live_tup >= 10000
+  AND 100.0 * n_mod_since_analyze / GREATEST(n_live_tup, 1) > 5
 ORDER BY stale_pct DESC NULLS LAST
 `
 

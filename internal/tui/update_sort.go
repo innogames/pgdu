@@ -277,7 +277,7 @@ func (m *Model) cycleSort(s *screen, dir int) {
 		// Numeric columns default to descending (biggest first);
 		// text columns default to ascending (alphabetical).
 		switch s.diagCols[s.diagSortCol].Kind {
-		case pg.DiagInt, pg.DiagFloat, pg.DiagPercent, pg.DiagBytes, pg.DiagPercentGraded, pg.DiagCostGraded, pg.DiagDuration:
+		case pg.DiagInt, pg.DiagFloat, pg.DiagPercent, pg.DiagBytes, pg.DiagPercentGraded, pg.DiagCostGraded, pg.DiagDuration, pg.DiagPercentBad:
 			s.sortDesc = true
 		default:
 			s.sortDesc = false

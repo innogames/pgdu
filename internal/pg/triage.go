@@ -55,8 +55,12 @@ const (
 	// not the exact wait duration — an upper bound, good enough for triage.
 	blockedCritXactMs = 30_000
 
-	// idle-in-transaction: 5 minutes of holding locks/snapshot while idle
-	// blocks vacuum and invites bloat.
+	// idle-in-transaction: a transaction that goes idle for a second or two
+	// between statements is normal churn (connection poolers do it constantly),
+	// so warn only once the oldest open idle transaction has held its
+	// snapshot/locks past idleXactWarnSecs; 5 minutes escalates to critical,
+	// where it is clearly blocking vacuum and inviting bloat.
+	idleXactWarnSecs = 60
 	idleXactCritSecs = 300
 
 	// cache hit ratio: below ~90% the working set clearly doesn't fit in
@@ -70,10 +74,11 @@ const (
 	slruCritReadsFloor = 10_000
 	slruWarnReadsFloor = 1_000
 
-	// sequences: consumed_pct is fraction of max_value handed out; past 80%
-	// exhaustion is on the horizon and a type/cycle decision is due.
-	seqCritPct = 80
-	seqWarnPct = 60
+	// sequences: consumed_pct is fraction of max_value handed out. Below 80%
+	// there is nothing to do, so that is the warn floor; at 95% exhaustion is
+	// close enough (inserts fail at 100%) that a type/cycle decision is overdue.
+	seqCritPct = 95
+	seqWarnPct = 80
 
 	// replication slots: when the server can't report safe_wal_size, cap
 	// retained WAL at a fixed budget instead.
@@ -424,11 +429,15 @@ func (c *Client) triageIdleInXact(ctx context.Context) (Severity, string, error)
 
 func idleInXactSeverity(count int, oldestSecs float64) Severity {
 	switch {
-	case count > 0 && oldestSecs > idleXactCritSecs:
+	case count == 0:
+		return SevOK
+	case oldestSecs > idleXactCritSecs:
 		return SevCrit
-	case count > 0:
+	case oldestSecs > idleXactWarnSecs:
 		return SevWarn
 	}
+	// Backends are idle in transaction but none has been open long enough to
+	// hurt — normal between-statement churn, not worth flagging.
 	return SevOK
 }
 
@@ -683,9 +692,9 @@ func (c *Client) triageSequences(ctx context.Context, db string) (Severity, stri
 
 func sequenceSeverity(maxConsumedPct float64) Severity {
 	switch {
-	case maxConsumedPct > seqCritPct:
+	case maxConsumedPct >= seqCritPct:
 		return SevCrit
-	case maxConsumedPct > seqWarnPct:
+	case maxConsumedPct >= seqWarnPct:
 		return SevWarn
 	}
 	return SevOK

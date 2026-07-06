@@ -19,6 +19,7 @@ const (
 	progColDoneTotal = 20 // "12345678 / 98765432" or "12.34 MB / 1.20 GB"
 	progColPct       = 6  // "99.9%"
 	progColAge       = 8  // fmtAge output ("31.1s", "2.4d")
+	progColEta       = 8  // fmtAge output for the extrapolated time remaining
 	progColUser      = 12
 )
 
@@ -63,6 +64,8 @@ func (m *Model) renderProgress(s *screen, height int) string {
 	}
 
 	barW := m.barWidth(s)
+	b.WriteString(m.renderProgressHeader(barW) + "\n")
+	used++
 	vis := s.visibleIndexes()
 	rowsH := max(height-used, 0)
 	if rowsH > 0 {
@@ -111,6 +114,10 @@ func (m *Model) renderProgressRow(r pg.ProgressRow, selected bool, barW int) str
 		age = strings.Repeat(" ", progColAge)
 	}
 
+	// ETA is a derived estimate, not a server-reported counter — keep it muted so
+	// it reads as a hint rather than a promise. Em-dash when it can't be computed.
+	eta := mu(padRight(progressETA(r), progColEta))
+
 	line := cursor +
 		cmd + "  " +
 		padRight(truncateToWidth(r.Relation, colName-1), colName) +
@@ -119,11 +126,46 @@ func (m *Model) renderProgressRow(r pg.ProgressRow, selected bool, barW int) str
 		bar + " " +
 		padLeft(pctStr, progColPct) + "  " +
 		age +
+		eta +
 		mu(truncateToWidth(r.Username, progColUser))
 	if m.width > 4 && lipgloss.Width(line) > m.width {
 		line = truncateToWidth(line, m.width)
 	}
 	return line
+}
+
+// renderProgressHeader is the muted column-label row above the operation list.
+// Widths and gutters mirror renderProgressRow exactly so each label sits over
+// its column; the bar span (barW inner cells + the two brackets) is left blank
+// since the [▇░] fill is self-describing.
+func (m *Model) renderProgressHeader(barW int) string {
+	line := "  " + // cursor slot (colCursor)
+		padRight("command", progColCmd) + "  " +
+		padRight("relation", colName) +
+		padRight("phase", progColPhase) +
+		padLeft("done / total", progColDoneTotal) + "  " +
+		strings.Repeat(" ", barW+colBrackets) + " " +
+		padLeft("pct", progColPct) + "  " +
+		padRight("elapsed", progColAge) +
+		padRight("~eta", progColEta) +
+		"user"
+	if m.width > 4 && lipgloss.Width(line) > m.width {
+		line = truncateToWidth(line, m.width)
+	}
+	return styleMuted.Render(line)
+}
+
+// progressETA linearly extrapolates the time remaining from the elapsed runtime
+// and the done/total ratio: remaining ≈ elapsed × (total-done)/done. It is
+// deliberately a "~eta" — phases that reset their counters (VACUUM cycles) or a
+// non-uniform cost per unit make it a rough guide. Unknown totals, an un-started
+// counter, or an already-complete phase yield an em-dash.
+func progressETA(r pg.ProgressRow) string {
+	if r.RunningMs <= 0 || r.Done <= 0 || r.Total <= 0 || r.Done >= r.Total {
+		return "—"
+	}
+	remainingMs := r.RunningMs * float64(r.Total-r.Done) / float64(r.Done)
+	return fmtAge(remainingMs)
 }
 
 // progressDoneTotal formats the raw counters in their native unit: byte-based
