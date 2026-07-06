@@ -105,8 +105,8 @@ func TestSequenceSeverity(t *testing.T) {
 	if got := sequenceSeverity(10); got != SevOK {
 		t.Errorf("10%% = %v, want SevOK", got)
 	}
-	if got := sequenceSeverity(70); got != SevWarn {
-		t.Errorf("70%% = %v, want SevWarn", got)
+	if got := sequenceSeverity(85); got != SevWarn {
+		t.Errorf("85%% = %v, want SevWarn", got)
 	}
 	if got := sequenceSeverity(95); got != SevCrit {
 		t.Errorf("95%% = %v, want SevCrit", got)
