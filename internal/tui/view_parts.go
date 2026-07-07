@@ -29,7 +29,7 @@ func (m *Model) renderPartsLevel(s *screen, height int) string {
 		if paneH < vacuumPaneMin {
 			// Too short for list + footer + a usable pane: drop the footer, then
 			// shrink the list, keeping the pane at its minimum.
-			footer, footerH = "", 0
+			footer = ""
 			paneH = height - listH
 			if paneH < vacuumPaneMin {
 				listH = max(height-vacuumPaneMin, 1)

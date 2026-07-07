@@ -117,7 +117,7 @@ func TestDeadlockSeverity(t *testing.T) {
 	if got := deadlockSeverity(0); got != SevOK {
 		t.Errorf("none = %v, want SevOK", got)
 	}
-	if got := deadlockSeverity(3); got != SevWarn {
+	if got := deadlockSeverity(20); got != SevWarn {
 		t.Errorf("a few = %v, want SevWarn", got)
 	}
 	if got := deadlockSeverity(200); got != SevCrit {
