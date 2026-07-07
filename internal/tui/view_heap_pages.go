@@ -27,7 +27,7 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 	b.WriteString("    " + sw(styleBloat) + "  " + mu("dead      bytes occupied by tuples awaiting VACUUM (lp_flags = DEAD)") + "\n")
 	b.WriteString("    " + mu("░  free      empty space between pd_lower and pd_upper inside the page") + "\n")
 	b.WriteString("    " + mu("         REDIRECT (HOT hop) slots have no tuple bytes so they don't appear in the bar;") + "\n")
-	b.WriteString("    " + mu("         their count shows in the R column (each of live / R / dead sorts on its own)") + "\n\n")
+	b.WriteString("    " + mu("         their count shows in the Red column (each of live / Red / dead sorts on its own)") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" page flag ") + "  " +
 		mu("one glyph per page summarising its tuple-mix state") + "\n")
@@ -118,8 +118,14 @@ func heapPageTableLabel(s *screen) string {
 	switch s.level {
 	case levelHeapPages, levelHeapTuples, levelTupleRow:
 		return "table: " + s.table.Qualified()
-	case levelIndexPages, levelIndexTuples:
+	case levelIndexPages:
 		return "index: " + s.index.Qualified()
+	case levelIndexTuples:
+		label := "index: " + s.index.Qualified()
+		if s.indexPageLevel != nil {
+			label += "  ·  page: L" + strconv.Itoa(int(*s.indexPageLevel))
+		}
+		return label
 	}
 	return ""
 }
@@ -159,7 +165,7 @@ func renderHeapPagesHeader(sort sortMode, sortDesc bool, barW int) string {
 		padRight("!", heapPageFlagColW) + "  " +
 		padRight(sortMark("used", sort == sortBySize, sortDesc), heapPageUsedColW) + "  " +
 		padRight(sortMark("live", sort == sortByLiveLP, sortDesc), heapPageLiveColW) + "  " +
-		padRight(sortMark("R", sort == sortByRedirectLP, sortDesc), heapPageRedirColW) + "  " +
+		padRight(sortMark("Red", sort == sortByRedirectLP, sortDesc), heapPageRedirColW) + "  " +
 		padRight(sortMark("dead", sort == sortByDeadLP, sortDesc), heapPageDeadLPColW) + "  " +
 		padRight(sortMark("dead%", sort == sortByDeadRatio, sortDesc), heapPageDeadColW) + "  " +
 		sortMark("page", sort == sortByBlkno, sortDesc)

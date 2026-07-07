@@ -84,6 +84,10 @@ type keyMap struct {
 	// table, its only advertisement for the blocking-chains view.
 	lockTreeInFooter bool
 
+	// progressInFooter adds the p (progress monitor) hint to the footer on the
+	// activity table.
+	progressInFooter bool
+
 	// describeInFooter adds the d (describe) hint to the footer on the progress
 	// monitor, where describing the operation's target relation is the only
 	// drill action (Enter is a no-op there) and nothing else advertises it.
@@ -217,9 +221,13 @@ func (k *keyMap) applyContext(s *screen) {
 	k.JumpActivity.SetEnabled(maint)
 	k.JumpWAL.SetEnabled(maint)
 	k.JumpReplication.SetEnabled(maint)
-	// p opens the live progress monitor; gated to the dashboard so the physical
-	// key stays free for Params (captured values) on statement detail.
-	k.Progress.SetEnabled(maint)
+	// p opens the live progress monitor, from the dashboard and the activity table
+	// (running operations are backends, so it's a natural cross-link from activity);
+	// gated off elsewhere so the physical key stays free for Params (captured
+	// values) on statement detail. Surface it in the activity footer, where nothing
+	// else advertises it — the dashboard lists it among its jump keys.
+	k.Progress.SetEnabled(maint || activity)
+	k.progressInFooter = activity
 
 	// The progress monitor orders rows in SQL (pct DESC, pid) with no user sort,
 	// and its rows don't drill (Enter is a no-op) — describing the target relation
@@ -260,6 +268,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	}
 	if k.waitProfileInFooter {
 		b = append(b, k.WaitProfile)
+	}
+	if k.progressInFooter {
+		b = append(b, k.Progress)
 	}
 	if k.showQueryInFooter {
 		b = append(b, k.ShowQuery)

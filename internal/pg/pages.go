@@ -320,22 +320,26 @@ func (c *Client) BtreeMeta(ctx context.Context, r Relation) (BtreeMeta, error) {
 }
 
 // BtreePageType returns one B-tree page's bt_page_stats type ('l' leaf, 'r'
-// root, 'i' internal, 'd' deleted). Used to resolve a child page's type when
-// the user descends through an internal-page downlink (the parent page only
-// gave us the child's block number, not its role). Best-effort at the call
-// site: a failure leaves the page type unknown and the tuple loader falls back
-// to the raw, non-decoded path.
-func (c *Client) BtreePageType(ctx context.Context, r Relation, blkno int32) (string, error) {
+// root, 'i' internal, 'd' deleted) and its btpo_level (0 = leaf). Used to
+// resolve a child page's type when the user descends through an internal-page
+// downlink (the parent page only gave us the child's block number, not its
+// role) and to label the page's tree depth. Best-effort at the call site: a
+// failure leaves the page type unknown and the tuple loader falls back to the
+// raw, non-decoded path.
+func (c *Client) BtreePageType(ctx context.Context, r Relation, blkno int32) (string, int32, error) {
 	pool, err := c.PoolFor(ctx, r.DB)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	var t string
+	var (
+		t     string
+		level int32
+	)
 	regclass := qualifiedIdent(r.Schema, r.Name)
-	if err := pool.QueryRow(ctx, sqlBtreePageType, regclass, blkno).Scan(&t); err != nil {
-		return "", fmt.Errorf("bt_page_stats type for %q page %d: %w", r.Qualified(), blkno, err)
+	if err := pool.QueryRow(ctx, sqlBtreePageType, regclass, blkno).Scan(&t, &level); err != nil {
+		return "", 0, fmt.Errorf("bt_page_stats type for %q page %d: %w", r.Qualified(), blkno, err)
 	}
-	return t, nil
+	return t, level, nil
 }
 
 // IndexKeyColumns returns the index's columns in definition order, split into

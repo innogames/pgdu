@@ -9,9 +9,10 @@ type ProgressRow struct {
 	Command   string
 	Relation  string // empty when the view has no relid (e.g. base backup)
 	Phase     string
-	Unit      string // "blocks" or "bytes"
+	Unit      string // "blocks", "bytes", or "rows" (COPY TO estimate)
 	Done      int64
 	Total     int64
+	Approx    bool // total is an estimate (COPY TO vs pg_class.reltuples), not a server counter
 	RunningMs float64
 	Username  string
 }

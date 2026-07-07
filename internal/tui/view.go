@@ -128,8 +128,13 @@ func (m *Model) View() string {
 	}
 
 	// Reserve a line for the colour legend (rendered after the list, before
-	// the help row) on levels whose bars carry more than one colour.
+	// the help row) on levels whose bars carry more than one colour. The parts
+	// level owns its own legend (rendered directly beneath its list by
+	// renderPartsLevel), so it's excluded from the bottom-of-screen legend.
 	legend := renderLegend(s)
+	if s.level == levelParts {
+		legend = ""
+	}
 	if legend != "" {
 		contentHeight--
 	}

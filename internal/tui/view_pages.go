@@ -52,7 +52,7 @@ func (m *Model) renderIndexPagesInfo(height int) string {
 	b.WriteString("    " + padRight("free", 10) +
 		mu("free_size as a percent of pagesize; high values on leaf pages signal bloat") + "\n")
 	b.WriteString("    " + padRight("links", 10) +
-		mu("btpo_prev↔btpo_next: the page's left/right siblings on its level (· = an end)") + "\n\n")
+		mu("btpo_prev - btpo_next: the page's left/right siblings on its level (· = an end)") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" flags ") + "  " +
 		mu("the leftmost ! column flags rare structural states from btpo_flags") + "\n")
@@ -455,7 +455,7 @@ func siblingLinks(prev, next int32) string {
 		}
 		return strconv.Itoa(int(blk))
 	}
-	return styleMuted.Render(end(prev) + "↔" + end(next))
+	return styleMuted.Render(end(prev) + " - " + end(next))
 }
 
 // renderIndexPageBar paints one B-tree page as live | dead | free, scaled

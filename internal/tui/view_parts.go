@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"pgdu/internal/humanize"
 	"pgdu/internal/pg"
 )
 
@@ -14,32 +15,132 @@ import (
 // the parts list + vacuum output pane (when a vacuum is in progress or done for
 // this table), or the parts list + maintenance stats panel below.
 func (m *Model) renderPartsLevel(s *screen, height int) string {
+	// Footer lines that sit directly beneath the parts list (with the table
+	// they annotate): the Σ totals line and the size/bloat colour legend.
+	// These are dropped first when the terminal is too short to fit everything.
+	footer, footerH := m.partsFooter(s)
+
 	if m.vacuumPaneVisible(s) {
-		paneH := vacuumPaneHeight(height)
-		listH := max(height-paneH, 1)
-		return m.renderList(s, listH) + m.renderVacuumPane(paneH)
+		// Keep a fixed slice of the list for context (partsVacuumListRows rows
+		// plus the 1-line header) and hand the rest of the area to the
+		// scrollable log pane.
+		listH := partsVacuumListRows + 1
+		paneH := height - listH - footerH
+		if paneH < vacuumPaneMin {
+			// Too short for list + footer + a usable pane: drop the footer, then
+			// shrink the list, keeping the pane at its minimum.
+			footer, footerH = "", 0
+			paneH = height - listH
+			if paneH < vacuumPaneMin {
+				listH = max(height-vacuumPaneMin, 1)
+				paneH = max(height-listH, 1)
+			}
+		}
+		return m.renderList(s, listH) + footer + m.renderVacuumPane(paneH)
 	}
+
 	panel := m.renderMaintPanel(s)
 	if panel != "" {
 		panelLines := strings.Count(panel, "\n")
-		listH := height - panelLines
+		listH := height - footerH - panelLines
 		if listH < 3 {
-			// Terminal too short for both — drop the panel.
-			return m.renderList(s, height)
+			// Terminal too short for list + footer + panel — drop the panel.
+			if listH = height - footerH; listH < 3 {
+				return m.renderList(s, height)
+			}
+			return m.renderList(s, listH) + footer
 		}
-		return m.renderList(s, listH) + panel
+		return m.renderList(s, listH) + footer + panel
+	}
+	if listH := height - footerH; listH >= 1 {
+		return m.renderList(s, listH) + footer
 	}
 	return m.renderList(s, height)
 }
 
-// vacuumPaneHeight returns the number of lines reserved for the vacuum output
-// pane given the total available content height.
-func vacuumPaneHeight(h int) int {
-	pane := min(max(h/2, 6), 16)
-	if pane > h-3 {
-		pane = max(h-3, 2)
+// partsVacuumListRows is how many parts-list rows stay visible for context
+// while a VACUUM log pane is shown; the log gets everything else.
+const partsVacuumListRows = 8
+
+// vacuumPaneMin is the smallest usable vacuum log pane (header + a few lines).
+const vacuumPaneMin = 4
+
+// partsFooter builds the totals + legend lines shown directly under the parts
+// list and returns them (each newline-terminated) with their line count.
+func (m *Model) partsFooter(s *screen) (string, int) {
+	var b strings.Builder
+	n := 0
+	if totals := m.renderPartsTotals(s); totals != "" {
+		b.WriteString(totals + "\n")
+		n++
 	}
-	return pane
+	if legend := renderPartsLegend(s); legend != "" {
+		b.WriteString(legend + "\n")
+		n++
+	}
+	return b.String(), n
+}
+
+// renderPartsLegend is the size/bloat colour legend for the parts level. Unlike
+// the generic bottom-of-screen legend, it renders directly beneath the parts
+// list so it sits with the table it describes (see renderPartsLevel).
+func renderPartsLegend(s *screen) string {
+	if s.level != levelParts {
+		return ""
+	}
+	sep := styleMuted.Render("  ·  ")
+	return "  " + swatch(styleBar) + " " + styleMuted.Render("size") + sep +
+		swatch(styleBloat) + " " + styleMuted.Render("bloat")
+}
+
+// renderPartsTotals sums the parts (heap / index / toast) sizes and renders a
+// one-line Σ footer beneath the parts list, mirroring the per-table breakdown
+// shown on the tables level. Returns "" until parts have loaded.
+func (m *Model) renderPartsTotals(s *screen) string {
+	if s.level != levelParts || len(s.items) == 0 {
+		return ""
+	}
+	var heap, idx, toast, bloat int64
+	anyBloat := false
+	for _, it := range s.items {
+		p, ok := it.data.(pg.Part)
+		if !ok {
+			continue
+		}
+		switch p.Kind {
+		case pg.PartHeap:
+			heap += p.SizeBytes
+		case pg.PartIndex:
+			idx += p.SizeBytes
+		case pg.PartToast:
+			toast += p.SizeBytes
+		}
+		if p.HasBloat {
+			bloat += p.WastedBytes
+			anyBloat = true
+		}
+	}
+	total := heap + idx + toast
+	if total == 0 {
+		return ""
+	}
+	mu := styleMuted.Render
+	sep := mu("  ·  ")
+	parts := []string{styleSelected.Render(humanize.Bytes(total)) + mu(" total")}
+	if heap > 0 {
+		parts = append(parts, mu("heap "+humanize.Bytes(heap)))
+	}
+	if idx > 0 {
+		parts = append(parts, mu("index "+humanize.Bytes(idx)))
+	}
+	if toast > 0 {
+		parts = append(parts, mu("toast "+humanize.Bytes(toast)))
+	}
+	if anyBloat && bloat > 0 {
+		pct := int(float64(bloat) / float64(total) * 100)
+		parts = append(parts, styleBloat.Render(fmt.Sprintf("bloat %s (%d%%)", humanize.Bytes(bloat), pct)))
+	}
+	return "  " + mu("Σ") + "  " + strings.Join(parts, sep)
 }
 
 // renderVacuumBanner renders the one-line confirmation prompt for the vacuum
@@ -58,7 +159,9 @@ func (m *Model) renderVacuumBanner(s *screen) string {
 
 // renderVacuumPane renders the streaming VACUUM output pane (header + output body).
 func (m *Model) renderVacuumPane(paneH int) string {
-	vs := m.vacuum
+	// Pointer, not a copy: the follow-snap and follow-re-evaluation below must
+	// persist to m.vacuum so tail-follow survives across renders.
+	vs := &m.vacuum
 	var hdr string
 	mu := styleMuted.Render
 	// While running the clock ticks live; once finished it freezes at the

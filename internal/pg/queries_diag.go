@@ -457,7 +457,7 @@ bloat_data AS (
 )
 SELECT databasename, schemaname, tablename, can_estimate, est_rows, pct_bloat, mb_bloat, table_mb
 FROM bloat_data
-WHERE (pct_bloat >= 50 AND mb_bloat >= 10)
+WHERE (pct_bloat >= 50 AND mb_bloat >= 50)
    OR (pct_bloat >= 25 AND mb_bloat >= 1000)
 ORDER BY mb_bloat DESC
 `
@@ -989,7 +989,7 @@ SELECT
     date_trunc('second', now() - GREATEST(last_analyze, last_autoanalyze)) AS analyzed_ago
 FROM pg_stat_user_tables
 WHERE n_live_tup >= 10000
-  AND 100.0 * n_mod_since_analyze / GREATEST(n_live_tup, 1) > 5
+  AND 100.0 * n_mod_since_analyze / GREATEST(n_live_tup, 1) > 10
 ORDER BY stale_pct DESC NULLS LAST
 `
 
@@ -1002,22 +1002,49 @@ const sqlProgressBase = `
 WITH prog AS (
     SELECT pid, 'VACUUM' AS command, relid, phase,
            heap_blks_scanned::numeric AS done, heap_blks_total::numeric AS total,
-           'blocks'::text AS unit
+           'blocks'::text AS unit, false AS approx
     FROM pg_stat_progress_vacuum
     UNION ALL
-    SELECT pid, 'CREATE INDEX', relid, phase, blocks_done::numeric, blocks_total::numeric, 'blocks'
+    SELECT pid, 'CREATE INDEX', relid, phase, blocks_done::numeric, blocks_total::numeric, 'blocks', false
     FROM pg_stat_progress_create_index
     UNION ALL
-    SELECT pid, 'ANALYZE', relid, phase, sample_blks_scanned::numeric, sample_blks_total::numeric, 'blocks'
+    SELECT pid, 'ANALYZE', relid, phase, sample_blks_scanned::numeric, sample_blks_total::numeric, 'blocks', false
     FROM pg_stat_progress_analyze
     UNION ALL
-    SELECT pid, 'CLUSTER', relid, phase, heap_blks_scanned::numeric, heap_blks_total::numeric, 'blocks'
+    SELECT pid, 'CLUSTER', relid, phase, heap_blks_scanned::numeric, heap_blks_total::numeric, 'blocks', false
     FROM pg_stat_progress_cluster
     UNION ALL
-    SELECT pid, 'COPY', relid, ''::text, bytes_processed::numeric, bytes_total::numeric, 'bytes'
-    FROM pg_stat_progress_copy
+    -- COPY reports bytes_processed but bytes_total is 0 for STDIN and PROGRAM/PIPE
+    -- sources (nothing seekable to size). For COPY TO of a plain table we can still
+    -- estimate progress from tuples_processed against pg_class.reltuples (a stale-able
+    -- ANALYZE estimate — hence approx, and pct is clamped since reltuples may lag the
+    -- live count), moving the byte volume into the phase column. With a real
+    -- bytes_total (file target) or no row estimate, fall back to the byte counters
+    -- with rows + IO type in the phase.
+    SELECT c.pid, c.command, c.relid,
+           CASE WHEN c.est_rows IS NOT NULL AND c.bytes_total <= 0
+                THEN pg_size_pretty(c.bytes_processed)
+                     || CASE WHEN COALESCE(c.type, '') <> '' THEN ' · ' || lower(c.type) ELSE '' END
+                ELSE c.tuples_processed || ' rows'
+                     || CASE WHEN c.tuples_excluded > 0 THEN ' (' || c.tuples_excluded || ' skipped)' ELSE '' END
+                     || CASE WHEN COALESCE(c.type, '') <> '' THEN ' · ' || lower(c.type) ELSE '' END
+           END,
+           CASE WHEN c.est_rows IS NOT NULL AND c.bytes_total <= 0
+                THEN c.tuples_processed::numeric ELSE c.bytes_processed::numeric END,
+           CASE WHEN c.est_rows IS NOT NULL AND c.bytes_total <= 0
+                THEN c.est_rows ELSE c.bytes_total::numeric END,
+           CASE WHEN c.est_rows IS NOT NULL AND c.bytes_total <= 0 THEN 'rows' ELSE 'bytes' END,
+           c.est_rows IS NOT NULL AND c.bytes_total <= 0
+    FROM (
+        SELECT pc.pid, pc.command, pc.relid, pc.type,
+               pc.bytes_processed, pc.bytes_total, pc.tuples_processed, pc.tuples_excluded,
+               CASE WHEN pc.command = 'COPY TO' AND pc.relid <> 0
+                    THEN NULLIF(GREATEST(cl.reltuples, 0), 0)::numeric END AS est_rows
+        FROM pg_stat_progress_copy pc
+        LEFT JOIN pg_class cl ON cl.oid = pc.relid
+    ) c
     UNION ALL
-    SELECT pid, 'BASE BACKUP', NULL::oid, phase, backup_streamed::numeric, backup_total::numeric, 'bytes'
+    SELECT pid, 'BASE BACKUP', NULL::oid, phase, backup_streamed::numeric, backup_total::numeric, 'bytes', false
     FROM pg_stat_progress_basebackup
 )
 `
@@ -1052,6 +1079,7 @@ SELECT
     p.unit,
     coalesce(p.done, 0)::bigint AS done,
     coalesce(p.total, 0)::bigint AS total,
+    p.approx,
     coalesce(EXTRACT(epoch FROM now() - a.xact_start) * 1000, 0)::float8 AS running_ms,
     coalesce(a.usename::text, '') AS username
 FROM prog p

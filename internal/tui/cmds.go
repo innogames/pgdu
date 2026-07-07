@@ -153,6 +153,7 @@ type indexTuplesLoadedMsg struct {
 	indexOID uint32
 	blkno    int32
 	pageType string
+	level    int32 // btpo_level from the probe; -1 when not probed (see loadIndexTuplesCmd)
 	tuples   []pg.IndexTuple
 	err      error
 }
@@ -463,13 +464,17 @@ func (m *Model) loadIndexTuplesCmd(r pg.Relation, blkno int32, pageType string) 
 		// probe it so the decode-vs-raw choice and further downlink navigation
 		// stay correct as the user walks toward the leaves. Best-effort: on
 		// failure the empty type just takes the raw path.
+		// level stays -1 (unknown) unless the probe below runs; the direct drill
+		// from levelIndexPages already set it on the screen from bt_page_stats.
+		level := int32(-1)
 		if pageType == "" {
-			if pt, err := m.client.BtreePageType(ctx, r, blkno); err == nil {
+			if pt, lv, err := m.client.BtreePageType(ctx, r, blkno); err == nil {
 				pageType = pt
+				level = lv
 			}
 		}
 		tuples, err := m.client.ListIndexTuples(ctx, r, blkno, pageType)
-		return indexTuplesLoadedMsg{indexOID: r.OID, blkno: blkno, pageType: pageType, tuples: tuples, err: err}
+		return indexTuplesLoadedMsg{indexOID: r.OID, blkno: blkno, pageType: pageType, level: level, tuples: tuples, err: err}
 	})
 }
 

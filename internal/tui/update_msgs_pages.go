@@ -133,6 +133,12 @@ func (m *Model) onIndexTuplesLoaded(msg indexTuplesLoadedMsg) tea.Cmd {
 	// Adopt the resolved page type so the renderer's labels (→ blk N / pivot)
 	// and the downlink-drill guard see the child page's real role.
 	s.indexPageType = msg.pageType
+	// The probe (descent path) resolves the depth; -1 means it didn't run, in
+	// which case the direct-drill level already set on the screen stands.
+	if msg.level >= 0 {
+		lv := msg.level
+		s.indexPageLevel = &lv
+	}
 	s.items = s.items[:0]
 	for _, t := range msg.tuples {
 		s.items = append(s.items, indexTupleToItem(t))

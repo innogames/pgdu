@@ -260,7 +260,7 @@ ORDER  BY i.itemoffset
 // decode-vs-raw tuple path and whether further downlinks exist. $1 is the index
 // regclass-castable text; $2 the block number.
 const sqlBtreePageType = `
-SELECT type::text FROM bt_page_stats($1, $2::int)
+SELECT type::text, btpo_level::int FROM bt_page_stats($1, $2::int)
 `
 
 // sqlBtreeMeta reads the B-tree metapage (block 0) via bt_metap. Every column

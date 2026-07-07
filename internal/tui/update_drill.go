@@ -239,6 +239,7 @@ func (m *Model) drillIn() tea.Cmd {
 		if !ok {
 			return nil
 		}
+		lvl := p.BtpoLevel
 		next := &screen{
 			level: levelIndexTuples, title: "index tuples", tool: s.tool,
 			db: s.db, schema: s.schema, index: s.index,
@@ -246,6 +247,7 @@ func (m *Model) drillIn() tea.Cmd {
 			heapPageCount:  s.heapPageCount,
 			indexPageBlkno: p.Blkno,
 			indexPageType:  indexTuplePageType(p.Type, p.BtpoLevel),
+			indexPageLevel: &lvl,
 			sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
 		}
 		m.stack = append(m.stack, next)

@@ -20,7 +20,7 @@ func (c *Client) ListProgress(ctx context.Context, db string) ([]ProgressRow, er
 			var r ProgressRow
 			err := row.Scan(
 				&r.PID, &r.Command, &r.Relation, &r.Phase, &r.Unit,
-				&r.Done, &r.Total, &r.RunningMs, &r.Username,
+				&r.Done, &r.Total, &r.Approx, &r.RunningMs, &r.Username,
 			)
 			return r, err
 		})

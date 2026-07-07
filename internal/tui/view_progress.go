@@ -17,7 +17,7 @@ const (
 	progColCmd       = 13 // "CREATE INDEX" is the widest command
 	progColPhase     = 26 // e.g. "building index: scanning table"  (clipped)
 	progColDoneTotal = 20 // "12345678 / 98765432" or "12.34 MB / 1.20 GB"
-	progColPct       = 6  // "99.9%"
+	progColPct       = 7  // "99.9%", or "~100.0%" for an estimated (approx) total
 	progColAge       = 8  // fmtAge output ("31.1s", "2.4d")
 	progColEta       = 8  // fmtAge output for the extrapolated time remaining
 	progColUser      = 12
@@ -105,6 +105,12 @@ func (m *Model) renderProgressRow(r pg.ProgressRow, selected bool, barW int) str
 		filled := min(int(float64(barW)*pct/100), barW)
 		bar = paintBar(barW, barSegment{cells: filled, style: styleBar})
 		pctStr = fmt.Sprintf("%.1f%%", pct)
+		if r.Approx {
+			// reltuples-derived estimate, not a server counter — flag it so the
+			// bar doesn't read as an exact promise, and cap the display at 100%
+			// since a stale reltuples can undershoot the live row count.
+			pctStr = "~" + fmt.Sprintf("%.1f%%", min(pct, 100))
+		}
 	}
 
 	var age string

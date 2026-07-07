@@ -86,7 +86,7 @@ const (
 
 	// temp files / deadlocks: cumulative since the last stats reset, so only
 	// large absolute numbers are meaningful.
-	deadlocksWarn = 1
+	deadlocksWarn = 10
 	deadlocksCrit = 100
 	tempBytesWarn = 10 << 30
 	tempBytesCrit = 100 << 30

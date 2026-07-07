@@ -218,6 +218,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.offset++ // clamped to the last screen by scrollWindow
 			break
 		}
+		if s.level == levelParts && m.vacuumPaneVisible(s) {
+			// Scroll the vacuum log; renderVacuumPane re-arms follow when the
+			// offset lands at the bottom.
+			m.vacuum.offset++
+			break
+		}
 		if s.level == levelMaintenance {
 			// ↑↓ moves the capacity cursor (3 rows: statements, qualstats, table stats).
 			s.maintCursor = min(s.maintCursor+1, 2)
@@ -231,6 +237,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.offset = max(s.offset-1, 0)
 			break
 		}
+		if s.level == levelParts && m.vacuumPaneVisible(s) {
+			m.vacuum.offset = max(m.vacuum.offset-1, 0)
+			m.vacuum.follow = false // stop tailing once the user scrolls up
+			break
+		}
 		if s.level == levelMaintenance {
 			s.maintCursor = max(s.maintCursor-1, 0)
 			break
@@ -241,6 +252,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.PageDown):
 		if s.level == levelStatementDetail {
 			s.offset += m.pageStep() // clamped by scrollWindow
+			break
+		}
+		if s.level == levelParts && m.vacuumPaneVisible(s) {
+			m.vacuum.offset += m.pageStep()
 			break
 		}
 		if s.level == levelMaintenance {
@@ -265,6 +280,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.offset = max(s.offset-m.pageStep(), 0)
 			break
 		}
+		if s.level == levelParts && m.vacuumPaneVisible(s) {
+			m.vacuum.offset = max(m.vacuum.offset-m.pageStep(), 0)
+			m.vacuum.follow = false
+			break
+		}
 		if s.level == levelMaintenance {
 			s.offset = max(s.offset-m.pageStep(), 0)
 			break
@@ -280,10 +300,20 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.offset = 0
 			break
 		}
+		if s.level == levelParts && m.vacuumPaneVisible(s) {
+			m.vacuum.offset = 0
+			m.vacuum.follow = false
+			break
+		}
 		s.cursor = 0
 	case key.Matches(msg, m.keys.Bottom):
 		if s.level == levelStatementDetail {
 			s.offset = math.MaxInt32 // clamped to the last screen by scrollWindow
+			break
+		}
+		if s.level == levelParts && m.vacuumPaneVisible(s) {
+			m.vacuum.offset = math.MaxInt32 // clamped by scrollWindow; re-arms follow at bottom
+			m.vacuum.follow = true
 			break
 		}
 		s.cursor = max(s.visibleLen()-1, 0)
@@ -326,7 +356,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case key.Matches(msg, m.keys.Progress):
 		// Open the live progress monitor over the pg_stat_progress_* views.
-		// Enabled only on levelMaintenance, so it never shadows Params.
+		// Enabled on levelMaintenance and levelActivity only, so it never shadows
+		// Params (p, statement detail).
 		next := &screen{
 			level: levelProgress, title: "progress", tool: toolMaintenance,
 			db: s.db, loading: true,

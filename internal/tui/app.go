@@ -278,6 +278,10 @@ type screen struct {
 	index          pg.Relation
 	indexPageBlkno int32
 	indexPageType  string
+	// indexPageLevel is the B-tree depth (btpo_level, 0 = leaf) of the page
+	// drilled into on levelIndexTuples, shown as "L2" in the status line. nil
+	// when unknown (mid-descent, before the loader probes it) or not a B-tree.
+	indexPageLevel *int32
 
 	// Deep-dive context for the index page/tuple views, loaded alongside the
 	// page list (best-effort, so a privilege/redefinition failure just hides the
