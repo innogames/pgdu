@@ -89,6 +89,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.pendingReindex = ""
 			s.reindexing = idx
 			s.reindexProg = nil
+			s.reindexPctMax = 0
 			s.reindexErr = nil
 			// Run the (blocking) REINDEX and, alongside it, start polling
 			// pg_stat_progress_create_index so the banner shows a live bar.
@@ -117,6 +118,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.resetQualstatsCmd(s.db)
 			case "tablestats":
 				return m, m.resetTableStatsCmd(s.db)
+			case "tablestats-all":
+				return m, m.resetTableStatsAllDBsCmd()
 			}
 		}
 		return m, nil
@@ -196,7 +199,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.level == levelWALRelations || s.level == levelWALRelBlocks ||
 			s.level == levelStatements || s.level == levelStatementDetail || s.level == levelSnapshots ||
 			s.level == levelMaintenance || s.level == levelSettings ||
-			s.level == levelActivity || s.level == levelTableStats || s.level == levelWaitProfile {
+			s.level == levelActivity || s.level == levelTableStats || s.level == levelWaitProfile ||
+			s.level == levelDiagnostics || s.level == levelDiagnosticResult {
 			m.showInfo = !m.showInfo
 			if m.showInfo {
 				m.infoOffset = 0 // always open scrolled to the top
@@ -214,7 +218,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s.seekStatus = ""
 		s.filterFocused = false
 	case key.Matches(msg, m.keys.Down):
-		if s.level == levelStatementDetail {
+		if s.level == levelStatementDetail || s.level == levelDescribe {
 			s.offset++ // clamped to the last screen by scrollWindow
 			break
 		}
@@ -225,15 +229,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if s.level == levelMaintenance {
-			// ↑↓ moves the capacity cursor (3 rows: statements, qualstats, table stats).
-			s.maintCursor = min(s.maintCursor+1, 2)
+			// ↑↓ moves the capacity cursor (4 rows: statements, qualstats, table
+			// stats, table stats · all dbs).
+			s.maintCursor = min(s.maintCursor+1, 3)
 			break
 		}
 		if s.cursor < s.visibleLen()-1 {
 			s.cursor++
 		}
 	case key.Matches(msg, m.keys.Up):
-		if s.level == levelStatementDetail {
+		if s.level == levelStatementDetail || s.level == levelDescribe {
 			s.offset = max(s.offset-1, 0)
 			break
 		}
@@ -250,7 +255,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.cursor--
 		}
 	case key.Matches(msg, m.keys.PageDown):
-		if s.level == levelStatementDetail {
+		if s.level == levelStatementDetail || s.level == levelDescribe {
 			s.offset += m.pageStep() // clamped by scrollWindow
 			break
 		}
@@ -276,7 +281,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		s.cursor = max(min(s.cursor+m.pageStep(), s.visibleLen()-1), 0)
 	case key.Matches(msg, m.keys.PageUp):
-		if s.level == levelStatementDetail {
+		if s.level == levelStatementDetail || s.level == levelDescribe {
 			s.offset = max(s.offset-m.pageStep(), 0)
 			break
 		}
@@ -296,7 +301,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		s.cursor = max(s.cursor-m.pageStep(), 0)
 	case key.Matches(msg, m.keys.Top):
-		if s.level == levelStatementDetail {
+		if s.level == levelStatementDetail || s.level == levelDescribe {
 			s.offset = 0
 			break
 		}
@@ -307,7 +312,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		s.cursor = 0
 	case key.Matches(msg, m.keys.Bottom):
-		if s.level == levelStatementDetail {
+		if s.level == levelStatementDetail || s.level == levelDescribe {
 			s.offset = math.MaxInt32 // clamped to the last screen by scrollWindow
 			break
 		}
@@ -668,6 +673,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				s.pendingReset = "qualstats"
 			case 2:
 				s.pendingReset = "tablestats"
+			case 3:
+				s.pendingReset = "tablestats-all"
 			}
 			return m, nil
 		}

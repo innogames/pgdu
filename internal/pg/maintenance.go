@@ -310,3 +310,34 @@ func (c *Client) ResetQualstats(ctx context.Context, db string) error {
 func (c *Client) ResetTableStats(ctx context.Context, db string) error {
 	return c.resetExtStats(ctx, db, "table statistics", sqlTableStatsResetAll)
 }
+
+// ResetTableStatsAllDBs runs pg_stat_reset() in every database the current user
+// can connect to, zeroing the cumulative table/index/IO counters cluster-wide.
+// pg_stat_reset() is per-database (it only touches current_database()), so the
+// whole-cluster reset must visit each database in turn — mirroring the fan-out
+// in RunDiagnosticAllDBs. A database that fails to connect or reset is skipped
+// and its first error remembered; the sweep reports that error (with the
+// succeeded/total tally) whenever any database failed, so a partial reset is
+// never silently reported as a full success. Requires pg_monitor (or superuser)
+// in each database.
+func (c *Client) ResetTableStatsAllDBs(ctx context.Context) error {
+	dbs, err := c.ListDatabases(ctx)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	var done int
+	for _, db := range dbs {
+		if rerr := c.resetExtStats(ctx, db.Name, "table statistics", sqlTableStatsResetAll); rerr != nil {
+			if firstErr == nil {
+				firstErr = rerr
+			}
+			continue
+		}
+		done++
+	}
+	if firstErr != nil {
+		return fmt.Errorf("reset table statistics in %d/%d databases: %w", done, len(dbs), firstErr)
+	}
+	return nil
+}

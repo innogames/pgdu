@@ -52,6 +52,7 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	body.WriteString(m.renderCapacityRow(s, s.db, 0, "pg_stat_statements", stmtsCap) + "\n")
 	body.WriteString(m.renderCapacityRow(s, s.db, 1, "pg_qualstats", qualsCap) + "\n")
 	body.WriteString(m.renderTableStatsRow(s, info, 2) + "\n")
+	body.WriteString(m.renderTableStatsAllRow(s, 3) + "\n")
 	body.WriteString("\n")
 
 	// Wide terminals get a two-pane layout: compact "vitals" sections side by
@@ -210,6 +211,22 @@ func (m *Model) renderTableStatsRow(s *screen, info *pg.MaintenanceInfo, idx int
 	return cursor + padRight(mu("table statistics"), 22) + mu(detail)
 }
 
+// renderTableStatsAllRow renders the fourth actionable capacity-section row: the
+// cluster-wide counterpart to renderTableStatsRow. It runs pg_stat_reset() in
+// every connectable database (ResetTableStatsAllDBs) rather than just the
+// current one. There is no single last-reset age to show (the timestamp is
+// per-database), so the row only describes the scope. idx is its position in the
+// maintCursor sequence.
+func (m *Model) renderTableStatsAllRow(s *screen, idx int) string {
+	mu := styleMuted.Render
+	cursor := "  "
+	if s.maintCursor == idx {
+		cursor = styleSelected.Render("▶ ")
+	}
+	return cursor + padRight(mu("table stats · all dbs"), 22) +
+		mu("table & index counters in every database (pg_stat_reset)")
+}
+
 // maintResetTarget maps a pendingReset key to the human-readable name shown in
 // the confirm banner.
 func maintResetTarget(which string) string {
@@ -220,6 +237,8 @@ func maintResetTarget(which string) string {
 		return "pg_qualstats"
 	case "tablestats":
 		return "table statistics (pg_stat_reset)"
+	case "tablestats-all":
+		return "table statistics in ALL databases (pg_stat_reset)"
 	default:
 		return which
 	}

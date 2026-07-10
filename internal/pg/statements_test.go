@@ -220,6 +220,10 @@ func TestQueryKind(t *testing.T) {
 		{"merge into t ...", "M"},
 		{"BEGIN", "T"},
 		{"commit", "T"},
+		{"PREPARE p AS SELECT $1", "P"},
+		{"prepare stmt (int) as select $1", "P"},
+		// PREPARE TRANSACTION is 2PC control, classified as a transaction.
+		{"PREPARE TRANSACTION 'gid'", "T"},
 
 		// Unknown / empty.
 		{"VACUUM t", "?"},

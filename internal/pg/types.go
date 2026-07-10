@@ -287,6 +287,7 @@ type DescribeColumn struct {
 	Type    string // format_type output, e.g. "text", "varchar(64)"
 	NotNull bool
 	Default string // pg_get_expr output; "" when there is no default
+	Indexed bool   // covered by any index (key, expression, or partial predicate) — an UPDATE touching it can't be HOT
 }
 
 // DescribeIndexDef is one index entry in the describe-table view.

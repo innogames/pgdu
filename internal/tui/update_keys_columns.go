@@ -132,7 +132,10 @@ func (m *Model) handleDiagColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, m.keys.Bottom):
 		m.diagColCfgCursor = len(cols) - 1
 	case key.Matches(msg, m.keys.ResetCols):
-		m.diagColsVisible[s.diag.Key] = nil
+		// Reset restores the diagnostic's defaults (which may hide columns), not
+		// an all-visible view; persisting an empty map re-seeds from defaults on
+		// reload.
+		m.diagColsVisible[s.diag.Key] = defaultDiagVis(s.diag.Key)
 		m.rebuildDiagItems(s)
 		m.saveColPrefs(diagPrefsKey(s.diag.Key), map[string]bool{})
 	case key.Matches(msg, m.keys.Refresh), key.Matches(msg, m.keys.Enter):

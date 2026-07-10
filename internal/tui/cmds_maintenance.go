@@ -29,7 +29,7 @@ type progressLoadedMsg struct {
 }
 
 type maintResetDoneMsg struct {
-	which string // "statements", "qualstats", or "tablestats"
+	which string // "statements", "qualstats", "tablestats", or "tablestats-all"
 	err   error
 }
 
@@ -96,6 +96,13 @@ func (m *Model) resetTableStatsCmd(db string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		err := m.client.ResetTableStats(ctx, db)
 		return maintResetDoneMsg{which: "tablestats", err: err}
+	})
+}
+
+func (m *Model) resetTableStatsAllDBsCmd() tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		err := m.client.ResetTableStatsAllDBs(ctx)
+		return maintResetDoneMsg{which: "tablestats-all", err: err}
 	})
 }
 

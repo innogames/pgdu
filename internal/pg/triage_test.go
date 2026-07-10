@@ -60,16 +60,19 @@ func TestIdleInXactSeverity(t *testing.T) {
 }
 
 func TestSlotSeverity(t *testing.T) {
-	if got := slotSeverity(0, 0, false); got != SevOK {
+	if got := slotSeverity(0, 0, 0, false); got != SevOK {
 		t.Errorf("healthy = %v, want SevOK", got)
 	}
-	if got := slotSeverity(1, 0, false); got != SevWarn {
+	if got := slotSeverity(1, 0, 0, false); got != SevWarn {
 		t.Errorf("inactive = %v, want SevWarn", got)
 	}
-	if got := slotSeverity(0, 1, false); got != SevCrit {
+	if got := slotSeverity(1, 1, 0, false); got != SevCrit {
+		t.Errorf("stale = %v, want SevCrit", got)
+	}
+	if got := slotSeverity(0, 0, 1, false); got != SevCrit {
 		t.Errorf("lost = %v, want SevCrit", got)
 	}
-	if got := slotSeverity(0, 0, true); got != SevCrit {
+	if got := slotSeverity(0, 0, 0, true); got != SevCrit {
 		t.Errorf("over cap = %v, want SevCrit", got)
 	}
 }

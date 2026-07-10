@@ -366,6 +366,7 @@ func (m *Model) onReindexDone(msg reindexDoneMsg) tea.Cmd {
 	// Clearing reindexing stops the progress-poll tick on its next fire.
 	s.reindexing = ""
 	s.reindexProg = nil
+	s.reindexPctMax = 0
 	if msg.err != nil {
 		s.reindexErr = msg.err
 		return nil
@@ -392,6 +393,11 @@ func (m *Model) onReindexProgress(msg reindexProgressMsg) tea.Cmd {
 		return nil
 	}
 	s.reindexProg = msg.row
+	if msg.row != nil {
+		// OverallPct is -1 for unmapped phases; max() also absorbs that, so
+		// the bar simply holds until a known phase reports again.
+		s.reindexPctMax = max(s.reindexPctMax, msg.row.OverallPct())
+	}
 	return nil
 }
 

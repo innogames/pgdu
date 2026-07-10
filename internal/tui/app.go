@@ -242,7 +242,12 @@ type screen struct {
 	// reindexProg is the last-polled live progress of the running REINDEX from
 	// pg_stat_progress_create_index; nil until the first sample lands (or
 	// between phases where the view reports no counters).
-	reindexProg *pg.ProgressRow
+	reindexProg *pg.ReindexProgress
+	// reindexPctMax is the high-water mark of reindexProg.OverallPct() across
+	// polls. Phase totals are estimates and briefly read 0 on transitions, so
+	// the banner renders this clamp instead of the raw sample — the overall
+	// bar only ever moves forward.
+	reindexPctMax float64
 	// reindexErr is the last REINDEX failure, shown until the next attempt.
 	reindexErr error
 
@@ -486,7 +491,8 @@ type screen struct {
 	maint    *pg.MaintenanceInfo
 	maintErr error
 	// maintCursor is the row within the extension-capacity section that ↑↓ move
-	// over (0 = pg_stat_statements, 1 = pg_qualstats).
+	// over (0 = pg_stat_statements, 1 = pg_qualstats, 2 = table stats, 3 = table
+	// stats · all dbs).
 	maintCursor int
 	// pendingReset is set by Enter on a capacity row; y confirms the reset.
 	pendingReset string

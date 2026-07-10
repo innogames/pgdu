@@ -63,16 +63,105 @@ func (m *Model) renderDiagQuery(s *screen, height int) string {
 	return b.String()
 }
 
-// describeFKMaxIncoming caps the "referenced by" list: a hub table can be
-// referenced by dozens of others and the describe panel has no scroll, so the
-// overflow is summarised as "… and N more" rather than pushing the help row off.
-const describeFKMaxIncoming = 12
+// renderDiagnosticInfo draws the ? reference overlay for the diagnostics tool:
+// the running diagnostic's (result screen) or the highlighted entry's (list)
+// purpose and how to interpret its result, from the registry's Description and
+// Help fields. Same resolution as the s SQL viewer (diagForShowQuery).
+func (m *Model) renderDiagnosticInfo(s *screen, height int) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+	d := s.diagForShowQuery()
+	if d == nil {
+		// Guarded by hasInfoOverlay/View, but stay defensive rather than panic.
+		for range height {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+	infoHeader(&b, d.Title)
+
+	b.WriteString("  " + styleHeader.Render(" purpose ") + "\n")
+	for _, line := range wrapIndent(d.Description, m.width) {
+		b.WriteString(mu(line) + "\n")
+	}
+
+	// Help strings are authored for every registry entry, but degrade to just
+	// the description if a future one ships without.
+	if d.Help != "" {
+		b.WriteString("\n  " + styleHeader.Render(" how to read it ") + "\n")
+		for _, line := range wrapIndent(d.Help, m.width) {
+			b.WriteString(mu(line) + "\n")
+		}
+	}
+
+	b.WriteString("\n  " + styleHeader.Render(" keys ") + "\n")
+	kb := func(k, desc string) string { return styleBadge.Render(k) + mu(" "+desc) }
+	if s.level == levelDiagnosticResult {
+		b.WriteString("    " + kb("s", "show SQL") + mu("  ·  ") + kb("C", "columns") + mu("  ·  ") +
+			kb("←/→", "sort column") + mu("  ·  ") + kb("r", "reverse") + "\n")
+		b.WriteString("    " + kb("/", "filter rows") + mu("  ·  ") + kb("e", "export csv") + "\n")
+	} else {
+		b.WriteString("    " + kb("enter", "run") + mu("  ·  ") + kb("s", "preview SQL") + mu("  ·  ") +
+			kb("f", "cycle category") + mu("  ·  ") + kb("/", "filter") + "\n")
+	}
+
+	return padInfo(&b, height)
+}
+
+// wrapIndent word-wraps free prose to the terminal width with a four-space
+// indent, first collapsing the source's own line breaks and indentation
+// (Diagnostic.Help strings are written as indented raw literals). A blank line
+// in the source separates paragraphs, preserved as an empty output line.
+func wrapIndent(text string, termWidth int) []string {
+	const indent = "    "
+	width := max(termWidth-len(indent), 20)
+
+	// Split into paragraphs of whitespace-normalised words.
+	var paras [][]string
+	var cur []string
+	for line := range strings.SplitSeq(text, "\n") {
+		words := strings.Fields(line)
+		if len(words) == 0 {
+			if len(cur) > 0 {
+				paras = append(paras, cur)
+				cur = nil
+			}
+			continue
+		}
+		cur = append(cur, words...)
+	}
+	if len(cur) > 0 {
+		paras = append(paras, cur)
+	}
+
+	var out []string
+	for pi, words := range paras {
+		if pi > 0 {
+			out = append(out, "")
+		}
+		line := words[0]
+		w := displayWidth(words[0])
+		for _, word := range words[1:] {
+			ww := displayWidth(word)
+			if w+1+ww > width {
+				out = append(out, indent+line)
+				line, w = word, ww
+				continue
+			}
+			line += " " + word
+			w += 1 + ww
+		}
+		out = append(out, indent+line)
+	}
+	return out
+}
 
 // renderDescribe draws the \d-style description panel for levelDescribe. It
-// is a plain-text free-form view (no bars) padded to `height` lines so the
-// help row stays pinned to the bottom. Switches on s.describe.Kind to render
-// either a table (columns / indexes / constraints / summary) or an index
-// (definition, method, parent, optional partial predicate).
+// is a plain-text free-form view (no bars) that scrolls as a single body
+// through scrollWindow (s.offset = first visible line), so wide tables whose
+// column/index/FK lists overflow the terminal stay reachable. Switches on
+// s.describe.Kind to render either a table (columns / indexes / constraints /
+// summary) or an index (definition, method, parent, optional partial predicate).
 func (m *Model) renderDescribe(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
@@ -126,6 +215,12 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 				line := padRight(col.Name, nameW) + "  " + col.Type
 				if col.NotNull {
 					line += "  " + styleBadge.Render("not null")
+				}
+				// Cyan matches the "index" hue used elsewhere. Any index
+				// counts — key, expression, or partial predicate — because
+				// updating such a column disqualifies HOT.
+				if col.Indexed {
+					line += "  " + styleBar.Render("indexed")
 				}
 				if col.Default != "" {
 					line += "  " + mu("default "+col.Default)
@@ -197,7 +292,7 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 		}
 	}
 
-	return padInfo(&b, height)
+	return scrollWindow(b.String(), &s.offset, height)
 }
 
 // renderDescribeBufferRows renders the body of the describe-table cache-footprint
@@ -269,10 +364,10 @@ func (m *Model) renderDescribeBufferRows(s *screen) string {
 // "foreign keys" outgoing list or, with incoming=true, the "referenced by"
 // list). incoming flips which side supplies the muted, aligned leading name —
 // the constraint name for outgoing, the referencing child table for incoming —
-// and the arrow orientation so both read referencer→referenced. The incoming
-// list is capped by describeFKMaxIncoming. Lines are left untruncated to match
-// the columns section (truncLine rune-slices and would corrupt the styled
-// spans); the describe panel already tolerates wide styled lines.
+// and the arrow orientation so both read referencer→referenced. Lines are left
+// untruncated to match the columns section (truncLine rune-slices and would
+// corrupt the styled spans); the describe panel already tolerates wide styled
+// lines.
 func renderFKRows(fks []pg.DescribeFK, incoming bool) string {
 	mu := styleMuted.Render
 	lead := func(fk pg.DescribeFK) string {
@@ -289,13 +384,8 @@ func renderFKRows(fks []pg.DescribeFK, incoming bool) string {
 		}
 	}
 
-	shown := len(fks)
-	if incoming && shown > describeFKMaxIncoming {
-		shown = describeFKMaxIncoming
-	}
-
 	var b strings.Builder
-	for _, fk := range fks[:shown] {
+	for _, fk := range fks {
 		var body string
 		if incoming {
 			body = fk.OtherCols + " → " + fk.LocalCols
@@ -310,9 +400,6 @@ func renderFKRows(fks []pg.DescribeFK, incoming bool) string {
 			line += "  " + mu("on update "+fk.OnUpdate)
 		}
 		b.WriteString(line + "\n")
-	}
-	if n := len(fks); n > shown {
-		b.WriteString("    " + mu(fmt.Sprintf("… and %d more", n-shown)) + "\n")
 	}
 	return b.String()
 }

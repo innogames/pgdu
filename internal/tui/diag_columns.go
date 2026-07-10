@@ -25,7 +25,8 @@ func diagColOn(vis map[string]bool, name string) bool {
 }
 
 // diagVis returns the column-visibility map for a diagnostic key, lazily
-// seeding it from the persisted prefs on first use. nil means "all visible".
+// seeding it from the persisted prefs (or the diagnostic's DefaultHidden set
+// when there are none) on first use. nil means "all visible".
 func (m *Model) diagVis(key string) map[string]bool {
 	if vis, ok := m.diagColsVisible[key]; ok {
 		return vis
@@ -36,10 +37,29 @@ func (m *Model) diagVis(key string) map[string]bool {
 			vis = v
 		}
 	}
+	if vis == nil {
+		vis = defaultDiagVis(key)
+	}
 	if m.diagColsVisible == nil {
 		m.diagColsVisible = map[string]map[string]bool{}
 	}
 	m.diagColsVisible[key] = vis
+	return vis
+}
+
+// defaultDiagVis builds the seed visibility map from a diagnostic's
+// DefaultHidden list: named columns start hidden, everything else stays visible
+// (absent → visible, per diagColOn). Returns nil — read as "all visible" — when
+// the diagnostic hides nothing.
+func defaultDiagVis(key string) map[string]bool {
+	d, ok := pg.DiagnosticByKey(key)
+	if !ok || len(d.DefaultHidden) == 0 {
+		return nil
+	}
+	vis := make(map[string]bool, len(d.DefaultHidden))
+	for _, name := range d.DefaultHidden {
+		vis[name] = false
+	}
 	return vis
 }
 

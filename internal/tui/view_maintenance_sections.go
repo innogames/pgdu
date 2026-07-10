@@ -202,7 +202,7 @@ func renderMaintReplication(info *pg.MaintenanceInfo) string {
 		wr := info.WalReceiver
 		wrLine := wr.Status
 		if wr.LastMsgAge > 0 {
-			wrLine += "  " + mu("last msg "+relativeAge(wr.LastMsgAge)+" ago")
+			wrLine += "  " + mu("last msg "+relativeAge(wr.LastMsgAge))
 		}
 		b.WriteString("  " + padRight(mu("wal receiver"), 22) + wrLine + "\n")
 	}
@@ -414,7 +414,7 @@ func renderMaintWAL(info *pg.MaintenanceInfo) string {
 				humanize.Bytes(info.WALMaxBytes),
 				pctStr)
 			if !info.WALCheckpointTime.IsZero() {
-				detail += "  " + mu("last checkpoint "+relativeAge(time.Since(info.WALCheckpointTime))+" ago")
+				detail += "  " + mu("last checkpoint "+relativeAge(time.Since(info.WALCheckpointTime)))
 			}
 			b.WriteString("  " + padRight(mu("since checkpoint"), 24) + bar + "  " + detail + "\n")
 		}

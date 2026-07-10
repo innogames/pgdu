@@ -18,7 +18,8 @@ func (m *Model) hasInfoOverlay(s *screen) bool {
 		levelWAL, levelWALRecords, levelWALBlocks, levelWALRelations, levelWALRelBlocks,
 		levelStatements, levelStatementDetail, levelStatementSamples, levelStatementResult, levelSnapshots,
 		levelMaintenance, levelSettings,
-		levelActivity, levelTableStats, levelWaitProfile:
+		levelActivity, levelTableStats, levelWaitProfile,
+		levelDiagnostics, levelDiagnosticResult:
 		return true
 	}
 	return false
@@ -77,6 +78,8 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 		return m.renderTableStatsInfo(height)
 	case levelWaitProfile:
 		return m.renderWaitProfileInfo(height)
+	case levelDiagnostics, levelDiagnosticResult:
+		return m.renderDiagnosticInfo(s, height)
 	}
 	return ""
 }
@@ -200,16 +203,21 @@ func (m *Model) renderReindexBanner(s *screen) string {
 		line := "  " + m.spinner.View() + " " +
 			styleSelected.Render("REINDEX") + mu(" CONCURRENTLY "+s.reindexing)
 		// Live progress, once pg_stat_progress_create_index starts reporting.
+		// The bar is the overall composite (reindexPctMax, monotonic across
+		// phases), not the current phase's own resetting counters.
 		if p := s.reindexProg; p != nil {
 			if p.Phase != "" {
-				line += mu("  ·  " + p.Phase)
+				label := p.Phase
+				if p.Waiting() && p.LockersTotal > 0 {
+					label += fmt.Sprintf(" (%d/%d)", p.LockersDone, p.LockersTotal)
+				}
+				line += mu("  ·  " + label)
 			}
-			if pct := p.Pct(); pct >= 0 {
-				const barW = 32
-				filled := min(int(float64(barW)*pct/100), barW)
-				line += "  " + paintBar(barW, barSegment{cells: filled, style: styleBar}) +
-					mu(fmt.Sprintf(" %.0f%%", pct))
-			}
+			const barW = 48
+			pct := s.reindexPctMax
+			filled := min(int(float64(barW)*pct/100), barW)
+			line += "  " + paintBar(barW, barSegment{cells: filled, style: styleBar}) +
+				mu(fmt.Sprintf(" %.0f%%", pct))
 		}
 		return line
 	case s.pendingReindex != "":

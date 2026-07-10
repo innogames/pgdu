@@ -86,7 +86,7 @@ func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, erro
 	defer rows.Close()
 	for rows.Next() {
 		var col DescribeColumn
-		if err := rows.Scan(&col.Name, &col.Type, &col.NotNull, &col.Default); err != nil {
+		if err := rows.Scan(&col.Name, &col.Type, &col.NotNull, &col.Default, &col.Indexed); err != nil {
 			return nil, fmt.Errorf("describe columns for %q.%q: %w", t.Schema, t.Name, err)
 		}
 		d.Columns = append(d.Columns, col)

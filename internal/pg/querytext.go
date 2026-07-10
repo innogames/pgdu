@@ -25,7 +25,7 @@ func ExplainableQuery(query string) bool {
 // QueryKind returns a short tag for the statement's command type — S (SELECT),
 // SL (a locking SELECT … FOR UPDATE/SHARE/…), L (a SELECT that acquires an
 // advisory lock), I (INSERT), U (UPDATE), D (DELETE), M (MERGE), T
-// (BEGIN/COMMIT) — for the top-queries `T` column. SL and L flag SELECTs that
+// (BEGIN/COMMIT), P (PREPARE) — for the top-queries `T` column. SL and L flag SELECTs that
 // take locks rather than just reading, which stand out in a hot-query list. The
 // leading keyword is taken after stripping any ORM comment tag; anything
 // unrecognized returns "?".
@@ -65,6 +65,13 @@ func parseQueryKind(query string) string {
 	case "begin", "commit", "rollback":
 		// transactions
 		return "T"
+	case "prepare":
+		// PREPARE TRANSACTION 'gid' is 2PC transaction control, not a prepared
+		// statement — keep it with the other transaction commands.
+		if len(fields) > 1 && fields[1] == "transaction" {
+			return "T"
+		}
+		return "P"
 	default:
 		return "?"
 	}

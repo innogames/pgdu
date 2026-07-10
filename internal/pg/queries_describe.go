@@ -32,12 +32,29 @@ WHERE  c.oid = to_regclass($1)
 `
 
 // sqlDescribeColumns lists a table's live columns in declaration order with
-// NOT NULL and the column default expression. $1 = table oid. PG 12+.
+// NOT NULL, the column default expression, and whether any index covers the
+// column. "Covers" matches what disqualifies an UPDATE from being HOT: key
+// columns (indkey), plus columns referenced by index expressions or partial-
+// index predicates — those aren't in indkey, but every index records a
+// pg_depend entry per column it references (constraint-backed indexes don't,
+// but they can't have expressions/predicates, so indkey covers them).
+// $1 = table oid. PG 12+.
 const sqlDescribeColumns = `
 SELECT a.attname,
        format_type(a.atttypid, a.atttypmod)               AS type_name,
        a.attnotnull,
-       COALESCE(pg_get_expr(d.adbin, d.adrelid), '')       AS default_expr
+       COALESCE(pg_get_expr(d.adbin, d.adrelid), '')       AS default_expr,
+       (EXISTS (SELECT 1 FROM pg_index i
+                WHERE  i.indrelid = a.attrelid
+                  AND  a.attnum = ANY (i.indkey))
+        OR EXISTS (SELECT 1
+                   FROM   pg_depend dep
+                   JOIN   pg_index i ON i.indexrelid = dep.objid
+                   WHERE  dep.classid    = 'pg_class'::regclass
+                     AND  dep.refclassid = 'pg_class'::regclass
+                     AND  dep.refobjid   = a.attrelid
+                     AND  dep.refobjsubid = a.attnum
+                     AND  i.indrelid     = a.attrelid)) AS indexed
 FROM   pg_attribute a
 LEFT   JOIN pg_attrdef d
        ON d.adrelid = a.attrelid AND d.adnum = a.attnum

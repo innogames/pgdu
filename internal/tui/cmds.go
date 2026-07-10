@@ -106,7 +106,7 @@ type reindexTickMsg struct{}
 // reindexing table. row is nil when nothing is reporting (yet / any more).
 type reindexProgressMsg struct {
 	tableOID uint32
-	row      *pg.ProgressRow
+	row      *pg.ReindexProgress
 }
 type heapPagesLoadedMsg struct {
 	table      pg.Table

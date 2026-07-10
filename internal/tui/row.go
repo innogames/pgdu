@@ -511,7 +511,14 @@ func (m *Model) renderBufferList(s *screen, height int, rankByOID map[uint32]int
 		}
 	}
 
-	return m.renderRowList(s, height, renderBufferHeader(s.sort, s.sortDesc, barW),
+	// The Σ footer is pinned beneath the list (like the diagnostic tables'
+	// total row), so it takes one line off the scrolling area when present.
+	footer := renderBufferTotals(s.items, barW)
+	listH := height
+	if footer != "" {
+		listH = max(height-1, 0)
+	}
+	out := m.renderRowList(s, listH, renderBufferHeader(s.sort, s.sortDesc, barW),
 		func(it item, selected bool) string {
 			st, _ := it.data.(pg.TableBufferStat)
 			barStyle := styleBar
@@ -520,6 +527,53 @@ func (m *Model) renderBufferList(s *screen, height int, rankByOID map[uint32]int
 			}
 			return renderBufferRow(it, st, maxSz, maxDirty, barW, selected, barStyle)
 		})
+	if footer != "" {
+		out += footer + "\n"
+	}
+	return out
+}
+
+// renderBufferTotals builds the pinned Σ footer for the buffer-tables list:
+// summed buffered/total/dirty bytes plus the pooled ratios — cached is
+// Σbuffered ÷ Σtotal and hit the hits-weighted Σhits ÷ Σ(hits+reads), so both
+// are true aggregates rather than averages of the per-row percentages. Sums
+// cover every loaded row, not just the filtered subset, matching the other Σ
+// footers. Returns "" when no row carries buffer stats (nothing to sum).
+func renderBufferTotals(items []item, barW int) string {
+	var buffered, total, hits, reads, dirty int64
+	n := 0
+	for _, it := range items {
+		st, ok := it.data.(pg.TableBufferStat)
+		if !ok {
+			continue
+		}
+		buffered += st.BufferedBytes
+		total += st.TotalBytes
+		hits += st.Hits
+		reads += st.Reads
+		dirty += st.DirtyBytes
+		n++
+	}
+	if n == 0 {
+		return ""
+	}
+	cachedStr := "—"
+	if total > 0 {
+		cachedStr = fmt.Sprintf("%.1f%%", float64(buffered)/float64(total)*100)
+	}
+	hitStr := "—"
+	if hits+reads > 0 {
+		hitStr = fmt.Sprintf("%.1f%%", float64(hits)/float64(hits+reads)*100)
+	}
+	// Cursor slot + blank bar area, then the same column layout as the rows.
+	line := "  " + strings.Repeat(" ", barW+2) + "  " +
+		padRight(humanize.Bytes(buffered), bufColBuffered) + "  " +
+		padRight(humanize.Bytes(total), bufColTotal) + "  " +
+		padRight(cachedStr, bufColCached) + "  " +
+		padRight(hitStr, bufColHit) + "  " +
+		padRight(humanize.Bytes(dirty), bufColDirty) + "  " +
+		fmt.Sprintf("Σ %d tables", n)
+	return styleTotal.Render(line)
 }
 
 func renderBufferHeader(sort sortMode, sortDesc bool, barW int) string {

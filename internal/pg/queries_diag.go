@@ -138,6 +138,15 @@ SELECT
     i.schemaname AS schema,
     i.relname AS table_name,
     i.indexrelname AS index_name,
+    -- idx_scan counts planner-driven lookups, not the uniqueness checks a
+    -- constraint index runs on every INSERT/UPDATE. So a unique/PK index can
+    -- read as "0 scans" here while still being load-bearing: it cannot simply
+    -- be dropped without dropping the constraint it enforces. Flag it rather
+    -- than exclude it — a genuinely unused non-constraint index is still worth
+    -- surfacing, and the operator needs to see the caveat next to the size.
+    CASE WHEN ix.indisprimary THEN 'PK'
+         WHEN ix.indisunique THEN 'U'
+         ELSE '' END AS unique,
     pg_relation_size(i.indexrelid) AS index_size_bytes,
     i.idx_scan,
     -- Amortised footprint per scan: how much disk this index costs for each
@@ -150,6 +159,7 @@ SELECT
     t.n_live_tup AS estimated_rows_covered
 FROM pg_catalog.pg_stat_user_indexes i
 JOIN pg_catalog.pg_stat_user_tables t ON t.relid = i.relid
+JOIN pg_catalog.pg_index ix ON ix.indexrelid = i.indexrelid
 WHERE i.schemaname NOT IN ('pg_catalog','information_schema')
   AND i.schemaname NOT LIKE 'pg\_toast%'
   AND t.n_live_tup >= 100
@@ -618,7 +628,8 @@ SELECT
     -- read via jsonb so older servers return NULL instead of erroring.
     (js.j ->> 'conflicting')::boolean AS conflicting,
     js.j ->> 'invalidation_reason' AS invalidation_reason,
-    date_trunc('second', NOW() - (js.j ->> 'inactive_since')::timestamptz) AS inactive_for
+    date_trunc('second', NOW() - (js.j ->> 'inactive_since')::timestamptz) AS inactive_for,
+    EXTRACT(EPOCH FROM NOW() - (js.j ->> 'inactive_since')::timestamptz)::float8 AS inactive_secs
 FROM pg_replication_slots s
 LEFT JOIN pg_stat_replication r ON r.pid = s.active_pid
 CROSS JOIN LATERAL (SELECT to_jsonb(s) AS j) js
@@ -789,7 +800,8 @@ FROM pg_stat_wal
 // cumulative milliseconds since stats_reset; they are divided down to seconds
 // (round() needs a numeric, hence the ::numeric cast on the double-precision
 // source) so the values stay readable. All columns beyond the headline hit_pct
-// bar are opt-out via the C column picker.
+// bar are opt-out via the C column picker; conflicts, rollback_pct and sessions
+// additionally start hidden (Diagnostic.DefaultHidden).
 const sqlDiagDatabaseStats = `
 SELECT
     datname AS database,

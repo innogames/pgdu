@@ -81,8 +81,13 @@ const (
 	seqWarnPct = 80
 
 	// replication slots: when the server can't report safe_wal_size, cap
-	// retained WAL at a fixed budget instead.
-	slotRetainedCapBytes = 16 << 30
+	// retained WAL at a fixed budget instead. An inactive slot is normal churn
+	// (a consumer reconnecting); one with no consumer for an hour is stale —
+	// nothing is draining it and it retains WAL forever, so it escalates to
+	// critical. inactive_since only exists on PG17+; older servers fall back
+	// to the plain "inactive" warning.
+	slotRetainedCapBytes  = 16 << 30
+	slotStaleInactiveSecs = 3600
 
 	// temp files / deadlocks: cumulative since the last stats reset, so only
 	// large absolute numbers are meaningful.
@@ -454,14 +459,24 @@ func (c *Client) triageReplicationSlots(ctx context.Context) (Severity, string, 
 		statusCol   = diagColIdx(res, "wal_status")
 		retainedCol = diagColIdx(res, "retained_wal_bytes")
 		safeCol     = diagColIdx(res, "safe_wal_size")
+		inactCol    = diagColIdx(res, "inactive_secs")
 
-		inactive, lost int
-		maxRetained    float64
-		overCap        bool
+		inactive, stale, lost int
+		oldestInactive        float64
+		maxRetained           float64
+		overCap               bool
 	)
 	for _, row := range res.Rows {
 		if activeCol >= 0 && row[activeCol].Display == "f" {
 			inactive++
+			if secs, ok := diagNum(row, inactCol); ok {
+				if secs > slotStaleInactiveSecs {
+					stale++
+				}
+				if secs > oldestInactive {
+					oldestInactive = secs
+				}
+			}
 		}
 		if statusCol >= 0 {
 			switch row[statusCol].Display {
@@ -484,11 +499,14 @@ func (c *Client) triageReplicationSlots(ctx context.Context) (Severity, string, 
 			overCap = true
 		}
 	}
-	sev := slotSeverity(inactive, lost, overCap)
+	sev := slotSeverity(inactive, stale, lost, overCap)
 	detail := fmt.Sprintf("%d slot(s), max retained WAL %s", len(res.Rows), humanize.Bytes(int64(maxRetained)))
 	if inactive > 0 {
 		detail = fmt.Sprintf("%d of %d slot(s) inactive, max retained WAL %s",
 			inactive, len(res.Rows), humanize.Bytes(int64(maxRetained)))
+	}
+	if stale > 0 {
+		detail += fmt.Sprintf(", %d stale (no consumer for %s)", stale, triageDuration(oldestInactive))
 	}
 	if lost > 0 {
 		detail += fmt.Sprintf(", %d lost/unreserved", lost)
@@ -496,9 +514,9 @@ func (c *Client) triageReplicationSlots(ctx context.Context) (Severity, string, 
 	return sev, detail, nil
 }
 
-func slotSeverity(inactive, lost int, overCap bool) Severity {
+func slotSeverity(inactive, stale, lost int, overCap bool) Severity {
 	switch {
-	case lost > 0 || overCap:
+	case lost > 0 || overCap || stale > 0:
 		return SevCrit
 	case inactive > 0:
 		return SevWarn
