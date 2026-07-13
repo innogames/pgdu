@@ -431,6 +431,41 @@ func (c *Client) ListHeapTuples(ctx context.Context, t Table, blkno int32) ([]He
 	return out, nil
 }
 
+// ListTupleAttrs splits one heap tuple (identified by block + line pointer)
+// into its per-attribute raw bytes plus pg_attribute physical metadata, in
+// attnum order. Feeds the tuple byte-layout overlay. Returns an empty slice
+// (not an error) when the lp no longer exists — the page was rewritten after
+// the tuple list loaded.
+func (c *Client) ListTupleAttrs(ctx context.Context, t Table, blkno, lp int32) ([]TupleAttr, error) {
+	if err := c.EnsurePageInspect(ctx, t.DB); err != nil {
+		return nil, err
+	}
+	pool, err := c.PoolFor(ctx, t.DB)
+	if err != nil {
+		return nil, err
+	}
+	regclass := qualifiedIdent(t.Schema, t.Name)
+	rows, err := pool.Query(ctx, sqlTupleAttrs, regclass, blkno, lp)
+	if err != nil {
+		return nil, fmt.Errorf("tuple attrs in %q page %d lp %d: %w", t.Qualified(), blkno, lp, err)
+	}
+	defer rows.Close()
+	var out []TupleAttr
+	for rows.Next() {
+		var a TupleAttr
+		if err := rows.Scan(&a.Attnum, &a.Name, &a.TypeName,
+			&a.Len, &a.Align, &a.Dropped, &a.Stored,
+			&a.TypName, &a.TypCategory, &a.Value); err != nil {
+			return nil, fmt.Errorf("tuple attrs in %q page %d lp %d: %w", t.Qualified(), blkno, lp, err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("tuple attrs in %q page %d lp %d: %w", t.Qualified(), blkno, lp, err)
+	}
+	return out, nil
+}
+
 // --- GiST ---
 
 // ListGistPages returns up to `count` per-page summaries of a GiST index from

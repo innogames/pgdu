@@ -170,14 +170,25 @@ func (m *Model) drillIn() tea.Cmd {
 			m.stack = append(m.stack, next)
 			return m.loadCurrent()
 		}
-		next := &screen{
-			level: levelTupleRow, title: "row", tool: s.tool,
-			db: s.db, schema: s.schema, table: s.table,
-			tupleCtid: *ht.Ctid,
-			sort:      sortByName, sortDesc: false,
+		if s.table.Schema == "pg_toast" {
+			// A toast page whose LP didn't resolve to a chunk row (dead but
+			// stored) — the classic ctid row view still applies.
+			next := &screen{
+				level: levelTupleRow, title: "row", tool: s.tool,
+				db: s.db, schema: s.schema, table: s.table,
+				tupleCtid: *ht.Ctid,
+				sort:      sortByName, sortDesc: false,
+			}
+			m.stack = append(m.stack, next)
+			return m.loadCurrent()
 		}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
+		// Regular heap tuples open the byte-layout overlay in place instead of
+		// drilling — it shows the decoded values *and* their physical layout.
+		if len(ht.Data) == 0 {
+			m.notice = "no tuple body on this line pointer"
+			return nil
+		}
+		return m.openTupleLayout(s, ht.LP)
 	case levelRelations:
 		r, ok := cur.data.(pg.Relation)
 		if !ok {

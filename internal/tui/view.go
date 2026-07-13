@@ -148,6 +148,8 @@ func (m *Model) View() string {
 		b.WriteString(m.renderTblColumnConfig(s, contentHeight))
 	case m.showDiagColumnConfig && s.level == levelDiagnosticResult:
 		b.WriteString(m.renderDiagColumnConfig(s, contentHeight))
+	case m.showTupleLayout && s.level == levelHeapTuples:
+		b.WriteString(m.renderTupleLayout(s, contentHeight))
 	case m.showDiagQuery && s.diagForShowQuery() != nil:
 		b.WriteString(m.renderDiagQuery(s, contentHeight))
 	case m.showInfo && m.hasInfoOverlay(s):

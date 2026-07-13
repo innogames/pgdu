@@ -105,7 +105,11 @@ func (m *Model) renderHeapTuplesInfo(height int) string {
 		mu("the selected row expands to three lines decoding its internals") + "\n")
 	b.WriteString("    " + padRight("data:", 12) + mu("first bytes of t_data in hex, tagged with the payload byte count") + "\n")
 	b.WriteString("    " + padRight("lifecycle:", 12) + mu("MVCC story — who inserted it (and if that committed), then deleted/locked/live") + "\n")
-	b.WriteString("    " + padRight("layout:", 12) + mu("header vs payload bytes (split at t_hoff) with a bar, plus the page byte span") + "\n")
+	b.WriteString("    " + padRight("layout:", 12) + mu("header vs payload bytes (split at t_hoff) with a bar, plus the page byte span") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" keys ") + "\n")
+	b.WriteString("    " + styleBadge.Render(padRight("enter", 10)) +
+		mu("byte-layout overlay — header fields, per-column bytes and decoded values (own ? help inside)") + "\n")
 
 	return padInfo(&b, height)
 }

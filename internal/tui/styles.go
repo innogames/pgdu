@@ -26,11 +26,14 @@ var (
 	styleMuted    = lipgloss.NewStyle().Foreground(colorMuted)
 	// styleTotal renders the pinned "← Sum" footer of the top-queries table:
 	// bold and ungraded so it reads as an aggregate, not just another data row.
-	styleTotal  = lipgloss.NewStyle().Bold(true)
-	styleBar    = lipgloss.NewStyle().Foreground(colorBar)
-	styleBloat  = lipgloss.NewStyle().Foreground(colorBloat)
-	styleBadge  = lipgloss.NewStyle().Foreground(colorOK)
-	styleBarAlt = lipgloss.NewStyle().Foreground(colorAccent)
+	styleTotal = lipgloss.NewStyle().Bold(true)
+	// styleColName embellishes real column names in the tuple-layout legend so
+	// they stand out against the muted structural rows (header fields, pads).
+	styleColName = lipgloss.NewStyle().Bold(true)
+	styleBar     = lipgloss.NewStyle().Foreground(colorBar)
+	styleBloat   = lipgloss.NewStyle().Foreground(colorBloat)
+	styleBadge   = lipgloss.NewStyle().Foreground(colorOK)
+	styleBarAlt  = lipgloss.NewStyle().Foreground(colorAccent)
 
 	// Server-memory bar: shared_buffers free pages, the kernel/app "other
 	// used" portion, and the reclaimable kernel page cache. Chosen to read

@@ -262,6 +262,15 @@ type screen struct {
 	// levelHeapTuples: which page we drilled into.
 	heapPageBlkno int32
 
+	// Tuple byte-layout overlay (Enter on levelHeapTuples): the per-attribute
+	// split of the selected tuple, loaded async when the overlay opens.
+	// tupleAttrsLP names the line pointer the data belongs to (0 = none) so
+	// a stale load or a cursor move can't show another tuple's layout.
+	tupleAttrs        []pg.TupleAttr
+	tupleAttrsLP      int32
+	tupleAttrsLoading bool
+	tupleAttrsErr     error
+
 	// levelTupleRow: the ctid we're showing. Carries (block,offset) text so
 	// the SQL bind doesn't have to re-derive it from heapPageBlkno + LP —
 	// the line pointer might be a REDIRECT pointing at a different page.
@@ -597,6 +606,17 @@ type Model struct {
 	stmtSortColID    stmtColID
 	showColumnConfig bool
 	colCfgCursor     int
+
+	// Tuple byte-layout overlay (Enter on levelHeapTuples). The cursor walks the
+	// legend rows; the offset is the legend's scroll window start. The loaded
+	// attrs live on the screen (tupleAttrs*) — this is just the modal state.
+	// Sorting is the overlay's own (tlSort): the legend can't ride the shared
+	// sortMode machinery since it isn't a screen item list.
+	showTupleLayout     bool
+	tupleLayoutCursor   int
+	tupleLayoutOffset   int
+	tupleLayoutSort     tlSort
+	tupleLayoutSortDesc bool
 
 	// Activity tool column configuration (C key on levelActivity). actColsVisible
 	// is the per-column-id visibility set (nil = registry defaults). actSortColID

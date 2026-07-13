@@ -65,6 +65,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onTupleRowLoaded(msg)
 	case toastValueLoadedMsg:
 		return m, m.onToastValueLoaded(msg)
+	case tupleAttrsLoadedMsg:
+		return m, m.onTupleAttrsLoaded(msg)
 	case relationsLoadedMsg:
 		return m, m.onRelationsLoaded(msg)
 	case indexPagesLoadedMsg:

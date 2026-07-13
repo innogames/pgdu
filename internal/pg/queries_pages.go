@@ -123,6 +123,44 @@ SELECT col, val FROM (
 ) s ORDER BY o
 `
 
+// sqlTupleAttrs splits one heap tuple into its per-attribute raw bytes via
+// heap_page_item_attrs and pairs each with its pg_attribute physical metadata.
+// t_attrs has one element per attribute of the relation's *current* tuple
+// descriptor, dropped columns included; an element is NULL both for SQL NULLs
+// and for attributes past the tuple's own natts (t_infomask2 & 0x07FF) — the
+// `stored` column disambiguates. Varlena elements include their 1- or 4-byte
+// header; with the default do_detoast=false an out-of-line value stays its
+// 18-byte on-disk TOAST pointer and nothing is ever dereferenced, so the query
+// is safe on dead-but-stored tuples.
+//
+// $1 doubles as get_raw_page's text arg and the ::regclass (precedent:
+// sqlToastTuples); $2 is the block number; $3 the line pointer. Zero rows mean
+// the lp vanished (page rewritten since the tuple list loaded) — the caller
+// treats that as "tuple gone", not an error.
+const sqlTupleAttrs = `
+WITH tup AS (
+  SELECT t_attrs, COALESCE(t_infomask2, 0)::int AS infomask2
+  FROM   heap_page_item_attrs(get_raw_page($1, 'main', $2::int), $1::regclass)
+  WHERE  lp = $3::int
+)
+SELECT a.attnum::int,
+       a.attname::text,
+       CASE WHEN a.attisdropped THEN ''
+            ELSE format_type(a.atttypid, a.atttypmod) END AS type_name,
+       a.attlen::int,
+       a.attalign::text,
+       a.attisdropped,
+       (a.attnum <= (tup.infomask2 & 2047))               AS stored,
+       COALESCE(t.typname, '')::text                      AS typname,
+       COALESCE(t.typcategory, '')::text                  AS typcategory,
+       tup.t_attrs[a.attnum]                              AS value
+FROM   pg_attribute a
+CROSS  JOIN tup
+LEFT   JOIN pg_type t ON t.oid = a.atttypid
+WHERE  a.attrelid = $1::regclass AND a.attnum > 0
+ORDER  BY a.attnum
+`
+
 // sqlRelations returns every heap-style table, every B-tree index, and every
 // TOAST heap whose owning table lives in the named schema, mixed into one list
 // and ordered by pg_relation_size. The page-inspector tool consumes it instead

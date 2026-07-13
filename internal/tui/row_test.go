@@ -82,3 +82,43 @@ func TestMax0(t *testing.T) {
 		t.Error("max0(7) should be 7")
 	}
 }
+
+func TestProportionalCells(t *testing.T) {
+	cases := []struct {
+		name  string
+		bytes []int
+		width int
+	}{
+		{"even split", []int{10, 10}, 20},
+		{"tiny next to huge keeps a cell", []int{4, 2000}, 30},
+		{"zero counts get no cell", []int{0, 8, 0, 8}, 10},
+		{"many small counts", []int{1, 1, 1, 1, 1, 1}, 40},
+		{"rounding deficit lands on largest", []int{3, 3, 3}, 20},
+		{"more counts than cells clips", []int{1, 1, 1, 1, 1}, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cells := proportionalCells(tc.bytes, tc.width)
+			sum, nonEmpty := 0, 0
+			for i, c := range cells {
+				sum += c
+				if tc.bytes[i] > 0 {
+					nonEmpty++
+					if c < 1 {
+						t.Errorf("count %d (%d B) got %d cells, want >= 1", i, tc.bytes[i], c)
+					}
+				} else if c != 0 {
+					t.Errorf("zero count %d got %d cells", i, c)
+				}
+			}
+			// When the 1-cell floor forces more cells than the bar holds,
+			// paintBar clips; otherwise the allocation must be exact.
+			if nonEmpty <= tc.width && sum != tc.width {
+				t.Errorf("cells sum to %d, want %d (%v)", sum, tc.width, cells)
+			}
+			if nonEmpty > tc.width && sum != nonEmpty {
+				t.Errorf("floored cells sum to %d, want %d", sum, nonEmpty)
+			}
+		})
+	}
+}

@@ -340,6 +340,52 @@ func bytesToCells(b, total int64, width int) int {
 	return min(max0(int(float64(width)*float64(b)/float64(total))), width)
 }
 
+// proportionalCells distributes `width` bar cells over a set of byte counts,
+// guaranteeing at least one cell for every non-zero count — unlike
+// bytesToCells, which lets tiny slices round to invisibility. The rounding
+// surplus is shaved off the widest runs; any deficit lands on the largest
+// count. Only when there are more non-zero counts than cells does the sum
+// exceed width (every count keeps its 1-cell floor; paintBar clips the tail).
+func proportionalCells(bytes []int, width int) []int {
+	cells := make([]int, len(bytes))
+	total, largest := 0, -1
+	for i, b := range bytes {
+		total += b
+		if b > 0 && (largest < 0 || b > bytes[largest]) {
+			largest = i
+		}
+	}
+	if total <= 0 || width <= 0 || largest < 0 {
+		return cells
+	}
+	sum := 0
+	for i, b := range bytes {
+		if b <= 0 {
+			continue
+		}
+		c := max(1, int(float64(width)*float64(b)/float64(total)))
+		cells[i] = c
+		sum += c
+	}
+	for sum > width {
+		w := -1
+		for i, c := range cells {
+			if c > 1 && (w < 0 || c > cells[w]) {
+				w = i
+			}
+		}
+		if w < 0 {
+			break
+		}
+		cells[w]--
+		sum--
+	}
+	if sum < width {
+		cells[largest] += width - sum
+	}
+	return cells
+}
+
 func padRight(s string, n int) string {
 	w := displayWidth(s)
 	if w >= n {

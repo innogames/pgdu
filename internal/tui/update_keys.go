@@ -164,6 +164,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.showTblColumnConfig && s.level == levelTableStats {
 		return m, m.handleTblColumnConfigKey(s, msg)
 	}
+	// Tuple byte-layout overlay (Enter on a heap tuple) — same modal pattern.
+	if m.showTupleLayout && s.level == levelHeapTuples {
+		return m, m.handleTupleLayoutKey(s, msg)
+	}
 	// Diagnostic-result column-config overlay — same modal pattern, but over the
 	// result's dynamic column set instead of a static registry.
 	if m.showDiagColumnConfig && s.level == levelDiagnosticResult {

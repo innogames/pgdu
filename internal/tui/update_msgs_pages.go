@@ -75,6 +75,17 @@ func (m *Model) onHeapTuplesLoaded(msg heapTuplesLoadedMsg) tea.Cmd {
 	return nil
 }
 
+func (m *Model) onTupleAttrsLoaded(msg tupleAttrsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelHeapTuples)
+	if s == nil || s.table.OID != msg.tableOID || s.heapPageBlkno != msg.blkno || s.tupleAttrsLP != msg.lp {
+		return nil
+	}
+	s.tupleAttrsLoading = false
+	s.tupleAttrs = msg.attrs
+	s.tupleAttrsErr = msg.err
+	return nil
+}
+
 func (m *Model) onRelationsLoaded(msg relationsLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelRelations)
 	if s == nil || s.db != msg.db || s.schema != msg.schema {

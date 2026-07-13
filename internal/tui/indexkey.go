@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -101,7 +102,7 @@ func decodeIndexColumn(b []byte, off int, c pg.IndexKeyColumn) (string, int, boo
 		if end > len(b) {
 			return "", 0, false // partial — data shorter than the fixed width
 		}
-		return formatFixed(b[off:end], c), end, true
+		return formatFixed(b[off:end], c.TypName), end, true
 	case c.TypLen == -1:
 		return decodeVarlena(b, off, c)
 	default:
@@ -133,10 +134,10 @@ func alignOffset(off int, typalign string) int {
 // reinterpreted from their bit pattern; bool and "char" get their natural form.
 // Other fixed-width types (uuid, name, timestamps, …) fall back to text/hex of
 // the raw bytes — a stable, length-correct rendering even when not pretty.
-func formatFixed(v []byte, c pg.IndexKeyColumn) string {
+func formatFixed(v []byte, typName string) string {
 	switch len(v) {
 	case 1:
-		switch c.TypName {
+		switch typName {
 		case "bool":
 			if v[0] != 0 {
 				return "t"
@@ -152,18 +153,18 @@ func formatFixed(v []byte, c pg.IndexKeyColumn) string {
 		}
 	case 2:
 		u := binary.LittleEndian.Uint16(v)
-		if isUnsignedType(c.TypName) {
+		if isUnsignedType(typName) {
 			return strconv.FormatUint(uint64(u), 10)
 		}
 		return strconv.FormatInt(int64(int16(u)), 10)
 	case 4:
 		u := binary.LittleEndian.Uint32(v)
 		switch {
-		case c.TypName == "float4":
+		case typName == "float4":
 			return strconv.FormatFloat(float64(math.Float32frombits(u)), 'g', -1, 32)
-		case c.TypName == "date":
+		case typName == "date":
 			return formatPGDate(int32(u))
-		case isUnsignedType(c.TypName):
+		case isUnsignedType(typName):
 			return strconv.FormatUint(uint64(u), 10)
 		default:
 			return strconv.FormatInt(int64(int32(u)), 10)
@@ -171,17 +172,24 @@ func formatFixed(v []byte, c pg.IndexKeyColumn) string {
 	case 8:
 		u := binary.LittleEndian.Uint64(v)
 		switch {
-		case c.TypName == "float8":
+		case typName == "float8":
 			return strconv.FormatFloat(math.Float64frombits(u), 'g', -1, 64)
-		case c.TypName == "timestamp" || c.TypName == "timestamptz":
+		case typName == "timestamp" || typName == "timestamptz":
 			return formatPGTimestamp(int64(u))
-		case c.TypName == "time":
+		case typName == "time":
 			return formatPGTime(int64(u))
-		case isUnsignedType(c.TypName):
+		case isUnsignedType(typName):
 			return strconv.FormatUint(u, 10)
 		default:
 			return strconv.FormatInt(int64(u), 10)
 		}
+	case 16:
+		if typName == "uuid" {
+			// Stored byte-for-byte in text order, so hex + dashes is the
+			// canonical 8-4-4-4-12 form.
+			return fmt.Sprintf("%x-%x-%x-%x-%x", v[0:4], v[4:6], v[6:8], v[8:10], v[10:16])
+		}
+		return formatBytesText(v)
 	default:
 		return formatBytesText(v)
 	}
@@ -248,7 +256,7 @@ func decodeVarlena(b []byte, off int, c pg.IndexKeyColumn) (string, int, bool) {
 		if total < 1 || off+total > len(b) {
 			return "", 0, false
 		}
-		return formatVarlenaPayload(b[off+1:off+total], c), off + total, true
+		return formatVarlenaPayload(b[off+1:off+total], c.TypCategory), off + total, true
 	case h&0x03 == 0x00:
 		// VARATT_IS_4B_U: 4-byte uncompressed header; total length incl header
 		// is the low 30 bits of the LE uint32 >> 2.
@@ -259,7 +267,7 @@ func decodeVarlena(b []byte, off int, c pg.IndexKeyColumn) (string, int, bool) {
 		if total < 4 || off+total > len(b) {
 			return "", 0, false
 		}
-		return formatVarlenaPayload(b[off+4:off+total], c), off + total, true
+		return formatVarlenaPayload(b[off+4:off+total], c.TypCategory), off + total, true
 	default:
 		// VARATT_IS_4B_C: compressed inline — would need pglz/lz4 to read.
 		return "", 0, false
@@ -269,8 +277,8 @@ func decodeVarlena(b []byte, off int, c pg.IndexKeyColumn) (string, int, bool) {
 // formatVarlenaPayload renders a varlena's data bytes: string types
 // (typcategory 'S') as text when valid and free of control bytes, everything
 // else (bytea, geometry, …) as \x-hex.
-func formatVarlenaPayload(payload []byte, c pg.IndexKeyColumn) string {
-	if c.TypCategory == "S" && utf8.Valid(payload) && !hasControlBytes(payload) {
+func formatVarlenaPayload(payload []byte, typCategory string) string {
+	if typCategory == "S" && utf8.Valid(payload) && !hasControlBytes(payload) {
 		return string(payload)
 	}
 	return hexString(payload)

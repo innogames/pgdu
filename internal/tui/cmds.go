@@ -134,6 +134,13 @@ type toastValueLoadedMsg struct {
 	cells    []pg.TupleCell
 	err      error
 }
+type tupleAttrsLoadedMsg struct {
+	tableOID uint32
+	blkno    int32
+	lp       int32
+	attrs    []pg.TupleAttr
+	err      error
+}
 type relationsLoadedMsg struct {
 	db, schema string
 	rels       []pg.Relation
@@ -419,6 +426,13 @@ func (m *Model) loadTupleRowCmd(t pg.Table, ctid string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		cells, err := m.client.ListTupleRow(ctx, t, ctid)
 		return tupleRowLoadedMsg{tableOID: t.OID, ctid: ctid, cells: cells, err: err}
+	})
+}
+
+func (m *Model) loadTupleAttrsCmd(t pg.Table, blkno, lp int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		attrs, err := m.client.ListTupleAttrs(ctx, t, blkno, lp)
+		return tupleAttrsLoadedMsg{tableOID: t.OID, blkno: blkno, lp: lp, attrs: attrs, err: err}
 	})
 }
 

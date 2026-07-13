@@ -91,6 +91,11 @@ const (
 	HeapOnlyTuple2   = 0x8000
 )
 
+// HeapNattsMask2 masks the attribute count out of t_infomask2
+// (HEAP_NATTS_MASK in access/htup_details.h). A tuple written before columns
+// were added stores fewer attributes than pg_attribute currently lists.
+const HeapNattsMask2 = 0x07FF
+
 // IndexPageStat is one row of the B-tree page-inspector view: a page
 // summarised by its bt_page_stats output. Type is the single-character
 // page type from pageinspect — 'l' leaf, 'r' root, 'i' internal, 'd'
@@ -147,6 +152,26 @@ type IndexTuple struct {
 type TupleCell struct {
 	Name  string
 	Value *string
+}
+
+// TupleAttr is one column of a heap tuple split into raw bytes by
+// heap_page_item_attrs, paired with its pg_attribute physical metadata. The
+// byte-layout view uses Len/Align to reconstruct the alignment padding that
+// t_attrs does not carry.
+type TupleAttr struct {
+	Attnum   int32
+	Name     string
+	TypeName string // format_type output; "" for dropped columns
+	Len      int32  // attlen: >0 fixed, -1 varlena, -2 cstring
+	Align    string // attalign: "c"/"s"/"i"/"d"
+	Dropped  bool
+	Stored   bool // attnum <= tuple's own natts (t_infomask2 & HeapNattsMask2)
+	// TypName/TypCategory identify the type for the byte→value decoder
+	// (pg_type.typname/typcategory, like IndexKeyColumn); "" when the type row
+	// is gone (dropped columns zero out atttypid).
+	TypName     string
+	TypCategory string
+	Value       []byte // nil = SQL NULL or not stored; varlena includes its header
 }
 
 // BtreeMeta is the B-tree metapage (block 0) as reported by bt_metap. Surfaced
