@@ -44,7 +44,8 @@ func TestIntegration_Progress(t *testing.T) {
 	}()
 
 	// Poll for the build to show up in pg_stat_progress_create_index.
-	var got *ProgressRow
+	var got ProgressRow
+	found := false
 poll:
 	for range 40 {
 		select {
@@ -59,16 +60,16 @@ poll:
 		if err != nil {
 			t.Fatalf("ListProgress: %v", err)
 		}
-		for i, r := range rows {
+		for _, r := range rows {
 			if r.Command == "CREATE INDEX" {
-				got = &rows[i]
+				got, found = r, true
 				break poll
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	if got == nil {
+	if !found {
 		t.Skip("index build finished before a progress sample landed")
 	}
 	if got.Unit != "blocks" {
