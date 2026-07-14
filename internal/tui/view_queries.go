@@ -95,6 +95,15 @@ func flattenQuery(q string) string {
 	return strings.Join(strings.Fields(q), " ")
 }
 
+// mainTableDisplay is the "table" column label for a query: pg.MainTable with a
+// leading public. schema stripped, since public is the default and unqualified
+// reads cleaner (public.production → production). Only the display is trimmed —
+// the d/u actions still resolve against the fully-qualified pg.MainTable so
+// to_regclass isn't left to guess the schema from search_path.
+func mainTableDisplay(query string) string {
+	return strings.TrimPrefix(pg.MainTable(query), "public.")
+}
+
 // planTimeMetric renders the detail-view plan-time line, distinguishing a real
 // zero from "not collected" (pg_stat_statements.track_planning off).
 func planTimeMetric(q pg.QueryStat, trackPlanning bool, mu func(...string) string) string {

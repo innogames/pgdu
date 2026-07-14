@@ -138,15 +138,6 @@ SELECT
     i.schemaname AS schema,
     i.relname AS table_name,
     i.indexrelname AS index_name,
-    -- idx_scan counts planner-driven lookups, not the uniqueness checks a
-    -- constraint index runs on every INSERT/UPDATE. So a unique/PK index can
-    -- read as "0 scans" here while still being load-bearing: it cannot simply
-    -- be dropped without dropping the constraint it enforces. Flag it rather
-    -- than exclude it — a genuinely unused non-constraint index is still worth
-    -- surfacing, and the operator needs to see the caveat next to the size.
-    CASE WHEN ix.indisprimary THEN 'PK'
-         WHEN ix.indisunique THEN 'U'
-         ELSE '' END AS unique,
     pg_relation_size(i.indexrelid) AS index_size_bytes,
     i.idx_scan,
     -- Amortised footprint per scan: how much disk this index costs for each
@@ -163,6 +154,13 @@ JOIN pg_catalog.pg_index ix ON ix.indexrelid = i.indexrelid
 WHERE i.schemaname NOT IN ('pg_catalog','information_schema')
   AND i.schemaname NOT LIKE 'pg\_toast%'
   AND t.n_live_tup >= 100
+  -- Exclude PK/unique indexes: idx_scan counts only planner lookups, not the
+  -- uniqueness checks a constraint index runs on every INSERT/UPDATE, so they
+  -- can read as "0 scans" while still being load-bearing — they enforce a
+  -- constraint and can't be dropped in isolation, so they aren't "unused" in
+  -- the sense this diagnostic surfaces.
+  AND NOT ix.indisprimary
+  AND NOT ix.indisunique
 ORDER BY pg_relation_size(i.indexrelid) / (COALESCE(i.idx_scan, 0) + 1) DESC
 `
 
@@ -365,18 +363,20 @@ raw_bloat AS (
     JOIN pg_stat_user_indexes AS stat ON index_aligned_est.index_oid = stat.indexrelid
 ),
 format_bloat AS (
+    -- Raw byte counts, not MB: the *_bytes columns are DiagBytes and humanize
+    -- the value themselves (see sqlDiagBloatTable for the same fix).
     SELECT dbname AS database_name, nspname AS schema_name, table_name, index_name,
         round(realbloat) AS bloat_pct,
-        round(wastedbytes / (1024^2)::NUMERIC) AS bloat_mb,
-        round(totalbytes / (1024^2)::NUMERIC, 3) AS index_mb,
-        round(table_bytes / (1024^2)::NUMERIC, 3) AS table_mb,
+        wastedbytes AS bloat_bytes,
+        totalbytes AS index_bytes,
+        table_bytes,
         index_scans
     FROM raw_bloat
 )
 SELECT *
 FROM format_bloat
-WHERE bloat_pct > 50 AND bloat_mb > 10
-ORDER BY bloat_mb DESC
+WHERE bloat_pct > 50 AND bloat_bytes > 10 * 1024^2
+ORDER BY bloat_bytes DESC
 `
 
 const sqlDiagBloatTable = `
@@ -455,21 +455,21 @@ table_estimates_plus AS (
     FROM no_stats
 ),
 bloat_data AS (
-    SELECT current_database() AS databasename, schemaname, tablename, can_estimate,
+    -- Emit raw byte counts (not MB): the TUI's *_bytes columns are DiagBytes,
+    -- which humanizes the value itself. Pre-dividing to MB made humanize.Bytes
+    -- treat "86000" MB as 86000 bytes and print "86 KB".
+    SELECT databasename, schemaname, tablename, can_estimate, est_rows,
         table_bytes,
-        round(table_bytes / (1024^2)::NUMERIC, 3) AS table_mb,
-        expected_bytes,
-        round(expected_bytes / (1024^2)::NUMERIC, 3) AS expected_mb,
-        round(bloat_bytes * 100 / table_bytes) AS pct_bloat,
-        round(bloat_bytes / (1024::NUMERIC ^ 2), 2) AS mb_bloat,
-        table_bytes, expected_bytes, est_rows
+        bloat_bytes,
+        round(bloat_bytes * 100 / table_bytes) AS pct_bloat
     FROM table_estimates_plus
 )
-SELECT databasename, schemaname, tablename, can_estimate, est_rows, pct_bloat, mb_bloat, table_mb
+SELECT databasename, schemaname, tablename, can_estimate, est_rows, pct_bloat, bloat_bytes, table_bytes
 FROM bloat_data
-WHERE (pct_bloat >= 50 AND mb_bloat >= 50)
-   OR (pct_bloat >= 25 AND mb_bloat >= 1000)
-ORDER BY mb_bloat DESC
+-- Thresholds are in bytes: ≥50 MB or ≥1 GB, matching the Description.
+WHERE (pct_bloat >= 50 AND bloat_bytes >= 50 * 1024^2)
+   OR (pct_bloat >= 25 AND bloat_bytes >= 1000 * 1024^2)
+ORDER BY bloat_bytes DESC
 `
 
 const sqlDiagVacuumStats = `

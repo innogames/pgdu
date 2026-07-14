@@ -263,7 +263,10 @@ func colKindFromName(name string) DiagColumnKind {
 	case strings.Contains(lower, "pct") || strings.Contains(lower, "percent") ||
 		strings.HasSuffix(lower, "ratio") || strings.HasSuffix(lower, "_pct"):
 		return DiagPercent
-	case strings.HasSuffix(lower, "_mb") || strings.HasSuffix(lower, "bytes"):
+	// Only a "bytes" suffix maps to DiagBytes — DiagBytes humanizes the numeric
+	// value as *raw bytes*, so a column already scaled to MB (an "_mb" name)
+	// would be mis-rendered by a factor of 1024². Keep size columns in bytes.
+	case strings.HasSuffix(lower, "bytes"):
 		return DiagBytes
 	}
 	return DiagText

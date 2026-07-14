@@ -116,6 +116,12 @@ type heapPagesLoadedMsg struct {
 	totalPages int32
 	err        error
 }
+type toastTargetResolvedMsg struct {
+	table   pg.Table
+	block   int32
+	chunkID uint32
+	err     error
+}
 type heapTuplesLoadedMsg struct {
 	tableOID uint32
 	blkno    int32
@@ -412,6 +418,13 @@ func (m *Model) loadHeapPagesCmd(t pg.Table, start, count int32) tea.Cmd {
 		// dropping the whole load on a transient pg_class read error.
 		rp, _ := m.client.RelPages(ctx, t)
 		return heapPagesLoadedMsg{table: t, start: start, count: count, pages: pages, totalPages: rp}
+	})
+}
+
+func (m *Model) resolveToastTargetCmd(db string, toastOID, chunkID uint32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		t, blk, err := m.client.ToastChunkLocation(ctx, db, toastOID, chunkID)
+		return toastTargetResolvedMsg{table: t, block: blk, chunkID: chunkID, err: err}
 	})
 }
 

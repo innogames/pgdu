@@ -71,8 +71,34 @@ func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, m.keys.Help):
 		m.showInfo = true
 		m.infoOffset = 0
-	case key.Matches(msg, m.keys.Enter), key.Matches(msg, m.keys.Back):
+	case key.Matches(msg, m.keys.Enter):
+		// ENTER on a TOAST-pointer row jumps to that value's TOAST relation in
+		// the page inspector; on any other row it just closes the overlay.
+		if oid, chunk, ok := m.tupleLayoutToastUnderCursor(s); ok {
+			return m.openToastChunkNav(s, oid, chunk)
+		}
 		m.closeTupleLayout(s)
+	case key.Matches(msg, m.keys.Back):
+		m.closeTupleLayout(s)
+	case key.Matches(msg, m.keys.Describe):
+		// Same describe target the list levels resolve (the inspected table);
+		// close the overlay first so we don't return to it behind the panel.
+		t, ok := describeTarget(s)
+		if !ok {
+			return nil
+		}
+		m.closeTupleLayout(s)
+		next := &screen{
+			level:   levelDescribe,
+			title:   "describe",
+			tool:    s.tool,
+			db:      s.db,
+			schema:  s.schema,
+			loading: true,
+			table:   t.table,
+		}
+		m.stack = append(m.stack, next)
+		return m.loadDescribeTableCmd(t.table)
 	case key.Matches(msg, m.keys.Up):
 		m.tupleLayoutCursor = max(m.tupleLayoutCursor-1, 0)
 	case key.Matches(msg, m.keys.Down):
@@ -97,4 +123,51 @@ func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 		return m.reloadTupleAttrs(s, s.tupleAttrsLP)
 	}
 	return nil
+}
+
+// tupleLayoutSegUnderCursor resolves the highlighted overlay segment, recomputing
+// the same layout+sort mapping the renderer uses (view_tuple_layout.go): the
+// cursor indexes the sorted legend, so order[cursor] gives the physical segment.
+// Reports false when there's no tuple/segment under the cursor.
+func (m *Model) tupleLayoutSegUnderCursor(s *screen) (tupleSeg, bool) {
+	t := s.tupleByLP(s.tupleAttrsLP)
+	if t == nil || len(s.tupleAttrs) == 0 {
+		return tupleSeg{}, false
+	}
+	segs, _ := computeTupleLayout(*t, s.tupleAttrs)
+	order := sortedTupleSegIdx(segs, m.tupleLayoutSort, m.tupleLayoutSortDesc)
+	if m.tupleLayoutCursor < 0 || m.tupleLayoutCursor >= len(order) {
+		return tupleSeg{}, false
+	}
+	return segs[order[m.tupleLayoutCursor]], true
+}
+
+// tupleLayoutToastUnderCursor reports the TOAST relation OID and chunk_id when
+// the highlighted segment is a column storing an on-disk TOAST pointer.
+func (m *Model) tupleLayoutToastUnderCursor(s *screen) (toastOID, chunkID uint32, ok bool) {
+	seg, ok := m.tupleLayoutSegUnderCursor(s)
+	if !ok || seg.kind != segColumn || seg.attr == nil {
+		return 0, 0, false
+	}
+	chunkID, toastOID, ok = toastPointerRef(seg.attr.Value)
+	return toastOID, chunkID, ok
+}
+
+// openToastChunkNav closes the overlay and pushes a loading heap-pages screen
+// for the TOAST relation, then resolves the OID→Table and the chunk's block
+// asynchronously (the pointer carries only the OID). The placeholder carries the
+// toast OID up front so findLevel + the OID guard target it, not the original
+// table's heap-pages screen deeper in the stack.
+func (m *Model) openToastChunkNav(s *screen, toastOID, chunkID uint32) tea.Cmd {
+	m.closeTupleLayout(s)
+	next := &screen{
+		level: levelHeapPages, title: "toast pages", tool: s.tool,
+		db: s.db, schema: "pg_toast",
+		table:           pg.Table{DB: s.db, OID: toastOID, Schema: "pg_toast"},
+		loading:         true,
+		heapWindowStart: 0, heapWindowCount: heapWindowDefault,
+		sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
+	}
+	m.stack = append(m.stack, next)
+	return m.resolveToastTargetCmd(s.db, toastOID, chunkID)
 }

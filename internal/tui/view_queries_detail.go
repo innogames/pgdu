@@ -60,7 +60,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	// Identify the statement's main table (parsed from FROM/UPDATE/INTO), the
 	// same value shown in the overview's `table` column. Omitted when unparseable.
 	if t := pg.MainTable(q.Query); t != "" {
-		metrics = append(metrics, [2]string{"table", t})
+		metrics = append(metrics, [2]string{"table", mainTableDisplay(q.Query)})
 		// HOT update ratio for that table, fetched async into statHotStats. It's
 		// cumulative (since the last stats reset), not window-scoped like the rows
 		// above, so it's explicitly labelled "lifetime". Higher is better →

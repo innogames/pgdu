@@ -467,10 +467,15 @@ type screen struct {
 	// true; false hides walwriter/checkpointer/launchers/io workers/etc by default.
 	// actCols is the projected column descriptor slice, kept so the C picker and
 	// sort cycling can map column indices back to stable actColIDs.
+	// actToast maps db+relname (see toastKey) → owning-table display name for the
+	// TOAST relations named in autovacuum rows, built incrementally by the
+	// background resolver and merged into the table column on arrival; "" means
+	// resolution was attempted but yielded nothing.
 	actRows    []pg.ActivityRow
 	actSummary pg.ActivitySummary // server-wide counts + max_connections for the header
 	actErr     error
 	actHosts   map[string]string
+	actToast   map[string]string
 	actFilter  pg.ActivityFilter
 	actVerbose bool
 	actCols    []actColDesc

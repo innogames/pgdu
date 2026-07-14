@@ -2,6 +2,7 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -191,6 +192,37 @@ func (c *Client) ReadToastValue(ctx context.Context, t Table, chunkID uint32) ([
 		{Name: "total_bytes", Value: str(strconv.Itoa(len(assembled)))},
 		{Name: "data", Value: str(hexData)},
 	}, nil
+}
+
+// ToastChunkLocation resolves an out-of-line value's TOAST pointer (the toast
+// relation's OID and the value's chunk_id) into the Table metadata the heap-page
+// inspector needs plus the heap block of the value's first chunk. It backs the
+// "ENTER on a TOASTed value jumps to its TOAST relation" shortcut: the pointer
+// carries an OID, not a name, so a catalog lookup is required. A missing chunk
+// (value vacuumed or updated since) is not an error — block 0 is returned.
+func (c *Client) ToastChunkLocation(ctx context.Context, db string, toastOID, chunkID uint32) (Table, int32, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return Table{}, 0, err
+	}
+	t := Table{DB: db, OID: toastOID}
+	err = pool.QueryRow(ctx, sqlResolveRelByOID, toastOID).
+		Scan(&t.Schema, &t.Name, &t.HeapBytes, &t.EstRows)
+	if err != nil {
+		return Table{}, 0, fmt.Errorf("resolve toast relation %d in %q: %w", toastOID, db, err)
+	}
+	t.TotalBytes = t.HeapBytes
+
+	var blk int32
+	sql := fmt.Sprintf(sqlToastChunkBlock, qualifiedIdent(t.Schema, t.Name))
+	err = pool.QueryRow(ctx, sql, chunkID).Scan(&blk)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return t, 0, nil
+	}
+	if err != nil {
+		return Table{}, 0, fmt.Errorf("locate toast chunk %d in %q: %w", chunkID, t.Qualified(), err)
+	}
+	return t, blk, nil
 }
 
 // ListIndexPages returns up to `count` per-page summaries of a B-tree index

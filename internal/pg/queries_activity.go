@@ -55,6 +55,23 @@ const sqlActivityAll = sqlActivityBase + `
 ORDER BY a.query_start ASC NULLS LAST
 `
 
+// sqlToastOwners maps each TOAST relation named in $1 (bare relnames like
+// pg_toast_21853, without the pg_toast. schema prefix) to the table that owns
+// it — reltoastrelid points from the main relation to its TOAST relation, so we
+// join back the other way. The owner is schema-qualified only when it isn't in
+// public, matching how the parsed query text usually names ordinary tables.
+const sqlToastOwners = `
+SELECT
+    t.relname,
+    CASE WHEN n.nspname = 'public' THEN c.relname
+         ELSE n.nspname || '.' || c.relname END
+FROM pg_class t
+JOIN pg_class c ON c.reltoastrelid = t.oid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE t.relnamespace = 'pg_toast'::regnamespace
+  AND t.relname = ANY($1)
+`
+
 // sqlActivitySummary returns one row of server-wide backend counts plus the
 // connection limit, independent of the row filter. "waiting" is restricted to
 // genuine contention wait classes; Client (ClientRead/Write), Activity (idle

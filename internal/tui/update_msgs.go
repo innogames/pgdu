@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"maps"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -552,14 +553,19 @@ func (m *Model) onActivityLoaded(msg activityLoadedMsg) tea.Cmd {
 	if s.actHosts == nil {
 		s.actHosts = make(map[string]string)
 	}
+	if s.actToast == nil {
+		s.actToast = make(map[string]string)
+	}
 	m.rebuildActivityItems(s)
 	// Feed the wait-event profile: every snapshot becomes one histogram bucket,
 	// whether or not the profile screen is open.
 	m.pushWaitBucket(msg.rows)
 
-	// Collect PIDs for proc sampling and IPs for DNS resolution, both in background.
+	// Collect PIDs for proc sampling, IPs for DNS resolution, and pg_toast.*
+	// targets for owner resolution — all in the background so none block refresh.
 	pids := make([]int32, len(msg.rows))
 	var unresolved []string
+	var toastReqs []toastResolveReq
 	for i, r := range msg.rows {
 		pids[i] = r.PID
 		if r.ClientAddr != "" {
@@ -567,9 +573,19 @@ func (m *Model) onActivityLoaded(msg activityLoadedMsg) tea.Cmd {
 				unresolved = append(unresolved, r.ClientAddr)
 			}
 		}
+		// A TOAST relation's OID is database-local, so resolution needs the row's
+		// own datname; skip rows without one (walsenders, etc.) rather than guess.
+		if r.Database != "" {
+			if rn, ok := strings.CutPrefix(pg.MainTable(r.Query), "pg_toast."); ok {
+				if _, seen := s.actToast[toastKey(r.Database, rn)]; !seen {
+					toastReqs = append(toastReqs, toastResolveReq{db: r.Database, relname: rn})
+				}
+			}
+		}
 	}
 	return tea.Batch(
 		m.resolveActivityHostsCmd(unresolved),
+		m.resolveActivityToastCmd(toastReqs),
 		m.sampleProcStatsCmd(pids),
 	)
 }
@@ -659,6 +675,21 @@ func (m *Model) onActivityHosts(msg activityHostsMsg) tea.Cmd {
 		s.actHosts = make(map[string]string)
 	}
 	maps.Copy(s.actHosts, msg.hosts)
+	if s.actRows != nil {
+		m.rebuildActivityItems(s)
+	}
+	return nil
+}
+
+func (m *Model) onActivityToast(msg activityToastMsg) tea.Cmd {
+	s := m.findLevel(levelActivity)
+	if s == nil {
+		return nil
+	}
+	if s.actToast == nil {
+		s.actToast = make(map[string]string)
+	}
+	maps.Copy(s.actToast, msg.owners)
 	if s.actRows != nil {
 		m.rebuildActivityItems(s)
 	}

@@ -57,6 +57,69 @@ func (c *Client) ActivitySummary(ctx context.Context, db string) (ActivitySummar
 	return s, nil
 }
 
+// toastKey keys the session TOAST-owner cache. TOAST OIDs are database-local, so
+// the same pg_toast_<oid> relname can name different tables in different
+// databases — the db must be part of the key.
+func toastKey(db, relname string) string { return db + "\x00" + relname }
+
+// ResolveToastOwners maps TOAST relnames (pg_toast_<oid>, without the pg_toast.
+// schema prefix) to the table that owns them, so the Activity tool can label an
+// autovacuum-of-TOAST row with the real table instead of the opaque OID. Results
+// are cached for the session (see toastCache); only relnames not already cached
+// trigger the catalog query. A relname that resolves to nothing (dropped table,
+// unreadable catalog) is cached as "" so it isn't re-queried on every refresh.
+// The returned map has one entry per requested relname ("" = unresolved).
+func (c *Client) ResolveToastOwners(ctx context.Context, db string, relnames []string) (map[string]string, error) {
+	out := make(map[string]string, len(relnames))
+	var miss []string
+	c.toastMu.Lock()
+	for _, rn := range relnames {
+		if owner, ok := c.toastCache[toastKey(db, rn)]; ok {
+			out[rn] = owner
+		} else {
+			miss = append(miss, rn)
+		}
+	}
+	c.toastMu.Unlock()
+	if len(miss) == 0 {
+		return out, nil
+	}
+
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return out, fmt.Errorf("resolve toast owners in %q: %w", db, err)
+	}
+	rows, err := collect(ctx, pool, fmt.Sprintf("resolve toast owners in %q", db),
+		sqlToastOwners, []any{miss},
+		func(row pgx.CollectableRow) (toastOwner, error) {
+			var o toastOwner
+			err := row.Scan(&o.toast, &o.owner)
+			return o, err
+		})
+	if err != nil {
+		return out, err
+	}
+
+	found := make(map[string]string, len(rows))
+	for _, o := range rows {
+		found[o.toast] = o.owner
+	}
+	c.toastMu.Lock()
+	for _, rn := range miss {
+		owner := found[rn] // "" when the relation didn't resolve — negative-cached
+		c.toastCache[toastKey(db, rn)] = owner
+		out[rn] = owner
+	}
+	c.toastMu.Unlock()
+	return out, nil
+}
+
+// toastOwner is one row of sqlToastOwners: a TOAST relname and its owning table.
+type toastOwner struct {
+	toast string
+	owner string
+}
+
 // CancelBackend sends pg_cancel_backend to the given PID. Returns true when the
 // signal was delivered, false when the backend no longer exists or the caller
 // lacks permission.

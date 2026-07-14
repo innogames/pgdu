@@ -106,7 +106,10 @@ func TestColKindFromName(t *testing.T) {
 		{"dead_ratio", DiagPercent},
 		{"percent_used", DiagPercent},
 		{"total_bytes", DiagBytes},
-		{"size_mb", DiagBytes},
+		// "_mb" is NOT DiagBytes: DiagBytes humanizes the value as raw bytes,
+		// so a megabyte-scaled column would be off by 1024². Queries emit raw
+		// bytes with a "bytes" suffix instead.
+		{"size_mb", DiagText},
 		{"relname", DiagText},
 	}
 	for _, c := range cases {

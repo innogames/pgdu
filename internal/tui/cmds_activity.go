@@ -33,6 +33,20 @@ type activityHostsMsg struct {
 	hosts map[string]string // IP → hostname
 }
 
+// toastResolveReq is one TOAST relation awaiting owner resolution, tagged with
+// the database whose catalog defines it (TOAST OIDs are database-local).
+type toastResolveReq struct {
+	db      string
+	relname string // bare pg_toast_<oid>, no pg_toast. schema prefix
+}
+
+// activityToastMsg delivers resolved TOAST-owner names (keyed by toastKey) from
+// the background resolver so they merge into the table column without a blocking
+// DB round-trip on the refresh path.
+type activityToastMsg struct {
+	owners map[string]string
+}
+
 // backendActionMsg is the result of pg_cancel_backend / pg_terminate_backend.
 type backendActionMsg struct {
 	action string // "cancel" | "terminate"
@@ -125,6 +139,33 @@ func (m *Model) resolveActivityHostsCmd(ips []string) tea.Cmd {
 		}
 		return activityHostsMsg{hosts: resolved}
 	}
+}
+
+// resolveActivityToastCmd resolves the owning table for each TOAST relation in
+// reqs, grouped by database, and delivers the results as activityToastMsg.
+// Best-effort: a database that can't be reached or read just leaves its rows
+// showing the raw pg_toast_<oid> name. Runs under the shared query() budget.
+func (m *Model) resolveActivityToastCmd(reqs []toastResolveReq) tea.Cmd {
+	if len(reqs) == 0 {
+		return nil
+	}
+	return query(func(ctx context.Context) tea.Msg {
+		byDB := map[string][]string{}
+		for _, r := range reqs {
+			byDB[r.db] = append(byDB[r.db], r.relname)
+		}
+		owners := make(map[string]string)
+		for db, relnames := range byDB {
+			resolved, err := m.client.ResolveToastOwners(ctx, db, relnames)
+			if err != nil {
+				continue
+			}
+			for rn, owner := range resolved {
+				owners[toastKey(db, rn)] = owner
+			}
+		}
+		return activityToastMsg{owners: owners}
+	})
 }
 
 // cancelBackendCmd sends pg_cancel_backend($pid) and reports the outcome.

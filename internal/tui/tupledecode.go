@@ -50,7 +50,7 @@ func decodeInlineVarlena(v []byte, typName, typCategory string) string {
 	case h&0x01 == 0x01:
 		// VARATT_IS_1B: total length incl the 1-byte header is h>>1.
 		if total := int(h >> 1); total >= 1 && total <= len(v) {
-			return varlenaPayloadValue(v[1:total], typCategory)
+			return inlinePayloadValue(v[1:total], typName, typCategory)
 		}
 		return ""
 	case h&0x03 == 0x02:
@@ -65,10 +65,22 @@ func decodeInlineVarlena(v []byte, typName, typCategory string) string {
 	default:
 		// VARATT_IS_4B_U: 4-byte uncompressed header.
 		if total := int((binary.LittleEndian.Uint32(v) >> 2) & 0x3FFFFFFF); total >= 4 && total <= len(v) {
-			return varlenaPayloadValue(v[4:total], typCategory)
+			return inlinePayloadValue(v[4:total], typName, typCategory)
 		}
 		return ""
 	}
+}
+
+// inlinePayloadValue renders an inline varlena's payload. jsonb gets its
+// binary tree decoded to JSON text (decodeJsonb); a decode failure falls
+// through to the generic text/hex path so nothing is shown half-decoded.
+func inlinePayloadValue(payload []byte, typName, typCategory string) string {
+	if typName == "jsonb" {
+		if s, ok := decodeJsonb(payload); ok {
+			return s
+		}
+	}
+	return varlenaPayloadValue(payload, typCategory)
 }
 
 // varlenaPayloadValue wraps formatVarlenaPayload with one overlay-specific
@@ -96,7 +108,25 @@ func describeToastPointer(v []byte) string {
 	valueID := binary.LittleEndian.Uint32(v[10:14])
 	s := fmt.Sprintf("→ toast chunk %d · %s", valueID, humanize.Bytes(rawSize))
 	if extSize < rawSize {
-		s += fmt.Sprintf(" (%s compressed)", humanize.Bytes(extSize))
+		// Compression rate as the on-disk (compressed) size relative to the raw
+		// payload — e.g. "55%" means it shrank to 55% of its uncompressed size.
+		pct := 100.0
+		if rawSize > 0 {
+			pct = 100 * float64(extSize) / float64(rawSize)
+		}
+		s += fmt.Sprintf(" (%s compressed · %.0f%%)", humanize.Bytes(extSize), pct)
 	}
 	return s
+}
+
+// toastPointerRef extracts the two identities an on-disk TOAST pointer carries:
+// va_valueid (the value's chunk_id) and va_toastrelid (the OID of the TOAST
+// relation holding it). Reports false when v isn't an on-disk pointer (same
+// VARTAG_ONDISK guard as describeToastPointer) — used to turn ENTER on a
+// TOAST-pointer row into a jump to that relation's page inspector.
+func toastPointerRef(v []byte) (valueID, toastRelID uint32, ok bool) {
+	if len(v) != toastPointerLen || v[1] != 0x12 { // VARTAG_ONDISK
+		return 0, 0, false
+	}
+	return binary.LittleEndian.Uint32(v[10:14]), binary.LittleEndian.Uint32(v[14:18]), true
 }

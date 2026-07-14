@@ -31,6 +31,7 @@ const (
 	actColBackendXmin actColID = "xmin"
 	actColBlockedBy   actColID = "blocked_by"
 	actColTable       actColID = "table"
+	actColType        actColID = "type" // command type (S/U/D/…), same parse as top-queries
 	actColQuery       actColID = "query"
 	// OS-level proc columns (Linux only, local server; show — otherwise).
 	actColRSS      actColID = "rss"
@@ -40,10 +41,26 @@ const (
 )
 
 // actCtx carries per-build inputs the activity column cells need beyond the row
-// itself. Both maps may be nil (non-Linux host, remote connection, first sample).
+// itself. All maps may be nil (non-Linux host, remote connection, first sample).
 type actCtx struct {
 	hosts map[string]string     // IP → resolved hostname (from actHosts on screen)
 	proc  map[int32]procDerived // PID → /proc-derived stats; nil = unavailable
+	toast map[string]string     // db+relname → owning table (from actToast on screen)
+}
+
+// toastKey keys the actToast map; it mirrors pg.ResolveToastOwners' own cache
+// key (TOAST OIDs are database-local, so the db disambiguates a shared relname).
+func toastKey(db, relname string) string { return db + "\x00" + relname }
+
+// toastOwner resolves the "table" column for a row whose main relation is a
+// TOAST relation (pg_toast.pg_toast_<oid>) to the owning table's name, or ""
+// when it isn't a TOAST relation or hasn't been resolved yet.
+func (ctx actCtx) toastOwner(db, mainTable string) string {
+	rn, ok := strings.CutPrefix(mainTable, "pg_toast.")
+	if !ok {
+		return ""
+	}
+	return ctx.toast[toastKey(db, rn)]
 }
 
 // actColDesc describes one Activity tool column: stable id, header label, render
@@ -191,8 +208,19 @@ func actColumnRegistry() []actColDesc {
 			}},
 
 		{id: actColTable, name: "table", kind: pg.DiagText,
-			desc: "main table parsed from the current query (same shallow parse as top-queries)",
-			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: pg.MainTable(r.Query)} }},
+			desc: "main table parsed from the current query; a pg_toast.* target resolves to its owning table",
+			cell: func(r pg.ActivityRow, ctx actCtx) pg.DiagCell {
+				// toastOwner needs the fully-qualified pg_toast.* name to recognise a
+				// TOAST target; the plain fallback is public-stripped for display.
+				if owner := ctx.toastOwner(r.Database, pg.MainTable(r.Query)); owner != "" {
+					return pg.DiagCell{Display: owner}
+				}
+				return pg.DiagCell{Display: mainTableDisplay(r.Query)}
+			}},
+
+		{id: actColType, name: "T", kind: pg.DiagCmdType, defaultOn: true,
+			desc: "command type: S/SL/L/I/U/D/M/T (same parse as top-queries; ? for utility/background)",
+			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: pg.QueryKind(r.Query)} }},
 
 		// query must stay the very last column: renderDiagResult grows the final
 		// column into the leftover terminal width (no bar on this table), so the
@@ -335,7 +363,7 @@ func visibleActRows(rows []pg.ActivityRow, verbose bool, filter pg.ActivityFilte
 // share exactly the same projection + sort logic.
 func (m *Model) rebuildActivityItems(s *screen) {
 	rows := visibleActRows(s.actRows, s.actVerbose, s.actFilter)
-	ctx := actCtx{hosts: s.actHosts, proc: m.actProcStats}
+	ctx := actCtx{hosts: s.actHosts, proc: m.actProcStats, toast: s.actToast}
 	items, descs := m.buildActivityItems(rows, ctx)
 	s.actCols = descs
 	s.diagCols = actDiagColumnsFrom(descs)

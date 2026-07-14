@@ -54,12 +54,12 @@ var Diagnostics = []Diagnostic{
 		PerDB:       true,
 		Title:       "Index bloat (btree)",
 		Category:    "index",
-		Description: "estimated bloat % and wasted MB for btree indexes (>50% bloat, >10 MB waste)",
+		Description: "estimated bloat % and wasted bytes for btree indexes (>50% bloat, >10 MB waste)",
 		SQL:         sqlDiagBloatIndex,
 		Bar:         "bloat_pct",
 		Help: `Statistical estimate of dead space inside btree indexes, derived from
 			pg_stats column widths (an estimate, not an exact measurement); only
-			indexes over 50% bloat wasting more than 10 MB are listed. bloat_mb is
+			indexes over 50% bloat wasting more than 10 MB are listed. bloat_bytes is
 			what a rebuild would reclaim; index_scans tells whether the index is
 			used at all — an unused bloated index is better dropped than rebuilt
 			(see Unused indexes). Fix with REINDEX INDEX CONCURRENTLY; the same
@@ -210,19 +210,19 @@ var Diagnostics = []Diagnostic{
 		PerDB:       true,
 		Title:       "Unused indexes",
 		Category:    "index",
-		Description: "indexes ranked by disk footprint per scan — big indexes that are never or rarely used (candidates for removal; PK/unique rows are flagged as they back a constraint)",
+		Description: "non-constraint indexes ranked by disk footprint per scan — big indexes that are never or rarely used (candidates for removal; PK/unique indexes are excluded as they back a constraint)",
 		SQL:         sqlDiagIndexShowUnused,
 		Bar:         "index_size_bytes",
 		Sort:        "size_per_scan_bytes",
 		Help: `Ranks indexes by amortised cost: size_per_scan = index size ÷
 			(scans + 1), so large never- or rarely-used indexes float to the top.
-			idx_scan counts planner lookups only — a PK/unique index (unique =
-			PK/Y) can show 0 scans yet still enforce its constraint on every
-			write, so it can't simply be dropped. Non-constraint rows (N) with 0
-			scans and real size are drop candidates (DROP INDEX CONCURRENTLY) —
-			but the counters run since the last stats reset, so make sure the
-			window covers periodic workloads (nightly imports, monthly reports)
-			before dropping anything.`,
+			idx_scan counts planner lookups only. PK/unique indexes are excluded:
+			they can show 0 scans yet still enforce their constraint on every
+			write, so they can't simply be dropped and aren't "unused" here. What
+			remains are non-constraint indexes; those with 0 scans and real size
+			are drop candidates (DROP INDEX CONCURRENTLY) — but the counters run
+			since the last stats reset, so make sure the window covers periodic
+			workloads (nightly imports, monthly reports) before dropping anything.`,
 	},
 	// ── table ─────────────────────────────────────────────────────────────
 	// "Table + index bloat (approx)" overlapped the more precise bloat_table and
@@ -244,7 +244,7 @@ var Diagnostics = []Diagnostic{
 		Description: "detailed table bloat estimate (>50% and >50 MB, or >25% and >1 GB)",
 		SQL:         sqlDiagBloatTable,
 		Bar:         "pct_bloat",
-		Sort:        "mb_bloat",
+		Sort:        "bloat_bytes",
 		Help: `Statistical estimate of heap bloat — dead space plain VACUUM keeps
 			but never returns to the OS — derived from pg_stats row widths; only
 			significant offenders are shown (≥50% and ≥50 MB, or ≥25% and ≥1 GB).

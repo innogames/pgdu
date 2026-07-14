@@ -77,7 +77,7 @@ func (m *Model) renderTupleLayoutInfo(height int) string {
 	b.WriteString("    " + padRight("1B-hdr", 14) + mu("values up to 126 B: 1 header byte + payload, packed unaligned") + "\n")
 	b.WriteString("    " + padRight("4B-hdr", 14) + mu("longer inline values: 4 header bytes, aligned like the type demands") + "\n")
 	b.WriteString("    " + padRight("compressed", 14) + mu("inline but pglz/lz4-compressed; the value column shows the uncompressed size") + "\n")
-	b.WriteString("    " + padRight("TOAST pointer", 14) + mu("18 B stub — the value lives out-of-line in the TOAST relation under the chunk id shown") + "\n\n")
+	b.WriteString("    " + padRight("TOAST pointer", 14) + mu("18 B stub — the value lives out-of-line in the TOAST relation under the chunk id shown; enter jumps to its page") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" other classes ") + "\n")
 	b.WriteString("    " + padRight("NULL", 14) + mu("0 B — only the bitmap records it") + "\n")
@@ -85,7 +85,7 @@ func (m *Model) renderTupleLayoutInfo(height int) string {
 	b.WriteString("    " + padRight("(dropped)", 14) + mu("dropped column — its bytes stay in old rows until they're rewritten") + "\n")
 	b.WriteString("    " + padRight("unaccounted", 14) + mu("bytes the walk couldn't attribute — shown red, never guessed at") + "\n\n")
 
-	b.WriteString("  " + mu("bar and rows share colours; ↑/↓ highlights a segment in both · ←/→ change sort, r reverses · Σ must equal lp_len") + "\n")
+	b.WriteString("  " + mu("bar and rows share colours; ↑/↓ highlights a segment in both · ←/→ change sort, r reverses · Σ must equal lp_len · d describes the table") + "\n")
 
 	return padInfo(&b, height)
 }
@@ -120,8 +120,12 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 	if m.tupleLayoutSortDesc {
 		arrow = "↓"
 	}
-	title += mu("  ·  sort: "+m.tupleLayoutSort.label()+arrow) +
-		mu("  ·  ") + styleBadge.Render("esc") + mu(" to dismiss · ") +
+	title += mu("  ·  sort: "+m.tupleLayoutSort.label()+arrow) + mu("  ·  ")
+	if _, _, ok := m.tupleLayoutToastUnderCursor(s); ok {
+		title += styleBadge.Render("enter") + mu(" → toast pages · ")
+	}
+	title += styleBadge.Render("d") + mu(" describe · ") +
+		styleBadge.Render("esc") + mu(" to dismiss · ") +
 		styleBadge.Render("space") + mu(" reload · ") + styleBadge.Render("?") + mu(" help")
 	b.WriteString(title + "\n\n")
 

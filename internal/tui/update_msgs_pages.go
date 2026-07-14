@@ -1,8 +1,33 @@
 package tui
 
 import (
+	"fmt"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// onToastTargetResolved completes the "ENTER on a TOASTed value" jump: the
+// placeholder heap-pages screen (pushed with only the toast OID known) gets its
+// full resolved Table and the window positioned at the chunk's block, then the
+// normal heap-pages load runs. Matches the placeholder by OID via findLevel
+// (topmost), so a heap-pages screen for the original table deeper in the stack
+// is not disturbed.
+func (m *Model) onToastTargetResolved(msg toastTargetResolvedMsg) tea.Cmd {
+	s := m.findLevel(levelHeapPages)
+	if s == nil || s.table.OID != msg.table.OID {
+		return nil
+	}
+	if msg.err != nil {
+		s.loading = false
+		s.loaded = true
+		s.err = msg.err
+		return nil
+	}
+	s.table = msg.table
+	s.heapWindowStart = (msg.block / heapWindowDefault) * heapWindowDefault
+	m.notice = fmt.Sprintf("toast value %d — heap page %d", msg.chunkID, msg.block)
+	return m.loadHeapPagesCmd(s.table, s.heapWindowStart, s.heapWindowCount)
+}
 
 func (m *Model) onHeapPagesLoaded(msg heapPagesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelHeapPages)

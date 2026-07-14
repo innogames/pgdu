@@ -63,6 +63,15 @@ type Client struct {
 	// (which can block on a network round-trip) never stalls PoolFor.
 	dnsMu    sync.Mutex
 	dnsCache map[string]string
+
+	// toastCache maps a TOAST relation to the table that owns it, keyed by
+	// db+relname (TOAST OIDs are database-local). Populated by ResolveToastOwners
+	// so the Activity tool can label an autovacuum-of-TOAST row with the real
+	// table. A table's TOAST relation is stable for the life of the table, so the
+	// cache lives for the session; "" is a valid (negative) entry meaning "not a
+	// resolvable TOAST relation", cached to avoid re-querying every refresh.
+	toastMu    sync.Mutex
+	toastCache map[string]string
 }
 
 type BloatMode int
@@ -88,6 +97,7 @@ func New(cfg cli.Config) *Client {
 		statStatementsVer:      map[string][2]int{},
 		statStatementsVerKnown: map[string]bool{},
 		dnsCache:               map[string]string{},
+		toastCache:             map[string]string{},
 	}
 }
 

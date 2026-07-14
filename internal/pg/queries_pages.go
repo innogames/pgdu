@@ -359,6 +359,28 @@ const sqlRelPages = `
 SELECT (pg_relation_size($1) / current_setting('block_size')::int)::int
 `
 
+// sqlResolveRelByOID builds the Table metadata for a relation known only by OID
+// — used to jump into a TOAST relation's page inspector from a tuple's TOAST
+// pointer. Unlike sqlResolveTable it is keyed by oid and not relkind-filtered,
+// so it resolves toast relations (relkind 't', which sqlResolveTable excludes).
+const sqlResolveRelByOID = `
+SELECT n.nspname, c.relname, pg_relation_size(c.oid), c.reltuples::bigint
+FROM   pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE  c.oid = $1::oid
+`
+
+// sqlToastChunkBlock returns the heap block of a TOAST value's first chunk, so
+// the page inspector can open positioned at that page. %s is the quoted toast
+// regclass; $1 is the chunk_id OID. No row (value vacuumed/updated away) is not
+// an error — the caller falls back to block 0.
+const sqlToastChunkBlock = `
+SELECT (t.ctid::text::point)[0]::int
+FROM   %s t
+WHERE  t.chunk_id = $1::oid
+ORDER  BY t.chunk_seq
+LIMIT  1
+`
+
 // --- GiST page inspector ---
 
 // sqlGistPagesSummary mirrors sqlIndexPagesSummary for GiST. GiST has no
