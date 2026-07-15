@@ -548,10 +548,20 @@ const summaryLabelWidth = 14
 const summaryBarMax = 200
 
 func (m *Model) renderList(s *screen, height int) string {
+	return m.renderListWithFooter(s, height, "")
+}
+
+// renderListWithFooter is renderList with a footer (zero or more
+// newline-terminated lines) rendered directly beneath the last row, so short
+// lists read as a closed table instead of the footer hiding at the bottom of
+// the screen. The footer's lines count against height; when the rows fill the
+// viewport it sits on the last content lines, exactly as a bottom-pinned
+// footer would.
+func (m *Model) renderListWithFooter(s *screen, height int, footer string) string {
 	vis := s.visibleIndexes()
 	maxSz := maxItemSize(s.items, vis)
 	barW := m.barWidth(s)
-	rowsH := height
+	rowsH := max(height-strings.Count(footer, "\n"), 0)
 
 	var b strings.Builder
 	// Sortable bar-list levels carry a column header so the active sort column is
@@ -572,9 +582,22 @@ func (m *Model) renderList(s *screen, height int) string {
 		header = renderGenericHeader(s, barW, "column")
 	}
 	if header != "" {
-		rowsH = max(height-1, 0)
+		rowsH = max(rowsH-1, 0)
 		b.WriteString(header)
 		b.WriteString("\n")
+	}
+
+	// The parts bloat columns appear once any sibling has been measured (the
+	// same gate as the header); rows still unmeasured render blank cells so
+	// the columns after them stay aligned.
+	bloatCols := false
+	if s.level == levelParts {
+		for _, it := range s.items {
+			if it.hasBloat {
+				bloatCols = true
+				break
+			}
+		}
 	}
 
 	if rowsH > 0 {
@@ -585,7 +608,7 @@ func (m *Model) renderList(s *screen, height int) string {
 		it := s.items[vis[vi]]
 		b.WriteString(renderRow(row{
 			size: it.size, bloat: it.bloat, hasBloat: it.hasBloat, hasChildren: it.hasChildren, maxSize: maxSz,
-			barW: barW,
+			barW: barW, bloatCols: bloatCols,
 			heap: it.heap, idx: it.idx, toast: it.toast, hasBreakdown: breakdown,
 			rows: it.rows, hasRows: it.hasRows,
 			pages: it.pages, hasPages: it.hasPages,
@@ -595,6 +618,7 @@ func (m *Model) renderList(s *screen, height int) string {
 		}))
 		b.WriteString("\n")
 	}
+	b.WriteString(footer)
 	// Pad to fixed height so help line stays put.
 	for i := end - s.offset; i < rowsH; i++ {
 		b.WriteString("\n")

@@ -1009,21 +1009,40 @@ ORDER BY stale_pct DESC NULLS LAST
 // live-operations CTE: what long-running maintenance/DDL is in flight and how
 // far along it is. done/total pick each command's most representative counter,
 // and unit records what they count (blocks for vacuum/index/analyze/cluster,
-// bytes for COPY and base backups) so callers can format them.
+// indexes for vacuum's index passes, bytes for COPY and base backups) so
+// callers can format them. datname carries the operation's own database —
+// the views are cluster-wide, so relid can only be resolved there.
 const sqlProgressBase = `
 WITH prog AS (
-    SELECT pid, 'VACUUM' AS command, relid, phase,
-           heap_blks_scanned::numeric AS done, heap_blks_total::numeric AS total,
-           'blocks'::text AS unit, false AS approx
+    -- heap_blks_scanned only moves during the scanning-heap phase; the index
+    -- and second heap passes have their own counters (PG17+), so pick per
+    -- phase — otherwise a vacuum reads 100% for its entire index pass.
+    SELECT pid, datname, 'VACUUM' AS command, relid, phase,
+           CASE phase
+                WHEN 'vacuuming indexes'   THEN indexes_processed::numeric
+                WHEN 'cleaning up indexes' THEN indexes_processed::numeric
+                WHEN 'vacuuming heap'      THEN heap_blks_vacuumed::numeric
+                ELSE heap_blks_scanned::numeric
+           END AS done,
+           CASE phase
+                WHEN 'vacuuming indexes'   THEN indexes_total::numeric
+                WHEN 'cleaning up indexes' THEN indexes_total::numeric
+                ELSE heap_blks_total::numeric
+           END AS total,
+           CASE phase
+                WHEN 'vacuuming indexes'   THEN 'indexes'
+                WHEN 'cleaning up indexes' THEN 'indexes'
+                ELSE 'blocks'
+           END::text AS unit, false AS approx
     FROM pg_stat_progress_vacuum
     UNION ALL
-    SELECT pid, 'CREATE INDEX', relid, phase, blocks_done::numeric, blocks_total::numeric, 'blocks', false
+    SELECT pid, datname, 'CREATE INDEX', relid, phase, blocks_done::numeric, blocks_total::numeric, 'blocks', false
     FROM pg_stat_progress_create_index
     UNION ALL
-    SELECT pid, 'ANALYZE', relid, phase, sample_blks_scanned::numeric, sample_blks_total::numeric, 'blocks', false
+    SELECT pid, datname, 'ANALYZE', relid, phase, sample_blks_scanned::numeric, sample_blks_total::numeric, 'blocks', false
     FROM pg_stat_progress_analyze
     UNION ALL
-    SELECT pid, 'CLUSTER', relid, phase, heap_blks_scanned::numeric, heap_blks_total::numeric, 'blocks', false
+    SELECT pid, datname, 'CLUSTER', relid, phase, heap_blks_scanned::numeric, heap_blks_total::numeric, 'blocks', false
     FROM pg_stat_progress_cluster
     UNION ALL
     -- COPY reports bytes_processed but bytes_total is 0 for STDIN and PROGRAM/PIPE
@@ -1033,7 +1052,7 @@ WITH prog AS (
     -- live count), moving the byte volume into the phase column. With a real
     -- bytes_total (file target) or no row estimate, fall back to the byte counters
     -- with rows + IO type in the phase.
-    SELECT c.pid, c.command, c.relid,
+    SELECT c.pid, c.datname, c.command, c.relid,
            CASE WHEN c.est_rows IS NOT NULL AND c.bytes_total <= 0
                 THEN pg_size_pretty(c.bytes_processed)
                      || CASE WHEN COALESCE(c.type, '') <> '' THEN ' · ' || lower(c.type) ELSE '' END
@@ -1048,7 +1067,7 @@ WITH prog AS (
            CASE WHEN c.est_rows IS NOT NULL AND c.bytes_total <= 0 THEN 'rows' ELSE 'bytes' END,
            c.est_rows IS NOT NULL AND c.bytes_total <= 0
     FROM (
-        SELECT pc.pid, pc.command, pc.relid, pc.type,
+        SELECT pc.pid, pc.datname, pc.command, pc.relid, pc.type,
                pc.bytes_processed, pc.bytes_total, pc.tuples_processed, pc.tuples_excluded,
                CASE WHEN pc.command = 'COPY TO' AND pc.relid <> 0
                     THEN NULLIF(GREATEST(cl.reltuples, 0), 0)::numeric END AS est_rows
@@ -1056,7 +1075,7 @@ WITH prog AS (
         LEFT JOIN pg_class cl ON cl.oid = pc.relid
     ) c
     UNION ALL
-    SELECT pid, 'BASE BACKUP', NULL::oid, phase, backup_streamed::numeric, backup_total::numeric, 'bytes', false
+    SELECT pid, NULL::name, 'BASE BACKUP', NULL::oid, phase, backup_streamed::numeric, backup_total::numeric, 'bytes', false
     FROM pg_stat_progress_basebackup
 )
 `
@@ -1067,7 +1086,12 @@ const sqlDiagProgressAll = sqlProgressBase + `
 SELECT
     p.pid,
     p.command,
-    CASE WHEN p.relid IS NOT NULL AND p.relid <> 0 THEN p.relid::regclass::text ELSE '' END AS relation,
+    -- regclass only sees the current database's catalog; for an operation in
+    -- another database show "db.<oid>" rather than a bare mystery number.
+    CASE WHEN p.relid IS NULL OR p.relid = 0 THEN ''
+         WHEN p.datname IS DISTINCT FROM current_database() THEN coalesce(p.datname || '.', '') || p.relid
+         ELSE p.relid::regclass::text
+    END AS relation,
     p.phase,
     round(100.0 * p.done / NULLIF(p.total, 0), 1) AS done_pct,
     date_trunc('second', now() - a.xact_start) AS running_for,
@@ -1086,7 +1110,13 @@ const sqlProgressOps = sqlProgressBase + `
 SELECT
     p.pid,
     p.command,
-    CASE WHEN p.relid IS NOT NULL AND p.relid <> 0 THEN p.relid::regclass::text ELSE '' END AS relation,
+    -- regclass only sees the current database's catalog; foreign-database
+    -- operations come back empty here and ListProgress resolves them through
+    -- that database's own pool via relid/database below.
+    CASE WHEN p.relid IS NOT NULL AND p.relid <> 0 AND p.datname IS NOT DISTINCT FROM current_database()
+         THEN p.relid::regclass::text ELSE '' END AS relation,
+    coalesce(p.relid, 0)::oid AS relid,
+    coalesce(p.datname, '') AS database,
     p.phase,
     p.unit,
     coalesce(p.done, 0)::bigint AS done,
@@ -1097,6 +1127,13 @@ SELECT
 FROM prog p
 LEFT JOIN pg_stat_activity a USING (pid)
 ORDER BY p.done / NULLIF(p.total, 0) DESC NULLS LAST, p.pid
+`
+
+// sqlProgressRelNames resolves relation OIDs to names inside the database the
+// operation actually runs in (issued through that database's pool). regclass
+// schema-qualifies exactly like the in-database path in sqlProgressOps does.
+const sqlProgressRelNames = `
+SELECT oid, oid::regclass::text FROM pg_class WHERE oid = ANY($1)
 `
 
 // sqlDiagLockSummary aggregates pg_locks by lock type and mode: how many locks

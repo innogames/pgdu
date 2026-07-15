@@ -15,7 +15,7 @@ import (
 // the parts list + vacuum output pane (when a vacuum is in progress or done for
 // this table), or the parts list + maintenance stats panel below.
 func (m *Model) renderPartsLevel(s *screen, height int) string {
-	// Footer lines that sit directly beneath the parts list (with the table
+	// Footer lines rendered directly beneath the last part row (with the table
 	// they annotate): the Σ totals line and the size/bloat colour legend.
 	// These are dropped first when the terminal is too short to fit everything.
 	footer, footerH := m.partsFooter(s)
@@ -29,14 +29,14 @@ func (m *Model) renderPartsLevel(s *screen, height int) string {
 		if paneH < vacuumPaneMin {
 			// Too short for list + footer + a usable pane: drop the footer, then
 			// shrink the list, keeping the pane at its minimum.
-			footer = ""
+			footer, footerH = "", 0
 			paneH = height - listH
 			if paneH < vacuumPaneMin {
 				listH = max(height-vacuumPaneMin, 1)
 				paneH = max(height-listH, 1)
 			}
 		}
-		return m.renderList(s, listH) + footer + m.renderVacuumPane(paneH)
+		return m.renderListWithFooter(s, listH+footerH, footer) + m.renderVacuumPane(paneH)
 	}
 
 	panel := m.renderMaintPanel(s)
@@ -45,15 +45,15 @@ func (m *Model) renderPartsLevel(s *screen, height int) string {
 		listH := height - footerH - panelLines
 		if listH < 3 {
 			// Terminal too short for list + footer + panel — drop the panel.
-			if listH = height - footerH; listH < 3 {
+			if height-footerH < 3 {
 				return m.renderList(s, height)
 			}
-			return m.renderList(s, listH) + footer
+			return m.renderListWithFooter(s, height, footer)
 		}
-		return m.renderList(s, listH) + footer + panel
+		return m.renderListWithFooter(s, listH+footerH, footer) + panel
 	}
-	if listH := height - footerH; listH >= 1 {
-		return m.renderList(s, listH) + footer
+	if height-footerH >= 1 {
+		return m.renderListWithFooter(s, height, footer)
 	}
 	return m.renderList(s, height)
 }
@@ -93,14 +93,16 @@ func renderPartsLegend(s *screen) string {
 		swatch(styleBloat) + " " + styleMuted.Render("bloat")
 }
 
-// renderPartsTotals sums the parts (heap / index / toast) sizes and renders a
-// one-line Σ footer beneath the parts list, mirroring the per-table breakdown
-// shown on the tables level. Returns "" until parts have loaded.
+// renderPartsTotals sums the parts sizes and wasted bytes and renders a pinned
+// Σ footer beneath the parts list, with the sums aligned under their columns
+// (like the buffer-tables footer). The heap/index/toast breakdown follows in
+// the name area. Returns "" until parts have loaded.
 func (m *Model) renderPartsTotals(s *screen) string {
 	if s.level != levelParts || len(s.items) == 0 {
 		return ""
 	}
 	var heap, idx, toast, bloat int64
+	n := 0
 	anyBloat := false
 	for _, it := range s.items {
 		p, ok := it.data.(pg.Part)
@@ -115,32 +117,49 @@ func (m *Model) renderPartsTotals(s *screen) string {
 		case pg.PartToast:
 			toast += p.SizeBytes
 		}
-		if p.HasBloat {
-			bloat += p.WastedBytes
+		// Bloat comes from the item fields, not the Part payload: onBloatFilled
+		// patches item.bloat/hasBloat in place and leaves item.data untouched.
+		if it.hasBloat {
+			bloat += it.bloat
 			anyBloat = true
 		}
+		n++
 	}
 	total := heap + idx + toast
 	if total == 0 {
 		return ""
 	}
-	mu := styleMuted.Render
-	sep := mu("  ·  ")
-	parts := []string{styleSelected.Render(humanize.Bytes(total)) + mu(" total")}
+	bloatCols := ""
+	if anyBloat {
+		pct := int(float64(bloat) / float64(total) * 100)
+		byteStr, pctStr := "-", "-"
+		if bloat > 0 {
+			byteStr = humanize.Bytes(bloat)
+			pctStr = fmt.Sprintf("%d%%", pct)
+		}
+		bloatCols = padRight(byteStr, bloatByteColW) + "  " + padRight(pctStr, bloatPctColW) + "  "
+	}
+	var breakdown []string
 	if heap > 0 {
-		parts = append(parts, mu("heap "+humanize.Bytes(heap)))
+		breakdown = append(breakdown, "heap "+humanize.Bytes(heap))
 	}
 	if idx > 0 {
-		parts = append(parts, mu("index "+humanize.Bytes(idx)))
+		breakdown = append(breakdown, "index "+humanize.Bytes(idx))
 	}
 	if toast > 0 {
-		parts = append(parts, mu("toast "+humanize.Bytes(toast)))
+		breakdown = append(breakdown, "toast "+humanize.Bytes(toast))
 	}
-	if anyBloat && bloat > 0 {
-		pct := int(float64(bloat) / float64(total) * 100)
-		parts = append(parts, styleBloat.Render(fmt.Sprintf("bloat %s (%d%%)", humanize.Bytes(bloat), pct)))
+	// Cursor slot + blank bar area, then the same column layout as the rows
+	// (size, bloat bytes, bloat %, blank type column, childMark slot).
+	line := "  " + strings.Repeat(" ", m.barWidth(s)+2) + "  " +
+		padRight(humanize.Bytes(total), 10) + "  " +
+		bloatCols +
+		strings.Repeat(" ", partTypeColW) + "  " + "  " +
+		fmt.Sprintf("Σ %d parts", n)
+	if len(breakdown) > 0 {
+		line += " · " + strings.Join(breakdown, " · ")
 	}
-	return "  " + mu("Σ") + "  " + strings.Join(parts, sep)
+	return styleTotal.Render(line)
 }
 
 // renderVacuumBanner renders the one-line confirmation prompt for the vacuum

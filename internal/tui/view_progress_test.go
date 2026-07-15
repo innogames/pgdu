@@ -17,6 +17,7 @@ func TestProgressDoneTotal(t *testing.T) {
 		{"blocks no total", pg.ProgressRow{Unit: "blocks", Done: 42}, "42"},
 		{"bytes", pg.ProgressRow{Unit: "bytes", Done: 1 << 20, Total: 1 << 30}, "1.00 MB / 1.00 GB"},
 		{"bytes no total", pg.ProgressRow{Unit: "bytes", Done: 1 << 20}, "1.00 MB"},
+		{"indexes", pg.ProgressRow{Unit: "indexes", Done: 3, Total: 9}, "3 / 9"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -38,7 +39,7 @@ func TestProgressPct(t *testing.T) {
 
 func TestRenderProgress(t *testing.T) {
 	m := &Model{width: 200}
-	s := &screen{level: levelProgress, tool: toolMaintenance}
+	s := &screen{level: levelProgress, tool: toolMaintenance, db: "maindb"}
 
 	// Empty state renders its own message instead of the generic "(no items)".
 	m.rebuildProgressItems(s)
@@ -53,10 +54,15 @@ func TestRenderProgress(t *testing.T) {
 			Unit: "bytes", Done: 1 << 30, Total: 2 << 30, RunningMs: 63_000, Username: "etl"},
 		{PID: 103, Command: "BASE BACKUP", Phase: "streaming database files",
 			Unit: "bytes", Done: 1 << 20, Total: 0, RunningMs: 1_000, Username: "repl"},
+		// Vacuum in another database: relation shows with a db prefix, and its
+		// index pass counts indexes rather than a parked heap-block counter.
+		{PID: 104, Command: "VACUUM", Relation: "public.big", Database: "otherdb",
+			Phase: "vacuuming indexes", Unit: "indexes", Done: 3, Total: 9,
+			RunningMs: 10_000, Username: "postgres"},
 	}
 	m.rebuildProgressItems(s)
-	if len(s.items) != 3 {
-		t.Fatalf("rebuildProgressItems: %d items, want 3", len(s.items))
+	if len(s.items) != 4 {
+		t.Fatalf("rebuildProgressItems: %d items, want 4", len(s.items))
 	}
 	// Filter text must match pid, command, relation, phase and user.
 	if !strings.Contains(s.items[0].name, "101") || !strings.Contains(s.items[0].name, "orders_idx") {
@@ -65,10 +71,11 @@ func TestRenderProgress(t *testing.T) {
 
 	out := stripANSI(m.renderProgress(s, 10))
 	for _, want := range []string{
-		"3 ops",
+		"4 ops",
 		"CREATE INDEX", "public.orders_idx", "building index", "640 / 1000", "64.0%", "4.2m",
 		"COPY", "1.00 GB / 2.00 GB", "50.0%",
 		"BASE BACKUP", "1.00 MB", "—", // unknown total: bare done + em-dash pct
+		"VACUUM", "otherdb.public.big", "vacuuming indexes", "3 / 9", "33.3%",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q:\n%s", want, out)

@@ -30,7 +30,10 @@ SELECT
     -- PIDs blocking this backend (pg_blocking_pids); empty when nobody blocks it.
     -- Rendered as an opt-in column so the lock-wait relationship reads inline.
     coalesce(array_to_string(pg_blocking_pids(a.pid), ' '), '') AS blocked_by,
-    coalesce(left(regexp_replace(a.query, '\s+', ' ', 'g'), 300), '') AS query
+    -- No left() cap: the server already bounds this at track_activity_query_size,
+    -- and MainTable needs the FROM clause, which a wide ORM select list pushes
+    -- past any small prefix.
+    coalesce(regexp_replace(a.query, '\s+', ' ', 'g'), '') AS query
 FROM pg_stat_activity a
 WHERE a.pid <> pg_backend_pid()
 `

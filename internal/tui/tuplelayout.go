@@ -43,10 +43,13 @@ type tupleSeg struct {
 // mirrors its UX (←/→ cycle, r reverses) over the segment slice instead.
 type tlSort int
 
+// Declaration order is the ←/→ cycle. It matches the legend header's
+// left-to-right column order (bytes · offset · column) cyclically, rotated so
+// the zero value stays offset — the physical default openTupleLayout arms.
 const (
 	tlSortOffset tlSort = iota // physical order within the tuple (default)
-	tlSortBytes
 	tlSortColumn
+	tlSortBytes
 	tlSortCount // sentinel for cycling
 )
 

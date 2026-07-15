@@ -907,15 +907,12 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 		b.WriteString(lineStr + "\n")
 	}
 
-	// Pad the data area to its budget so the footer (and help) stay pinned.
-	for i := end - s.offset; i < rowsH; i++ {
-		b.WriteString("\n")
-	}
-
-	// Pinned total footer: always the last content line, so it stays visible
-	// regardless of scroll. Reuses the column layout but is never selected,
-	// barred or graded (the total is each column's max — grading would paint it
-	// solid red).
+	// Total footer: rendered directly beneath the last row, so short result
+	// sets read as a closed table instead of the sum hiding at the bottom of
+	// the screen. When the rows fill the viewport there's no padding below, so
+	// it sits on the last content line and stays visible regardless of scroll.
+	// Reuses the column layout but is never selected, barred or graded (the
+	// total is each column's max — grading would paint it solid red).
 	if s.diagTotalRow != nil {
 		var line strings.Builder
 		line.WriteString("  ") // cursor placeholder, no ▶
@@ -952,6 +949,11 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			lineStr = truncateToWidth(lineStr, m.width)
 		}
 		b.WriteString(lineStr + "\n")
+	}
+
+	// Pad the data area to its budget so the help row stays pinned.
+	for i := end - s.offset; i < rowsH; i++ {
+		b.WriteString("\n")
 	}
 	return b.String()
 }

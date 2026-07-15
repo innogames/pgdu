@@ -760,8 +760,8 @@ func describeTarget(s *screen) (descTarget, bool) {
 
 	case levelProgress:
 		// Describe the operation's target relation by name (basebackup rows have
-		// none). The name comes from regclass in the operation's own database, so
-		// resolve it against the screen's db like the other by-name paths.
+		// none). The name was resolved in the operation's own database, so route
+		// the describe there too — the screen's db is only the fallback.
 		it, ok := curItem()
 		if !ok {
 			return descTarget{}, false
@@ -770,7 +770,11 @@ func describeTarget(s *screen) (descTarget, bool) {
 		if !ok || r.Relation == "" {
 			return descTarget{}, false
 		}
-		return descTarget{byName: true, db: s.db, tableName: r.Relation}, true
+		db := s.db
+		if r.Database != "" {
+			db = r.Database
+		}
+		return descTarget{byName: true, db: db, tableName: r.Relation}, true
 
 	case levelTables:
 		it, ok := curItem()

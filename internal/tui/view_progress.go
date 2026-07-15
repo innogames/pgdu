@@ -31,7 +31,7 @@ func (m *Model) rebuildProgressItems(s *screen) {
 	s.itemsRev++
 	for _, r := range s.progressRows {
 		s.items = append(s.items, item{
-			name: fmt.Sprintf("%d %s %s %s %s", r.PID, r.Command, r.Relation, r.Phase, r.Username),
+			name: fmt.Sprintf("%d %s %s %s %s %s", r.PID, r.Command, r.Database, r.Relation, r.Phase, r.Username),
 			data: r,
 		})
 	}
@@ -74,15 +74,17 @@ func (m *Model) renderProgress(s *screen, height int) string {
 	end := min(s.offset+rowsH, len(vis))
 	for vi := s.offset; vi < end; vi++ {
 		r, _ := s.items[vis[vi]].data.(pg.ProgressRow)
-		b.WriteString(m.renderProgressRow(r, vi == s.cursor, barW) + "\n")
+		b.WriteString(m.renderProgressRow(r, s.db, vi == s.cursor, barW) + "\n")
 		used++
 	}
 	return padToHeight(&b, height, used)
 }
 
 // renderProgressRow renders one operation: command · relation · phase ·
-// done/total · progress bar · pct · running time · user.
-func (m *Model) renderProgressRow(r pg.ProgressRow, selected bool, barW int) string {
+// done/total · progress bar · pct · running time · user. db is the database
+// the screen is connected through — operations elsewhere in the cluster get
+// their relation prefixed with their own database name.
+func (m *Model) renderProgressRow(r pg.ProgressRow, db string, selected bool, barW int) string {
 	mu := styleMuted.Render
 
 	cursor := "  "
@@ -124,9 +126,14 @@ func (m *Model) renderProgressRow(r pg.ProgressRow, selected bool, barW int) str
 	// it reads as a hint rather than a promise. Em-dash when it can't be computed.
 	eta := mu(padRight(progressETA(r), progColEta))
 
+	relation := r.Relation
+	if r.Database != "" && r.Database != db {
+		relation = r.Database + "." + relation
+	}
+
 	line := cursor +
 		cmd + "  " +
-		padRight(truncateToWidth(r.Relation, colName-1), colName) +
+		padRight(truncateToWidth(relation, colName-1), colName) +
 		mu(padRight(truncateToWidth(r.Phase, progColPhase-1), progColPhase)) +
 		padLeft(progressDoneTotal(r), progColDoneTotal) + "  " +
 		bar + " " +
@@ -175,8 +182,8 @@ func progressETA(r pg.ProgressRow) string {
 }
 
 // progressDoneTotal formats the raw counters in their native unit: byte-based
-// operations (COPY, base backup) humanized, block-based ones as plain counts.
-// With no total yet, show just what's been done so far.
+// operations (COPY, base backup) humanized, count-based ones (blocks, indexes,
+// rows) as plain counts. With no total yet, show just what's been done so far.
 func progressDoneTotal(r pg.ProgressRow) string {
 	if r.Unit == "bytes" {
 		if r.Total <= 0 {

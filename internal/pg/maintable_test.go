@@ -76,6 +76,10 @@ func TestMainTable(t *testing.T) {
 		"ANALYZE public.game_battle":                          "public.game_battle",
 		// A whole-database VACUUM names no relation.
 		"VACUUM": "",
+		// LOCK: the TABLE noise word and ONLY are optional; the mode clause follows.
+		"LOCK TABLE public.battle IN SHARE UPDATE EXCLUSIVE MODE": "public.battle",
+		"LOCK TABLE ONLY battle IN ACCESS EXCLUSIVE MODE NOWAIT":  "battle",
+		"LOCK battle": "battle",
 	}
 	for q, want := range cases {
 		if got := MainTable(q); got != want {

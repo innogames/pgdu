@@ -76,7 +76,9 @@ func barReserve(s *screen) int {
 		// detail budget so the bar shrinks earlier on narrow terminals
 		// instead of pushing the detail off the right.
 		const partsDetail = 50
-		return colCursor + colBrackets + colSize + colBloat + colMark + colName + partsDetail
+		return colCursor + colBrackets + colSize +
+			(bloatByteColW + colGutter) + (bloatPctColW + colGutter) +
+			(partTypeColW + colGutter) + colMark + colName + partsDetail
 	case levelColumns, levelDatabases, levelSchemas:
 		return colCursor + colBrackets + colSize + colMark + colName + colDetail
 	case levelHeapPages:

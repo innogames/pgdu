@@ -448,29 +448,43 @@ func tupleLifecycleLine(t pg.HeapTuple, indent string) string {
 	return indent + styleMuted.Render("lifecycle: "+strings.Join(parts, " · "))
 }
 
-// tupleAnatomyLine breaks lp_len down into header overhead vs. user payload
-// (split at t_hoff), draws a tiny proportional bar, and locates the tuple in
-// the page by byte span — turning the old bare lp_off / raw_len numbers into a
-// disk-efficiency story. The header byte count is graded by payload share so
-// overhead-heavy tuples (many tiny rows) read warm.
+// tupleAnatomyLine breaks lp_len down into fixed header, null bitmap, the
+// MAXALIGN pad up to t_hoff, and user payload, draws a tiny proportional bar,
+// and locates the tuple in the page by byte span — turning the old bare
+// lp_off / raw_len numbers into a disk-efficiency story. This is the same
+// decomposition the byte-layout overlay's Σ line shows, minus the inter-column
+// pads that need the per-attribute walk (those stay folded into data here, so
+// the split matches without loading the attr metadata this level doesn't have).
+// The fixed-header byte count is graded by payload share so overhead-heavy
+// tuples (many tiny rows) read warm.
 func tupleAnatomyLine(t pg.HeapTuple, indent string) string {
 	total := int(t.LPLen)
-	header := 0
+	hoff := 0
 	if t.Hoff != nil {
-		header = int(*t.Hoff)
+		hoff = int(*t.Hoff)
 	}
-	data := max(total-header, 0)
-	bar := renderTupleAnatomyBar(header, total, 10)
+	data := max(total-hoff, 0)
+	bar := renderTupleAnatomyBar(hoff, total, 10)
 
-	headStr := fmt.Sprintf("%d B header", header)
+	nullmap := 0
+	if uint16(t.Infomask)&pg.HeapHasNull != 0 {
+		natts := int(t.Infomask2 & pg.HeapNattsMask2)
+		nullmap = (natts + 7) / 8
+	}
+	pad := max(hoff-heapTupleHeaderLen-nullmap, 0)
+
+	headStr := fmt.Sprintf("%d B header", heapTupleHeaderLen)
 	if total > 0 {
 		headStr = percentStyle(float64(data) * 100 / float64(total)).Render(headStr)
 	}
-	nullNote := ""
-	if im := uint16(t.Infomask); im&pg.HeapHasNull != 0 {
-		nullNote = styleMuted.Render(" incl null-map")
+	parts := headStr
+	if nullmap > 0 {
+		parts += styleMuted.Render(fmt.Sprintf(" + %d B null-map", nullmap))
 	}
-	return indent + bar + "  " + headStr + nullNote +
+	if pad > 0 {
+		parts += styleMuted.Render(fmt.Sprintf(" + %d B pad", pad))
+	}
+	return indent + bar + "  " + parts +
 		styleMuted.Render(fmt.Sprintf(" + %d B data = %d B", data, total)) +
 		styleMuted.Render(fmt.Sprintf("  ·  page bytes %d–%d", t.LPOff, int(t.LPOff)+total))
 }

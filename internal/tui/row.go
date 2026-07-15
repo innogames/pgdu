@@ -32,6 +32,11 @@ type row struct {
 	typeTag   string
 	typeStyle lipgloss.Style
 
+	// bloatCols splits the bloat cell into two aligned columns — wasted bytes
+	// and percentage — instead of the tables level's single "N% bloat" cell.
+	// Set on the parts level, whose Σ footer sums the bytes column.
+	bloatCols bool
+
 	// Optional heap/index/toast breakdown — when any are non-zero, the bar is
 	// drawn as three coloured segments instead of one solid block. Used by the
 	// tables level so the composition of each table is visible at a glance.
@@ -85,16 +90,29 @@ func renderRow(r row) string {
 	}
 	cursor := selectedCursor(r.selected)
 	bloatStr := ""
-	if r.hasBloat {
+	if r.bloatCols && !r.hasBloat {
+		// The bloat columns exist (a sibling was measured) but this row wasn't
+		// — toast has no estimator, and rows are still pending mid-scan. Blank
+		// cells keep the type/name columns aligned with the measured rows.
+		bloatStr = strings.Repeat(" ", bloatByteColW+colGutter+bloatPctColW+colGutter)
+	} else if r.hasBloat {
 		pct := 0
 		if r.size > 0 {
 			pct = int(float64(r.bloat) * 100.0 / float64(r.size))
 		}
-		if pct <= 0 {
+		switch {
+		case pct <= 0 && r.bloatCols:
 			// Measured, but no (or negligible) waste — a dash reads as "checked,
 			// clean" where a "0% bloat" would draw the eye to a non-problem.
+			bloatStr = styleMuted.Render(padRight("-", bloatByteColW)) + "  " +
+				styleMuted.Render(padRight("-", bloatPctColW)) + "  "
+		case pct <= 0:
 			bloatStr = styleMuted.Render(padRight("-", 12)) + "  "
-		} else {
+		case r.bloatCols:
+			st := bloatPercentStyle(pct)
+			bloatStr = st.Render(padRight(humanize.Bytes(r.bloat), bloatByteColW)) + "  " +
+				st.Render(padRight(fmt.Sprintf("%d%%", pct), bloatPctColW)) + "  "
+		default:
 			bloatStr = bloatPercentStyle(pct).Render(padRight(fmt.Sprintf("%d%% bloat", pct), 12)) + "  "
 		}
 	}
@@ -139,6 +157,14 @@ const breakdownColW = 10
 
 // pagesColW matches rowsColW: formatRows output (max 6 chars) + a "p" suffix.
 const pagesColW = 7
+
+// Widths of the parts level's split bloat columns: wasted bytes
+// ("1023.99 MB" = 10 cells) and percentage — sized for its "bloat%" header
+// plus the sort arrow, not the cell values ("100%" at most).
+const (
+	bloatByteColW = 10
+	bloatPctColW  = 7
+)
 
 // tableCountColW is the width of the schemas level's "tables" column; wide
 // enough for the "tables↓" header label and any realistic formatRows count.
@@ -681,7 +707,8 @@ func renderPartsHeader(s *screen, barW int) string {
 	line := headerIndent(barW) +
 		padRight(sortMark("size", s.sort == sortBySize, s.sortDesc), 10) + "  "
 	if anyBloat {
-		line += padRight(sortMark("bloat", s.sort == sortByBloat, s.sortDesc), 12) + "  "
+		line += padRight("bloat", bloatByteColW) + "  " +
+			padRight(sortMark("bloat%", s.sort == sortByBloat, s.sortDesc), bloatPctColW) + "  "
 	}
 	line += padRight(sortMark("type", s.sort == sortByType, s.sortDesc), partTypeColW) + "  "
 	// 2-cell placeholder for the childMark ("+ " / "  ") before the name.
