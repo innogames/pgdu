@@ -248,8 +248,8 @@ func decodeOnDiskNumeric(b []byte) (string, bool) {
 	// Strip the numeric's varlena header. In practice it is always the 4-byte
 	// uncompressed form, but tolerate a 1-byte short header defensively.
 	var p []byte
-	switch {
-	case b[0]&0x01 == 0x01:
+	switch b[0] & 0x01 {
+	case 0x01:
 		total := int(b[0] >> 1)
 		if total < 1 || total > len(b) {
 			return "", false

@@ -11,7 +11,11 @@ func le16(v uint16) []byte  { b := make([]byte, 2); binary.LittleEndian.PutUint1
 func le32b(v uint32) []byte { b := make([]byte, 4); binary.LittleEndian.PutUint32(b, v); return b }
 
 func concat(parts ...[]byte) []byte {
-	var out []byte
+	n := 0
+	for _, p := range parts {
+		n += len(p)
+	}
+	out := make([]byte, 0, n)
 	for _, p := range parts {
 		out = append(out, p...)
 	}
@@ -58,14 +62,14 @@ func TestDecodeJsonb(t *testing.T) {
 	// {"a": true}
 	obj := concat(
 		le32b(jbFObject|1),
-		le32b(jEntryString|1),   // key "a"
-		le32b(jEntryBoolTrue|0), // value true
+		le32b(jEntryString|1), // key "a"
+		le32b(jEntryBoolTrue), // value true
 		[]byte{'a'},
 	)
 	// [null, "x"]
 	arr := concat(
 		le32b(jbFArray|2),
-		le32b(jEntryNull|0),
+		le32b(jEntryNull),
 		le32b(jEntryString|1),
 		[]byte{'x'},
 	)
@@ -89,7 +93,7 @@ func TestDecodeJsonb(t *testing.T) {
 	nested := concat(
 		le32b(jbFArray|1),
 		le32b(jEntryContainer|4),
-		le32b(jbFArray|0),
+		le32b(jbFArray), // zero elements
 	)
 
 	cases := []struct {
@@ -100,8 +104,8 @@ func TestDecodeJsonb(t *testing.T) {
 		{"object", obj, `{"a": true}`},
 		{"array", arr, `[null, "x"]`},
 		{"scalar string", scalar, `"hi"`},
-		{"empty object", le32b(jbFObject | 0), `{}`},
-		{"empty array", le32b(jbFArray | 0), `[]`},
+		{"empty object", le32b(jbFObject), `{}`},
+		{"empty array", le32b(jbFArray), `[]`},
 		{"numeric elem", withNum, `["ab", 1]`},
 		{"nested", nested, `[[]]`},
 	}
@@ -120,7 +124,7 @@ func TestDecodeAttrValueJsonb(t *testing.T) {
 	container := concat(
 		le32b(jbFObject|1),
 		le32b(jEntryString|1),
-		le32b(jEntryBoolTrue|0),
+		le32b(jEntryBoolTrue),
 		[]byte{'a'},
 	)
 	val := concat(le32b(uint32(4+len(container))<<2), container)
