@@ -39,7 +39,13 @@ func (m *Model) onDatabasesLoaded(msg databasesLoadedMsg) tea.Cmd {
 	// In the diagnostics tool, offer running the query across every database as
 	// a synthetic row pinned to the top of the picker.
 	if msg.err == nil && s.tool == toolTools && s.diag != nil && len(msg.dbs) > 1 {
-		allRow := item{name: "(all databases)", hasChildren: true, data: allDBsChoice{}}
+		// Sized as the sum of all listed databases so the row reads as a real
+		// total and sorts to the top on size↓ without pinning.
+		var total int64
+		for _, d := range msg.dbs {
+			total += d.SizeBytes
+		}
+		allRow := item{name: "(all databases)", size: total, hasChildren: true, data: allDBsChoice{}}
 		s.items = append([]item{allRow}, s.items...)
 		s.itemsRev++ // items no longer match the applySort order; invalidate the filter cache
 	}

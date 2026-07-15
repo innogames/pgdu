@@ -22,8 +22,9 @@ internal/tui/        # Bubble Tea Model/Update/View
   update.go          #   top-level Update() dispatcher
   update_msgs*.go    #   *LoadedMsg / extStatus / reindexDone handlers (split per feature)
   update_keys*.go    #   handleKey, handleFilterKey, confirm flows (split per feature)
-  update_drill*.go   #   drillIn (level ↓), loadCurrent (issue load Cmd)
-  update_sort.go     #   applySort + validSorts + cycleSort
+  update_drill*.go   #   drillIn (level ↓)
+  update_load.go     #   loadCurrent (issue load Cmd)
+  update_sort.go     #   applySort + validSorts + cycleSort (sortMode methods in sort_modes.go)
   cmds*.go           #   tea.Cmd wrappers around pg.Client (query() helper)
   view.go, view_*.go #   View() + per-level renderers (view_activity/queries/snapshots/…)
   row.go             #   shared row + paintBar/barSegment primitives
@@ -85,16 +86,17 @@ persist to `~/.config/pgdu/prefs.json` via `internal/prefs` (`os.UserConfigDir`,
 `PGDU_CONFIG_DIR` overrides; dir 0o700, file 0o600, atomic temp+rename). The
 schema (`prefs.Prefs` → `Tables[key].Columns`) is extensible — add sort/refresh
 fields later with no migration. `prefs.Load` never fails (missing/corrupt →
-empty prefs). The TUI seeds `actColsVisible`/`stmtColsVisible` from it in
-`NewModel` and writes back via `saveColPrefs` in the two C-toggle handlers; a new
-table just needs a `colPrefs<Name>` key + one `saveColPrefs` call.
+empty prefs). The TUI seeds the per-table `*ColsVisible` maps from it in
+`NewModel` and writes back via `saveColPrefs` in the C-toggle handlers
+(`update_keys_columns.go`); a new table just needs a `colPrefs<Name>` key + one
+`saveColPrefs` call.
 
 ## Things to know before touching code
 
-- **Tools & levels**: `levelTools` is the root menu; from it you pick one of the 8 `tool`
+- **Tools & levels**: `levelTools` is the root menu; from it you pick one of the `tool`
   values (`toolDisk`, `toolBuffers`, `toolPageInspect`, `toolTools` (diagnostics), `toolWAL`,
-  `toolQueries` (top queries), `toolMaintenance`, `toolActivity`) and drill through that
-  tool's own `level*` chain. Both enums live in `app.go`.
+  `toolQueries` (top queries), `toolMaintenance`, `toolActivity`, `toolTableStats`,
+  `toolTriage`) and drill through that tool's own `level*` chain. Both enums live in `app.go`.
 - **Two-step confirm is a shared pattern**: reindex, snapshot delete (`pendingDeleteSnap`),
   backend cancel/terminate (`pendingBackend*`), streaming VACUUM (`pendingVacuum`), and
   extension reset all use the same flow — Enter arms a `pending*` field, any next key
@@ -115,16 +117,13 @@ table just needs a `colPrefs<Name>` key + one `saveColPrefs` call.
 - **Maintenance / system overview** (`toolMaintenance`, `view_maintenance*.go`): extension
   capacity stats (pg_stat_statements/pg_qualstats) with a reset confirm, plus a settings
   browser (`levelSettings`).
-- `screen.table` is the source of truth at `levelParts`/`levelColumns` — there
-  used to be redundant `tableName`/`tableOID` fields; they were dropped.
+- `screen.table` is the source of truth at `levelParts`/`levelColumns`.
 - `loadCurrent()` clears `extPrompt` and `installing` on entry; any state set
   before it is loaded asynchronously will be wiped.
 - `applySort` is called after every load so render order matches sort order.
   `bloatFilledMsg` matches by name, not index, because of this.
 - `extPrompt.blocking == true` replaces the list area entirely; non-blocking
   prompts render as a soft hint line above it.
-- Reindex flow is two-step: Enter on a >5% bloated index arms `pendingReindex`,
-  any next key cancels — `y`/`Y` executes (see `handleKey`).
 - Top-queries snapshots (`internal/pg/snapshots.go`): `S` dumps the raw
   cumulative counters to disk, `L` opens `levelSnapshots` — a timeline range
   picker whose `◀ start`/`◀ end` markers reflect the applied window (derived by
@@ -154,7 +153,7 @@ table just needs a `colPrefs<Name>` key + one `saveColPrefs` call.
   `stmtColDesc` carries an id, kind, `defaultOn`, an `available(ctx)` gate
   (planning columns need `track_planning`) and a `cell` builder. `C` opens an
   htop-style picker (`showColumnConfig` overlay) to toggle visibility; choices
-  are session-only. `buildStatementItems` *projects* the registry to the visible
+  persist via `internal/prefs`. `buildStatementItems` *projects* the registry to the visible
   subset so `diagCols` and each row's `[]pg.DiagCell` stay parallel by
   construction (no index constants). The sort column is tracked by stable id
   (`Model.stmtSortColID`); `syncStmtSort` remaps it to the projected

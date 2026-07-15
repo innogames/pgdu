@@ -6,8 +6,9 @@
 
 An ncdu-style TUI for deep inspection of your PostgreSQL database — drill
 from databases into schemas, tables, partitions, indexes, columns, pages,
-and tuples; analyse query performance, WAL activity, and index health; inspect
-what's living in `shared_buffers`.
+and tuples; analyse query performance, live activity, WAL, and index health;
+inspect what's living in `shared_buffers`; and run a one-key server health
+triage.
 
 ### Disk usage
 
@@ -37,9 +38,10 @@ A workload analyzer in the spirit of [PoWA](https://powa.readthedocs.io/) (the
 web-based PostgreSQL Workload Analyzer) — but living entirely in your terminal,
 no web server or collector daemon to deploy. It reads `pg_stat_statements` and
 ranks statements by total time, calls, rows, cache-hit ratio, WAL bytes, and
-more. Columns are configurable (`C`), and snapshots can be captured (`S`) and
-diffed over a time window (`L`) so you can see what changed between two points
-instead of only cumulative totals.
+more. Enter shows the full query with `EXPLAIN` and captured sample
+parameters. Columns are configurable (`C`), and snapshots can be captured
+(`S`) and diffed over a time window (`L`) so you can see what changed between
+two points instead of only cumulative totals.
 
 ![Top queries](docs/top_queries.png)
 
@@ -53,6 +55,23 @@ table it's touching, and the query itself. Sort by any column, and filter by
 state to zero in on long-running or blocked backends.
 
 ![Live activity](docs/activity.png)
+
+### Table overview
+
+Per-table statistics for a schema in one sortable table: size, write/scan
+activity, cache hit ratios, bloat, vacuum age, and storage options — with
+configurable columns (`C`), like the top-queries view.
+
+### System overview & health triage
+
+**System overview** is a server health dashboard: connections, transactions,
+I/O, replication, autovacuum, WAL, PgBouncer, extension capacity, and a
+`pg_settings` browser.
+
+**Health triage** runs the whole diagnostic battery concurrently and boils it
+down to a red/yellow/green report; Enter drills into the check that fired. The
+individual diagnostics (index sizes/bloat, table health, vacuum, locks, …) are
+also browsable under **Other tools**.
 
 ### Shared buffers
 
@@ -90,22 +109,19 @@ And one level below a heap page are the raw **heap tuples**: line-pointer flags
 
 ![Tuples](docs/page_tuples.png)
 
+![Single Tuple](docs/page_tuple.png)
+
 ### WAL Inspector
 
-Built-in diagnostic queries for WAL activity and index health.
-
-The **WAL inspector** breaks down recently generated WAL by record type / resource
-manager — bytes, full-page images, and record counts per category — with the
-individual records listed alongside, so you can see exactly what is driving WAL
-volume.
+Breaks down recently generated WAL by record type / resource manager — bytes,
+full-page images, and record counts per category — with the individual records
+listed alongside, so you can see exactly what is driving WAL volume.
 
 ![WAL inspector](docs/wal_inspector.png)
 
-**Index sizes** lists every index ranked by size, and **index bloat** estimates
-wasted space per index (bloat %, bloat MB vs. index/table size, and scan counts)
-to surface unused or bloated indexes that are candidates for a `REINDEX` or drop.
-
-![Index sizes](docs/tool_index_size.png)
+Among the diagnostics under **Other tools**, **index bloat** estimates wasted
+space per index (bloat %, bloat MB vs. index/table size, and scan counts) to
+surface unused or bloated indexes that are candidates for a `REINDEX` or drop.
 
 ![Index bloat](docs/tool_index_bloat.png)
 
@@ -142,16 +158,18 @@ Honors the usual libpq environment: `PGHOST`, `PGPORT`, `PGUSER`,
 
 ## Keys
 
-| Key             | Action                |
-|-----------------|-----------------------|
-| `↑`/`k` `↓`/`j` | move                  |
-| `↵`/`l`         | drill in              |
-| `q`/`esc`       | back                  |
-| `/`             | filter                |
-| `s` / `r`       | sort column / reverse | # todo <- and -> 
-| `space`         | refresh               |
-| `e`             | export view to CSV    |
-| `?`             | help                  |
+| Key       | Action                       |
+|-----------|------------------------------|
+| `↑` `↓`   | move                         |
+| `↵`       | drill in                     |
+| `q`/`esc` | back                         |
+| `/`       | filter                       |
+| `←` `→`   | sort column                  |
+| `r`       | reverse sort                 |
+| `C`       | configure columns            |
+| `space`   | refresh                      |
+| `e`       | export view to CSV           |
+| `?`       | help (all view-specific keys)|
 
 ## Sample data
 
@@ -172,5 +190,6 @@ safe to re-run — each table is dropped and rebuilt.
 ## Requirements
 
 - PostgreSQL 17+
-- `pg_stat_statements` and `pgstattuple` are used opportunistically;
-  press `i` in the relevant view to install them if missing.
+- Extensions are used opportunistically per view: `pg_stat_statements`,
+  `pgstattuple`, `pg_buffercache`, `pageinspect`, `pg_walinspect`,
+  `pg_qualstats`; press `i` in the relevant view to install one if missing.
