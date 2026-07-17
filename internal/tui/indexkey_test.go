@@ -200,7 +200,8 @@ func pivotItem(off int32, ctid string, data *string) item {
 func TestInternalDownlinkRangesTruncated(t *testing.T) {
 	cols := []pg.IndexKeyColumn{int4Col, textCol}
 	full := func(id byte, s string) *string {
-		b := []byte{id, 0, 0, 0, byte((len(s)+1)<<1 | 1)}
+		b := make([]byte, 0, 5+len(s))
+		b = append(b, id, 0, 0, 0, byte((len(s)+1)<<1|1))
 		b = append(b, s...)
 		return rawBytes(b...)
 	}
