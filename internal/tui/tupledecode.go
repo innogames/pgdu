@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/binary"
 	"fmt"
+	"strconv"
 
 	"pgdu/internal/humanize"
 	"pgdu/internal/pg"
@@ -18,6 +19,16 @@ func decodeAttrValue(a pg.TupleAttr) string {
 	case a.Len > 0:
 		if len(a.Value) != int(a.Len) {
 			return ""
+		}
+		// An enum's bytes are the pg_enum row's OID (unsigned — formatFixed
+		// would read a high OID as negative); the label resolved by
+		// sqlTupleAttrs rides along so the number means something.
+		if a.TypCategory == "E" && a.Len == 4 {
+			oid := strconv.FormatUint(uint64(binary.LittleEndian.Uint32(a.Value)), 10)
+			if a.EnumLabel != nil {
+				return oid + " (" + *a.EnumLabel + ")"
+			}
+			return oid
 		}
 		return formatFixed(a.Value, a.TypName)
 	case a.Len == -1:

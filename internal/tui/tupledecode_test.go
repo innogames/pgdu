@@ -22,6 +22,8 @@ func TestDecodeAttrValue(t *testing.T) {
 	compressed := append(le32(12<<2|2), le32(5000)...)
 	compressed = append(compressed, 'z', 'z', 'z', 'z')
 
+	closed := "closed"
+
 	cases := []struct {
 		name string
 		attr pg.TupleAttr
@@ -44,6 +46,10 @@ func TestDecodeAttrValue(t *testing.T) {
 		{"compressed inline", pg.TupleAttr{Len: -1, TypCategory: "S", Value: compressed}, "compressed · 4.88 KB raw"},
 		{"fixed length mismatch", pg.TupleAttr{Len: 4, TypName: "int4", Value: le64(1)}, ""},
 		{"cstring undecodable", pg.TupleAttr{Len: -2, Value: []byte{'x', 0}}, ""},
+		{"enum with label", pg.TupleAttr{Len: 4, TypName: "quest_state", TypCategory: "E", EnumLabel: &closed, Value: le32(19428)}, "19428 (closed)"},
+		// Unresolvable label (enum row gone) and high OIDs both stay readable:
+		// the OID renders unsigned, never as a negative int4.
+		{"enum without label", pg.TupleAttr{Len: 4, TypName: "quest_state", TypCategory: "E", Value: le32(0x80000001)}, "2147483649"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

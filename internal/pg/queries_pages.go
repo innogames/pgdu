@@ -133,6 +133,14 @@ SELECT col, val FROM (
 // 18-byte on-disk TOAST pointer and nothing is ever dereferenced, so the query
 // is safe on dead-but-stored tuples.
 //
+// An enum attribute's stored bytes are the pg_enum row's OID, which means
+// nothing to a reader — the pg_enum join decodes those bytes back to the OID
+// (little-endian, the layout on every platform pageinspect runs on in
+// practice, matching the TUI's byte decoders) and carries the matching
+// enumlabel along so the overlay can render "19428 (closed)" without a second
+// round trip. enum_label stays NULL for non-enums, NULL/not-stored values, and
+// OIDs that no longer resolve.
+//
 // $1 doubles as get_raw_page's text arg and the ::regclass (precedent:
 // sqlToastTuples); $2 is the block number; $3 the line pointer. Zero rows mean
 // the lp vanished (page rewritten since the tuple list loaded) — the caller
@@ -153,10 +161,23 @@ SELECT a.attnum::int,
        (a.attnum <= (tup.infomask2 & 2047))               AS stored,
        COALESCE(t.typname, '')::text                      AS typname,
        COALESCE(t.typcategory, '')::text                  AS typcategory,
+       e.enumlabel::text                                  AS enum_label,
        tup.t_attrs[a.attnum]                              AS value
 FROM   pg_attribute a
 CROSS  JOIN tup
 LEFT   JOIN pg_type t ON t.oid = a.atttypid
+LEFT   JOIN pg_enum e
+       ON  t.typtype = 'e'
+       AND e.enumtypid = t.oid
+       -- CASE, not an AND'ed octet_length qual: join quals evaluate in any
+       -- order, so a bare guard doesn't stop get_byte from erroring on the
+       -- 1-3 B values of *other* attributes in the row.
+       AND e.oid = CASE WHEN octet_length(tup.t_attrs[a.attnum]) = 4
+                        THEN (get_byte(tup.t_attrs[a.attnum], 0)::bigint
+                            + get_byte(tup.t_attrs[a.attnum], 1)::bigint * 256
+                            + get_byte(tup.t_attrs[a.attnum], 2)::bigint * 65536
+                            + get_byte(tup.t_attrs[a.attnum], 3)::bigint * 16777216)::oid
+                   END
 WHERE  a.attrelid = $1::regclass AND a.attnum > 0
 ORDER  BY a.attnum
 `

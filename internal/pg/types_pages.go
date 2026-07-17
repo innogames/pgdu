@@ -171,7 +171,10 @@ type TupleAttr struct {
 	// is gone (dropped columns zero out atttypid).
 	TypName     string
 	TypCategory string
-	Value       []byte // nil = SQL NULL or not stored; varlena includes its header
+	// EnumLabel is the pg_enum label matching this attribute's stored OID,
+	// resolved SQL-side; nil for non-enums and unresolvable/absent values.
+	EnumLabel *string
+	Value     []byte // nil = SQL NULL or not stored; varlena includes its header
 }
 
 // BtreeLevelCount is one (tree level, page type) bucket from a whole-index
