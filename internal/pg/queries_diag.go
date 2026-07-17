@@ -1007,11 +1007,12 @@ ORDER BY stale_pct DESC NULLS LAST
 
 // sqlProgressBase unifies every pg_stat_progress_* view into one normalized
 // live-operations CTE: what long-running maintenance/DDL is in flight and how
-// far along it is. done/total pick each command's most representative counter,
-// and unit records what they count (blocks for vacuum/index/analyze/cluster,
-// indexes for vacuum's index passes, bytes for COPY and base backups) so
-// callers can format them. datname carries the operation's own database —
-// the views are cluster-wide, so relid can only be resolved there.
+// far along it is. done/total pick each phase's own counter — the one that
+// actually moves right now — and unit records what it counts (blocks, tuples,
+// lockers, indexes, bytes, rows) so callers can format it; ProgressRow.
+// OverallPct composes those per-phase counters into one 0–100 estimate.
+// datname carries the operation's own database — the views are cluster-wide,
+// so relid can only be resolved there.
 const sqlProgressBase = `
 WITH prog AS (
     -- heap_blks_scanned only moves during the scanning-heap phase; the index
@@ -1036,13 +1037,35 @@ WITH prog AS (
            END::text AS unit, false AS approx
     FROM pg_stat_progress_vacuum
     UNION ALL
-    SELECT pid, datname, 'CREATE INDEX', relid, phase, blocks_done::numeric, blocks_total::numeric, 'blocks', false
+    -- The scan phases count blocks, the sort/load phases tuples, and the
+    -- "waiting for …" phases only move their lockers counters — pick per
+    -- phase (mirrors sqlReindexProgress) so the counters keep moving through
+    -- the whole build instead of parking at 0.
+    SELECT pid, datname, 'CREATE INDEX', relid, phase,
+           CASE WHEN phase LIKE 'waiting%' THEN lockers_done::numeric
+                WHEN blocks_total > 0      THEN blocks_done::numeric
+                ELSE tuples_done::numeric
+           END,
+           CASE WHEN phase LIKE 'waiting%' THEN lockers_total::numeric
+                WHEN blocks_total > 0      THEN blocks_total::numeric
+                ELSE tuples_total::numeric
+           END,
+           CASE WHEN phase LIKE 'waiting%' THEN 'lockers'
+                WHEN blocks_total > 0      THEN 'blocks'
+                ELSE 'tuples'
+           END, false
     FROM pg_stat_progress_create_index
     UNION ALL
     SELECT pid, datname, 'ANALYZE', relid, phase, sample_blks_scanned::numeric, sample_blks_total::numeric, 'blocks', false
     FROM pg_stat_progress_analyze
     UNION ALL
-    SELECT pid, datname, 'CLUSTER', relid, phase, heap_blks_scanned::numeric, heap_blks_total::numeric, 'blocks', false
+    -- heap_blks_scanned/heap_blks_total only apply to the seq-scan phase; the
+    -- later phases count tuples with no total, so zero the counters there and
+    -- let the phase itself carry the progress (clusterPhaseSpan).
+    SELECT pid, datname, 'CLUSTER', relid, phase,
+           CASE WHEN phase = 'seq scanning heap' THEN heap_blks_scanned::numeric ELSE 0 END,
+           CASE WHEN phase = 'seq scanning heap' THEN heap_blks_total::numeric ELSE 0 END,
+           'blocks', false
     FROM pg_stat_progress_cluster
     UNION ALL
     -- COPY reports bytes_processed but bytes_total is 0 for STDIN and PROGRAM/PIPE

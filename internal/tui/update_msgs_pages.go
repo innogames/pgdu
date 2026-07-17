@@ -151,6 +151,29 @@ func (m *Model) onIndexPagesLoaded(msg indexPagesLoadedMsg) tea.Cmd {
 	return nil
 }
 
+func (m *Model) onBtreeLevelsLoaded(msg btreeLevelsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexPages)
+	if s == nil || s.index.OID != msg.indexOID {
+		return nil
+	}
+	s.btreeLevelsLoading = false
+	s.btreeLevelsDone = true
+	// Best-effort banner decoration: a failure (privileges, census timeout on
+	// a very large index) keeps its error for the banner to explain. Except a
+	// missing pageinspect — the page list is showing its install prompt for
+	// that; leaving the census un-done lets the post-install reload retry it.
+	s.btreeLevels = msg.counts
+	s.btreeLevelsErr = msg.err
+	if msg.err != nil {
+		s.btreeLevels = nil
+		if asMissingExt(msg.err) != nil {
+			s.btreeLevelsDone = false
+			s.btreeLevelsErr = nil
+		}
+	}
+	return nil
+}
+
 func (m *Model) onIndexTuplesLoaded(msg indexTuplesLoadedMsg) tea.Cmd {
 	// Match on (index, block) only — block uniquely identifies the page within
 	// an index. The page type isn't part of the identity: a downlink descent

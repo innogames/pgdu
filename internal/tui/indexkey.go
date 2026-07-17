@@ -90,6 +90,49 @@ func decodeIndexKeyParts(hexData string, cols []pg.IndexKeyColumn) (parts []stri
 	return parts, complete, true
 }
 
+// decodeIndexKeyPivot decodes a suffix-truncated pivot key: nbtree kept only
+// the first natts attributes (enough to separate the two children at the split
+// point) and dropped the rest, which _bt_compare treats as minus infinity. The
+// stored attributes decode normally and each dropped one renders as −∞ —
+// "(19224,−∞)" — matching the parenthesized style of full separators instead
+// of the bare-and-elided "19224…" the generic decoder produces when its walk
+// runs out of bytes. natts comes from the pivot's ctid offset word (see
+// pivotNAtts); ok == false sends the caller back to the generic path. That
+// includes leftover bytes past the stored attributes that aren't pure MAXALIGN
+// zero padding — then natts wasn't a real attribute count (the ctid was a
+// genuine heap pointer whose offset merely looked small).
+func decodeIndexKeyPivot(hexData string, cols []pg.IndexKeyColumn, natts int) (string, bool) {
+	if natts <= 0 || natts >= len(cols) {
+		return "", false
+	}
+	b, truncated := parseHexBytes(hexData)
+	if len(b) == 0 || truncated {
+		return "", false
+	}
+	parts := make([]string, 0, len(cols))
+	off := 0
+	for _, c := range cols[:natts] {
+		s, next, ok := decodeIndexColumn(b, off, c)
+		if !ok {
+			return "", false
+		}
+		parts = append(parts, s)
+		off = next
+	}
+	if len(b)-off >= 8 {
+		return "", false
+	}
+	for _, pad := range b[off:] {
+		if pad != 0 {
+			return "", false
+		}
+	}
+	for range len(cols) - natts {
+		parts = append(parts, "−∞")
+	}
+	return "(" + strings.Join(parts, ",") + ")", true
+}
+
 // decodeIndexColumn decodes one attribute starting at absolute offset off within
 // b (absolute because alignment padding is computed from the tuple-data start).
 // Returns the formatted value and the offset just past it, or ok == false when
@@ -275,11 +318,11 @@ func decodeVarlena(b []byte, off int, c pg.IndexKeyColumn) (string, int, bool) {
 }
 
 // formatVarlenaPayload renders a varlena's data bytes: string types
-// (typcategory 'S') as text when valid and free of control bytes, everything
-// else (bytea, geometry, …) as \x-hex.
+// (typcategory 'S') as text when valid UTF-8, with control characters shown
+// as backslash escapes, everything else (bytea, geometry, …) as \x-hex.
 func formatVarlenaPayload(payload []byte, typCategory string) string {
-	if typCategory == "S" && utf8.Valid(payload) && !hasControlBytes(payload) {
-		return string(payload)
+	if typCategory == "S" && utf8.Valid(payload) {
+		return escapeControlBytes(payload)
 	}
 	return hexString(payload)
 }
@@ -349,6 +392,33 @@ func hasControlBytes(b []byte) bool {
 		}
 	}
 	return false
+}
+
+// escapeControlBytes renders text that may carry ASCII control characters
+// (which would corrupt the single-line TUI) with those bytes as visible
+// backslash escapes — \n, \t, \r for the common ones, \xNN otherwise — so a
+// multi-line text value still reads as text instead of falling back to hex.
+func escapeControlBytes(b []byte) string {
+	if !hasControlBytes(b) {
+		return string(b)
+	}
+	var s strings.Builder
+	s.Grow(len(b) + 8)
+	for _, c := range b {
+		switch {
+		case c == '\n':
+			s.WriteString(`\n`)
+		case c == '\t':
+			s.WriteString(`\t`)
+		case c == '\r':
+			s.WriteString(`\r`)
+		case c < 0x20 || c == 0x7f:
+			fmt.Fprintf(&s, `\x%02x`, c)
+		default:
+			s.WriteByte(c)
+		}
+	}
+	return s.String()
 }
 
 func hexString(b []byte) string {

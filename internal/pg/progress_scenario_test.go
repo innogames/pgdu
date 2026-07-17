@@ -9,8 +9,9 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// A real CREATE INDEX must surface in ListProgress as a block-counted
-// operation. The build can outrun the poll loop on fast machines, so a run
+// A real CREATE INDEX must surface in ListProgress with a phase-appropriate
+// counter (blocks while scanning, tuples while sorting/loading, lockers while
+// waiting). The build can outrun the poll loop on fast machines, so a run
 // that never catches it skips rather than fails.
 func TestIntegration_Progress(t *testing.T) {
 	c, db := diagTestClient(t)
@@ -72,8 +73,10 @@ poll:
 	if !found {
 		t.Skip("index build finished before a progress sample landed")
 	}
-	if got.Unit != "blocks" {
-		t.Errorf("unit = %q, want \"blocks\"", got.Unit)
+	switch got.Unit {
+	case "blocks", "tuples", "lockers":
+	default:
+		t.Errorf("unit = %q, want blocks/tuples/lockers", got.Unit)
 	}
 	if got.PID == 0 {
 		t.Errorf("missing pid: %+v", got)

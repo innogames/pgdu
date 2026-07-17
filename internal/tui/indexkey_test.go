@@ -94,6 +94,14 @@ func TestDecodeIndexKey(t *testing.T) {
 			want: "wheel…", ok: true,
 		},
 		{
+			// Control characters escape to \n / \t / \xNN instead of hexing
+			// the whole value — "ab\ncd" with a 1-byte varlena header.
+			name: "text with newline",
+			hex:  "0d 61 62 0a 63 64",
+			cols: []pg.IndexKeyColumn{textCol},
+			want: `ab\ncd`, ok: true,
+		},
+		{
 			name: "empty data (minus infinity)",
 			hex:  "",
 			cols: []pg.IndexKeyColumn{int8Col},
@@ -141,6 +149,73 @@ func TestInternalDownlinkRangesTyped(t *testing.T) {
 		2: "−∞  …  10",
 		3: "10  …  20",
 		4: "20  …  44",
+	}
+	for off, w := range want {
+		if plain := stripANSI(got[off]); plain != w {
+			t.Errorf("range for off %d = %q, want %q", off, plain, w)
+		}
+	}
+}
+
+// TestDecodeIndexKeyPivot covers suffix-truncated separators: natts (from the
+// pivot's ctid offset word) says how many attributes the tuple stores; the
+// dropped ones render as −∞, the way nbtree compares them.
+func TestDecodeIndexKeyPivot(t *testing.T) {
+	cols := []pg.IndexKeyColumn{int4Col, textCol}
+	for _, tc := range []struct {
+		name  string
+		hex   string
+		natts int
+		want  string
+		ok    bool
+	}{
+		// int4 19224 followed by MAXALIGN zero padding: only the leading
+		// column survived truncation.
+		{"truncated to leading int", "18 4b 00 00 00 00 00 00", 1, "(19224,−∞)", true},
+		// A full separator isn't this function's job — the generic decoder
+		// already renders every stored attribute.
+		{"natts covers all columns", "17 00 00 00 05 61", 2, "", false},
+		// Non-zero leftovers past the stored attributes mean natts wasn't a
+		// pivot word (a real heap offset that happened to be small).
+		{"leftover data bytes", "17 00 00 00 05 61 62 63", 1, "", false},
+		{"minus-infinity downlink", "", 0, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := decodeIndexKeyPivot(tc.hex, cols, tc.natts)
+			if got != tc.want || ok != tc.ok {
+				t.Errorf("decodeIndexKeyPivot(%q, natts=%d) = (%q, %v), want (%q, %v)",
+					tc.hex, tc.natts, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+func pivotItem(off int32, ctid string, data *string) item {
+	return item{data: pg.IndexTuple{ItemOffset: off, Ctid: &ctid, Data: data}}
+}
+
+// TestInternalDownlinkRangesTruncated proves the range column renders a
+// suffix-truncated separator (natts=1 in the downlink's ctid offset word)
+// with its dropped column as −∞, parenthesized like its full neighbours.
+func TestInternalDownlinkRangesTruncated(t *testing.T) {
+	cols := []pg.IndexKeyColumn{int4Col, textCol}
+	full := func(id byte, s string) *string {
+		b := []byte{id, 0, 0, 0, byte((len(s)+1)<<1 | 1)}
+		b = append(b, s...)
+		return rawBytes(b...)
+	}
+	trunc := func(id byte) *string { return rawBytes(id, 0, 0, 0, 0, 0, 0, 0) }
+	items := []item{
+		pivotItem(1, "(93,2)", full(44, "zz")), // high key — page upper bound
+		pivotItem(2, "(628,0)", nil),           // minus-infinity leftmost child
+		pivotItem(3, "(629,2)", full(10, "aa")),
+		pivotItem(4, "(630,1)", trunc(20)), // suffix-truncated: text col dropped
+	}
+	got := internalDownlinkRanges(items, "i", cols, 200)
+	want := map[int32]string{
+		2: "−∞  …  (10,aa)",
+		3: "(10,aa)  …  (20,−∞)",
+		4: "(20,−∞)  …  (44,zz)",
 	}
 	for off, w := range want {
 		if plain := stripANSI(got[off]); plain != w {

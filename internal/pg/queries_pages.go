@@ -238,6 +238,31 @@ FROM   generate_series(
 ORDER  BY s.blkno
 `
 
+// sqlRelationBlocks is the relation's exact block count, from the file size —
+// not pg_class.relpages, which is an ANALYZE-time estimate that could push a
+// whole-relation page walk past EOF. $1 is a regclass-castable text.
+const sqlRelationBlocks = `
+SELECT pg_relation_size($1::regclass) / current_setting('block_size')::bigint
+`
+
+// sqlBtreeLevelCounts aggregates every page of a B-tree (block 0, the
+// metapage, excluded) into per-(btpo_level, type) page counts for the
+// tree-shape banner above the page list. bt_multi_page_stats (PG 16+) walks
+// the whole block range in one call — far cheaper than a LATERAL
+// bt_page_stats per block, but still a full-index read, so the TUI loads it
+// asynchronously and caches the result per screen. $1 is the index
+// regclass-castable text; $2 the number of blocks after the metapage (the
+// caller sizes it via sqlRelationBlocks and skips the call when it's zero —
+// bt_multi_page_stats rejects an empty range).
+const sqlBtreeLevelCounts = `
+SELECT s.btpo_level::int AS level,
+       s.type::text      AS type,
+       count(*)          AS pages
+FROM   bt_multi_page_stats($1, 1, $2::bigint) s
+GROUP  BY 1, 2
+ORDER  BY 1 DESC, 2
+`
+
 // sqlIndexTuples returns the items on one B-tree page. data here is the
 // raw key bytes as a hex text (no per-column decoding — pageinspect can't
 // know the indexed types). Used as the fallback path on internal/deleted

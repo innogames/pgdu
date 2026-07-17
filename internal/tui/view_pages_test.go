@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -109,6 +110,38 @@ func TestInternalDownlinkRangesSkipsNonInternal(t *testing.T) {
 }
 
 func stripANSI(s string) string { return ansi.Strip(s) }
+
+func TestBtreeLevelsLine(t *testing.T) {
+	const w = 120
+	s := &screen{}
+	if got := btreeLevelsLine(s, w); got != "" {
+		t.Errorf("no scan issued: line = %q, want empty", got)
+	}
+	s.btreeLevelsLoading = true
+	if got := stripANSI(btreeLevelsLine(s, w)); !strings.Contains(got, "counting") {
+		t.Errorf("scan in flight: line = %q, want a counting placeholder", got)
+	}
+	s.btreeLevelsLoading = false
+	s.btreeLevelsDone = true
+	if got := btreeLevelsLine(s, w); got != "" {
+		t.Errorf("empty census (metapage-only index): line = %q, want empty", got)
+	}
+	s.btreeLevelsErr = errors.New("permission denied for function bt_multi_page_stats")
+	if got := stripANSI(btreeLevelsLine(s, w)); !strings.Contains(got, "unavailable — permission denied") {
+		t.Errorf("failed scan: line = %q, want the failure reason inline", got)
+	}
+	s.btreeLevelsErr = nil
+	s.btreeLevels = []pg.BtreeLevelCount{
+		{Level: 2, Type: "r", Pages: 1},
+		{Level: 1, Type: "i", Pages: 154},
+		{Level: 0, Type: "l", Pages: 139538},
+		{Level: 0, Type: "d", Pages: 3},
+	}
+	want := "  levels: L2 1 root  ·  L1 154  ·  L0 139538 leaf  ·  deleted 3"
+	if got := stripANSI(btreeLevelsLine(s, w)); got != want {
+		t.Errorf("levels line = %q, want %q", got, want)
+	}
+}
 
 func TestIndexTuplePageType(t *testing.T) {
 	for _, tc := range []struct {

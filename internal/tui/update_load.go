@@ -131,6 +131,15 @@ func (m *Model) loadCurrent() tea.Cmd {
 		case "gin":
 			return m.loadGinPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount)
 		default:
+			// The whole-tree level census reads every page of the index, so it
+			// runs once per screen — window moves and refreshes reuse the cache.
+			if !s.btreeLevelsDone && !s.btreeLevelsLoading {
+				s.btreeLevelsLoading = true
+				return tea.Batch(
+					m.loadIndexPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount),
+					m.loadBtreeLevelCountsCmd(s.index),
+				)
+			}
 			return m.loadIndexPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount)
 		}
 	case levelIndexTuples:

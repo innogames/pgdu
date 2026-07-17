@@ -11,7 +11,7 @@ type ProgressRow struct {
 	RelID     uint32 // raw relid; 0 when the view has none
 	Database  string // database the operation runs in ("" for base backup)
 	Phase     string
-	Unit      string // "blocks", "bytes", "indexes" (vacuum index passes), or "rows" (COPY TO estimate)
+	Unit      string // "blocks", "bytes", "indexes" (vacuum index passes), "tuples"/"lockers" (index build phases), or "rows" (COPY TO estimate)
 	Done      int64
 	Total     int64
 	Approx    bool // total is an estimate (COPY TO vs pg_class.reltuples), not a server counter

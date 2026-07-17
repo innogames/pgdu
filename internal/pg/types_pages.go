@@ -174,6 +174,17 @@ type TupleAttr struct {
 	Value       []byte // nil = SQL NULL or not stored; varlena includes its header
 }
 
+// BtreeLevelCount is one (tree level, page type) bucket from a whole-index
+// bt_page_stats scan: how many pages of that type sit on that btpo_level.
+// Level counts down from the root (= tree height) to 0 (leaves); Type is the
+// bt_page_stats code ('r'/'i'/'l' in the tree, 'd' deleted, 'e' half-dead —
+// PG 14+ keeps btpo_level valid even on deleted pages).
+type BtreeLevelCount struct {
+	Level int32
+	Type  string
+	Pages int64
+}
+
 // BtreeMeta is the B-tree metapage (block 0) as reported by bt_metap. Surfaced
 // as a one-line banner above the page list so the user can read the tree's
 // shape (root block, height) and whether deduplication is possible

@@ -309,6 +309,18 @@ type screen struct {
 	brinMeta     *pg.BrinMeta
 	ginMeta      *pg.GinMeta
 
+	// btreeLevels is the whole-tree page census (pages per level) behind the
+	// "levels:" banner line on the B-tree page list. The scan reads every page
+	// of the index, so it runs once per screen — window moves and refreshes
+	// reuse the cached counts. btreeLevelsLoading suppresses duplicate scans
+	// while one is in flight; btreeLevelsDone marks it finished, with the
+	// failure (if any) kept in btreeLevelsErr so the banner can say why the
+	// counts are missing instead of silently dropping the line.
+	btreeLevels        []pg.BtreeLevelCount
+	btreeLevelsLoading bool
+	btreeLevelsDone    bool
+	btreeLevelsErr     error
+
 	// describe holds the loaded \d-style description for levelDescribe screens.
 	// Nil until the async load completes.
 	describe *pg.Description
@@ -523,6 +535,12 @@ type screen struct {
 	// pg_stat_progress_* views; progressErr is non-nil when the load failed.
 	progressRows []pg.ProgressRow
 	progressErr  error
+	// progressPctMax is the per-operation high-water mark of OverallPct(),
+	// keyed by pid — the same monotonic clamp reindexPctMax applies to the
+	// REINDEX banner, so VACUUM's repeated index passes and transiently-zero
+	// totals hold the bar instead of snapping it back. Entries are rebuilt on
+	// every refresh, so a finished operation's mark is dropped with its row.
+	progressPctMax map[int32]progressMark
 
 	// ── Table maintenance panel (levelParts) ──────────────────────────────────
 	// tableStats is the maintenance snapshot for the current table, loaded

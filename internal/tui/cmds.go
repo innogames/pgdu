@@ -162,6 +162,11 @@ type indexPagesLoadedMsg struct {
 	meta       *pg.BtreeMeta       // metapage banner (nil when bt_metap failed)
 	err        error
 }
+type btreeLevelsLoadedMsg struct {
+	indexOID uint32
+	counts   []pg.BtreeLevelCount
+	err      error
+}
 type indexTuplesLoadedMsg struct {
 	indexOID uint32
 	blkno    int32
@@ -483,6 +488,21 @@ func (m *Model) loadIndexPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		}
 		return indexPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta}
 	})
+}
+
+// btreeCensusTimeout bounds the whole-index level census separately from
+// queryTimeout: reading every page of a large index is legitimately slower
+// than any other read in the TUI, and a late failure only costs a banner
+// line, so it gets more rope than the interactive queries.
+const btreeCensusTimeout = 2 * time.Minute
+
+func (m *Model) loadBtreeLevelCountsCmd(r pg.Relation) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), btreeCensusTimeout)
+		defer cancel()
+		counts, err := m.client.BtreeLevelCounts(ctx, r)
+		return btreeLevelsLoadedMsg{indexOID: r.OID, counts: counts, err: err}
+	}
 }
 
 func (m *Model) loadIndexTuplesCmd(r pg.Relation, blkno int32, pageType string) tea.Cmd {

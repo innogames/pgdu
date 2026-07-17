@@ -37,6 +37,22 @@ func TestProgressPct(t *testing.T) {
 	}
 }
 
+func TestProgressETA(t *testing.T) {
+	r := pg.ProgressRow{RunningMs: 60_000}
+	// 25% in one minute → three more minutes to go.
+	if got, want := progressETA(r, 25), fmtAge(180_000); got != want {
+		t.Errorf("progressETA = %q, want %q", got, want)
+	}
+	for _, pct := range []float64{-1, 0, 100, 120} {
+		if got := progressETA(r, pct); got != "—" {
+			t.Errorf("progressETA(pct=%v) = %q, want em-dash", pct, got)
+		}
+	}
+	if got := progressETA(pg.ProgressRow{}, 50); got != "—" {
+		t.Errorf("progressETA with no runtime = %q, want em-dash", got)
+	}
+}
+
 func TestRenderProgress(t *testing.T) {
 	m := &Model{width: 200}
 	s := &screen{level: levelProgress, tool: toolMaintenance, db: "maindb"}
@@ -50,8 +66,10 @@ func TestRenderProgress(t *testing.T) {
 	s.progressRows = []pg.ProgressRow{
 		{PID: 101, Command: "CREATE INDEX", Relation: "public.orders_idx", Phase: "building index",
 			Unit: "blocks", Done: 640, Total: 1000, RunningMs: 252_000, Username: "app"},
-		{PID: 102, Command: "COPY", Relation: "public.events",
+		{PID: 102, Command: "COPY FROM", Relation: "public.events",
 			Unit: "bytes", Done: 1 << 30, Total: 2 << 30, RunningMs: 63_000, Username: "etl"},
+		// No size estimate (--no-estimate-size): pinned to the streaming
+		// span's start, bare done counter.
 		{PID: 103, Command: "BASE BACKUP", Phase: "streaming database files",
 			Unit: "bytes", Done: 1 << 20, Total: 0, RunningMs: 1_000, Username: "repl"},
 		// Vacuum in another database: relation shows with a db prefix, and its
@@ -69,16 +87,58 @@ func TestRenderProgress(t *testing.T) {
 		t.Errorf("filter text incomplete: %q", s.items[0].name)
 	}
 
+	// The bar/pct column shows the overall phase-weighted estimate; the
+	// done/total column keeps each phase's raw counters.
 	out := stripANSI(m.renderProgress(s, 10))
 	for _, want := range []string{
 		"4 ops",
-		"CREATE INDEX", "public.orders_idx", "building index", "640 / 1000", "64.0%", "4.2m",
-		"COPY", "1.00 GB / 2.00 GB", "50.0%",
-		"BASE BACKUP", "1.00 MB", "—", // unknown total: bare done + em-dash pct
-		"VACUUM", "otherdb.public.big", "vacuuming indexes", "3 / 9", "33.3%",
+		"CREATE INDEX", "public.orders_idx", "building index", "640 / 1000", "42.3%", "4.2m",
+		"COPY FROM", "1.00 GB / 2.00 GB", "50.0%", // no phases: raw counters are the overall pct
+		"BASE BACKUP", "1.00 MB", "3.0%",
+		"VACUUM", "otherdb.public.big", "vacuuming indexes", "3 / 9", "66.7%",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// onProgressLoaded keeps a per-operation high-water mark of OverallPct — the
+// same monotonic clamp the REINDEX banner uses — so a VACUUM restarting an
+// index pass holds the bar instead of snapping it back, while a new operation
+// reusing the pid starts fresh.
+func TestProgressClamp(t *testing.T) {
+	s := &screen{level: levelProgress, tool: toolMaintenance, db: "maindb"}
+	m := &Model{stack: []*screen{s}}
+	load := func(rows ...pg.ProgressRow) {
+		m.onProgressLoaded(progressLoadedMsg{db: "maindb", rows: rows})
+	}
+
+	vac := pg.ProgressRow{PID: 7, Command: "VACUUM", RelID: 42, Database: "maindb",
+		Phase: "vacuuming indexes", Unit: "indexes", Done: 1, Total: 2}
+	load(vac)
+	if got := s.progressPct(vac); got != 70 {
+		t.Errorf("first sample: pct %.1f, want 70", got)
+	}
+
+	// Second index-cleanup cycle restarts the counter; the clamp holds.
+	vac.Done = 0
+	load(vac)
+	if got := s.progressPct(vac); got != 70 {
+		t.Errorf("regressed sample: pct %.1f, want held 70", got)
+	}
+
+	// Same pid, different relation (autovacuum worker moved on): fresh mark.
+	next := pg.ProgressRow{PID: 7, Command: "VACUUM", RelID: 43, Database: "maindb",
+		Phase: "scanning heap", Unit: "blocks", Done: 0, Total: 100}
+	load(next)
+	if got := s.progressPct(next); got != 1 {
+		t.Errorf("new relation on reused pid: pct %.1f, want 1", got)
+	}
+
+	// Finished operations drop their marks with their rows.
+	load()
+	if len(s.progressPctMax) != 0 {
+		t.Errorf("marks not pruned: %v", s.progressPctMax)
 	}
 }

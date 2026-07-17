@@ -123,6 +123,8 @@ func tableForStmt(toks []string, kw int) string {
 			i++
 		}
 		return cleanTable(toks, i)
+	case "create":
+		return tableForCreateIndex(toks, kw)
 	case "vacuum", "analyze":
 		// VACUUM/ANALYZE <table> — manual commands and the autovacuum worker
 		// status line (after its prefix is stripped). Options can sit between the
@@ -131,6 +133,24 @@ func tableForStmt(toks []string, kw int) string {
 	default:
 		return ""
 	}
+}
+
+// tableForCreateIndex resolves the relation an index build targets: CREATE
+// [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] [name] ON [ONLY] <table> … —
+// the shape a long-running manual build or a pg_repack rebuild shows in
+// pg_stat_activity. Scanning for the ON keyword skips the optional modifiers
+// and index name in one go (identifiers are single tokens, so a bare "on" can
+// only be the keyword). Any other CREATE statement yields "" — there's no
+// existing relation to point at.
+func tableForCreateIndex(toks []string, kw int) string {
+	i := kw + 1
+	if i < len(toks) && strings.EqualFold(toks[i], "unique") {
+		i++
+	}
+	if i >= len(toks) || !strings.EqualFold(toks[i], "index") {
+		return ""
+	}
+	return tableAfter(toks, indexOfAfter(toks, "on", i+1, len(toks)))
 }
 
 // tableForVacuum resolves the target relation of a VACUUM or ANALYZE. The table

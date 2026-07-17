@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -128,7 +130,11 @@ func (m *Model) renderIndexTuplesInfo(height int) string {
 		mu(" range: the keys that child block holds") + "\n")
 	b.WriteString("    " + strings.Repeat(" ", 8) +
 		mu("(") + styleIndexSeg.Render("−∞") + mu(" = leftmost child, ") +
-		styleIndexSeg.Render("+∞") + mu(" = rightmost; the range runs to the next downlink's key)") + "\n\n")
+		styleIndexSeg.Render("+∞") + mu(" = rightmost; the range runs to the next downlink's key)") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 8) +
+		mu("a ") + styleIndexSeg.Render("−∞") + mu(" inside a key, e.g. (19224,−∞), is a suffix-truncated separator —") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 8) +
+		mu("the trailing columns weren't needed to tell the two children apart and aren't stored") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" drilling ") + "  " +
 		mu("which rows respond to Enter — and why others don't") + "\n")
@@ -242,7 +248,7 @@ func (m *Model) renderIndexKeyBanner(s *screen) string {
 	// not on a single page's tuple view. Each access method has its own metapage
 	// shape (GiST has none).
 	if s.level == levelIndexPages {
-		var meta string
+		var meta, levels string
 		switch s.index.AccessMethod {
 		case "brin":
 			meta = brinMetaLine(s.brinMeta)
@@ -252,12 +258,87 @@ func (m *Model) renderIndexKeyBanner(s *screen) string {
 			meta = "" // GiST has no metapage (block 0 is the root)
 		default:
 			meta = btreeMetaLine(s.btreeMeta)
+			levels = btreeLevelsLine(s, m.width)
 		}
 		if meta != "" {
 			lines = append(lines, meta)
 		}
+		if levels != "" {
+			lines = append(lines, levels)
+		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// btreeLevelsLine renders the whole-tree page census as one compact table
+// line — pages per B-tree level, root down to the leaves, with pages that
+// have left the tree (deleted / half-dead) as a muted tail:
+//
+//	levels: L2 1 root  ·  L1 154  ·  L0 139538 leaf  ·  deleted 3
+//
+// The census covers the entire index (not just the loaded window), so it
+// loads asynchronously; a muted placeholder holds the slot while the scan
+// runs so the banner doesn't jump when the counts land. A failed scan says
+// why inline (clipped to the terminal width) — a silently missing line is
+// indistinguishable from the feature not existing.
+func btreeLevelsLine(s *screen, width int) string {
+	mu := styleMuted.Render
+	if !s.btreeLevelsDone {
+		if s.btreeLevelsLoading {
+			return "  " + mu("levels: counting pages…")
+		}
+		return ""
+	}
+	if s.btreeLevelsErr != nil {
+		reason := s.btreeLevelsErr.Error()
+		if errors.Is(s.btreeLevelsErr, context.DeadlineExceeded) {
+			reason = fmt.Sprintf("timed out after %s", btreeCensusTimeout)
+		}
+		return truncateToWidth("  "+mu("levels: unavailable — "+reason), width)
+	}
+	if len(s.btreeLevels) == 0 {
+		return ""
+	}
+	live := map[int32]int64{}
+	var order []int32
+	rootLevel := int32(-1)
+	var deleted, halfDead int64
+	for _, c := range s.btreeLevels {
+		switch c.Type {
+		case "d":
+			deleted += c.Pages
+		case "e":
+			halfDead += c.Pages
+		default: // l / r / i — pages still in the tree
+			if _, seen := live[c.Level]; !seen {
+				order = append(order, c.Level)
+			}
+			live[c.Level] += c.Pages
+			if c.Type == "r" {
+				rootLevel = c.Level
+			}
+		}
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i] > order[j] })
+	parts := make([]string, 0, len(order)+2)
+	for _, lv := range order {
+		p := styleIndexSeg.Render(fmt.Sprintf("L%d", lv)) +
+			fmt.Sprintf(" %d", live[lv])
+		switch lv {
+		case rootLevel:
+			p += mu(" root")
+		case 0:
+			p += mu(" leaf")
+		}
+		parts = append(parts, p)
+	}
+	if deleted > 0 {
+		parts = append(parts, mu(fmt.Sprintf("deleted %d", deleted)))
+	}
+	if halfDead > 0 {
+		parts = append(parts, mu(fmt.Sprintf("half-dead %d", halfDead)))
+	}
+	return "  " + mu("levels: ") + strings.Join(parts, mu("  ·  "))
 }
 
 // indexKeyLine renders "keys: (a, lower(b))  include: (c)" from the index's
@@ -605,7 +686,11 @@ func renderIndexTupleRow(t pg.IndexTuple, pageType, blockRange string, cols []pg
 			key = deadTag + styleMuted.Render(truncateValue(t.Data, keyW-5))
 		}
 	case t.Data != nil:
-		if s, ok := indexKeyText(t, cols); ok {
+		keyText := indexKeyText
+		if kind == idxTuplePivot {
+			keyText = pivotKeyText // high keys: truncated attrs render as −∞
+		}
+		if s, ok := keyText(t, cols); ok {
 			key = styleMuted.Render(truncateToWidth(s, keyW))
 		} else {
 			key = styleMuted.Render(truncateValue(t.Data, keyW))
@@ -695,7 +780,7 @@ func internalDownlinkRanges(items []item, pageType string, cols []pg.IndexKeyCol
 		if !ok {
 			continue
 		}
-		text, hasKey := indexKeyText(t, cols)
+		text, hasKey := pivotKeyText(t, cols)
 		all = append(all, entry{t.ItemOffset, text, hasKey})
 	}
 	if len(all) == 0 {
@@ -836,6 +921,43 @@ func postingTupleCount(ctid *string) int {
 	}
 	_ = blk
 	return off & btOffsetMask
+}
+
+// pivotNAtts reads the stored key-attribute count from a pivot tuple's ctid
+// offset word: since PG 12 every pivot stores natts in the BT_OFFSET_MASK bits
+// (BTreeTupleGetNAtts), with BT_PIVOT_HEAP_TID_ATTR flagging an extra heap-tid
+// attribute beyond the count. Only meaningful for tuples that actually are
+// pivots — a regular leaf entry's offset word is a real heap offset — so
+// callers gate on the tuple kind and decodeIndexKeyPivot double-checks the
+// count against the data bytes.
+func pivotNAtts(ctid *string) (int, bool) {
+	if ctid == nil {
+		return 0, false
+	}
+	var blk, off int
+	if _, err := fmt.Sscanf(*ctid, "(%d,%d)", &blk, &off); err != nil {
+		return 0, false
+	}
+	_ = blk
+	if off&btIndexAltTIDMask != 0 { // posting tuple: the word is a tid count
+		return 0, false
+	}
+	return off & btOffsetMask, true
+}
+
+// pivotKeyText is indexKeyText for pivot tuples (internal-page items and leaf
+// high keys): when the ctid offset word says the separator was suffix-truncated
+// to fewer attributes than the index has, the dropped ones render as −∞
+// instead of the generic decoder's trailing "…".
+func pivotKeyText(t pg.IndexTuple, cols []pg.IndexKeyColumn) (string, bool) {
+	if t.Data != nil {
+		if natts, ok := pivotNAtts(t.Ctid); ok {
+			if s, ok := decodeIndexKeyPivot(*t.Data, cols, natts); ok {
+				return s, true
+			}
+		}
+	}
+	return indexKeyText(t, cols)
 }
 
 func classifyIndexTuple(t pg.IndexTuple, pageType string) indexTupleKind {

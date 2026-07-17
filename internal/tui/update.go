@@ -73,6 +73,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onRelationsLoaded(msg)
 	case indexPagesLoadedMsg:
 		return m, m.onIndexPagesLoaded(msg)
+	case btreeLevelsLoadedMsg:
+		return m, m.onBtreeLevelsLoaded(msg)
 	case indexTuplesLoadedMsg:
 		return m, m.onIndexTuplesLoaded(msg)
 	case gistPagesLoadedMsg:

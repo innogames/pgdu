@@ -58,6 +58,15 @@ func TestMainTable(t *testing.T) {
 		"SELECT unit_id FROM ( SELECT generate_series( $1, ( SELECT max(unit_id) FROM game_army_units WHERE player_id = $2 ) + $3 ) AS unit_id ) AS series WHERE series.unit_id NOT IN(SELECT unit_id FROM game_army_units WHERE player_id = $4) LIMIT $5": "game_army_units",
 		"SET search_path = $1": "",
 		"":                     "",
+		// CREATE INDEX targets the ON relation — the shape a pg_repack rebuild or a
+		// manual build shows in pg_stat_activity, often truncated mid-column-list.
+		"CREATE INDEX index_1839593 ON repack.table_19180 USING btree (player_i": "repack.table_19180",
+		"CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ix_p ON ONLY public.game_player (id)": "public.game_player",
+		`CREATE INDEX ON "MySchema"."Tbl" (id)`: "MySchema.Tbl",
+		// Other CREATE statements have no existing relation to point at; a
+		// truncation that cuts CREATE INDEX off before ON must not mislabel.
+		"CREATE TABLE t AS SELECT * FROM src":  "",
+		"CREATE INDEX CONCURRENTLY ix_long_na": "",
 		// Leading ORM comments must be skipped, not parsed as the statement.
 		"/* TechnologyRepository.findAllByPlayerId */ SELECT * FROM technology WHERE id = $1": "technology",
 		"/* update for com.example.Battle */update battle set modified = $1 where id = $2":    "battle",

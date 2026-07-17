@@ -59,37 +59,12 @@ type ReindexProgress struct {
 // the meaningful counters are lockers, not blocks/tuples.
 func (p ReindexProgress) Waiting() bool { return strings.HasPrefix(p.Phase, "waiting") }
 
-// reindexPhaseSpan maps each REINDEX CONCURRENTLY phase (as spelled by the
-// pg_stat_progress_create_index view, including the btree build subphases) to
-// its slice of an overall 0–100% bar. The per-phase counters reset at every
-// phase change, so a naive done/total bar snaps back to zero mid-rebuild;
-// pinning each phase to a fixed span turns that into one left-to-right pass.
-// The weights are guesses, not measurements — they only need to be monotonic
-// and roughly plausible, so the two block-proportional table scans get the
-// big slices and the sort/wait phases get slivers.
-var reindexPhaseSpan = map[string][2]float64{
-	"initializing":                            {0, 1},
-	"waiting for writers before build":        {1, 2},
-	"building index":                          {2, 65}, // AMs without subphase reporting
-	"building index: initializing":            {2, 3},
-	"building index: scanning table":          {3, 35},
-	"building index: sorting live tuples":     {35, 40},
-	"building index: loading tuples in tree":  {40, 65},
-	"waiting for writers before validation":   {65, 66},
-	"index validation: scanning index":        {66, 74},
-	"index validation: sorting tuples":        {74, 77},
-	"index validation: scanning table":        {77, 95},
-	"waiting for old snapshots":               {95, 97},
-	"waiting for readers before marking dead": {97, 98},
-	"waiting for readers before dropping":     {98, 100},
-}
-
 // OverallPct places the current phase's own progress inside its
-// reindexPhaseSpan slice and returns the composite 0..100 estimate, or -1 for
-// a phase we can't map (new PG version, unknown AM) — callers hold the bar
-// where it was rather than jumping. Totals are estimates (reltuples) and
-// briefly read 0 on phase transitions, so callers must also clamp the result
-// monotonic across polls.
+// reindexPhaseSpan slice (see progress_pct.go) and returns the composite
+// 0..100 estimate, or -1 for a phase we can't map (new PG version, unknown
+// AM) — callers hold the bar where it was rather than jumping. Totals are
+// estimates (reltuples) and briefly read 0 on phase transitions, so callers
+// must also clamp the result monotonic across polls.
 func (p ReindexProgress) OverallPct() float64 {
 	span, ok := reindexPhaseSpan[p.Phase]
 	if !ok {
@@ -103,11 +78,7 @@ func (p ReindexProgress) OverallPct() float64 {
 	if p.Waiting() {
 		done, total = p.LockersDone, p.LockersTotal
 	}
-	frac := 0.0
-	if total > 0 {
-		frac = min(float64(done)/float64(total), 1)
-	}
-	return span[0] + frac*(span[1]-span[0])
+	return spanPoint(span, done, total)
 }
 
 // ReindexProgress returns the live progress of a REINDEX/CREATE INDEX running

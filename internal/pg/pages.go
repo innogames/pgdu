@@ -351,6 +351,50 @@ func (c *Client) BtreeMeta(ctx context.Context, r Relation) (BtreeMeta, error) {
 	return m, nil
 }
 
+// BtreeLevelCounts scans the whole index (every page, once) and returns the
+// per-(level, type) page counts for the tree-shape banner. Expensive on big
+// indexes — a full-index read — so the TUI runs it asynchronously and caches
+// the result for the screen's lifetime. Best-effort like BtreeMeta: a
+// privilege error or the client-side timeout just hides the banner line.
+func (c *Client) BtreeLevelCounts(ctx context.Context, r Relation) ([]BtreeLevelCount, error) {
+	// Ensure pageinspect ourselves: this runs concurrently with the page-list
+	// load, not after it, so we can't lean on that loader's ensure — and the
+	// typed MissingExtensionError lets the TUI retry the census after the
+	// user installs the extension through the prompt.
+	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
+		return nil, err
+	}
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return nil, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	var nblocks int64
+	if err := pool.QueryRow(ctx, sqlRelationBlocks, regclass).Scan(&nblocks); err != nil {
+		return nil, fmt.Errorf("btree level counts for %q: %w", r.Qualified(), err)
+	}
+	if nblocks <= 1 {
+		return nil, nil // just the metapage (or an empty file): nothing to census
+	}
+	rows, err := pool.Query(ctx, sqlBtreeLevelCounts, regclass, nblocks-1)
+	if err != nil {
+		return nil, fmt.Errorf("btree level counts for %q: %w", r.Qualified(), err)
+	}
+	defer rows.Close()
+	var out []BtreeLevelCount
+	for rows.Next() {
+		var lc BtreeLevelCount
+		if err := rows.Scan(&lc.Level, &lc.Type, &lc.Pages); err != nil {
+			return nil, fmt.Errorf("btree level counts for %q: %w", r.Qualified(), err)
+		}
+		out = append(out, lc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("btree level counts for %q: %w", r.Qualified(), err)
+	}
+	return out, nil
+}
+
 // BtreePageType returns one B-tree page's bt_page_stats type ('l' leaf, 'r'
 // root, 'i' internal, 'd' deleted) and its btpo_level (0 = leaf). Used to
 // resolve a child page's type when the user descends through an internal-page
