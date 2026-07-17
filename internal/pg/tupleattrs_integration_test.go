@@ -19,9 +19,11 @@ func TestIntegration_ListTupleAttrs(t *testing.T) {
 	}
 	_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS pgdu_xray`)
 	for _, sql := range []string{
-		`CREATE TABLE pgdu_xray (a int2, b int8, s text, big text, n text)`,
+		`DROP TYPE IF EXISTS pgdu_xray_mood`,
+		`CREATE TYPE pgdu_xray_mood AS ENUM ('sad', 'ok', 'happy')`,
+		`CREATE TABLE pgdu_xray (a int2, b int8, s text, big text, n text, mood pgdu_xray_mood)`,
 		`ALTER TABLE pgdu_xray ALTER COLUMN big SET STORAGE EXTERNAL`,
-		`INSERT INTO pgdu_xray VALUES (1, 2, 'abc', repeat('x', 100000), NULL)`,
+		`INSERT INTO pgdu_xray VALUES (1, 2, 'abc', repeat('x', 100000), NULL, 'ok')`,
 		`ALTER TABLE pgdu_xray DROP COLUMN s`,
 		`ALTER TABLE pgdu_xray ADD COLUMN later int4`,
 	} {
@@ -29,7 +31,10 @@ func TestIntegration_ListTupleAttrs(t *testing.T) {
 			t.Fatalf("%s: %v", sql, err)
 		}
 	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS pgdu_xray`) })
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS pgdu_xray`)
+		_, _ = pool.Exec(context.Background(), `DROP TYPE IF EXISTS pgdu_xray_mood`)
+	})
 
 	var oid uint32
 	if err := pool.QueryRow(ctx, `SELECT 'pgdu_xray'::regclass::oid`).Scan(&oid); err != nil {
@@ -49,9 +54,9 @@ func TestIntegration_ListTupleAttrs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTupleAttrs: %v", err)
 	}
-	// a, b, s (dropped), big, n, later — the dropped column keeps its slot.
-	if len(attrs) != 6 {
-		t.Fatalf("got %d attrs, want 6: %+v", len(attrs), attrs)
+	// a, b, s (dropped), big, n, mood, later — the dropped column keeps its slot.
+	if len(attrs) != 7 {
+		t.Fatalf("got %d attrs, want 7: %+v", len(attrs), attrs)
 	}
 	for i, a := range attrs {
 		if a.Attnum != int32(i+1) {
@@ -68,7 +73,11 @@ func TestIntegration_ListTupleAttrs(t *testing.T) {
 	if n := attrs[4]; !n.Stored || n.Value != nil {
 		t.Errorf("NULL column should be stored with nil value: %+v", n)
 	}
-	if later := attrs[5]; later.Stored || later.Value != nil {
+	if mood := attrs[5]; mood.TypCategory != "E" || len(mood.Value) != 4 ||
+		mood.EnumLabel == nil || *mood.EnumLabel != "ok" {
+		t.Errorf("enum column should carry its resolved label: %+v", mood)
+	}
+	if later := attrs[6]; later.Stored || later.Value != nil {
 		t.Errorf("column added after insert should be not-stored: %+v", later)
 	}
 	if a := attrs[0]; a.Len != 2 || a.Align != "s" || a.TypName != "int2" || len(a.Value) != 2 {

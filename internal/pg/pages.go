@@ -531,7 +531,7 @@ func (c *Client) ListTupleAttrs(ctx context.Context, t Table, blkno, lp int32) (
 		var a TupleAttr
 		if err := rows.Scan(&a.Attnum, &a.Name, &a.TypeName,
 			&a.Len, &a.Align, &a.Dropped, &a.Stored,
-			&a.TypName, &a.TypCategory, &a.Value); err != nil {
+			&a.TypName, &a.TypCategory, &a.EnumLabel, &a.Value); err != nil {
 			return nil, fmt.Errorf("tuple attrs in %q page %d lp %d: %w", t.Qualified(), blkno, lp, err)
 		}
 		out = append(out, a)
