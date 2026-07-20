@@ -180,6 +180,9 @@ func infomaskText(im int32) string {
 // bits plus the HOT flags.
 func infomask2Text(im2 int32) string {
 	s := fmt.Sprintf("0x%04x · %d attrs", uint16(im2), im2&pg.HeapNattsMask2)
+	if im2&pg.HeapKeysUpdated2 != 0 {
+		s += " · keys-updated"
+	}
 	if im2&pg.HeapHotUpdated2 != 0 {
 		s += " · hot-updated"
 	}
@@ -239,10 +242,17 @@ func computeTupleLayout(t pg.HeapTuple, attrs []pg.TupleAttr) (segs []tupleSeg, 
 	hoff := int(*t.Hoff)
 
 	natts := int(t.Infomask2 & pg.HeapNattsMask2)
-	nulls := 0
+	// A stored attribute with no bytes is exactly a cleared bit in the bitmap,
+	// so the null column names come straight from the split — no need to map
+	// bit positions back to columns by hand.
+	var nullNames []string
 	for _, a := range attrs {
 		if a.Stored && a.Value == nil {
-			nulls++
+			name := a.Name
+			if a.Dropped {
+				name = "(dropped)"
+			}
+			nullNames = append(nullNames, name)
 		}
 	}
 
@@ -254,9 +264,15 @@ func computeTupleLayout(t pg.HeapTuple, attrs []pg.TupleAttr) (segs []tupleSeg, 
 		if t.Bits != nil {
 			bits = *t.Bits
 		}
+		// Spell out which columns the cleared bits belong to; the raw bitmap
+		// is unlabelled and matching a 0 to a column otherwise means counting
+		// attribute positions off the header row.
+		if len(nullNames) > 0 {
+			bits += "  ·  null: " + strings.Join(nullNames, ", ")
+		}
 		header = append(header, tupleSeg{
 			kind: segNullBitmap, start: at, bytes: bm,
-			class: fmt.Sprintf("%d attrs, %d null", natts, nulls),
+			class: fmt.Sprintf("%d attrs, %d null", natts, len(nullNames)),
 			value: bits,
 		})
 		at += bm

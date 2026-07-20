@@ -97,6 +97,28 @@ func TestFormatDiagInterval(t *testing.T) {
 	}
 }
 
+// A column the name heuristic left as text but whose values are pg_size_pretty
+// strings must promote to DiagBytes (not DiagInt), so its cells and Σ footer
+// humanize in the same units — the fix for a footer showing a raw byte sum.
+func TestPromotedNumericKind(t *testing.T) {
+	cases := []struct {
+		in   any
+		want DiagColumnKind
+	}{
+		{"306 MB", DiagBytes},
+		{"9832 kB", DiagBytes},
+		{"0 bytes", DiagBytes},
+		{"game_conversation_message", DiagInt}, // non-size string that reached the numeric-promotion path
+		{int64(42), DiagInt},
+		{3.14, DiagInt},
+	}
+	for _, c := range cases {
+		if got := promotedNumericKind(c.in); got != c.want {
+			t.Errorf("promotedNumericKind(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
 func TestColKindFromName(t *testing.T) {
 	cases := []struct {
 		name string

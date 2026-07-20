@@ -435,6 +435,13 @@ func tupleLifecycleLine(t pg.HeapTuple, indent string) string {
 		parts = append(parts, "deleting "+xidLabel(t.Xmax))
 	}
 
+	// HEAP_KEYS_UPDATED qualifies the delete/lock above: the update touched a
+	// key column (or the row was deleted), which is what forces FOR-UPDATE-style
+	// locking over the cheaper FOR-KEY-SHARE path.
+	if im2&pg.HeapKeysUpdated2 != 0 {
+		parts = append(parts, "key cols updated")
+	}
+
 	if im2&pg.HeapHotUpdated2 != 0 {
 		parts = append(parts, "HOT-updated")
 	}

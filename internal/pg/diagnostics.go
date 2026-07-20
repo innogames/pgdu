@@ -235,12 +235,12 @@ func scanDiagRows(rows pgx.Rows, maxRows int) (cols []DiagColumn, out [][]DiagCe
 				k = cols[i].Kind
 			}
 			cells[i] = formatDiagValue(v, k)
-			// Promote column kind from Text to Int/Float once we have an
+			// Promote column kind from Text to a numeric kind once we have an
 			// actual numeric value, so the renderer can right-align and the
 			// bar scaling works on numeric-typed columns that weren't caught
 			// by the column-name heuristic.
 			if cells[i].HasNum && cols[i].Kind == DiagText {
-				cols[i].Kind = DiagInt
+				cols[i].Kind = promotedNumericKind(v)
 			}
 		}
 		out = append(out, cells)
@@ -270,6 +270,22 @@ func colKindFromName(name string) DiagColumnKind {
 		return DiagBytes
 	}
 	return DiagText
+}
+
+// promotedNumericKind picks the kind for a column first seen to carry a numeric
+// value in a cell that the column-name heuristic left as DiagText. A value that
+// parsed out of pg_size_pretty text (e.g. "306 MB") is a byte quantity, so the
+// column humanizes exactly like a raw "*_bytes" DiagBytes column — same units in
+// the cells, the sum footer and any bar. Everything else is a plain integer.
+// Without this, size columns pre-formatted by pg_size_pretty fell to DiagInt and
+// their Σ footer printed a bare byte count next to humanized rows.
+func promotedNumericKind(v any) DiagColumnKind {
+	if s, ok := v.(string); ok {
+		if _, isSize := parseSizePretty(s); isSize {
+			return DiagBytes
+		}
+	}
+	return DiagInt
 }
 
 // formatDiagValue converts a single value returned by pgx rows.Values() into a
