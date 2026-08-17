@@ -1,6 +1,10 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 var (
 	colorBar     = lipgloss.Color("39")  // cyan-blue
@@ -247,9 +251,14 @@ func cmdTypeStyle(tag string) lipgloss.Style {
 // the generic renderer can show alongside this; the state text itself is "active"
 // for both, so it stays green here.
 func stateStyle(state string) (lipgloss.Style, bool) {
-	switch state {
-	case "active":
+	// Prefix, not equality: the Activity tool appends an inline progress
+	// percent ("active - 63%") and the augmented cell must stay green. The
+	// remaining states stay exact so "idle" can't swallow its "idle in
+	// transaction" variants.
+	if strings.HasPrefix(state, "active") {
 		return lipgloss.NewStyle().Foreground(colorOK), true
+	}
+	switch state {
 	case "idle in transaction":
 		return lipgloss.NewStyle().Foreground(colorAccent), true
 	case "idle in transaction (aborted)":

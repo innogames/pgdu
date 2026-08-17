@@ -491,6 +491,10 @@ type screen struct {
 	actFilter  pg.ActivityFilter
 	actVerbose bool
 	actCols    []actColDesc
+	// actProgressPct is the pid → clamped pg_stat_progress_* percent for the
+	// inline "active - 63%" state cell — the same monotonic high-water clamp as
+	// progressPctMax on the progress screen (see that field for the rationale).
+	actProgressPct map[int32]progressMark
 
 	// ── Lock tree (levelLockTree) ─────────────────────────────────────────────
 	// lockNodes is the last fetched set of blocking-chain backends; lockErr is

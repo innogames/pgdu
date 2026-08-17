@@ -32,10 +32,31 @@ type progressMark struct {
 	relid   uint32
 	db      string
 	pct     float64
+	approx  bool
 }
 
 func (p progressMark) matches(r pg.ProgressRow) bool {
 	return p.command == r.Command && p.relid == r.RelID && p.db == r.Database
+}
+
+// clampProgressMarks rebuilds a pid → mark map from a fresh progress snapshot,
+// carrying each still-running operation's high-water mark forward: OverallPct
+// is -1 for unmapped phases and regresses when VACUUM repeats an index pass,
+// and max() absorbs both so a percent only ever moves up (the same monotonic
+// clamp reindexPctMax applies to the REINDEX banner). Rebuilding from scratch
+// drops marks of operations that have finished.
+func clampProgressMarks(prev map[int32]progressMark, rows []pg.ProgressRow) map[int32]progressMark {
+	marks := make(map[int32]progressMark, len(rows))
+	for _, r := range rows {
+		mark, ok := prev[r.PID]
+		if !ok || !mark.matches(r) {
+			mark = progressMark{command: r.Command, relid: r.RelID, db: r.Database, pct: -1}
+		}
+		mark.pct = max(mark.pct, r.OverallPct())
+		mark.approx = r.Approx
+		marks[r.PID] = mark
+	}
+	return marks
 }
 
 // progressPct is the value the bar/pct/eta columns render: the clamped

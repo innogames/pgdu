@@ -14,11 +14,24 @@ import (
 // Relations in other databases (which regclass can't see from db) are
 // resolved best-effort through their own database's pool.
 func (c *Client) ListProgress(ctx context.Context, db string) ([]ProgressRow, error) {
+	rows, err := c.ListProgressRaw(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	c.resolveProgressRelations(ctx, db, rows)
+	return rows, nil
+}
+
+// ListProgressRaw is ListProgress without cross-database relation-name
+// resolution: Relation stays "" for operations in other databases. The
+// Activity tool polls this on every refresh tick and only needs pid → pct,
+// so it must not fan out a pool per foreign database each time.
+func (c *Client) ListProgressRaw(ctx context.Context, db string) ([]ProgressRow, error) {
 	pool, err := c.PoolFor(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("list progress in %q: %w", db, err)
 	}
-	rows, err := collect(ctx, pool, fmt.Sprintf("list progress in %q", db), sqlProgressOps, nil,
+	return collect(ctx, pool, fmt.Sprintf("list progress in %q", db), sqlProgressOps, nil,
 		func(row pgx.CollectableRow) (ProgressRow, error) {
 			var r ProgressRow
 			err := row.Scan(
@@ -27,11 +40,6 @@ func (c *Client) ListProgress(ctx context.Context, db string) ([]ProgressRow, er
 			)
 			return r, err
 		})
-	if err != nil {
-		return nil, err
-	}
-	c.resolveProgressRelations(ctx, db, rows)
-	return rows, nil
 }
 
 // resolveProgressRelations fills Relation for operations running in a

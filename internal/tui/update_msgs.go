@@ -555,6 +555,7 @@ func (m *Model) onActivityLoaded(msg activityLoadedMsg) tea.Cmd {
 	s.actErr = nil
 	s.actRows = msg.rows
 	s.actSummary = msg.summary
+	s.actProgressPct = clampProgressMarks(s.actProgressPct, msg.progress)
 
 	if s.actHosts == nil {
 		s.actHosts = make(map[string]string)
@@ -668,20 +669,7 @@ func (m *Model) onProgressLoaded(msg progressLoadedMsg) tea.Cmd {
 	}
 	s.progressErr = nil
 	s.progressRows = msg.rows
-	// Same monotonic clamp as onReindexProgress, but per operation: OverallPct
-	// is -1 for unmapped phases and regresses when VACUUM repeats an index
-	// pass; max() absorbs both so each bar only ever moves right. Rebuilding
-	// the map drops marks of operations that have finished.
-	marks := make(map[int32]progressMark, len(msg.rows))
-	for _, r := range msg.rows {
-		mark, ok := s.progressPctMax[r.PID]
-		if !ok || !mark.matches(r) {
-			mark = progressMark{command: r.Command, relid: r.RelID, db: r.Database, pct: -1}
-		}
-		mark.pct = max(mark.pct, r.OverallPct())
-		marks[r.PID] = mark
-	}
-	s.progressPctMax = marks
+	s.progressPctMax = clampProgressMarks(s.progressPctMax, msg.rows)
 	m.rebuildProgressItems(s)
 	return nil
 }

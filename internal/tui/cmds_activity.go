@@ -12,10 +12,11 @@ import (
 // ── Activity message types ────────────────────────────────────────────────────
 
 type activityLoadedMsg struct {
-	db      string
-	rows    []pg.ActivityRow
-	summary pg.ActivitySummary
-	err     error
+	db       string
+	rows     []pg.ActivityRow
+	summary  pg.ActivitySummary
+	progress []pg.ProgressRow // pg_stat_progress_* rows for the inline state %
+	err      error
 }
 
 type activityTickMsg struct{}
@@ -75,7 +76,10 @@ func (m *Model) loadActivityCmd(db string, mode pg.ActivityFilter) tea.Cmd {
 		// The summary is a cheap single-row aggregate; failing it should not
 		// blank the list, so a summary error degrades to zero counts.
 		summary, _ := m.client.ActivitySummary(ctx, db)
-		return activityLoadedMsg{db: db, rows: rows, summary: summary}
+		// Progress is equally best-effort: a failure just leaves the state
+		// column without its inline percent until the next tick.
+		progress, _ := m.client.ListProgressRaw(ctx, db)
+		return activityLoadedMsg{db: db, rows: rows, summary: summary, progress: progress}
 	})
 }
 

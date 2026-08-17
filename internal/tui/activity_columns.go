@@ -43,9 +43,10 @@ const (
 // actCtx carries per-build inputs the activity column cells need beyond the row
 // itself. All maps may be nil (non-Linux host, remote connection, first sample).
 type actCtx struct {
-	hosts map[string]string     // IP → resolved hostname (from actHosts on screen)
-	proc  map[int32]procDerived // PID → /proc-derived stats; nil = unavailable
-	toast map[string]string     // db+relname → owning table (from actToast on screen)
+	hosts    map[string]string      // IP → resolved hostname (from actHosts on screen)
+	proc     map[int32]procDerived  // PID → /proc-derived stats; nil = unavailable
+	toast    map[string]string      // db+relname → owning table (from actToast on screen)
+	progress map[int32]progressMark // PID → clamped progress pct (from actProgressPct)
 }
 
 // toastKey keys the actToast map; it mirrors pg.ResolveToastOwners' own cache
@@ -118,8 +119,21 @@ func actColumnRegistry() []actColDesc {
 			desc: "backend_type (client backend, autovacuum worker, walsender, …)",
 			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: r.BackendType} }},
 		{id: actColState, name: "state", kind: pg.DiagBackendState, defaultOn: true,
-			desc: "backend state: active, idle, idle in transaction, …",
-			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell { return pg.DiagCell{Display: r.State} }},
+			desc: "backend state: active, idle, idle in transaction, …; long-running operations reporting into a pg_stat_progress_* view show their percent inline",
+			cell: func(r pg.ActivityRow, ctx actCtx) pg.DiagCell {
+				// Inline percent only after 1s so short statements don't flash
+				// a number; pct < 0 means the phase has no usable estimate yet.
+				if r.State == "active" && r.QueryAgeMs > 1000 {
+					if mark, ok := ctx.progress[r.PID]; ok && mark.pct >= 0 {
+						pct := fmt.Sprintf("%.0f%%", min(mark.pct, 100))
+						if mark.approx {
+							pct = "~" + pct
+						}
+						return pg.DiagCell{Display: r.State + " - " + pct}
+					}
+				}
+				return pg.DiagCell{Display: r.State}
+			}},
 		{id: actColWait, name: "wait", kind: pg.DiagText, defaultOn: true,
 			desc: "wait event (e.g. Lock/relation, IO/DataFileRead) or blank when not waiting",
 			cell: func(r pg.ActivityRow, _ actCtx) pg.DiagCell {
@@ -363,7 +377,7 @@ func visibleActRows(rows []pg.ActivityRow, verbose bool, filter pg.ActivityFilte
 // share exactly the same projection + sort logic.
 func (m *Model) rebuildActivityItems(s *screen) {
 	rows := visibleActRows(s.actRows, s.actVerbose, s.actFilter)
-	ctx := actCtx{hosts: s.actHosts, proc: m.actProcStats, toast: s.actToast}
+	ctx := actCtx{hosts: s.actHosts, proc: m.actProcStats, toast: s.actToast, progress: s.actProgressPct}
 	items, descs := m.buildActivityItems(rows, ctx)
 	s.actCols = descs
 	s.diagCols = actDiagColumnsFrom(descs)
