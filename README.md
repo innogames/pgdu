@@ -111,6 +111,8 @@ And one level below a heap page are the raw **heap tuples**: line-pointer flags
 
 ![Single Tuple](docs/page_tuple.png)
 
+![Single Heap Tuple](docs/page_heap_tuple.png)
+
 ### WAL Inspector
 
 Breaks down recently generated WAL by record type / resource manager — bytes,

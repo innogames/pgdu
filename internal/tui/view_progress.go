@@ -14,9 +14,10 @@ import (
 // Column widths shared by the progress-monitor rows and barReserve, so the
 // bar auto-sizes against the same budgets the renderer prints with.
 const (
-	progColCmd       = 13 // "CREATE INDEX" is the widest command
-	progColPhase     = 26 // e.g. "building index: scanning table"  (clipped)
-	progColDoneTotal = 20 // "12345678 / 98765432" or "12.34 MB / 1.20 GB"
+	progColCmd   = 13 // "CREATE INDEX" is the widest command
+	progColPhase = 26 // e.g. "building index: scanning table"  (clipped)
+	progColDone  = 10 // "1234567890" or "1023.99 MB"
+	progColTotal = 10
 	progColPct       = 7  // "99.9%", or "~100.0%" for an estimated (approx) total
 	progColAge       = 8  // fmtAge output ("31.1s", "2.4d")
 	progColEta       = 8  // fmtAge output for the extrapolated time remaining
@@ -127,10 +128,10 @@ func (m *Model) renderProgress(s *screen, height int) string {
 }
 
 // renderProgressRow renders one operation: command · relation · phase ·
-// done/total · progress bar · pct · running time · user. pct is the overall
+// done · total · progress bar · pct · running time · user. pct is the overall
 // phase-weighted percentage (clamped by the caller, see progressPct) — the
 // bar makes one 0→100 pass across the whole operation while the done/total
-// column keeps the current phase's raw counters. db is the database the
+// columns keep the current phase's raw counters. db is the database the
 // screen is connected through — operations elsewhere in the cluster get
 // their relation prefixed with their own database name.
 func (m *Model) renderProgressRow(r pg.ProgressRow, pct float64, db string, selected bool, barW int) string {
@@ -184,7 +185,8 @@ func (m *Model) renderProgressRow(r pg.ProgressRow, pct float64, db string, sele
 		cmd + "  " +
 		padRight(truncateToWidth(relation, colName-1), colName) +
 		mu(padRight(truncateToWidth(r.Phase, progColPhase-1), progColPhase)) +
-		padLeft(progressDoneTotal(r), progColDoneTotal) + "  " +
+		padLeft(progressDone(r), progColDone) + "  " +
+		mu(padLeft(progressTotal(r), progColTotal)) + "  " +
 		bar + " " +
 		padLeft(pctStr, progColPct) + "  " +
 		age +
@@ -205,7 +207,8 @@ func (m *Model) renderProgressHeader(barW int) string {
 		padRight("command", progColCmd) + "  " +
 		padRight("relation", colName) +
 		padRight("phase", progColPhase) +
-		padLeft("done / total", progColDoneTotal) + "  " +
+		padLeft("done", progColDone) + "  " +
+		padLeft("total", progColTotal) + "  " +
 		strings.Repeat(" ", barW+colBrackets) + " " +
 		padLeft("pct", progColPct) + "  " +
 		padRight("elapsed", progColAge) +
@@ -230,18 +233,23 @@ func progressETA(r pg.ProgressRow, pct float64) string {
 	return fmtAge(remainingMs)
 }
 
-// progressDoneTotal formats the raw counters in their native unit: byte-based
-// operations (COPY, base backup) humanized, count-based ones (blocks, indexes,
-// rows) as plain counts. With no total yet, show just what's been done so far.
-func progressDoneTotal(r pg.ProgressRow) string {
+// progressDone / progressTotal format the raw counters in their native unit:
+// byte-based operations (COPY, base backup) humanized, count-based ones
+// (blocks, indexes, rows) as plain counts.
+func progressDone(r pg.ProgressRow) string {
 	if r.Unit == "bytes" {
-		if r.Total <= 0 {
-			return humanize.Bytes(r.Done)
-		}
-		return humanize.Bytes(r.Done) + " / " + humanize.Bytes(r.Total)
+		return humanize.Bytes(r.Done)
 	}
+	return strconv.FormatInt(r.Done, 10)
+}
+
+// With no total yet (COPY before a size estimate) an em-dash marks the unknown.
+func progressTotal(r pg.ProgressRow) string {
 	if r.Total <= 0 {
-		return strconv.FormatInt(r.Done, 10)
+		return "—"
 	}
-	return fmt.Sprintf("%d / %d", r.Done, r.Total)
+	if r.Unit == "bytes" {
+		return humanize.Bytes(r.Total)
+	}
+	return strconv.FormatInt(r.Total, 10)
 }

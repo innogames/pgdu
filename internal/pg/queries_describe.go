@@ -93,6 +93,19 @@ JOIN   pg_am am    ON am.oid = c.relam
 WHERE  idx.indexrelid = $1
 `
 
+// sqlDescribeOptions returns a table's storage options (pg_class.reloptions)
+// plus its TOAST table's options prefixed with "toast.", matching how psql's
+// \d+ folds both into one "Options:" line. Empty array when neither has any.
+// $1 = table oid.
+const sqlDescribeOptions = `
+SELECT COALESCE(c.reloptions, '{}') ||
+       COALESCE((SELECT array_agg('toast.' || opt)
+                 FROM   unnest(tc.reloptions) AS opt), '{}')
+FROM   pg_class c
+LEFT   JOIN pg_class tc ON tc.oid = c.reltoastrelid
+WHERE  c.oid = $1
+`
+
 // sqlDescribeFKOutgoing lists foreign keys this table declares (it is the
 // referencing side, conrelid = $1). Column lists are rebuilt from conkey/confkey
 // via unnest WITH ORDINALITY so multi-column keys keep their declared order.

@@ -157,7 +157,7 @@ func jbWriteContainer(sb *strings.Builder, c []byte, depth int) bool {
 		return count == 1 && writeVal(0)
 	case isObject:
 		sb.WriteByte('{')
-		for i := 0; i < count; i++ {
+		for i := range count {
 			if i > 0 {
 				sb.WriteString(", ")
 			}
@@ -174,7 +174,7 @@ func jbWriteContainer(sb *strings.Builder, c []byte, depth int) bool {
 		sb.WriteByte('}')
 	default: // array
 		sb.WriteByte('[')
-		for i := 0; i < count; i++ {
+		for i := range count {
 			if i > 0 {
 				sb.WriteString(", ")
 			}
@@ -347,7 +347,7 @@ func decodeOnDiskNumeric(b []byte) (string, bool) {
 		out.WriteByte('.')
 		frac := make([]byte, 0, dscale+4)
 		for i := weight + 1; len(frac) < dscale; i++ {
-			frac = append(frac, []byte(fmt.Sprintf("%04d", digit(i)))...)
+			frac = append(frac, fmt.Appendf(nil, "%04d", digit(i))...)
 		}
 		out.Write(frac[:dscale])
 	}

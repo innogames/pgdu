@@ -6,8 +6,6 @@ import (
 	"pgdu/internal/pg"
 )
 
-func i32(v int32) *int32 { return &v }
-
 // fixedAttr builds a fixed-width TupleAttr whose Value is `size` arbitrary
 // non-zero bytes.
 func fixedAttr(name string, size int32, align string) pg.TupleAttr {
@@ -34,7 +32,7 @@ func buildTuple(hoff int, infomask, infomask2 int32, data []byte, residue int) p
 		LPLen:     int32(hoff + len(data) + residue),
 		Infomask:  infomask,
 		Infomask2: infomask2,
-		Hoff:      i32(int32(hoff)),
+		Hoff:      new(int32(hoff)),
 		Data:      data,
 	}
 }
