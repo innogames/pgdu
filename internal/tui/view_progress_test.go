@@ -9,20 +9,24 @@ import (
 
 func TestProgressDoneTotal(t *testing.T) {
 	cases := []struct {
-		name string
-		row  pg.ProgressRow
-		want string
+		name      string
+		row       pg.ProgressRow
+		wantDone  string
+		wantTotal string
 	}{
-		{"blocks", pg.ProgressRow{Unit: "blocks", Done: 300, Total: 1000}, "300 / 1000"},
-		{"blocks no total", pg.ProgressRow{Unit: "blocks", Done: 42}, "42"},
-		{"bytes", pg.ProgressRow{Unit: "bytes", Done: 1 << 20, Total: 1 << 30}, "1.00 MB / 1.00 GB"},
-		{"bytes no total", pg.ProgressRow{Unit: "bytes", Done: 1 << 20}, "1.00 MB"},
-		{"indexes", pg.ProgressRow{Unit: "indexes", Done: 3, Total: 9}, "3 / 9"},
+		{"blocks", pg.ProgressRow{Unit: "blocks", Done: 300, Total: 1000}, "300", "1000"},
+		{"blocks no total", pg.ProgressRow{Unit: "blocks", Done: 42}, "42", "—"},
+		{"bytes", pg.ProgressRow{Unit: "bytes", Done: 1 << 20, Total: 1 << 30}, "1.00 MB", "1.00 GB"},
+		{"bytes no total", pg.ProgressRow{Unit: "bytes", Done: 1 << 20}, "1.00 MB", "—"},
+		{"indexes", pg.ProgressRow{Unit: "indexes", Done: 3, Total: 9}, "3", "9"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := progressDoneTotal(c.row); got != c.want {
-				t.Errorf("progressDoneTotal(%+v) = %q, want %q", c.row, got, c.want)
+			if got := progressDone(c.row); got != c.wantDone {
+				t.Errorf("progressDone(%+v) = %q, want %q", c.row, got, c.wantDone)
+			}
+			if got := progressTotal(c.row); got != c.wantTotal {
+				t.Errorf("progressTotal(%+v) = %q, want %q", c.row, got, c.wantTotal)
 			}
 		})
 	}
@@ -88,14 +92,18 @@ func TestRenderProgress(t *testing.T) {
 	}
 
 	// The bar/pct column shows the overall phase-weighted estimate; the
-	// done/total column keeps each phase's raw counters.
+	// done and total columns keep each phase's raw counters, right-aligned
+	// side by side.
+	doneTotal := func(done, total string) string {
+		return padLeft(done, progColDone) + "  " + padLeft(total, progColTotal)
+	}
 	out := stripANSI(m.renderProgress(s, 10))
 	for _, want := range []string{
 		"4 ops",
-		"CREATE INDEX", "public.orders_idx", "building index", "640 / 1000", "42.3%", "4.2m",
-		"COPY FROM", "1.00 GB / 2.00 GB", "50.0%", // no phases: raw counters are the overall pct
-		"BASE BACKUP", "1.00 MB", "3.0%",
-		"VACUUM", "otherdb.public.big", "vacuuming indexes", "3 / 9", "66.7%",
+		"CREATE INDEX", "public.orders_idx", "building index", doneTotal("640", "1000"), "42.3%", "4.2m",
+		"COPY FROM", doneTotal("1.00 GB", "2.00 GB"), "50.0%", // no phases: raw counters are the overall pct
+		"BASE BACKUP", doneTotal("1.00 MB", "—"), "3.0%",
+		"VACUUM", "otherdb.public.big", "vacuuming indexes", doneTotal("3", "9"), "66.7%",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q:\n%s", want, out)

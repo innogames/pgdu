@@ -123,6 +123,11 @@ func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, erro
 		return nil, fmt.Errorf("describe foreign keys for %q.%q: %w", t.Schema, t.Name, err)
 	}
 
+	// Options
+	if err := pool.QueryRow(ctx, sqlDescribeOptions, t.OID).Scan(&d.Options); err != nil {
+		return nil, fmt.Errorf("describe options for %q.%q: %w", t.Schema, t.Name, err)
+	}
+
 	return d, nil
 }
 

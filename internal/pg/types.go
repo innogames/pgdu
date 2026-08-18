@@ -326,6 +326,7 @@ type Description struct {
 	Indexes    []DescribeIndexDef
 	FKOutgoing []DescribeFK // FKs this table declares (references other tables)
 	FKIncoming []DescribeFK // FKs other tables declare against this table
+	Options    []string     // reloptions incl. toast.* entries; empty for none
 	SizeBytes  int64
 	EstRows    int64
 

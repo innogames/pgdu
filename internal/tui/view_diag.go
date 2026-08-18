@@ -259,6 +259,14 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 			b.WriteString(renderFKRows(d.FKIncoming, true))
 		}
 
+		// --- options (reloptions incl. toast.*; omitted entirely when unset) ---
+		if len(d.Options) > 0 {
+			b.WriteString("\n  " + styleHeader.Render(" options ") + "\n")
+			for _, opt := range d.Options {
+				b.WriteString("    " + mu(truncLine(opt)) + "\n")
+			}
+		}
+
 		// --- summary ---
 		b.WriteString("\n  " + mu(fmt.Sprintf(
 			"%s total · ~%s rows",
