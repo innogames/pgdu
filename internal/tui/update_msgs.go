@@ -610,6 +610,7 @@ func (m *Model) onTableOverviewLoaded(msg tableOverviewLoadedMsg) tea.Cmd {
 	}
 	s.err = nil
 	s.tblRows = msg.rows
+	s.tblStatsReset = msg.statsReset
 	m.rebuildTableStatItems(s)
 	return nil
 }

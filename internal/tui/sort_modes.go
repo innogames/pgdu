@@ -17,6 +17,7 @@ const (
 	sortByCount      // WAL: record count per resource manager
 	sortByFPI        // WAL: full-page-image bytes
 	sortByDirty      // buffer-tables: dirty (modified-in-memory) bytes
+	sortByTemp       // buffer-tables: mean clock-sweep usagecount (0..5)
 	sortByType       // index pages: page type (leaf/intr/root/del)
 	sortByBloat      // parts: wasted-space fraction (bloat %)
 	sortByHeap       // tables: heap (main fork) bytes
@@ -35,7 +36,7 @@ const (
 // ratio so the worst-cached tables bubble to the top.
 func (sm sortMode) defaultDesc() bool {
 	switch sm {
-	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty, sortByBloat, sortByHeap, sortByIndex, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByLevel:
+	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty, sortByTemp, sortByBloat, sortByHeap, sortByIndex, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByLevel:
 		// sortByLevel is descending so the B-tree page view opens root-first
 		// (highest btpo_level at the top), reading the tree top-down.
 		return true
@@ -74,6 +75,8 @@ func (sm sortMode) name() string {
 		return "fpi"
 	case sortByDirty:
 		return "dirty"
+	case sortByTemp:
+		return "temp"
 	case sortByType:
 		return "type"
 	case sortByBloat:
@@ -145,6 +148,8 @@ func (sm sortMode) less(a, b item) bool {
 		return lessByExtractor(a, b, itemWALFPI)
 	case sortByDirty:
 		return lessByExtractor(a, b, itemDirtyBytes)
+	case sortByTemp:
+		return lessByExtractor(a, b, itemTemp)
 	case sortByType:
 		return lessByExtractor(a, b, itemPageType)
 	case sortByBloat:

@@ -37,6 +37,8 @@ const (
 	tblColIdxFetch  tblColID = "idx_fetch"
 	tblColCache     tblColID = "cache"
 	tblColIdxCache  tblColID = "idx_cache"
+	tblColBuffered  tblColID = "buffered"
+	tblColDirty     tblColID = "dirty"
 	tblColHeapRead  tblColID = "heap_read"
 	tblColHeapHit   tblColID = "heap_hit"
 	tblColModSince  tblColID = "mod_since_analyze"
@@ -174,6 +176,22 @@ func tableColumnRegistry() []tblColDesc {
 		{id: tblColIdxCache, name: "idx_cache", kind: pg.DiagPercentGraded,
 			desc: "index shared-buffer hit ratio (idx_blks_hit / (hit+read))",
 			cell: func(r pg.TableStat) pg.DiagCell { v, ok := r.IdxHitPct(); return tblPct(v, ok) }},
+		{id: tblColBuffered, name: "buffered", kind: pg.DiagBytes,
+			desc: "bytes of this table (heap + TOAST + indexes) in shared buffers right now — point-in-time (pg_buffercache)",
+			cell: func(r pg.TableStat) pg.DiagCell {
+				if !r.BufsKnown {
+					return pg.DiagCell{Display: "—"}
+				}
+				return tblBytes(r.BufferedBytes)
+			}},
+		{id: tblColDirty, name: "dirty", kind: pg.DiagBytes, defaultOn: true,
+			desc: "bytes currently dirty (modified, not yet flushed) in shared buffers — live buffer-pool write pressure (pg_buffercache)",
+			cell: func(r pg.TableStat) pg.DiagCell {
+				if !r.BufsKnown {
+					return pg.DiagCell{Display: "—"}
+				}
+				return tblBytes(r.DirtyBytes)
+			}},
 		{id: tblColHeapRead, name: "heap_read", kind: pg.DiagInt,
 			desc: "heap blocks read from disk (heap_blks_read)",
 			cell: func(r pg.TableStat) pg.DiagCell { return tblCount(r.HeapBlksRead) }},
@@ -343,6 +361,9 @@ func sumTableStats(rows []pg.TableStat) pg.TableStat {
 		t.HeapBlksHit += r.HeapBlksHit
 		t.IdxBlksRead += r.IdxBlksRead
 		t.IdxBlksHit += r.IdxBlksHit
+		t.BufferedBytes += r.BufferedBytes
+		t.DirtyBytes += r.DirtyBytes
+		t.BufsKnown = t.BufsKnown || r.BufsKnown
 		if r.FrozenXIDAge > t.FrozenXIDAge {
 			t.FrozenXIDAge = r.FrozenXIDAge
 		}

@@ -110,6 +110,12 @@ type item struct {
 	detailStyled bool
 	data         any
 
+	// pageBuf is the shared-buffers state of a page-inspector row (heap or any
+	// index AM), attached at item build when pg_buffercache data was loaded.
+	// nil = page not cached, or no temperature data for this screen at all —
+	// screen.pageBufs distinguishes the two for the renderer.
+	pageBuf *pg.PageBuffer
+
 	// typeTag is the kind label shown in the parts level's "type" column
 	// ("heap"/"toast"/"btree"/"gist"/"brin"/"gin"/…). typeStyle tints it (and
 	// only it) per kind, matching the relations level. Empty on other levels,
@@ -258,6 +264,12 @@ type screen struct {
 	heapWindowStart int32
 	heapWindowCount int32
 	heapPageCount   int32
+
+	// pageBufs is the current window's block → shared-buffers state map from
+	// pg_buffercache (best-effort side load). Non-nil means temperature data
+	// is available and the page lists render their "temp" column; nil hides
+	// it (extension missing, insufficient privileges, or load not done).
+	pageBufs map[int64]pg.PageBuffer
 
 	// levelHeapTuples: which page we drilled into.
 	heapPageBlkno int32
@@ -510,6 +522,10 @@ type screen struct {
 	// can map column indices back to stable tblColIDs.
 	tblRows []pg.TableStat
 	tblCols []tblColDesc
+	// tblStatsReset dates the cumulative pg_stat counters shown here (the
+	// database's stats_reset); zero when unknown / never reset. Shown in the
+	// status line so "since when" is never ambiguous.
+	tblStatsReset time.Time
 
 	// pendingBackendAction is the PID of the backend the user pressed k/x on,
 	// waiting for a y/Y confirmation.  action is "cancel" or "terminate".
@@ -574,6 +590,7 @@ const (
 	extPromptReasonBufferCache    = "shared_buffers view requires the pg_buffercache extension"
 	extPromptReasonPgStatTuple    = "exact bloat measurements are available with pgstattuple"
 	extPromptReasonPageInspect    = "Page inspector requires the pageinspect extension"
+	extPromptReasonPageTemp       = "per-page buffer temperature is available with pg_buffercache"
 	extPromptReasonWALInspect     = "WAL inspector requires the pg_walinspect extension (and a superuser / pg_read_server_files role to read WAL)"
 	extPromptReasonStatStatements = "Top queries requires the pg_stat_statements extension (also needs it in shared_preload_libraries + a restart to collect)"
 	extPromptReasonQualstats      = "real EXPLAIN values are available with pg_qualstats (already in shared_preload_libraries here)"

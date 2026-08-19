@@ -45,6 +45,11 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 	b.WriteString("    " + styleLPDead.Render("●") + "  " + mu("DEAD      reclaimable — VACUUM removes these (and their items)") + "\n")
 	b.WriteString("    " + styleLPUnused.Render("●") + "  " + mu("UNUSED    line pointer is free for reuse") + "\n\n")
 
+	b.WriteString("  " + styleHeader.Render(" temp ") + "  " +
+		mu("shown when pg_buffercache is installed: the page's shared-buffers usagecount") + "\n")
+	b.WriteString("    " + mu("0 = cold (evictable) → 5 = hot (frequently reused)  ·  ") +
+		styleDirty.Render("•") + mu(" dirty (modified, awaiting flush)  ·  — not in shared_buffers") + "\n\n")
+
 	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+strconv.Itoa(int(heapWindowDefault))+" pages per step).") + "\n")
 	b.WriteString("  " + mu("Within a window, j/k or arrows move the cursor; Enter drills into one page.") + "\n")
 
@@ -155,14 +160,15 @@ func heapPageWindowLabel(s *screen) string {
 // when scanning a heap for hotspots.
 func (m *Model) renderHeapPagesList(s *screen, height int) string {
 	barW := m.barWidth(s)
-	return m.renderRowList(s, height, renderHeapPagesHeader(s.sort, s.sortDesc, barW),
+	showTemp := s.pageBufs != nil
+	return m.renderRowList(s, height, renderHeapPagesHeader(s.sort, s.sortDesc, barW, showTemp),
 		func(it item, selected bool) string {
 			p, _ := it.data.(pg.HeapPageStat)
-			return renderHeapPageRow(it, p, barW, selected)
+			return renderHeapPageRow(it, p, barW, selected, showTemp)
 		})
 }
 
-func renderHeapPagesHeader(sort sortMode, sortDesc bool, barW int) string {
+func renderHeapPagesHeader(sort sortMode, sortDesc bool, barW int, showTemp bool) string {
 	// Header indent matches the row: cursor (2) + bar slot (barW+2) + "  "
 	// before the flag column starts.
 	line := headerIndent(barW) +
@@ -172,11 +178,12 @@ func renderHeapPagesHeader(sort sortMode, sortDesc bool, barW int) string {
 		padRight(sortMark("Red", sort == sortByRedirectLP, sortDesc), heapPageRedirColW) + "  " +
 		padRight(sortMark("dead", sort == sortByDeadLP, sortDesc), heapPageDeadLPColW) + "  " +
 		padRight(sortMark("dead%", sort == sortByDeadRatio, sortDesc), heapPageDeadColW) + "  " +
+		pageTempHeaderCol(sort, sortDesc, showTemp) +
 		sortMark("page", sort == sortByBlkno, sortDesc)
 	return styleMuted.Render(line)
 }
 
-func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool) string {
+func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool, showTemp bool) string {
 	cursor := selectedCursor(selected)
 	bar := renderHeapPageBar(p.LiveBytes, p.DeadBytes, barW)
 
@@ -215,6 +222,7 @@ func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool) stri
 		padRight(redirStr, heapPageRedirColW) + "  " +
 		padRight(deadStr, heapPageDeadLPColW) + "  " +
 		padRight(deadPct, heapPageDeadColW) + "  " +
+		pageTempRowCol(it, showTemp) +
 		name
 }
 

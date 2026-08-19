@@ -179,7 +179,7 @@ func stmtColumnRegistry() []stmtColDesc {
 			desc: "shared blocks (hit+read) per row — work per result row",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
 				if bpr, ok := q.BlocksPerRow(); ok {
-					return diagNum(fmtFloat(bpr), bpr)
+					return diagNum(fmt1(bpr), bpr)
 				}
 				return pg.DiagCell{Display: "—"}
 			}},

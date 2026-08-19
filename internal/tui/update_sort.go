@@ -133,6 +133,28 @@ func itemDirtyBytes(it item) (int64, bool) {
 	return st.DirtyBytes, true
 }
 
+// itemUsageAvg extracts a buffer-tables item's mean clock-sweep usagecount
+// (the "temp" column, 0..5). Returns (0, false) when the table has no pages
+// in shared_buffers — a temperature only exists for cached pages — so those
+// rows sort below tables with a measurable one rather than tying at cold.
+func itemUsageAvg(it item) (float64, bool) {
+	st, ok := it.data.(pg.TableBufferStat)
+	if !ok || st.BufferedBytes <= 0 {
+		return 0, false
+	}
+	return st.UsageAvg, true
+}
+
+// itemTemp is sortByTemp's extractor across both consumers of the shared
+// temperature column: buffer-tables rows (mean usagecount) and page-inspector
+// rows (the page's exact usagecount, see itemPageTemp).
+func itemTemp(it item) (float64, bool) {
+	if _, ok := it.data.(pg.TableBufferStat); ok {
+		return itemUsageAvg(it)
+	}
+	return itemPageTemp(it)
+}
+
 // itemRows extracts the row-count estimate from a table or relation item.
 // Second return is false for items lacking row estimates and for negative
 // EstRows (planner stats unavailable).
@@ -228,11 +250,11 @@ func validSorts(l level) []sortMode {
 	case levelSchemas:
 		return []sortMode{sortBySize, sortByTables, sortByName}
 	case levelBufferTables:
-		return []sortMode{sortBySize, sortByTotal, sortByCached, sortByHitRatio, sortByDirty, sortByName}
+		return []sortMode{sortBySize, sortByTotal, sortByCached, sortByHitRatio, sortByDirty, sortByTemp, sortByName}
 	case levelShmem:
 		return []sortMode{sortBySize, sortByGroup, sortByName}
 	case levelHeapPages:
-		return []sortMode{sortByBlkno, sortBySize, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByDeadRatio, sortByFreeSpace}
+		return []sortMode{sortByBlkno, sortBySize, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByDeadRatio, sortByFreeSpace, sortByTemp}
 	case levelHeapTuples:
 		return []sortMode{sortByLP, sortBySize}
 	case levelTupleRow:
@@ -244,7 +266,7 @@ func validSorts(l level) []sortMode {
 		// AM) defaults to root-first and ←/→ cycles from there. GiST/BRIN/GIN
 		// override the default to sortByBlkno at screen construction (level is
 		// inert for them), but share this cycle list.
-		return []sortMode{sortByLevel, sortByType, sortBySize, sortByDeadRatio, sortByFreeSpace, sortByBlkno}
+		return []sortMode{sortByLevel, sortByType, sortBySize, sortByDeadRatio, sortByFreeSpace, sortByTemp, sortByBlkno}
 	case levelIndexTuples:
 		return []sortMode{sortByLP, sortBySize}
 	case levelWAL:
@@ -277,7 +299,7 @@ func (m *Model) cycleSort(s *screen, dir int) {
 		// Numeric columns default to descending (biggest first);
 		// text columns default to ascending (alphabetical).
 		switch s.diagCols[s.diagSortCol].Kind {
-		case pg.DiagInt, pg.DiagFloat, pg.DiagPercent, pg.DiagBytes, pg.DiagPercentGraded, pg.DiagCostGraded, pg.DiagDuration, pg.DiagPercentBad:
+		case pg.DiagInt, pg.DiagFloat, pg.DiagPercent, pg.DiagBytes, pg.DiagPercentGraded, pg.DiagCostGraded, pg.DiagDuration, pg.DiagPercentBad, pg.DiagCount:
 			s.sortDesc = true
 		default:
 			s.sortDesc = false

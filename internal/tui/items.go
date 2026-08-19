@@ -106,6 +106,30 @@ func itemBlkno(it item) (int64, bool) {
 	return 0, false
 }
 
+// withPageBuf attaches a page's shared-buffers state (the page inspector's
+// temp column) to a freshly built page item. A nil map or an uncached block
+// leaves pageBuf nil; itemBlkno keys the lookup for every page-stat type.
+func withPageBuf(it item, bufs map[int64]pg.PageBuffer) item {
+	blk, ok := itemBlkno(it)
+	if !ok {
+		return it
+	}
+	if b, hit := bufs[blk]; hit {
+		it.pageBuf = &b
+	}
+	return it
+}
+
+// itemPageTemp extracts a page item's buffer usagecount for sortByTemp.
+// Uncached pages (and pages with no temperature data at all) return
+// (0, false) so they sort below pages with a measurable temperature.
+func itemPageTemp(it item) (float64, bool) {
+	if it.pageBuf == nil {
+		return 0, false
+	}
+	return float64(it.pageBuf.UsageCount), true
+}
+
 // itemDeadRatio is dead/(live+dead) for heap- or index-page items; second
 // return is false for empty pages so they don't dominate the dead% sort.
 func itemDeadRatio(it item) (float64, bool) {

@@ -175,6 +175,38 @@ func (c *Client) TableBufferUsageCounts(ctx context.Context, db string, oid uint
 	return counts, blockSize, err
 }
 
+// PageBuffers maps the blocks of one main-fork window of a relation to their
+// shared-buffers state (usagecount, dirty). Blocks not currently cached are
+// absent from the map. Powers the page inspector's per-page temperature
+// column; callers treat failures as "no temperature data" rather than fatal.
+func (c *Client) PageBuffers(ctx context.Context, db string, oid uint32, start, count int32) (map[int64]PageBuffer, error) {
+	if err := c.EnsureBufferCache(ctx, db); err != nil {
+		return nil, err
+	}
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := pool.Query(ctx, sqlPageBuffers, oid, start, count)
+	if err != nil {
+		return nil, fmt.Errorf("page buffers for oid %d in %q: %w", oid, db, err)
+	}
+	defer rows.Close()
+	bufs := make(map[int64]PageBuffer)
+	for rows.Next() {
+		var blkno int64
+		var b PageBuffer
+		if err := rows.Scan(&blkno, &b.UsageCount, &b.Dirty); err != nil {
+			return nil, fmt.Errorf("page buffers for oid %d in %q: %w", oid, db, err)
+		}
+		bufs[blkno] = b
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("page buffers for oid %d in %q: %w", oid, db, err)
+	}
+	return bufs, nil
+}
+
 // BufferCacheSummary returns the cluster-wide shared_buffers occupancy split
 // between the current database, anything else, and free pages.
 func (c *Client) BufferCacheSummary(ctx context.Context, db string) (BufferCacheSummary, error) {

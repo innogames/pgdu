@@ -5,9 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
-
-	"golang.org/x/sync/errgroup"
 
 	"pgdu/internal/humanize"
 )
@@ -157,8 +156,8 @@ func (c *Client) Triage(ctx context.Context) []TriageResult {
 		dbStats *DiagResult
 		dbErr   error
 	)
-	var pre errgroup.Group
-	pre.Go(func() error {
+	var pre sync.WaitGroup
+	pre.Go(func() {
 		cctx, cancel := context.WithTimeout(ctx, triageCheckTimeout)
 		defer cancel()
 		info, infoErr = c.Maintenance(cctx, "")
@@ -170,15 +169,13 @@ func (c *Client) Triage(ctx context.Context) []TriageResult {
 		if infoErr == nil && (info == nil || info.Version == "") {
 			infoErr = errors.New("server unreachable")
 		}
-		return nil
 	})
-	pre.Go(func() error {
+	pre.Go(func() {
 		cctx, cancel := context.WithTimeout(ctx, triageCheckTimeout)
 		defer cancel()
 		dbStats, dbErr = c.runTriageDiag(cctx, "", "database_stats")
-		return nil
 	})
-	_ = pre.Wait()
+	pre.Wait()
 
 	// mgrade/dgrade adapt a pure grader over a shared input into a check.run,
 	// short-circuiting to "could not evaluate" when that input failed to load.
@@ -231,10 +228,12 @@ func (c *Client) Triage(ctx context.Context) []TriageResult {
 	}
 
 	results := make([]TriageResult, len(checks))
-	g := new(errgroup.Group)
-	g.SetLimit(triageFanout)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, triageFanout)
 	for i, chk := range checks {
-		g.Go(func() error {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			cctx, cancel := context.WithTimeout(ctx, triageCheckTimeout)
 			defer cancel()
 			sev, detail, err := chk.run(cctx)
@@ -248,10 +247,9 @@ func (c *Client) Triage(ctx context.Context) []TriageResult {
 				DiagKey:  chk.diagKey,
 				Target:   chk.target,
 			}
-			return nil
 		})
 	}
-	_ = g.Wait()
+	wg.Wait()
 
 	sort.SliceStable(results, func(a, b int) bool {
 		return results[a].Severity > results[b].Severity

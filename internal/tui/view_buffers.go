@@ -41,6 +41,7 @@ func (m *Model) renderBufferInfo(height int) string {
 	b.WriteString("    " + sw(usageHeatStyle(0)) + "  " + mu("cold (0)     evictable: not touched since the sweep last passed") + "\n")
 	b.WriteString("    " + sw(usageHeatStyle(5)) + "  " + mu("hot  (5)     reused often, burned in (cap is 5)") + "\n")
 	b.WriteString("    " + mu("a bar mostly cold means shared_buffers is bigger than the working set") + "\n")
+	b.WriteString("    " + mu("the temp column is each table's mean usage count across its cached pages") + "\n")
 	b.WriteString("    " + sw(styleDirty) + "  " + mu("dirty        pages modified in memory, not yet flushed to disk —") + "\n")
 	b.WriteString("    " + mu("                 the checkpointer/bgwriter owes a write; high = write pressure") + "\n\n")
 

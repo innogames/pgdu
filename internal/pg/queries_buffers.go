@@ -78,6 +78,20 @@ LEFT   JOIN b ON b.usagecount = g.usagecount
 ORDER  BY g.usagecount
 `
 
+// sqlPageBuffers lists the shared buffers holding one window of a relation's
+// main fork: block number → usagecount/isdirty, feeding the page inspector's
+// per-page temperature column. pg_relation_filenode resolves rewritten and
+// mapped relations; reldatabase 0 covers shared catalogs. One full buffer-pool
+// scan per window — the same cost class as the aggregate queries above.
+const sqlPageBuffers = `
+SELECT relblocknumber::bigint, usagecount::int, isdirty
+FROM   pg_buffercache
+WHERE  relfilenode = pg_relation_filenode($1::oid::regclass)
+  AND  reldatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
+  AND  relforknumber = 0
+  AND  relblocknumber >= $2::int AND relblocknumber < $2::int + $3::int
+`
+
 // sqlBufferStats reports per-table shared-buffer footprint and cumulative I/O
 // counters for one schema. Buffer footprint sums the heap, toast and every
 // index for the table, so the "biggest cache hog" answer matches the user's

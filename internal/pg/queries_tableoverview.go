@@ -54,3 +54,44 @@ WHERE  n.nspname = $1
   AND  c.relkind IN ('r','m','p')
 ORDER  BY total_bytes DESC
 `
+
+// sqlTableStatsBuffers sums the current shared-buffer footprint (total and
+// dirty bytes) per table for one schema from pg_buffercache, covering the heap,
+// TOAST and every index — the same filenode aggregation as sqlBufferStats but
+// without the sizing/statio columns the overview already has. It is a separate
+// best-effort query rather than a join in sqlTableStats because pg_buffercache
+// is an extension needing pg_monitor: its absence must not take down the whole
+// overview, only blank the two buffer columns.
+const sqlTableStatsBuffers = `
+WITH bc AS (
+  SELECT relfilenode,
+         COUNT(*)                         AS bufs,
+         COUNT(*) FILTER (WHERE isdirty)  AS dirty_bufs
+  FROM   pg_buffercache
+  WHERE  reldatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
+  GROUP  BY relfilenode
+),
+filenodes AS (
+  SELECT c.oid AS tab_oid, pg_relation_filenode(c.oid) AS fn
+  FROM   pg_class c
+  JOIN   pg_namespace n ON n.oid = c.relnamespace
+  WHERE  n.nspname = $1 AND c.relkind IN ('r','m','p')
+  UNION ALL
+  SELECT c.oid, pg_relation_filenode(c.reltoastrelid)
+  FROM   pg_class c
+  JOIN   pg_namespace n ON n.oid = c.relnamespace
+  WHERE  n.nspname = $1 AND c.relkind IN ('r','m','p') AND c.reltoastrelid <> 0
+  UNION ALL
+  SELECT c.oid, pg_relation_filenode(i.indexrelid)
+  FROM   pg_class c
+  JOIN   pg_namespace n ON n.oid = c.relnamespace
+  JOIN   pg_index i ON i.indrelid = c.oid
+  WHERE  n.nspname = $1 AND c.relkind IN ('r','m','p')
+)
+SELECT f.tab_oid,
+       (COALESCE(SUM(bc.bufs), 0)       * current_setting('block_size')::int)::bigint AS buffered_bytes,
+       (COALESCE(SUM(bc.dirty_bufs), 0) * current_setting('block_size')::int)::bigint AS dirty_bytes
+FROM   filenodes f
+LEFT   JOIN bc ON bc.relfilenode = f.fn
+GROUP  BY f.tab_oid
+`

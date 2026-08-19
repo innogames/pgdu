@@ -150,8 +150,8 @@ func (m *Model) rebuildDiagItems(s *screen) {
 }
 
 // diagFooterCells builds the pinned Σ footer for a generic diagnostic result.
-// Only additive columns sum meaningfully: counts (DiagInt) and sizes
-// (DiagBytes). Percents, grades, floats and text stay blank, as do
+// Only additive columns sum meaningfully: counts (DiagInt, DiagCount) and
+// sizes (DiagBytes). Percents, grades, floats and text stay blank, as do
 // identifier-shaped numeric columns (pid/oid) whose sum is nonsense. The
 // row-count label lands in the first text column. Returns nil when no column
 // summed — a footer of blanks would just eat a row.
@@ -162,7 +162,7 @@ func diagFooterCells(cols []pg.DiagColumn, items []item) []pg.DiagCell {
 	total := make([]pg.DiagCell, len(cols))
 	summed := false
 	for j, c := range cols {
-		if c.Kind != pg.DiagInt && c.Kind != pg.DiagBytes {
+		if c.Kind != pg.DiagInt && c.Kind != pg.DiagBytes && c.Kind != pg.DiagCount {
 			continue
 		}
 		lower := strings.ToLower(c.Name)

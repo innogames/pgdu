@@ -26,6 +26,21 @@ func relativeAge(d time.Duration) string {
 	return fmt.Sprintf("%dmo ago", int(d.Hours()/(24*30)))
 }
 
+// tblStatsResetLabel is the table overview's "since when" status-line part:
+// the stats_reset timestamp the cumulative counters count from. Empty until
+// loaded; "never reset" when the server has no reset recorded (counters date
+// from whenever stats collection began).
+func tblStatsResetLabel(s *screen) string {
+	if s.level != levelTableStats || !s.loaded || s.err != nil {
+		return ""
+	}
+	if s.tblStatsReset.IsZero() {
+		return "counters since: never reset"
+	}
+	t := s.tblStatsReset.Local()
+	return "counters since: " + t.Format("2006-01-02 15:04") + " (" + relativeAge(time.Since(t)) + ")"
+}
+
 // positionLabel reports the cursor's position within the list, e.g.
 // "12/438". Returns "0 items" for empty lists so the status line never
 // shows the misleading "0/0". When a filter is active, the visible count
