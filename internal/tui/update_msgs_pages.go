@@ -29,6 +29,25 @@ func (m *Model) onToastTargetResolved(msg toastTargetResolvedMsg) tea.Cmd {
 	return m.loadHeapPagesCmd(s.table, s.heapWindowStart, s.heapWindowCount)
 }
 
+// pageTempHint surfaces the non-blocking "install pg_buffercache" hint when
+// the temperature side load failed on the missing extension. Anything else
+// (privileges, transient errors) stays silent — the temp column just hides.
+// Never clobbers an existing prompt; in particular a blocking pageinspect
+// prompt must win over this decoration.
+func pageTempHint(s *screen, bufsErr error) {
+	ext := asMissingExt(bufsErr)
+	if ext == nil || s.extPrompt != nil {
+		return
+	}
+	s.extPrompt = &extPrompt{
+		name:        extBufferCache,
+		db:          ext.DB,
+		installable: ext.Installable,
+		reason:      extPromptReasonPageTemp,
+		blocking:    false,
+	}
+}
+
 func (m *Model) onHeapPagesLoaded(msg heapPagesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelHeapPages)
 	if s == nil || s.table.OID != msg.table.OID || s.heapWindowStart != msg.start {
@@ -41,9 +60,11 @@ func (m *Model) onHeapPagesLoaded(msg heapPagesLoadedMsg) tea.Cmd {
 	}
 	s.err = msg.err
 	s.heapPageCount = msg.totalPages
+	s.pageBufs = msg.bufs
+	pageTempHint(s, msg.bufsErr)
 	s.items = s.items[:0]
 	for _, p := range msg.pages {
-		s.items = append(s.items, heapPageToItem(p))
+		s.items = append(s.items, withPageBuf(heapPageToItem(p), msg.bufs))
 	}
 	m.applySort(s)
 	return nil
@@ -143,9 +164,11 @@ func (m *Model) onIndexPagesLoaded(msg indexPagesLoadedMsg) tea.Cmd {
 	// failure, in which case the banner simply isn't drawn.
 	s.indexKeyCols = msg.keyCols
 	s.btreeMeta = msg.meta
+	s.pageBufs = msg.bufs
+	pageTempHint(s, msg.bufsErr)
 	s.items = s.items[:0]
 	for _, p := range msg.pages {
-		s.items = append(s.items, indexPageToItem(p))
+		s.items = append(s.items, withPageBuf(indexPageToItem(p), msg.bufs))
 	}
 	m.applySort(s)
 	return nil
@@ -219,9 +242,11 @@ func (m *Model) onGistPagesLoaded(msg gistPagesLoadedMsg) tea.Cmd {
 	s.err = msg.err
 	s.heapPageCount = msg.totalPages
 	s.indexKeyCols = msg.keyCols
+	s.pageBufs = msg.bufs
+	pageTempHint(s, msg.bufsErr)
 	s.items = s.items[:0]
 	for _, p := range msg.pages {
-		s.items = append(s.items, gistPageToItem(p))
+		s.items = append(s.items, withPageBuf(gistPageToItem(p), msg.bufs))
 	}
 	m.applySort(s)
 	return nil
@@ -261,9 +286,11 @@ func (m *Model) onBrinPagesLoaded(msg brinPagesLoadedMsg) tea.Cmd {
 	s.heapPageCount = msg.totalPages
 	s.indexKeyCols = msg.keyCols
 	s.brinMeta = msg.meta
+	s.pageBufs = msg.bufs
+	pageTempHint(s, msg.bufsErr)
 	s.items = s.items[:0]
 	for _, p := range msg.pages {
-		s.items = append(s.items, brinPageToItem(p))
+		s.items = append(s.items, withPageBuf(brinPageToItem(p), msg.bufs))
 	}
 	m.applySort(s)
 	return nil
@@ -302,9 +329,11 @@ func (m *Model) onGinPagesLoaded(msg ginPagesLoadedMsg) tea.Cmd {
 	s.heapPageCount = msg.totalPages
 	s.indexKeyCols = msg.keyCols
 	s.ginMeta = msg.meta
+	s.pageBufs = msg.bufs
+	pageTempHint(s, msg.bufsErr)
 	s.items = s.items[:0]
 	for _, p := range msg.pages {
-		s.items = append(s.items, ginPageToItem(p))
+		s.items = append(s.items, withPageBuf(ginPageToItem(p), msg.bufs))
 	}
 	m.applySort(s)
 	return nil

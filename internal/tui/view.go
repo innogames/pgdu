@@ -189,6 +189,10 @@ func (m *Model) View() string {
 		switch s.level {
 		case levelTools:
 			b.WriteString(m.renderToolPicker(s, contentHeight))
+		case levelSchemas:
+			b.WriteString(m.renderListWithFooter(s, contentHeight, m.renderSchemasTotals(s)))
+		case levelTables:
+			b.WriteString(m.renderListWithFooter(s, contentHeight, m.renderTablesTotals(s)))
 		case levelBufferTables:
 			b.WriteString(m.renderBufferList(s, contentHeight, rankByOID))
 		case levelBufferDetail:
@@ -347,6 +351,9 @@ func (m *Model) renderStatus(s *screen) string {
 	}
 	if wl := walStatusLabel(s); wl != "" {
 		parts = append(parts, wl)
+	}
+	if tr := tblStatsResetLabel(s); tr != "" {
+		parts = append(parts, tr)
 	}
 	if m.notice != "" {
 		parts = append(parts, styleSelected.Render(m.notice))

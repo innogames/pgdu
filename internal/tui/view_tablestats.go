@@ -65,7 +65,8 @@ func (m *Model) renderTableStatsInfo(height int) string {
 	infoHeader(&b, "table overview reference")
 	b.WriteString("  " + mu("One row per base / partitioned / materialized table in the schema. Write and") + "\n")
 	b.WriteString("  " + mu("scan counters (ins/upd/del, seq/idx, cache) are cumulative since the last stats") + "\n")
-	b.WriteString("  " + mu("reset; sizes and ages are point-in-time. Press ") + styleBadge.Render("C") +
+	b.WriteString("  " + mu("reset (the \"counters since\" timestamp in the status line); sizes, ages and the") + "\n")
+	b.WriteString("  " + mu("buffered/dirty buffer-pool columns are point-in-time. Press ") + styleBadge.Render("C") +
 		mu(" to choose which columns show.") + "\n\n")
 
 	reg := tableColumnRegistry()

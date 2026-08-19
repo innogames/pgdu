@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -559,10 +560,12 @@ const (
 	bufColCached   = 8 // "100.0%"
 	bufColHit      = 8
 	bufColDirty    = 10 // dirty bytes — usually small or "0 B"
+	bufColTemp     = 5  // mean usagecount, "3.2" (header "temp↓" sets the width)
 )
 
 // renderBufferList draws the shared-buffer occupancy view as a column table:
-// bar | buffered bytes | total table size | cached % | hit % | table name.
+// bar | buffered bytes | total table size | cached % | hit % | dirty | temp |
+// table name.
 // The bar visualises BufferedBytes scaled to the largest sibling so the eye
 // still gets a quick "which table dominates the cache" read. rankByOID
 // maps each row to its rank among all buffered tables (0 = biggest); the
@@ -607,12 +610,14 @@ func (m *Model) renderBufferList(s *screen, height int, rankByOID map[uint32]int
 
 // renderBufferTotals builds the pinned Σ footer for the buffer-tables list:
 // summed buffered/total/dirty bytes plus the pooled ratios — cached is
-// Σbuffered ÷ Σtotal and hit the hits-weighted Σhits ÷ Σ(hits+reads), so both
-// are true aggregates rather than averages of the per-row percentages. Sums
-// cover every loaded row, not just the filtered subset, matching the other Σ
+// Σbuffered ÷ Σtotal, hit the hits-weighted Σhits ÷ Σ(hits+reads), and temp
+// the buffered-bytes-weighted mean usagecount, so all three are true
+// aggregates rather than averages of the per-row percentages. Sums cover
+// every loaded row, not just the filtered subset, matching the other Σ
 // footers. Returns "" when no row carries buffer stats (nothing to sum).
 func renderBufferTotals(items []item, barW int) string {
 	var buffered, total, hits, reads, dirty int64
+	var usageWeighted float64
 	n := 0
 	for _, it := range items {
 		st, ok := it.data.(pg.TableBufferStat)
@@ -624,6 +629,9 @@ func renderBufferTotals(items []item, barW int) string {
 		hits += st.Hits
 		reads += st.Reads
 		dirty += st.DirtyBytes
+		// UsageAvg is per-buffer and every buffer is one block, so weighting by
+		// buffered bytes reconstructs the pooled per-buffer mean exactly.
+		usageWeighted += st.UsageAvg * float64(st.BufferedBytes)
 		n++
 	}
 	if n == 0 {
@@ -637,6 +645,10 @@ func renderBufferTotals(items []item, barW int) string {
 	if hits+reads > 0 {
 		hitStr = fmt.Sprintf("%.1f%%", float64(hits)/float64(hits+reads)*100)
 	}
+	tempStr := "—"
+	if buffered > 0 {
+		tempStr = fmt.Sprintf("%.1f", usageWeighted/float64(buffered))
+	}
 	// Cursor slot + blank bar area, then the same column layout as the rows.
 	line := "  " + strings.Repeat(" ", barW+2) + "  " +
 		padRight(humanize.Bytes(buffered), bufColBuffered) + "  " +
@@ -644,6 +656,7 @@ func renderBufferTotals(items []item, barW int) string {
 		padRight(cachedStr, bufColCached) + "  " +
 		padRight(hitStr, bufColHit) + "  " +
 		padRight(humanize.Bytes(dirty), bufColDirty) + "  " +
+		padRight(tempStr, bufColTemp) + "  " +
 		fmt.Sprintf("Σ %d tables", n)
 	return styleTotal.Render(line)
 }
@@ -656,8 +669,53 @@ func renderBufferHeader(sort sortMode, sortDesc bool, barW int) string {
 		padRight(sortMark("cached", sort == sortByCached, sortDesc), bufColCached) + "  " +
 		padRight(sortMark("hit", sort == sortByHitRatio, sortDesc), bufColHit) + "  " +
 		padRight(sortMark("dirty", sort == sortByDirty, sortDesc), bufColDirty) + "  " +
+		padRight(sortMark("temp", sort == sortByTemp, sortDesc), bufColTemp) + "  " +
 		sortMark("table", sort == sortByName, sortDesc)
 	return styleMuted.Render(line)
+}
+
+// tempCell renders the buffer-tables "temp" column: the table's mean
+// clock-sweep usagecount tinted cold→hot on the shared temperature palette,
+// or a muted dash when the table has no pages in shared_buffers (an average
+// over zero buffers isn't cold, it's undefined).
+func tempCell(st pg.TableBufferStat) string {
+	if st.BufferedBytes <= 0 {
+		return styleMuted.Render("—")
+	}
+	return usageHeatStyle(int(st.UsageAvg + 0.5)).Render(fmt.Sprintf("%.1f", st.UsageAvg))
+}
+
+// pageTempCell renders the page inspector's "temp" column: the page's exact
+// buffer usagecount on the same cold→hot palette as tempCell, a • when the
+// buffered copy is dirty, or a muted dash when the page isn't in
+// shared_buffers. Only rendered when screen.pageBufs is non-nil.
+func pageTempCell(it item) string {
+	if it.pageBuf == nil {
+		return styleMuted.Render("—")
+	}
+	cell := usageHeatStyle(int(it.pageBuf.UsageCount)).Render(strconv.Itoa(int(it.pageBuf.UsageCount)))
+	if it.pageBuf.Dirty {
+		cell += styleDirty.Render("•")
+	}
+	return cell
+}
+
+// pageTempHeaderCol / pageTempRowCol emit the optional temp column (cell plus
+// trailing gutter) for the page-inspector headers and rows. Empty when the
+// screen has no buffer data, so hidden columns consume no width — mirrored by
+// pageTempReserve in the layout math.
+func pageTempHeaderCol(sort sortMode, sortDesc, show bool) string {
+	if !show {
+		return ""
+	}
+	return padRight(sortMark("temp", sort == sortByTemp, sortDesc), pageTempColW) + "  "
+}
+
+func pageTempRowCol(it item, show bool) string {
+	if !show {
+		return ""
+	}
+	return padRight(pageTempCell(it), pageTempColW) + "  "
 }
 
 func renderTablesHeader(s *screen, barW int) string {
@@ -691,6 +749,62 @@ func renderTablesHeader(s *screen, barW int) string {
 	line += "  " + sortMark("table", s.sort == sortByName, s.sortDesc)
 
 	return styleMuted.Render(line)
+}
+
+// renderTablesTotals builds the pinned Σ footer for the tables list: the
+// summed total size plus the same columns as the rows above (heap/idx/rows on
+// the disk tool, rows/pages on the page inspector). Toast has no column of its
+// own — it's only a bar segment — so its sum trails the Σ label, like the
+// parts footer's breakdown. Sums cover every loaded row, not just the filtered
+// subset, matching the other Σ footers. Returns "" until tables have loaded.
+func (m *Model) renderTablesTotals(s *screen) string {
+	var size, heap, idx, toast, rows, pages, bloat int64
+	anyBloat := false
+	n := 0
+	for _, it := range s.items {
+		if _, ok := it.data.(pg.Table); !ok {
+			continue
+		}
+		size += it.size
+		heap += it.heap
+		idx += it.idx
+		toast += it.toast
+		// reltuples is -1 until first analyze; keep it out of the sum.
+		rows += max(it.rows, 0)
+		pages += it.pages
+		if it.hasBloat {
+			bloat += it.bloat
+			anyBloat = true
+		}
+		n++
+	}
+	if n == 0 {
+		return ""
+	}
+	// Cursor slot + blank bar area, then the same column layout as renderRow.
+	line := "  " + strings.Repeat(" ", m.barWidth(s)+2) + "  " +
+		padRight(humanize.Bytes(size), 10) + "  "
+	if s.tool == toolPageInspect {
+		line += padRight(formatRows(rows), rowsColW) + "  " +
+			padRight(formatRows(pages)+"p", pagesColW) + "  "
+	} else {
+		line += padRight(humanize.Bytes(heap), breakdownColW) + "  " +
+			padRight(humanize.Bytes(idx), breakdownColW) + "  " +
+			padRight(formatRows(rows), rowsColW) + "  "
+		if anyBloat {
+			cell := "-"
+			if bloat > 0 && size > 0 {
+				cell = fmt.Sprintf("%d%% bloat", int(float64(bloat)*100/float64(size)))
+			}
+			line += padRight(cell, 12) + "  "
+		}
+	}
+	// 2-cell childMark placeholder, then the Σ label in the name column.
+	line += "  " + fmt.Sprintf("Σ %d tables", n)
+	if s.tool != toolPageInspect && toast > 0 {
+		line += " · toast " + humanize.Bytes(toast)
+	}
+	return styleTotal.Render(line) + "\n"
 }
 
 // renderPartsHeader is the size/bloat/name column header for the parts level,
@@ -782,6 +896,33 @@ func renderSchemasHeader(s *screen, barW int) string {
 	return styleMuted.Render(line)
 }
 
+// renderSchemasTotals builds the pinned Σ footer for the schemas list: summed
+// size and table count under their columns, like the tables footer one level
+// below. Sums cover every loaded row, not just the filtered subset, matching
+// the other Σ footers. Returns "" until schemas have loaded.
+func (m *Model) renderSchemasTotals(s *screen) string {
+	var size, tables int64
+	n := 0
+	for _, it := range s.items {
+		if _, ok := it.data.(pg.Schema); !ok {
+			continue
+		}
+		size += it.size
+		tables += it.tableCount
+		n++
+	}
+	if n == 0 {
+		return ""
+	}
+	// Cursor slot + blank bar area, then the same column layout as renderRow
+	// (size, tables, childMark placeholder, Σ label in the name column).
+	line := "  " + strings.Repeat(" ", m.barWidth(s)+2) + "  " +
+		padRight(humanize.Bytes(size), 10) + "  " +
+		padRight(formatRows(tables), tableCountColW) + "  " +
+		"  " + fmt.Sprintf("Σ %d schemas", n)
+	return styleTotal.Render(line) + "\n"
+}
+
 func renderBufferRow(it item, st pg.TableBufferStat, maxSize, maxDirty int64, barW int, selected bool, barStyle lipgloss.Style) string {
 	bar := renderSolidBar(it.size, maxSize, barW, barStyle)
 	cursor := selectedCursor(selected)
@@ -808,5 +949,6 @@ func renderBufferRow(it item, st pg.TableBufferStat, maxSize, maxDirty int64, ba
 		padRight(cachedStr, bufColCached) + "  " +
 		padRight(hitStr, bufColHit) + "  " +
 		padRight(dirtyStr, bufColDirty) + "  " +
+		padRight(tempCell(st), bufColTemp) + "  " +
 		name
 }

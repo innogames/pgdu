@@ -43,13 +43,15 @@ func barReserve(s *screen) int {
 	l, tl := s.level, s.tool
 	switch l {
 	case levelBufferTables:
-		// cursor + bar(brackets) + buffered + total + cached + hit + dirty + name
+		// cursor + bar(brackets) + buffered + total + cached + hit + dirty +
+		// temp + name
 		return colCursor + colBrackets +
 			bufColBuffered + colGutter +
 			bufColTotal + colGutter +
 			bufColCached + colGutter +
 			bufColHit + colGutter +
 			bufColDirty + colGutter +
+			bufColTemp + colGutter +
 			colName
 	case levelShmem:
 		// cursor + bar(brackets) + size + share% + group + name
@@ -82,12 +84,13 @@ func barReserve(s *screen) int {
 	case levelColumns, levelDatabases, levelSchemas:
 		return colCursor + colBrackets + colSize + colMark + colName + colDetail
 	case levelHeapPages:
-		// cursor + bar(brackets) + flag + used + live + R + dead + dead% + name
+		// cursor + bar(brackets) + flag + used + live + R + dead + dead% +
+		// [temp] + name — temp only when buffer data loaded (pg_buffercache).
 		return colCursor + colBrackets + heapPageFlagColW + colGutter +
 			heapPageUsedColW + colGutter +
 			heapPageLiveColW + colGutter + heapPageRedirColW + colGutter +
 			heapPageDeadLPColW + colGutter +
-			heapPageDeadColW + colGutter + heapPageNameColW
+			heapPageDeadColW + colGutter + pageTempReserve(s) + heapPageNameColW
 	case levelHeapTuples:
 		// cursor + dot + lp idx + flag word + len + xmin + xmax + ctid + slack
 		const tupleReserve = 2 + 2 + 6 + 10 + 8 + 12 + 12 + 14 + 6
@@ -105,23 +108,25 @@ func barReserve(s *screen) int {
 			(relTypeColW + colGutter) +
 			colMark + colName + relParentColW
 	case levelIndexPages:
-		base := colCursor + colBrackets
+		// Every AM gets the optional [temp] column just before the page name;
+		// it only takes space when buffer data loaded (pg_buffercache).
+		base := colCursor + colBrackets + pageTempReserve(s)
 		switch s.index.AccessMethod {
 		case "gist":
-			// type + used + items + free% + page name (no tree level)
+			// type + used + items + free% + [temp] + page name (no tree level)
 			return base + idxPageTypeColW + colGutter + idxPageUsedColW + colGutter +
 				idxPageItemsColW + colGutter + idxPageFreeColW + colGutter + idxPageNameColW
 		case "brin":
-			// type(meta/revmap/regular) + used + free% + page name
+			// type(meta/revmap/regular) + used + free% + [temp] + page name
 			return base + brinPageTypeColW + colGutter + idxPageUsedColW + colGutter +
 				idxPageFreeColW + colGutter + idxPageNameColW
 		case "gin":
-			// type(flags tag) + maxoff(items) + used + free% + page name
+			// type(flags tag) + maxoff(items) + used + free% + [temp] + page name
 			return base + ginPageTypeColW + colGutter + idxPageItemsColW + colGutter +
 				idxPageUsedColW + colGutter + idxPageFreeColW + colGutter + idxPageNameColW
 		default:
 			// btree: cursor + bar(brackets) + flag + type + level + used + avg +
-			// items + free% + links + name
+			// items + free% + links + [temp] + name
 			return base + idxPageFlagColW + colGutter +
 				idxPageTypeColW + colGutter +
 				idxPageLevelColW + colGutter + idxPageUsedColW + colGutter +
@@ -182,7 +187,22 @@ const (
 	heapPageDeadLPColW = 5
 	heapPageDeadColW   = 7
 	heapPageNameColW   = 16
+
+	// pageTempColW is the optional buffer-temperature column shared by the
+	// heap- and index-page views: "temp↑" header, "5•" (usagecount + dirty
+	// dot) cells.
+	pageTempColW = 5
 )
+
+// pageTempReserve is the extra width the optional temp column takes on a
+// page-inspector screen — zero until pg_buffercache data actually loaded, so
+// the bar doesn't shrink for a column that isn't drawn.
+func pageTempReserve(s *screen) int {
+	if s.pageBufs == nil {
+		return 0
+	}
+	return pageTempColW + colGutter
+}
 
 // Column widths for the heap-tuples header and rows. Same rationale.
 const (

@@ -571,6 +571,9 @@ func (s *screen) diagMetrics(cols []pg.DiagColumn, barCol int) (colW, naturalW [
 			if cell.HasNum && cols[i].Kind == pg.DiagBytes {
 				display = humanize.Bytes(int64(cell.Num))
 			}
+			if cell.HasNum && cols[i].Kind == pg.DiagCount {
+				display = formatRows(int64(cell.Num))
+			}
 			w := displayWidth(display)
 			if w > naturalW[i] {
 				naturalW[i] = w
@@ -601,6 +604,9 @@ func (s *screen) diagMetrics(cols []pg.DiagColumn, barCol int) (colW, naturalW [
 		display := cell.Display
 		if cell.HasNum && cols[i].Kind == pg.DiagBytes {
 			display = humanize.Bytes(int64(cell.Num))
+		}
+		if cell.HasNum && cols[i].Kind == pg.DiagCount {
+			display = formatRows(int64(cell.Num))
 		}
 		w := displayWidth(display)
 		if w > naturalW[i] {
@@ -843,6 +849,9 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			if cell.HasNum && i < nCols && cols[i].Kind == pg.DiagBytes {
 				raw = humanize.Bytes(int64(cell.Num))
 			}
+			if cell.HasNum && i < nCols && cols[i].Kind == pg.DiagCount {
+				raw = formatRows(int64(cell.Num))
+			}
 			if cell.HasNum && i < nCols && isDiagPercentKind(cols[i].Kind) {
 				raw = formatDiagPercent(cell)
 			}
@@ -939,6 +948,9 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			raw := cell.Display
 			if cell.HasNum && cols[i].Kind == pg.DiagBytes {
 				raw = humanize.Bytes(int64(cell.Num))
+			}
+			if cell.HasNum && cols[i].Kind == pg.DiagCount {
+				raw = formatRows(int64(cell.Num))
 			}
 			display := truncateDiagCell(raw, colW[i])
 			isNumeric := cell.HasNum || cols[i].Kind == pg.DiagInt ||

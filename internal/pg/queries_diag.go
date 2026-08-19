@@ -238,6 +238,80 @@ WHERE am.amname = 'btree'                       -- only B-tree indexes
 ORDER BY abs(s.correlation) DESC, pg_relation_size(t.oid) DESC
 `
 
+// sqlDiagIndexClusterCandidates is the inverse of the BRIN query: btree indexes
+// whose leading column has *low* physical correlation (|correlation| ≤ 0.5) yet
+// whose scans return many rows each — the fragmented-detail-table pattern (e.g.
+// a player inventory always fetched by user id) where every index scan touches
+// scattered heap pages and a CLUSTER/pg_repack rewrite collapses them onto few.
+// Only the leading column matters (k.ord = 1): its correlation decides the heap
+// locality of a prefix scan. Unique/primary indexes stay in deliberately — the
+// tuples-per-scan floor already drops point lookups (~1 tuple/scan), and a PK
+// like (user_id, item_id) scanned by prefix is exactly the target. Expression
+// indexes drop out naturally (indkey attnum 0 has no pg_attribute/pg_stats row).
+// scatter_pct ((1−|corr|)×100, higher = worse) is the bar. heap_miss_pct
+// (per-table, from pg_statio_user_tables) separates fragmented tables that
+// actually hit disk from ones the buffer cache absorbs anyway, and the default
+// sort is disk_pain — tuples_read × scatter × heap-miss ratio — so the rows
+// whose scattered fetches actually cost disk reads rank first, not merely the
+// hottest counters on fully-cached tables.
+const sqlDiagIndexClusterCandidates = `
+SELECT
+    t.relname                                           AS table_name,
+    i.relname                                           AS index_name,
+    a.attname                                           AS column_name,
+    round(((1 - abs(s.correlation)) * 100)::numeric, 1) AS scatter_pct,
+    -- Fraction of the table's heap block reads that missed shared_buffers: a
+    -- fragmented table that lives entirely in cache costs little; one that
+    -- hits disk on scattered pages is the real CLUSTER payoff.
+    round(100 * sio.heap_blks_read::numeric
+          / nullif(sio.heap_blks_hit + sio.heap_blks_read, 0), 1) AS heap_miss_pct,
+    -- Composite ranking: tuple fetches × scattered fraction × disk-miss
+    -- fraction ≈ fetches that were both on a random page AND read from disk.
+    -- Table size needs no extra factor — a table the cache absorbs already
+    -- scores ~0 through the miss ratio. NULL (no heap I/O counted) sorts last.
+    round(st.idx_tup_read * (1 - abs(s.correlation))
+          * sio.heap_blks_read::numeric
+          / nullif(sio.heap_blks_hit + sio.heap_blks_read, 0)) AS disk_pain,
+    st.idx_scan                                         AS scans,
+    st.idx_tup_read                                     AS tuples_read,
+    round(st.idx_tup_read::numeric / st.idx_scan, 1)    AS tup_per_scan,
+    CASE
+        WHEN s.n_distinct > 0
+            THEN round((t.reltuples / s.n_distinct)::numeric, 1)
+        WHEN s.n_distinct < 0
+            THEN round((-1 / s.n_distinct)::numeric, 1)
+    END                                                 AS rows_per_key,
+    idx.indisclustered                                  AS clustered,
+    pg_size_pretty(pg_relation_size(t.oid))             AS table_size,
+    pg_size_pretty(pg_relation_size(i.oid))             AS index_size
+FROM pg_index idx
+JOIN pg_class i        ON i.oid = idx.indexrelid           -- the index
+JOIN pg_class t        ON t.oid = idx.indrelid             -- the table
+JOIN pg_namespace n    ON n.oid = t.relnamespace
+JOIN pg_am am          ON am.oid = i.relam                 -- access method
+-- pg_stat_user_indexes also scopes the result to user schemas, so no explicit
+-- pg_catalog/information_schema exclusion is needed here.
+JOIN pg_stat_user_indexes st ON st.indexrelid = idx.indexrelid
+JOIN pg_statio_user_tables sio ON sio.relid = t.oid
+JOIN LATERAL unnest(idx.indkey) WITH ORDINALITY AS k(attnum, ord) ON k.ord = 1
+JOIN pg_attribute a    ON a.attrelid = t.oid AND a.attnum = k.attnum
+LEFT JOIN pg_stats s   ON s.schemaname = n.nspname
+                       AND s.tablename  = t.relname
+                       AND s.attname    = a.attname
+WHERE am.amname = 'btree'                       -- only B-tree (CLUSTER's home turf)
+  AND idx.indisvalid
+  AND a.attnum > 0                              -- skip expression-index entries
+  AND t.reltuples > 100000                      -- only tables big enough to matter
+  AND s.correlation IS NOT NULL
+  AND abs(s.correlation) <= 0.5                 -- heap order does not follow the index
+  AND st.idx_scan > 0
+  -- Multi-row scans only, written multiplication-side to avoid division by
+  -- zero before the idx_scan > 0 predicate is applied: point lookups
+  -- (~1 tuple/scan) don't suffer from fragmentation and would be noise.
+  AND st.idx_tup_read >= 5 * st.idx_scan
+ORDER BY disk_pain DESC NULLS LAST
+`
+
 // sqlDiagIndexShowAll was the old per-index listing (public schema only). Its
 // useful columns (scan count, tuples read, unique flag) were folded into
 // sqlDiagIndexShowSize, so it is no longer registered. Kept commented for

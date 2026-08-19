@@ -98,6 +98,42 @@ var Diagnostics = []Diagnostic{
 			range scans, not single-row lookups — check the workload first, create
 			the BRIN, verify the plans still prune, then drop the btree.`,
 	},
+	{
+		Key:         "index_cluster_candidates",
+		PerDB:       true,
+		Title:       "CLUSTER candidates (fragmented)",
+		Category:    "index",
+		Description: "hot btree indexes on low-correlation columns (|corr| ≤ 0.5) whose scans return many scattered rows — candidates for CLUSTER / pg_repack",
+		SQL:         sqlDiagIndexClusterCandidates,
+		Bar:         "scatter_pct",
+		Sort:        "disk_pain",
+		Kinds: map[string]DiagColumnKind{
+			"scatter_pct":   DiagPercentBad,
+			"heap_miss_pct": DiagPercentBad,
+			"disk_pain":     DiagCount,
+			"scans":         DiagCount,
+			"tuples_read":   DiagCount,
+		},
+		Help: `Btree indexes whose scans return several rows each (tup_per_scan ≥ 5)
+			while the heap is ordered unlike the index (scatter_pct = (1−|corr|)×100;
+			100 means heap and index order are unrelated), so every scan fetches
+			rows scattered across many heap pages. The classic shape is a per-key
+			detail table — a player inventory, per-user events — always queried by
+			that key; rows_per_key confirms it. disk_pain, the default order, is
+			tuples_read × scatter × heap-miss ratio — an estimate of fetches that
+			were both scattered and served from disk; a fragmented table the
+			buffer cache fully absorbs (heap_miss_pct ≈ 0) scores near zero no
+			matter how hot its counters are. Ignore rows
+			with rows_per_key ≈ 1 unless the scans are range scans (cleanup by
+			timestamp, id ranges) — clustering only helps when scanned rows share
+			pages. Fix by rewriting the heap in index order: CLUSTER <table>
+			USING <index> (takes an ACCESS EXCLUSIVE lock) or pg_repack for an
+			online rewrite. Churny tables re-fragment over time, so re-run
+			periodically; clustered = t means the table was already CLUSTERed on
+			that index and has degraded since. scans/tuples_read/heap_miss_pct are
+			cumulative since the last stats reset, so freshly reset stats
+			understate hotness.`,
+	},
 	// "All indexes" was merged into "Index sizes" below (which now also carries
 	// scan counts and the unique flag, across all schemas), so it is no longer a
 	// separate entry. Kept commented for reference rather than deleted.

@@ -249,6 +249,14 @@ type BufferUsageCount struct {
 	Pinned  int64
 }
 
+// PageBuffer is the shared-buffers residency of a single relation page: its
+// clock-sweep usagecount (0 = cold … 5 = hot) and whether the buffered copy is
+// dirty. Pages absent from the PageBuffers map are simply not cached.
+type PageBuffer struct {
+	UsageCount int16
+	Dirty      bool
+}
+
 func (b BufferCacheSummary) FreeBytes() int64 {
 	free := b.TotalBytes - b.ThisDBBytes - b.OtherDBBytes
 	if free < 0 {

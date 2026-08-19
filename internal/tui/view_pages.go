@@ -54,7 +54,10 @@ func (m *Model) renderIndexPagesInfo(height int) string {
 	b.WriteString("    " + padRight("free", 10) +
 		mu("free_size as a percent of pagesize; high values on leaf pages signal bloat") + "\n")
 	b.WriteString("    " + padRight("links", 10) +
-		mu("btpo_prev - btpo_next: the page's left/right siblings on its level (· = an end)") + "\n\n")
+		mu("btpo_prev - btpo_next: the page's left/right siblings on its level (· = an end)") + "\n")
+	b.WriteString("    " + padRight("temp", 10) +
+		mu("with pg_buffercache: shared-buffers usagecount 0 (cold) → 5 (hot), "+
+			"• = dirty, — = not cached") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" flags ") + "  " +
 		mu("the leftmost ! column flags rare structural states from btpo_flags") + "\n")
@@ -388,14 +391,15 @@ func btreeMetaLine(meta *pg.BtreeMeta) string {
 // level (0 = leaf), used bytes, live/dead item counts, free %.
 func (m *Model) renderIndexPagesList(s *screen, height int) string {
 	barW := m.barWidth(s)
-	return m.renderRowList(s, height, renderIndexPagesHeader(s.sort, s.sortDesc, barW),
+	showTemp := s.pageBufs != nil
+	return m.renderRowList(s, height, renderIndexPagesHeader(s.sort, s.sortDesc, barW, showTemp),
 		func(it item, selected bool) string {
 			p, _ := it.data.(pg.IndexPageStat)
-			return renderIndexPageRow(it, p, barW, selected)
+			return renderIndexPageRow(it, p, barW, selected, showTemp)
 		})
 }
 
-func renderIndexPagesHeader(sort sortMode, sortDesc bool, barW int) string {
+func renderIndexPagesHeader(sort sortMode, sortDesc bool, barW int, showTemp bool) string {
 	// "!" (flag), avg and links are display-only columns — no sortMark.
 	line := headerIndent(barW) +
 		padRight("!", idxPageFlagColW) + "  " +
@@ -406,6 +410,7 @@ func renderIndexPagesHeader(sort sortMode, sortDesc bool, barW int) string {
 		padRight(sortMark("live/dead", sort == sortByDeadRatio, sortDesc), idxPageItemsColW) + "  " +
 		padRight(sortMark("free", sort == sortByFreeSpace, sortDesc), idxPageFreeColW) + "  " +
 		padRight("links", idxPageLinksColW) + "  " +
+		pageTempHeaderCol(sort, sortDesc, showTemp) +
 		sortMark("page", sort == sortByBlkno, sortDesc)
 	return styleMuted.Render(line)
 }
@@ -456,7 +461,7 @@ func indexPageTypeStyle(t string) lipgloss.Style {
 	return styleMuted
 }
 
-func renderIndexPageRow(it item, p pg.IndexPageStat, barW int, selected bool) string {
+func renderIndexPageRow(it item, p pg.IndexPageStat, barW int, selected bool, showTemp bool) string {
 	cursor := selectedCursor(selected)
 	bar := renderIndexPageBar(p, barW)
 	flag := indexPageFlagGlyph(p.BtpoFlags)
@@ -505,6 +510,7 @@ func renderIndexPageRow(it item, p pg.IndexPageStat, barW int, selected bool) st
 		padRight(items, idxPageItemsColW) + "  " +
 		padRight(free, idxPageFreeColW) + "  " +
 		padRight(links, idxPageLinksColW) + "  " +
+		pageTempRowCol(it, showTemp) +
 		name
 }
 
@@ -1066,19 +1072,21 @@ func tupleInfomaskBadges(infomask, infomask2 int32) string {
 // type (leaf/intr/del), used bytes, item count, free %, block.
 func (m *Model) renderGistPagesList(s *screen, height int) string {
 	barW := m.barWidth(s)
-	return m.renderRowList(s, height, renderGistPagesHeader(s.sort, s.sortDesc, barW),
+	showTemp := s.pageBufs != nil
+	return m.renderRowList(s, height, renderGistPagesHeader(s.sort, s.sortDesc, barW, showTemp),
 		func(it item, selected bool) string {
 			p, _ := it.data.(pg.GistPageStat)
-			return renderGistPageRow(it, p, barW, selected)
+			return renderGistPageRow(it, p, barW, selected, showTemp)
 		})
 }
 
-func renderGistPagesHeader(sort sortMode, sortDesc bool, barW int) string {
+func renderGistPagesHeader(sort sortMode, sortDesc bool, barW int, showTemp bool) string {
 	line := headerIndent(barW) +
 		padRight(sortMark("type", sort == sortByType, sortDesc), idxPageTypeColW) + "  " +
 		padRight(sortMark("used", sort == sortBySize, sortDesc), idxPageUsedColW) + "  " +
 		padRight("items", idxPageItemsColW) + "  " +
 		padRight(sortMark("free", sort == sortByFreeSpace, sortDesc), idxPageFreeColW) + "  " +
+		pageTempHeaderCol(sort, sortDesc, showTemp) +
 		sortMark("page", sort == sortByBlkno, sortDesc)
 	return styleMuted.Render(line)
 }
@@ -1097,7 +1105,7 @@ func gistPageTypeStyle(p pg.GistPageStat) lipgloss.Style {
 	return styleMuted // leaf stays muted (the common case)
 }
 
-func renderGistPageRow(it item, p pg.GistPageStat, barW int, selected bool) string {
+func renderGistPageRow(it item, p pg.GistPageStat, barW int, selected bool, showTemp bool) string {
 	cursor := selectedCursor(selected)
 	bar := renderSolidBar(it.size, heapPageBlockSize, barW, styleGistSeg)
 	typ := gistPageTypeStyle(p).Render(gistPageTypeLabel(p))
@@ -1119,6 +1127,7 @@ func renderGistPageRow(it item, p pg.GistPageStat, barW int, selected bool) stri
 		padRight(used, idxPageUsedColW) + "  " +
 		padRight(items, idxPageItemsColW) + "  " +
 		padRight(free, idxPageFreeColW) + "  " +
+		pageTempRowCol(it, showTemp) +
 		name
 }
 
@@ -1206,18 +1215,20 @@ func brinMetaLine(meta *pg.BrinMeta) string {
 // used bytes, free %, block. Item counts are omitted (see BrinPageStat).
 func (m *Model) renderBrinPagesList(s *screen, height int) string {
 	barW := m.barWidth(s)
-	return m.renderRowList(s, height, renderBrinPagesHeader(s.sort, s.sortDesc, barW),
+	showTemp := s.pageBufs != nil
+	return m.renderRowList(s, height, renderBrinPagesHeader(s.sort, s.sortDesc, barW, showTemp),
 		func(it item, selected bool) string {
 			p, _ := it.data.(pg.BrinPageStat)
-			return renderBrinPageRow(it, p, barW, selected)
+			return renderBrinPageRow(it, p, barW, selected, showTemp)
 		})
 }
 
-func renderBrinPagesHeader(sort sortMode, sortDesc bool, barW int) string {
+func renderBrinPagesHeader(sort sortMode, sortDesc bool, barW int, showTemp bool) string {
 	line := headerIndent(barW) +
 		padRight(sortMark("type", sort == sortByType, sortDesc), brinPageTypeColW) + "  " +
 		padRight(sortMark("used", sort == sortBySize, sortDesc), idxPageUsedColW) + "  " +
 		padRight(sortMark("free", sort == sortByFreeSpace, sortDesc), idxPageFreeColW) + "  " +
+		pageTempHeaderCol(sort, sortDesc, showTemp) +
 		sortMark("page", sort == sortByBlkno, sortDesc)
 	return styleMuted.Render(line)
 }
@@ -1230,7 +1241,7 @@ func brinPageTypeStyle(t string) lipgloss.Style {
 	return styleMuted // regular (data) pages stay muted — the common case
 }
 
-func renderBrinPageRow(it item, p pg.BrinPageStat, barW int, selected bool) string {
+func renderBrinPageRow(it item, p pg.BrinPageStat, barW int, selected bool, showTemp bool) string {
 	cursor := selectedCursor(selected)
 	bar := renderSolidBar(it.size, heapPageBlockSize, barW, styleBrinSeg)
 	typ := brinPageTypeStyle(p.PageType).Render(p.PageType)
@@ -1245,6 +1256,7 @@ func renderBrinPageRow(it item, p pg.BrinPageStat, barW int, selected bool) stri
 		padRight(typ, brinPageTypeColW) + "  " +
 		padRight(used, idxPageUsedColW) + "  " +
 		padRight(free, idxPageFreeColW) + "  " +
+		pageTempRowCol(it, showTemp) +
 		name
 }
 
@@ -1368,24 +1380,26 @@ func ginPageTypeStyle(flags string) lipgloss.Style {
 // item count (maxoff), used bytes, free %, block. Only data-leaf pages drill.
 func (m *Model) renderGinPagesList(s *screen, height int) string {
 	barW := m.barWidth(s)
-	return m.renderRowList(s, height, renderGinPagesHeader(s.sort, s.sortDesc, barW),
+	showTemp := s.pageBufs != nil
+	return m.renderRowList(s, height, renderGinPagesHeader(s.sort, s.sortDesc, barW, showTemp),
 		func(it item, selected bool) string {
 			p, _ := it.data.(pg.GinPageStat)
-			return renderGinPageRow(it, p, barW, selected)
+			return renderGinPageRow(it, p, barW, selected, showTemp)
 		})
 }
 
-func renderGinPagesHeader(sort sortMode, sortDesc bool, barW int) string {
+func renderGinPagesHeader(sort sortMode, sortDesc bool, barW int, showTemp bool) string {
 	line := headerIndent(barW) +
 		padRight(sortMark("type", sort == sortByType, sortDesc), ginPageTypeColW) + "  " +
 		padRight("items", idxPageItemsColW) + "  " +
 		padRight(sortMark("used", sort == sortBySize, sortDesc), idxPageUsedColW) + "  " +
 		padRight(sortMark("free", sort == sortByFreeSpace, sortDesc), idxPageFreeColW) + "  " +
+		pageTempHeaderCol(sort, sortDesc, showTemp) +
 		sortMark("page", sort == sortByBlkno, sortDesc)
 	return styleMuted.Render(line)
 }
 
-func renderGinPageRow(it item, p pg.GinPageStat, barW int, selected bool) string {
+func renderGinPageRow(it item, p pg.GinPageStat, barW int, selected bool, showTemp bool) string {
 	cursor := selectedCursor(selected)
 	bar := renderSolidBar(it.size, heapPageBlockSize, barW, styleGinSeg)
 	typ := ginPageTypeStyle(p.Flags).Render(ginPageTypeLabel(p.Flags))
@@ -1402,6 +1416,7 @@ func renderGinPageRow(it item, p pg.GinPageStat, barW int, selected bool) string
 		padRight(items, idxPageItemsColW) + "  " +
 		padRight(used, idxPageUsedColW) + "  " +
 		padRight(free, idxPageFreeColW) + "  " +
+		pageTempRowCol(it, showTemp) +
 		name
 }
 

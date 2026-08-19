@@ -45,6 +45,14 @@ type TableStat struct {
 	// pg_statio_all_tables block counters (shared-buffer hits vs disk reads).
 	HeapBlksRead, HeapBlksHit int64
 	IdxBlksRead, IdxBlksHit   int64
+
+	// Point-in-time shared-buffer footprint (heap + TOAST + indexes) from
+	// pg_buffercache, merged in best-effort by ListTableStats. BufsKnown is
+	// false when the extension is missing or unreadable, so the TUI renders "—"
+	// instead of a misleading 0.
+	BufferedBytes int64
+	DirtyBytes    int64
+	BufsKnown     bool
 }
 
 // AsTable reconstructs the foundation Table for this row so drill-in can reuse

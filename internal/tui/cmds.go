@@ -114,6 +114,8 @@ type heapPagesLoadedMsg struct {
 	count      int32
 	pages      []pg.HeapPageStat
 	totalPages int32
+	bufs       map[int64]pg.PageBuffer // per-block shared-buffers state (nil: no temp data)
+	bufsErr    error                   // why bufs is nil; a MissingExtensionError drives the hint
 	err        error
 }
 type toastTargetResolvedMsg struct {
@@ -160,6 +162,8 @@ type indexPagesLoadedMsg struct {
 	totalPages int32
 	keyCols    []pg.IndexKeyColumn // index key/INCLUDE columns for the banner
 	meta       *pg.BtreeMeta       // metapage banner (nil when bt_metap failed)
+	bufs       map[int64]pg.PageBuffer
+	bufsErr    error
 	err        error
 }
 type btreeLevelsLoadedMsg struct {
@@ -182,6 +186,8 @@ type gistPagesLoadedMsg struct {
 	pages      []pg.GistPageStat
 	totalPages int32
 	keyCols    []pg.IndexKeyColumn
+	bufs       map[int64]pg.PageBuffer
+	bufsErr    error
 	err        error
 }
 type gistItemsLoadedMsg struct {
@@ -199,6 +205,8 @@ type brinPagesLoadedMsg struct {
 	totalPages int32
 	keyCols    []pg.IndexKeyColumn
 	meta       *pg.BrinMeta
+	bufs       map[int64]pg.PageBuffer
+	bufsErr    error
 	err        error
 }
 type brinItemsLoadedMsg struct {
@@ -215,6 +223,8 @@ type ginPagesLoadedMsg struct {
 	totalPages int32
 	keyCols    []pg.IndexKeyColumn
 	meta       *pg.GinMeta
+	bufs       map[int64]pg.PageBuffer
+	bufsErr    error
 	err        error
 }
 type ginItemsLoadedMsg struct {
@@ -422,7 +432,10 @@ func (m *Model) loadHeapPagesCmd(t pg.Table, start, count int32) tea.Cmd {
 		// "pages N–M / total" status snippet shows ?/?? — much better than
 		// dropping the whole load on a transient pg_class read error.
 		rp, _ := m.client.RelPages(ctx, t)
-		return heapPagesLoadedMsg{table: t, start: start, count: count, pages: pages, totalPages: rp}
+		// Buffer temperature is best-effort decoration: without pg_buffercache
+		// (or the privileges to read it) the temp column simply stays hidden.
+		bufs, bufsErr := m.client.PageBuffers(ctx, t.DB, t.OID, start, count)
+		return heapPagesLoadedMsg{table: t, start: start, count: count, pages: pages, totalPages: rp, bufs: bufs, bufsErr: bufsErr}
 	})
 }
 
@@ -486,7 +499,8 @@ func (m *Model) loadIndexPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		if bm, err := m.client.BtreeMeta(ctx, r); err == nil {
 			meta = &bm
 		}
-		return indexPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta}
+		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
+		return indexPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta, bufs: bufs, bufsErr: bufsErr}
 	})
 }
 
@@ -533,7 +547,8 @@ func (m *Model) loadGistPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		}
 		rp, _ := m.client.RelPages(ctx, pg.Table{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
 		keyCols, _ := m.client.IndexKeyColumns(ctx, r) // best-effort banner
-		return gistPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols}
+		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
+		return gistPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, bufs: bufs, bufsErr: bufsErr}
 	})
 }
 
@@ -563,7 +578,8 @@ func (m *Model) loadBrinPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		if bm, err := m.client.BrinMeta(ctx, r); err == nil {
 			meta = &bm
 		}
-		return brinPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta}
+		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
+		return brinPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta, bufs: bufs, bufsErr: bufsErr}
 	})
 }
 
@@ -586,7 +602,8 @@ func (m *Model) loadGinPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		if gm, err := m.client.GinMeta(ctx, r); err == nil {
 			meta = &gm
 		}
-		return ginPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta}
+		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
+		return ginPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta, bufs: bufs, bufsErr: bufsErr}
 	})
 }
 

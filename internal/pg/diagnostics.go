@@ -28,6 +28,7 @@ const (
 	DiagDuration                            // elapsed time in ms (Num): right-aligned, coloured by absolute magnitude band (ms→green, s→yellow, min→red)
 	DiagBackendState                        // pg_stat_activity state: coloured per value (active→green, idle-in-xact→yellow, aborted→red, idle→muted)
 	DiagPercentBad                          // 0–100 % where higher is worse: cell text graded green→red on an absolute scale (e.g. dead-tuple %, seq-scan %)
+	DiagCount                               // large cumulative counter: rendered humanized (1.2k/3.4M/5.1G) from Num; sorts and sums on the raw value
 )
 
 // DiagColumn describes one column of a diagnostic result set.

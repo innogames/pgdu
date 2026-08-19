@@ -207,13 +207,14 @@ func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 			}, true
 
 	case levelHeapPages:
-		return []string{"blkno", "lsn", "lower", "upper", "special", "page_size", "flags", "free_bytes", "live_lp", "redirect_lp", "dead_lp", "unused_lp", "live_bytes", "dead_bytes", "hot_updated", "has_external"},
+		return []string{"blkno", "lsn", "lower", "upper", "special", "page_size", "flags", "free_bytes", "live_lp", "redirect_lp", "dead_lp", "unused_lp", "live_bytes", "dead_bytes", "hot_updated", "has_external", "usagecount", "buffer_dirty"},
 			func(it item) []string {
 				p, ok := it.data.(pg.HeapPageStat)
 				if !ok {
 					return nil
 				}
-				return []string{csvInt(p.Blkno), p.LSN, csvInt(p.Lower), csvInt(p.Upper), csvInt(p.Special), csvInt(p.PageSize), csvInt(p.Flags), csvInt(p.FreeBytes), csvInt(p.LiveLP), csvInt(p.RedirectLP), csvInt(p.DeadLP), csvInt(p.UnusedLP), csvInt(p.LiveBytes), csvInt(p.DeadBytes), csvInt(p.HotUpdated), csvInt(p.HasExternal)}
+				uc, dirty := csvPageBuf(it)
+				return []string{csvInt(p.Blkno), p.LSN, csvInt(p.Lower), csvInt(p.Upper), csvInt(p.Special), csvInt(p.PageSize), csvInt(p.Flags), csvInt(p.FreeBytes), csvInt(p.LiveLP), csvInt(p.RedirectLP), csvInt(p.DeadLP), csvInt(p.UnusedLP), csvInt(p.LiveBytes), csvInt(p.DeadBytes), csvInt(p.HotUpdated), csvInt(p.HasExternal), uc, dirty}
 			}, true
 
 	case levelHeapTuples:
@@ -237,13 +238,14 @@ func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 			}, true
 
 	case levelIndexPages:
-		return []string{"blkno", "type", "live_items", "dead_items", "avg_item_size", "page_size", "free_size", "btpo_prev", "btpo_next", "btpo_level", "btpo_flags"},
+		return []string{"blkno", "type", "live_items", "dead_items", "avg_item_size", "page_size", "free_size", "btpo_prev", "btpo_next", "btpo_level", "btpo_flags", "usagecount", "buffer_dirty"},
 			func(it item) []string {
 				p, ok := it.data.(pg.IndexPageStat)
 				if !ok {
 					return nil
 				}
-				return []string{csvInt(p.Blkno), p.Type, csvInt(p.LiveItems), csvInt(p.DeadItems), csvInt(p.AvgItemSize), csvInt(p.PageSize), csvInt(p.FreeSize), csvInt(p.BtpoPrev), csvInt(p.BtpoNext), csvInt(p.BtpoLevel), csvInt(p.BtpoFlags)}
+				uc, dirty := csvPageBuf(it)
+				return []string{csvInt(p.Blkno), p.Type, csvInt(p.LiveItems), csvInt(p.DeadItems), csvInt(p.AvgItemSize), csvInt(p.PageSize), csvInt(p.FreeSize), csvInt(p.BtpoPrev), csvInt(p.BtpoNext), csvInt(p.BtpoLevel), csvInt(p.BtpoFlags), uc, dirty}
 			}, true
 
 	case levelIndexTuples:
@@ -325,6 +327,16 @@ func relKindName(k pg.RelationKind) string {
 func numStr(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
 
 func csvInt[T int | int32 | int64](n T) string { return strconv.FormatInt(int64(n), 10) }
+
+// csvPageBuf renders a page item's buffer state for the page-inspector
+// exports: usagecount and dirty flag, both empty when the page isn't in
+// shared_buffers (or no temperature data was loaded at all).
+func csvPageBuf(it item) (usagecount, dirty string) {
+	if it.pageBuf == nil {
+		return "", ""
+	}
+	return strconv.Itoa(int(it.pageBuf.UsageCount)), strconv.FormatBool(it.pageBuf.Dirty)
+}
 func csvUint(n uint32) string                  { return strconv.FormatUint(uint64(n), 10) }
 
 // Pointer-field helpers: empty string when the source value is SQL NULL.
