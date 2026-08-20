@@ -108,10 +108,10 @@ func (m *Model) View() string {
 	}
 
 	if s.level == levelActivity {
-		if banner := activityPendingBanner(s); banner != "" {
+		if banner := activityPendingBanner(s, m.width); banner != "" {
 			b.WriteString(banner)
 			b.WriteString("\n")
-			contentHeight--
+			contentHeight -= strings.Count(banner, "\n") + 1
 		}
 	}
 

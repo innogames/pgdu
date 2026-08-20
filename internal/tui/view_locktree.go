@@ -92,19 +92,6 @@ func lockRowFilterText(n pg.LockNode) string {
 	return fmt.Sprintf("%d %s %s %s", n.PID, n.Username, n.Database, n.Query)
 }
 
-// lockTreeSelectedPID returns the PID under the cursor, or 0 when the list is
-// empty — the target for the k/x cancel/terminate confirm flow.
-func lockTreeSelectedPID(s *screen) int32 {
-	vis := s.visibleIndexes()
-	if s.cursor < 0 || s.cursor >= len(vis) {
-		return 0
-	}
-	if r, ok := s.items[vis[s.cursor]].data.(lockTreeRow); ok {
-		return r.node.PID
-	}
-	return 0
-}
-
 func (m *Model) renderLockTree(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
@@ -127,13 +114,13 @@ func (m *Model) renderLockTree(s *screen, height int) string {
 	}
 	b.WriteString("  " + styleSelected.Render("blocking chains") + mu(fmt.Sprintf("  ·  %d backends, %d waiting  ·  ⟳ %s  ·  ",
 		len(s.lockNodes), waiters, refresh)) +
-		styleBadge.Render("k") + mu(" cancel · ") + styleBadge.Render("x") + mu(" terminate · ") +
+		styleBadge.Render("k") + mu(" cancel · ") + styleBadge.Render("x/^k") + mu(" terminate · ") +
 		styleBadge.Render("t") + mu(" cadence") + "\n")
 	used := 1
 
-	if banner := activityPendingBanner(s); banner != "" {
+	if banner := activityPendingBanner(s, m.width); banner != "" {
 		b.WriteString(banner + "\n")
-		used++
+		used += strings.Count(banner, "\n") + 1
 	}
 
 	if len(s.items) == 0 {

@@ -717,6 +717,7 @@ func (m *Model) onBackendAction(msg backendActionMsg) tea.Cmd {
 	}
 	s.pendingBackendAction = ""
 	s.pendingBackendPID = 0
+	s.pendingBackendQuery = ""
 	switch {
 	case msg.err != nil:
 		m.notice = fmt.Sprintf("%s %d failed: %s", msg.action, msg.pid, msg.err)
