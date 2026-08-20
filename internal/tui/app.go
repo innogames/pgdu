@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -891,9 +892,9 @@ func (m *Model) Init() tea.Cmd {
 func (m *Model) top() *screen { return m.stack[len(m.stack)-1] }
 
 func (m *Model) findLevel(l level) *screen {
-	for i := len(m.stack) - 1; i >= 0; i-- {
-		if m.stack[i].level == l {
-			return m.stack[i]
+	for _, v := range slices.Backward(m.stack) {
+		if v.level == l {
+			return v
 		}
 	}
 	return nil
