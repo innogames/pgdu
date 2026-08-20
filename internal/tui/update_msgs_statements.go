@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -452,8 +453,8 @@ func (m *Model) onStatementExplainLoaded(msg statementExplainLoadedMsg) tea.Cmd 
 // findExplainTarget returns the topmost statement screen whose EXPLAIN is in
 // flight for the given normalized query — the one that issued the request.
 func (m *Model) findExplainTarget(query string) *screen {
-	for i := len(m.stack) - 1; i >= 0; i-- {
-		s := m.stack[i]
+	for _, s := range slices.Backward(m.stack) {
+
 		if s.level != levelStatementDetail && s.level != levelStatementSamples {
 			continue
 		}

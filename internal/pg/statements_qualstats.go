@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -103,8 +104,8 @@ func (c *Client) InferParams(ctx context.Context, db, query string) ([]ParamType
 // doesn't clobber the prefix of "$10".
 func BuildSampleCall(query string, params []ParamType, real map[int]string) string {
 	out := query
-	for i := len(params) - 1; i >= 0; i-- {
-		p := params[i]
+	for _, p := range slices.Backward(params) {
+
 		lit, ok := real[p.Ordinal]
 		if !ok {
 			lit = sampleLiteral(p.Type)

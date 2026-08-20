@@ -183,8 +183,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // asMissingExt returns the underlying *pg.MissingExtensionError if err is one,
 // or nil. errors.As handles wrapping so command callers can wrap freely.
 func asMissingExt(err error) *pg.MissingExtensionError {
-	var e *pg.MissingExtensionError
-	if errors.As(err, &e) {
+	if e, ok := errors.AsType[*pg.MissingExtensionError](err); ok {
 		return e
 	}
 	return nil
@@ -210,8 +209,7 @@ func setExtensionPrompt(s *screen, ext *pg.MissingExtensionError, reason string)
 // asOutdatedExt returns the underlying *pg.OutdatedExtensionError if err is one,
 // or nil. errors.As handles wrapping so command callers can wrap freely.
 func asOutdatedExt(err error) *pg.OutdatedExtensionError {
-	var e *pg.OutdatedExtensionError
-	if errors.As(err, &e) {
+	if e, ok := errors.AsType[*pg.OutdatedExtensionError](err); ok {
 		return e
 	}
 	return nil
