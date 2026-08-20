@@ -178,8 +178,8 @@ func (m *Model) renderActivityInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" backend actions ") + "\n")
 	b.WriteString("    " + badge("k") + mu("  pg_cancel_backend (SIGINT)  — cancels the current statement, leaves the connection open") + "\n")
-	b.WriteString("    " + badge("x") + mu("  pg_terminate_backend (SIGTERM) — closes the connection entirely") + "\n")
-	b.WriteString("    " + mu("    Both require a confirmation: press y to execute, any other key to abort.") + "\n\n")
+	b.WriteString("    " + badge("x") + mu("/") + badge("^k") + mu("  pg_terminate_backend (SIGTERM) — closes the connection entirely (kill, as in pg_activity)") + "\n")
+	b.WriteString("    " + mu("    Both require a confirmation showing the target pid and query: press y to execute, any other key to abort.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" navigation ") + "\n")
 	b.WriteString("    " + badge("↵") + mu("  drill into top-queries detail for the selected row's query_id (when available)") + "\n")
@@ -225,7 +225,7 @@ func (m *Model) renderActivityInfo(height int) string {
 // called from the standard error path in view.go; only the notice-like status
 // is rendered here for the activity-specific backend action pending state, used
 // inline in renderDiagResult.
-func activityPendingBanner(s *screen) string {
+func activityPendingBanner(s *screen, width int) string {
 	if s.pendingBackendAction == "" {
 		return ""
 	}
@@ -238,8 +238,12 @@ func activityPendingBanner(s *screen) string {
 	default:
 		action = s.pendingBackendAction
 	}
-	return styleErr.Render(fmt.Sprintf(
+	banner := styleErr.Render(fmt.Sprintf(
 		"  ⚠  %s backend %d — press y to confirm, any other key to cancel",
 		action, s.pendingBackendPID,
 	))
+	if q := flattenQuery(s.pendingBackendQuery); q != "" {
+		banner += "\n" + truncateToWidth(styleErr.Render("     "+q), width)
+	}
+	return banner
 }

@@ -139,6 +139,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		pid := s.pendingBackendPID
 		s.pendingBackendAction = ""
 		s.pendingBackendPID = 0
+		s.pendingBackendQuery = ""
 		if msg.String() == "y" || msg.String() == "Y" {
 			switch action {
 			case "cancel":
@@ -455,14 +456,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.CancelBackend):
 		// Arm the two-step confirmation for pg_cancel_backend, from the activity
 		// table or the lock tree.
-		if pid := backendActionPID(s); pid != 0 {
+		if pid, query := backendActionTarget(s); pid != 0 {
 			s.pendingBackendPID = pid
 			s.pendingBackendAction = "cancel"
+			s.pendingBackendQuery = query
 		}
 	case key.Matches(msg, m.keys.TerminateBackend):
-		if pid := backendActionPID(s); pid != 0 {
+		if pid, query := backendActionTarget(s); pid != 0 {
 			s.pendingBackendPID = pid
 			s.pendingBackendAction = "terminate"
+			s.pendingBackendQuery = query
 		}
 	case key.Matches(msg, m.keys.Columns):
 		// Open the htop-style column picker — on the top-queries table or on
@@ -1040,17 +1043,33 @@ func (m *Model) triggerInstall(s *screen) tea.Cmd {
 	return m.installExtensionCmd(s.extPrompt.db, s.extPrompt.name)
 }
 
-// backendActionPID resolves the PID that k/x should act on for the current
-// screen: the activity table's selected row or the lock tree's selected node.
-// Returns 0 on any other level or when nothing is selected.
-func backendActionPID(s *screen) int32 {
+// backendActionTarget resolves the PID (and its query text, for the confirm
+// banner) that k/x/^k should act on for the current screen: the activity
+// table's selected row or the lock tree's selected node. Returns 0 on any
+// other level or when nothing is selected.
+func backendActionTarget(s *screen) (int32, string) {
 	switch s.level {
 	case levelActivity:
-		return activitySelectedPID(s)
+		pid := activitySelectedPID(s)
+		if pid == 0 {
+			return 0, ""
+		}
+		for i := range s.actRows {
+			if s.actRows[i].PID == pid {
+				return pid, s.actRows[i].Query
+			}
+		}
+		return pid, ""
 	case levelLockTree:
-		return lockTreeSelectedPID(s)
+		vis := s.visibleIndexes()
+		if s.cursor < 0 || s.cursor >= len(vis) {
+			return 0, ""
+		}
+		if r, ok := s.items[vis[s.cursor]].data.(lockTreeRow); ok {
+			return r.node.PID, r.node.Query
+		}
 	}
-	return 0
+	return 0, ""
 }
 
 // activitySelectedPID returns the PID of the currently highlighted backend in

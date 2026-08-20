@@ -527,10 +527,13 @@ type screen struct {
 	// status line so "since when" is never ambiguous.
 	tblStatsReset time.Time
 
-	// pendingBackendAction is the PID of the backend the user pressed k/x on,
-	// waiting for a y/Y confirmation.  action is "cancel" or "terminate".
+	// pendingBackendAction is the PID of the backend the user pressed k/x/^k on,
+	// waiting for a y/Y confirmation.  action is "cancel" or "terminate".  The
+	// query text is captured at arm time so an auto-refresh between arm and
+	// confirm can't swap what the banner shows.
 	pendingBackendPID    int32
 	pendingBackendAction string // "cancel" | "terminate" | ""
+	pendingBackendQuery  string
 
 	// ── Maintenance dashboard (levelMaintenance) ─────────────────────────────
 	// maint is the loaded snapshot; maintErr is non-nil when the load failed.

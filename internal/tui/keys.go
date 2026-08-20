@@ -131,7 +131,7 @@ func defaultKeys() keyMap {
 
 		ActivityFilter:   key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "cycle filter")),
 		CancelBackend:    key.NewBinding(key.WithKeys("k"), key.WithHelp("k", "cancel backend")),
-		TerminateBackend: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "terminate backend")),
+		TerminateBackend: key.NewBinding(key.WithKeys("x", "ctrl+k"), key.WithHelp("x/^k", "kill backend")),
 		LockTree:         key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "lock tree")),
 
 		WALByRelation: key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "by relation")),
