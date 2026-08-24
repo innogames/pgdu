@@ -115,7 +115,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 
 	// --- query text ---
 	b.WriteString("\n  " + styleHeader.Render(" query ") + "\n")
-	for _, line := range m.wrapDetail(flattenQuery(q.Query)) {
+	for _, line := range highlightSQL(q.Query, m.width-4) {
 		b.WriteString("    " + line + "\n")
 	}
 
@@ -151,8 +151,11 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	case s.statSampleErr != nil:
 		b.WriteString("    " + mu("could not infer parameters: "+s.statSampleErr.Error()) + "\n")
 	case s.statSampleCall != "":
-		for _, line := range m.wrapDetail(flattenQuery(s.statSampleCall)) {
-			b.WriteString("    " + styleBarAlt.Render(line) + "\n")
+		// Same highlighter as the query section: the literals substituted for
+		// $n land in the accent the whole block used to wear, so the colour now
+		// marks exactly the filled-in values.
+		for _, line := range highlightSQL(s.statSampleCall, m.width-4) {
+			b.WriteString("    " + line + "\n")
 		}
 	default:
 		b.WriteString("    " + mu("inferring parameters…") + "\n")
@@ -382,20 +385,6 @@ func (m *Model) renderStatementSamples(s *screen, height int) string {
 	}
 
 	return padInfo(&b, height)
-}
-
-// wrapDetail hard-wraps text to the detail panel's usable width (terminal minus
-// the 4-column indent), so long query/sample text doesn't clip the help row.
-func (m *Model) wrapDetail(text string) []string {
-	w := max(m.width-4, 8)
-	var out []string
-	r := []rune(text)
-	for len(r) > w {
-		out = append(out, string(r[:w]))
-		r = r[w:]
-	}
-	out = append(out, string(r))
-	return out
 }
 
 // clipDetail truncates one line to the usable detail width (EXPLAIN output is
