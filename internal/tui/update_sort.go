@@ -185,10 +185,11 @@ func itemBloatRatio(it item) (float64, bool) {
 	return float64(it.bloat) / float64(it.size), true
 }
 
-// itemHeapBytes / itemIndexBytes extract the heap and combined-index byte
-// footprints carried on tables-level items. Gated on the pg.Table payload so a
-// row from another level (where these fields are zero) sorts to the bottom
-// rather than tying at zero with a genuinely empty heap/index.
+// itemHeapBytes / itemIndexBytes / itemToastBytes extract the heap,
+// combined-index and toast byte footprints carried on tables-level items.
+// Gated on the pg.Table payload so a row from another level (where these
+// fields are zero) sorts to the bottom rather than tying at zero with a
+// genuinely empty heap/index/toast.
 func itemHeapBytes(it item) (int64, bool) {
 	if _, ok := it.data.(pg.Table); !ok {
 		return 0, false
@@ -201,6 +202,13 @@ func itemIndexBytes(it item) (int64, bool) {
 		return 0, false
 	}
 	return it.idx, true
+}
+
+func itemToastBytes(it item) (int64, bool) {
+	if _, ok := it.data.(pg.Table); !ok {
+		return 0, false
+	}
+	return it.toast, true
 }
 
 // itemColType / itemColAvgWidth extract the data type and pg_stats avg_width
@@ -242,7 +250,7 @@ func validSorts(l level) []sortMode {
 	case levelTools, levelDiagnostics:
 		return []sortMode{sortByName}
 	case levelTables:
-		return []sortMode{sortBySize, sortByHeap, sortByIndex, sortByRows, sortByName}
+		return []sortMode{sortBySize, sortByHeap, sortByIndex, sortByToast, sortByRows, sortByName}
 	case levelParts:
 		return []sortMode{sortBySize, sortByBloat, sortByType, sortByName}
 	case levelColumns:
