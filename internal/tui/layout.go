@@ -37,7 +37,7 @@ const (
 // numeric columns and name/detail. Each level declares its own so new tools
 // with different column shapes don't all have to share one global guess.
 // Tool is consulted on levels whose columns differ per tool — at the tables
-// level, the page-inspector swaps the toast/index detail string for a pages
+// level, the page-inspector swaps the heap/idx/toast breakdown for a pages
 // column.
 func barReserve(s *screen) int {
 	l, tl := s.level, s.tool
@@ -62,15 +62,17 @@ func barReserve(s *screen) int {
 			colName
 	case levelTables:
 		if tl == toolPageInspect {
-			// Page-inspector tables: no bloat overlay and no toast/idx detail
-			// string — instead a pages column sits next to rows.
+			// Page-inspector tables: no bloat overlay and no heap/idx/toast
+			// breakdown — instead a pages column sits next to rows.
 			return colCursor + colBrackets + colSize +
 				(rowsColW + colGutter) + (pagesColW + colGutter) +
 				colMark + colName
 		}
-		// cursor + bar(brackets) + size + heap + idx + rows + bloat + mark + name
+		// cursor + bar(brackets) + size + heap + idx + toast + rows + bloat +
+		// mark + name
 		return colCursor + colBrackets + colSize +
 			(breakdownColW + colGutter) + (breakdownColW + colGutter) +
+			(breakdownColW + colGutter) +
 			(rowsColW + colGutter) + colBloat + colMark + colName
 	case levelParts:
 		// Parts detail strings can be long ("heap · 12k dead (5%) · vac 3h ago

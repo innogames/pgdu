@@ -43,9 +43,9 @@ type row struct {
 	// tables level so the composition of each table is visible at a glance.
 	heap, idx, toast int64
 
-	// hasBreakdown renders heap/idx as their own numeric columns (tinted to
-	// match their bar segments) between size and rows — set on the tables level
-	// so the heap/idx sort keys have visible, aligned columns under the header.
+	// hasBreakdown renders heap/idx/toast as their own numeric columns (tinted
+	// to match their bar segments) between size and rows — set on the tables
+	// level so those sort keys have visible, aligned columns under the header.
 	hasBreakdown bool
 
 	// rows is the estimated row count; only rendered when hasRows is true.
@@ -120,7 +120,8 @@ func renderRow(r row) string {
 	breakdownStr := ""
 	if r.hasBreakdown {
 		breakdownStr = styleHeapSeg.Render(padRight(humanize.Bytes(r.heap), breakdownColW)) + "  " +
-			styleIndexSeg.Render(padRight(humanize.Bytes(r.idx), breakdownColW)) + "  "
+			styleIndexSeg.Render(padRight(humanize.Bytes(r.idx), breakdownColW)) + "  " +
+			styleToastSeg.Render(padRight(humanize.Bytes(r.toast), breakdownColW)) + "  "
 	}
 	rowsStr := ""
 	if r.hasRows {
@@ -152,8 +153,8 @@ func renderRow(r row) string {
 // realistic value with one space of slack.
 const rowsColW = 7
 
-// breakdownColW is the width of the heap and idx columns on the tables level;
-// a humanize.Bytes value ("1023.99 MB") fits in 10 cells.
+// breakdownColW is the width of the heap, idx and toast columns on the tables
+// level; a humanize.Bytes value ("1023.99 MB") fits in 10 cells.
 const breakdownColW = 10
 
 // pagesColW matches rowsColW: formatRows output (max 6 chars) + a "p" suffix.
@@ -740,6 +741,7 @@ func renderTablesHeader(s *screen, barW int) string {
 	} else {
 		line += padRight(sortMark("heap", s.sort == sortByHeap, s.sortDesc), breakdownColW) + "  " +
 			padRight(sortMark("idx", s.sort == sortByIndex, s.sortDesc), breakdownColW) + "  " +
+			padRight(sortMark("toast", s.sort == sortByToast, s.sortDesc), breakdownColW) + "  " +
 			padRight(sortMark("rows", s.sort == sortByRows, s.sortDesc), rowsColW) + "  "
 		if anyBloat {
 			line += padRight("bloat", 12) + "  "
@@ -752,11 +754,10 @@ func renderTablesHeader(s *screen, barW int) string {
 }
 
 // renderTablesTotals builds the pinned Σ footer for the tables list: the
-// summed total size plus the same columns as the rows above (heap/idx/rows on
-// the disk tool, rows/pages on the page inspector). Toast has no column of its
-// own — it's only a bar segment — so its sum trails the Σ label, like the
-// parts footer's breakdown. Sums cover every loaded row, not just the filtered
-// subset, matching the other Σ footers. Returns "" until tables have loaded.
+// summed total size plus the same columns as the rows above (heap/idx/toast/
+// rows on the disk tool, rows/pages on the page inspector). Sums cover every
+// loaded row, not just the filtered subset, matching the other Σ footers.
+// Returns "" until tables have loaded.
 func (m *Model) renderTablesTotals(s *screen) string {
 	var size, heap, idx, toast, rows, pages, bloat int64
 	anyBloat := false
@@ -790,6 +791,7 @@ func (m *Model) renderTablesTotals(s *screen) string {
 	} else {
 		line += padRight(humanize.Bytes(heap), breakdownColW) + "  " +
 			padRight(humanize.Bytes(idx), breakdownColW) + "  " +
+			padRight(humanize.Bytes(toast), breakdownColW) + "  " +
 			padRight(formatRows(rows), rowsColW) + "  "
 		if anyBloat {
 			cell := "-"
@@ -801,9 +803,6 @@ func (m *Model) renderTablesTotals(s *screen) string {
 	}
 	// 2-cell childMark placeholder, then the Σ label in the name column.
 	line += "  " + fmt.Sprintf("Σ %d tables", n)
-	if s.tool != toolPageInspect && toast > 0 {
-		line += " · toast " + humanize.Bytes(toast)
-	}
 	return styleTotal.Render(line) + "\n"
 }
 

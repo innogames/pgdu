@@ -22,6 +22,7 @@ const (
 	sortByBloat      // parts: wasted-space fraction (bloat %)
 	sortByHeap       // tables: heap (main fork) bytes
 	sortByIndex      // tables: combined index bytes
+	sortByToast      // tables: toast (out-of-line value) bytes
 	sortByColType    // columns: data type (text)
 	sortByAvgWidth   // columns: pg_stats avg_width (bytes per non-null value)
 	sortByTables     // schemas: table count
@@ -36,7 +37,7 @@ const (
 // ratio so the worst-cached tables bubble to the top.
 func (sm sortMode) defaultDesc() bool {
 	switch sm {
-	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty, sortByTemp, sortByBloat, sortByHeap, sortByIndex, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByLevel:
+	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty, sortByTemp, sortByBloat, sortByHeap, sortByIndex, sortByToast, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByLevel:
 		// sortByLevel is descending so the B-tree page view opens root-first
 		// (highest btpo_level at the top), reading the tree top-down.
 		return true
@@ -85,6 +86,8 @@ func (sm sortMode) name() string {
 		return "heap"
 	case sortByIndex:
 		return "idx"
+	case sortByToast:
+		return "toast"
 	case sortByColType:
 		return "type"
 	case sortByAvgWidth:
@@ -158,6 +161,8 @@ func (sm sortMode) less(a, b item) bool {
 		return lessByExtractor(a, b, itemHeapBytes)
 	case sortByIndex:
 		return lessByExtractor(a, b, itemIndexBytes)
+	case sortByToast:
+		return lessByExtractor(a, b, itemToastBytes)
 	case sortByColType:
 		return lessByStringExtractor(a, b, itemColType)
 	case sortByAvgWidth:
