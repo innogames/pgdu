@@ -166,13 +166,16 @@ func (c *Client) TableBufferUsageCounts(ctx context.Context, db string, oid uint
 		return nil, 0, fmt.Errorf("block size in %q: %w", db, err)
 	}
 	counts, err := collect(ctx, pool, fmt.Sprintf("table buffer usage counts for oid %d in %q", oid, db),
-		sqlBufferTableUsageCounts, []any{oid},
-		func(row pgx.CollectableRow) (BufferUsageCount, error) {
-			var u BufferUsageCount
-			err := row.Scan(&u.Count, &u.Buffers, &u.Dirty, &u.Pinned)
-			return u, err
-		})
+		sqlBufferTableUsageCounts, []any{oid}, scanBufferUsageCount)
 	return counts, blockSize, err
+}
+
+// scanBufferUsageCount scans one (usagecount, buffers, dirty, pinned) histogram
+// row — shared by the per-table and cluster-wide temperature queries.
+func scanBufferUsageCount(row pgx.CollectableRow) (BufferUsageCount, error) {
+	var u BufferUsageCount
+	err := row.Scan(&u.Count, &u.Buffers, &u.Dirty, &u.Pinned)
+	return u, err
 }
 
 // PageBuffers maps the blocks of one main-fork window of a relation to their
@@ -187,24 +190,13 @@ func (c *Client) PageBuffers(ctx context.Context, db string, oid uint32, start, 
 	if err != nil {
 		return nil, err
 	}
-	rows, err := pool.Query(ctx, sqlPageBuffers, oid, start, count)
-	if err != nil {
-		return nil, fmt.Errorf("page buffers for oid %d in %q: %w", oid, db, err)
-	}
-	defer rows.Close()
-	bufs := make(map[int64]PageBuffer)
-	for rows.Next() {
-		var blkno int64
-		var b PageBuffer
-		if err := rows.Scan(&blkno, &b.UsageCount, &b.Dirty); err != nil {
-			return nil, fmt.Errorf("page buffers for oid %d in %q: %w", oid, db, err)
-		}
-		bufs[blkno] = b
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("page buffers for oid %d in %q: %w", oid, db, err)
-	}
-	return bufs, nil
+	return collectMap(ctx, pool, fmt.Sprintf("page buffers for oid %d in %q", oid, db), sqlPageBuffers, []any{oid, start, count},
+		func(row pgx.CollectableRow) (int64, PageBuffer, error) {
+			var blkno int64
+			var b PageBuffer
+			err := row.Scan(&blkno, &b.UsageCount, &b.Dirty)
+			return blkno, b, err
+		})
 }
 
 // BufferCacheSummary returns the cluster-wide shared_buffers occupancy split
@@ -223,12 +215,7 @@ func (c *Client) BufferCacheSummary(ctx context.Context, db string) (BufferCache
 	}
 	// The temperature histogram is supplementary — if pg_buffercache_usage_counts()
 	// is somehow unavailable, keep the occupancy summary rather than failing it.
-	if counts, err := collect(ctx, pool, "buffer usage counts", sqlBufferUsageCounts, nil,
-		func(row pgx.CollectableRow) (BufferUsageCount, error) {
-			var u BufferUsageCount
-			err := row.Scan(&u.Count, &u.Buffers, &u.Dirty, &u.Pinned)
-			return u, err
-		}); err == nil {
+	if counts, err := collect(ctx, pool, "buffer usage counts", sqlBufferUsageCounts, nil, scanBufferUsageCount); err == nil {
 		s.UsageCounts = counts
 	}
 	return s, nil

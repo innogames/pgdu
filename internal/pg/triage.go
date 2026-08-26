@@ -415,13 +415,7 @@ func (c *Client) triageIdleInXact(ctx context.Context) (Severity, string, error)
 	if err != nil {
 		return 0, "", err
 	}
-	ageCol := diagColIdx(res, "xact_age_secs")
-	oldest := float64(0)
-	for _, row := range res.Rows {
-		if v, ok := diagNum(row, ageCol); ok && v > oldest {
-			oldest = v
-		}
-	}
+	oldest := diagMax(res, "xact_age_secs")
 	sev := idleInXactSeverity(len(res.Rows), oldest)
 	if len(res.Rows) == 0 {
 		return sev, "no idle-in-transaction backends", nil
@@ -599,13 +593,7 @@ func slruSeverity(hitPct, blksRead float64) Severity {
 }
 
 func deadlockGrade(res *DiagResult) (Severity, string, error) {
-	dlCol := diagColIdx(res, "deadlocks")
-	var deadlocks float64
-	for _, row := range res.Rows {
-		if v, ok := diagNum(row, dlCol); ok {
-			deadlocks += v
-		}
-	}
+	deadlocks := diagSum(res, "deadlocks")
 	sev := deadlockSeverity(deadlocks)
 	if deadlocks == 0 {
 		return sev, "no deadlocks since stats reset", nil
@@ -624,13 +612,7 @@ func deadlockSeverity(deadlocks float64) Severity {
 }
 
 func tempFilesGrade(res *DiagResult) (Severity, string, error) {
-	tmpCol := diagColIdx(res, "temp_bytes")
-	var tempBytes float64
-	for _, row := range res.Rows {
-		if v, ok := diagNum(row, tmpCol); ok {
-			tempBytes += v
-		}
-	}
+	tempBytes := diagSum(res, "temp_bytes")
 	sev := tempBytesSeverity(tempBytes)
 	return sev, humanize.Bytes(int64(tempBytes)) + " spilled to temp files since stats reset", nil
 }
@@ -695,13 +677,7 @@ func (c *Client) triageSequences(ctx context.Context, db string) (Severity, stri
 	if err != nil {
 		return 0, "", err
 	}
-	pctCol := diagColIdx(res, "consumed_pct")
-	maxPct := float64(0)
-	for _, row := range res.Rows {
-		if v, ok := diagNum(row, pctCol); ok && v > maxPct {
-			maxPct = v
-		}
-	}
+	maxPct := diagMax(res, "consumed_pct")
 	sev := sequenceSeverity(maxPct)
 	return sev, fmt.Sprintf("most-consumed sequence at %.1f%% of its range (in %s)", maxPct, db), nil
 }
@@ -789,12 +765,7 @@ func (c *Client) runTriageDiag(ctx context.Context, db, key string) (*DiagResult
 
 // diagColIdx finds a column by name, -1 when absent.
 func diagColIdx(res *DiagResult, name string) int {
-	for i, col := range res.Columns {
-		if col.Name == name {
-			return i
-		}
-	}
-	return -1
+	return colIndex(res.Columns, name)
 }
 
 // diagNum reads the numeric value of row[idx], false when the column is
@@ -804,6 +775,31 @@ func diagNum(row []DiagCell, idx int) (float64, bool) {
 		return 0, false
 	}
 	return row[idx].Num, true
+}
+
+// diagSum totals a named column over every row; cells without a number
+// (missing column, NULL, text) contribute nothing.
+func diagSum(res *DiagResult, col string) float64 {
+	idx := diagColIdx(res, col)
+	var sum float64
+	for _, row := range res.Rows {
+		if v, ok := diagNum(row, idx); ok {
+			sum += v
+		}
+	}
+	return sum
+}
+
+// diagMax is diagSum's maximum sibling; with no numeric cells it returns 0.
+func diagMax(res *DiagResult, col string) float64 {
+	idx := diagColIdx(res, col)
+	var maxV float64
+	for _, row := range res.Rows {
+		if v, ok := diagNum(row, idx); ok && v > maxV {
+			maxV = v
+		}
+	}
+	return maxV
 }
 
 // triageDuration renders seconds the way the report reads them: "48s", "11m",

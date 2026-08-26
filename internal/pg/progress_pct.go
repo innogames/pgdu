@@ -96,6 +96,22 @@ var commandPhaseSpans = map[string]map[string][2]float64{
 	"BASE BACKUP":  basebackupPhaseSpan,
 }
 
+// resolvePhaseSpan looks a phase up in its command's span map. An unmapped
+// AM-specific "building index:" subphase still bounds us to the build slice —
+// but only for maps that have one, so other commands' unknown phases stay
+// unmapped.
+func resolvePhaseSpan(spans map[string][2]float64, phase string) ([2]float64, bool) {
+	if span, ok := spans[phase]; ok {
+		return span, true
+	}
+	if strings.HasPrefix(phase, "building index:") {
+		if span, ok := spans["building index"]; ok {
+			return span, true
+		}
+	}
+	return [2]float64{}, false
+}
+
 // spanPoint places a phase's own done/total fraction inside the phase's
 // [start,end] slice of the overall bar. A zero total pins to the span start —
 // totals are estimates and read 0 both on phase transitions and in phases
@@ -120,13 +136,9 @@ func (r ProgressRow) OverallPct() float64 {
 	if !ok {
 		return r.Pct()
 	}
-	span, ok := spans[r.Phase]
+	span, ok := resolvePhaseSpan(spans, r.Phase)
 	if !ok {
-		// An unmapped AM-specific subphase still bounds us to the build slice.
-		if r.Command != "CREATE INDEX" || !strings.HasPrefix(r.Phase, "building index:") {
-			return -1
-		}
-		span = spans["building index"]
+		return -1
 	}
 	return spanPoint(span, r.Done, r.Total)
 }

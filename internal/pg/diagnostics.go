@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+
+	"pgdu/internal/humanize"
 )
 
 // DiagColumnKind classifies a result column so the renderer knows how to
@@ -85,26 +87,25 @@ func (c *Client) RunDiagnostic(ctx context.Context, db string, d Diagnostic) (*D
 func resolveBarSort(cols []DiagColumn, d Diagnostic) (barCol, sortCol int) {
 	barCol = -1
 	if d.Bar != "" {
-		for i, c := range cols {
-			if c.Name == d.Bar {
-				barCol = i
-				break
-			}
-		}
+		barCol = colIndex(cols, d.Bar)
 	}
 
-	sortCol = -1
 	if d.Sort != "" {
-		for i, c := range cols {
-			if c.Name == d.Sort {
-				sortCol = i
-				break
-			}
-		}
+		sortCol = colIndex(cols, d.Sort)
 	} else {
 		sortCol = barCol
 	}
 	return barCol, sortCol
+}
+
+// colIndex finds a column by name, -1 when absent.
+func colIndex(cols []DiagColumn, name string) int {
+	for i, c := range cols {
+		if c.Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // RunDiagnosticAllDBs runs a per-database diagnostic against every database the
@@ -282,7 +283,7 @@ func colKindFromName(name string) DiagColumnKind {
 // their Σ footer printed a bare byte count next to humanized rows.
 func promotedNumericKind(v any) DiagColumnKind {
 	if s, ok := v.(string); ok {
-		if _, isSize := parseSizePretty(s); isSize {
+		if _, isSize := humanize.ParseSizePretty(s); isSize {
 			return DiagBytes
 		}
 	}
@@ -323,7 +324,7 @@ func formatDiagValue(v any, hint DiagColumnKind) DiagCell {
 		// Several diagnostic queries pre-format sizes with pg_size_pretty for
 		// display. Parse the magnitude back out so the column sorts by bytes
 		// instead of by the leading digits of the string ("97 MB" vs "9832 kB").
-		if n, ok := parseSizePretty(t); ok {
+		if n, ok := humanize.ParseSizePretty(t); ok {
 			return DiagCell{Display: t, Num: n, HasNum: true}
 		}
 		return DiagCell{Display: t}
@@ -392,48 +393,9 @@ func formatDiagValue(v any, hint DiagColumnKind) DiagCell {
 	}
 }
 
-// sizePrettyUnits maps the unit suffixes emitted by PostgreSQL's
-// pg_size_pretty() to their byte multipliers. pg_size_pretty is 1024-based, so
-// these mirror the server's own thresholds.
-var sizePrettyUnits = map[string]float64{
-	"bytes": 1,
-	"kB":    1 << 10,
-	"MB":    1 << 20,
-	"GB":    1 << 30,
-	"TB":    1 << 40,
-	"PB":    1 << 50,
-}
-
-// parseSizePretty parses a string in the exact "<number> <unit>" form produced
-// by pg_size_pretty() (e.g. "9832 kB", "97 MB", "0 bytes") into a byte count.
-// The match is deliberately strict — number, single space, known unit — so a
-// genuine text column is never mistaken for a size and given a bogus sort key.
-func parseSizePretty(s string) (float64, bool) {
-	num, unit, ok := strings.Cut(s, " ")
-	if !ok {
-		return 0, false
-	}
-	mult, ok := sizePrettyUnits[unit]
-	if !ok {
-		return 0, false
-	}
-	f, err := strconv.ParseFloat(num, 64)
-	if err != nil {
-		return 0, false
-	}
-	return f * mult, true
-}
-
 // diagFormatFloat renders f with up to 2 decimal places, stripping trailing
 // zeros so "12.00" becomes "12" and "3.10" becomes "3.1".
-func diagFormatFloat(f float64) string {
-	s := strconv.FormatFloat(f, 'f', 2, 64)
-	if strings.ContainsRune(s, '.') {
-		s = strings.TrimRight(s, "0")
-		s = strings.TrimRight(s, ".")
-	}
-	return s
-}
+func diagFormatFloat(f float64) string { return humanize.Float(f, 2) }
 
 // formatDiagInterval renders a pgtype.Interval as a human-readable string
 // similar to PostgreSQL's interval output but condensed for table cells.

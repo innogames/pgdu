@@ -120,34 +120,32 @@ type toastOwner struct {
 	owner string
 }
 
+// signalBackend runs one of the pg_*_backend(pid) functions, wrapping any error
+// with verb. The two public backend-signal methods share this body — they
+// differ only in the SQL and the verb used in error messages (mirrors
+// resetExtStats).
+func (c *Client) signalBackend(ctx context.Context, db, verb, sql string, pid int32) (bool, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return false, fmt.Errorf("%s %d in %q: %w", verb, pid, db, err)
+	}
+	var ok bool
+	if err := pool.QueryRow(ctx, sql, pid).Scan(&ok); err != nil {
+		return false, fmt.Errorf("%s %d in %q: %w", verb, pid, db, err)
+	}
+	return ok, nil
+}
+
 // CancelBackend sends pg_cancel_backend to the given PID. Returns true when the
 // signal was delivered, false when the backend no longer exists or the caller
 // lacks permission.
 func (c *Client) CancelBackend(ctx context.Context, db string, pid int32) (bool, error) {
-	pool, err := c.PoolFor(ctx, db)
-	if err != nil {
-		return false, fmt.Errorf("cancel backend %d in %q: %w", pid, db, err)
-	}
-	var ok bool
-	err = pool.QueryRow(ctx, "SELECT pg_cancel_backend($1)", pid).Scan(&ok)
-	if err != nil {
-		return false, fmt.Errorf("cancel backend %d in %q: %w", pid, db, err)
-	}
-	return ok, nil
+	return c.signalBackend(ctx, db, "cancel backend", "SELECT pg_cancel_backend($1)", pid)
 }
 
 // TerminateBackend sends pg_terminate_backend to the given PID. Returns true
 // when the backend was terminated, false when it no longer exists or the caller
 // lacks permission.
 func (c *Client) TerminateBackend(ctx context.Context, db string, pid int32) (bool, error) {
-	pool, err := c.PoolFor(ctx, db)
-	if err != nil {
-		return false, fmt.Errorf("terminate backend %d in %q: %w", pid, db, err)
-	}
-	var ok bool
-	err = pool.QueryRow(ctx, "SELECT pg_terminate_backend($1)", pid).Scan(&ok)
-	if err != nil {
-		return false, fmt.Errorf("terminate backend %d in %q: %w", pid, db, err)
-	}
-	return ok, nil
+	return c.signalBackend(ctx, db, "terminate backend", "SELECT pg_terminate_backend($1)", pid)
 }

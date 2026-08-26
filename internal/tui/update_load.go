@@ -6,6 +6,19 @@ import (
 	"pgdu/internal/pg"
 )
 
+// armActivityTick appends the self-rescheduling activity refresh tick to cmds
+// unless one is already running (the loop is shared by the activity table, the
+// lock tree and the progress monitor).
+func (m *Model) armActivityTick(cmds []tea.Cmd) []tea.Cmd {
+	if !m.activityTicking {
+		if tick := m.activityTick(); tick != nil {
+			m.activityTicking = true
+			cmds = append(cmds, tick)
+		}
+	}
+	return cmds
+}
+
 // loadCurrent issues the right load command for the top screen and resets any
 // transient affordances (extPrompt, install spinner, buffer-summary cache)
 // so a refresh shows a clean state.
@@ -224,38 +237,17 @@ func (m *Model) loadCurrent() tea.Cmd {
 	case levelActivity:
 		// Kick an immediate snapshot and, unless one is already running, start
 		// the self-rescheduling refresh tick. Pattern mirrors levelStatements.
-		cmds := []tea.Cmd{m.loadActivityCmd(s.db, s.actFilter)}
-		if !m.activityTicking {
-			if tick := m.activityTick(); tick != nil {
-				m.activityTicking = true
-				cmds = append(cmds, tick)
-			}
-		}
-		return tea.Batch(cmds...)
+		return tea.Batch(m.armActivityTick([]tea.Cmd{m.loadActivityCmd(s.db, s.actFilter)})...)
 	case levelLockTree:
 		// Same live-refresh pattern as the activity table, reusing its tick loop.
-		cmds := []tea.Cmd{m.loadLockTreeCmd(s.db)}
-		if !m.activityTicking {
-			if tick := m.activityTick(); tick != nil {
-				m.activityTicking = true
-				cmds = append(cmds, tick)
-			}
-		}
-		return tea.Batch(cmds...)
+		return tea.Batch(m.armActivityTick([]tea.Cmd{m.loadLockTreeCmd(s.db)})...)
 	case levelTableStats:
 		return m.loadTableOverviewCmd(s.db, s.schema)
 	case levelTriage:
 		return m.loadTriageCmd()
 	case levelProgress:
 		// Same live-refresh pattern as the activity table, reusing its tick loop.
-		cmds := []tea.Cmd{m.loadProgressCmd(s.db)}
-		if !m.activityTicking {
-			if tick := m.activityTick(); tick != nil {
-				m.activityTicking = true
-				cmds = append(cmds, tick)
-			}
-		}
-		return tea.Batch(cmds...)
+		return tea.Batch(m.armActivityTick([]tea.Cmd{m.loadProgressCmd(s.db)})...)
 	}
 	return nil
 }

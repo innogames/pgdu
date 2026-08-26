@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
-
 	"pgdu/internal/pg"
 )
 
@@ -283,57 +281,21 @@ func (m *Model) renderStatementsInfo(height int) string {
 // columns are toggled with space/Enter; the mandatory query column and the
 // planning columns when track_planning is off are shown but not toggleable.
 func (m *Model) renderColumnConfig(s *screen, height int) string {
-	mu := styleMuted.Render
-	var b strings.Builder
-
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("configure columns") + mu("  ·  ") +
-		styleBadge.Render("space") + mu(" toggles · ") + styleBadge.Render("↑/↓") + mu(" move · ") +
-		styleBadge.Render("r") + mu(" reset · ") +
-		styleBadge.Render("C") + mu(" or ") + styleBadge.Render("esc") + mu(" to close") + "\n")
-	b.WriteString("  " + mu("choose which columns the top-queries table shows — opt-in metrics are off by default") + "\n\n")
-
 	m.ensureStmtColsInit()
 	ctx := stmtCtx{trackPlanning: s.statTrackPlanning}
 	reg := stmtColumnRegistry()
-	nameW := 0
-	for _, d := range reg {
-		if n := len(d.name); n > nameW {
-			nameW = n
-		}
-	}
+	rows := make([]colCfgRow, len(reg))
 	for i, d := range reg {
-		unavailable := d.available != nil && !d.available(ctx)
-		on := d.mandatory || m.stmtColEnabled(d.id, d.defaultOn)
-
-		box := "[ ]"
-		switch {
-		case unavailable:
-			box = "[·]"
-		case on:
-			box = "[x]"
+		rows[i] = colCfgRow{
+			name:        d.name,
+			desc:        d.desc,
+			on:          d.mandatory || m.stmtColEnabled(d.id, d.defaultOn),
+			mandatory:   d.mandatory,
+			unavailable: d.available != nil && !d.available(ctx),
+			note:        "track_planning off",
 		}
-
-		cursor := "  "
-		if i == m.colCfgCursor {
-			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-		}
-
-		label := box + "  " + padRight(d.name, nameW)
-		var rendered string
-		switch {
-		case unavailable:
-			rendered = mu(label+"  "+d.desc) + "  " + styleBadge.Render("track_planning off")
-		case i == m.colCfgCursor:
-			rendered = styleSelected.Render(label) + "  " + mu(d.desc)
-		default:
-			rendered = label + "  " + mu(d.desc)
-		}
-		if d.mandatory {
-			rendered += mu("  (always shown)")
-		}
-		b.WriteString(cursor + rendered + "\n")
 	}
-
-	return padInfo(&b, height)
+	return m.renderColCfgOverlay(
+		"choose which columns the top-queries table shows — opt-in metrics are off by default",
+		rows, m.colCfgCursor, height)
 }

@@ -477,48 +477,21 @@ func (m *Model) renderDiagnosticList(s *screen, height int) string {
 // registry-backed pickers, but the rows come from the result's dynamic column
 // set and the selection is remembered per diagnostic key.
 func (m *Model) renderDiagColumnConfig(s *screen, height int) string {
-	mu := styleMuted.Render
-	var b strings.Builder
-
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("configure columns") + mu("  ·  ") +
-		styleBadge.Render("space") + mu(" toggles · ") +
-		styleBadge.Render("↑/↓") + mu(" move · ") +
-		styleBadge.Render("r") + mu(" reset · ") +
-		styleBadge.Render("C") + mu(" or ") + styleBadge.Render("esc") + mu(" to close") + "\n")
 	title := "this diagnostic"
 	if s.diag != nil {
 		title = s.diag.Title
 	}
-	b.WriteString("  " + mu("choose which columns "+title+" shows (remembered per diagnostic)") + "\n\n")
-
+	subtitle := "choose which columns " + title + " shows (remembered per diagnostic)"
 	res := s.diagResult
 	if res == nil || s.diag == nil {
-		return padInfo(&b, height)
+		return m.renderColCfgOverlay(subtitle, nil, m.diagColCfgCursor, height)
 	}
 	vis := m.diagVis(s.diag.Key)
-	nameW := 0
-	for _, c := range res.Columns {
-		if n := len(c.Name); n > nameW {
-			nameW = n
-		}
-	}
+	rows := make([]colCfgRow, len(res.Columns))
 	for i, c := range res.Columns {
-		box := "[ ]"
-		if diagColOn(vis, c.Name) {
-			box = "[x]"
-		}
-		cursor := "  "
-		if i == m.diagColCfgCursor {
-			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-		}
-		label := box + "  " + padRight(c.Name, nameW)
-		if i == m.diagColCfgCursor {
-			label = styleSelected.Render(label)
-		}
-		b.WriteString(cursor + label + "\n")
+		rows[i] = colCfgRow{name: c.Name, on: diagColOn(vis, c.Name)}
 	}
-	return padInfo(&b, height)
+	return m.renderColCfgOverlay(subtitle, rows, m.diagColCfgCursor, height)
 }
 
 // diagColWidth is the maximum per-column display width in the result table.

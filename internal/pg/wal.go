@@ -72,19 +72,11 @@ func (c *Client) WALCheckpoint(ctx context.Context, db string) (WALCheckpointInf
 	if err != nil {
 		return WALCheckpointInfo{}, err
 	}
-	info := WALCheckpointInfo{Settings: make(map[string]string)}
+	var info WALCheckpointInfo
 	_ = pool.QueryRow(ctx, sqlWALCheckpoint).Scan(
 		&info.BytesSinceCheckpoint, &info.MaxWALBytes, &info.CheckpointTime, &info.CheckpointTimeoutSec)
 	_ = pool.QueryRow(ctx, sqlWALCheckpointer).Scan(&info.CheckpointsTimed, &info.CheckpointsRequested)
-	if rows, qerr := pool.Query(ctx, sqlWALSettings, walSettingsKeys); qerr == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var k, v string
-			if rows.Scan(&k, &v) == nil {
-				info.Settings[k] = v
-			}
-		}
-	}
+	info.Settings = settingsMap(ctx, pool, sqlWALSettings, walSettingsKeys)
 	return info, nil
 }
 
@@ -122,17 +114,20 @@ func (c *Client) WALRelBlocks(ctx context.Context, db, start, end string, relfil
 	if err != nil {
 		return nil, err
 	}
-	return collect(ctx, pool, fmt.Sprintf("wal rel blocks in %q", db), sqlWALRelBlocks, []any{start, end, int64(relfilenode)},
-		func(row pgx.CollectableRow) (WALBlockRef, error) {
-			var b WALBlockRef
-			err := row.Scan(
-				&b.BlockID, &b.RelTablespace, &b.RelDatabase, &b.RelFileNode,
-				&b.ForkNumber, &b.BlockNumber, &b.Rmgr, &b.RecordType,
-				&b.BlockDataLength, &b.FPILength, &b.FPIInfo, &b.Description, &b.RelName,
-				&b.IsToast, &b.DBName,
-			)
-			return b, err
-		})
+	return collect(ctx, pool, fmt.Sprintf("wal rel blocks in %q", db), sqlWALRelBlocks, []any{start, end, int64(relfilenode)}, scanWALBlockRef)
+}
+
+// scanWALBlockRef scans one pg_get_wal_block_info row — shared by the
+// per-relation and per-record block listings.
+func scanWALBlockRef(row pgx.CollectableRow) (WALBlockRef, error) {
+	var b WALBlockRef
+	err := row.Scan(
+		&b.BlockID, &b.RelTablespace, &b.RelDatabase, &b.RelFileNode,
+		&b.ForkNumber, &b.BlockNumber, &b.Rmgr, &b.RecordType,
+		&b.BlockDataLength, &b.FPILength, &b.FPIInfo, &b.Description, &b.RelName,
+		&b.IsToast, &b.DBName,
+	)
+	return b, err
 }
 
 // WALRmgrStats returns the per-resource-manager byte breakdown for the window
@@ -145,12 +140,15 @@ func (c *Client) WALRmgrStats(ctx context.Context, db, start, end string) ([]WAL
 	if err != nil {
 		return nil, err
 	}
-	return collect(ctx, pool, fmt.Sprintf("wal rmgr stats in %q", db), sqlWALRmgrStats, []any{start, end},
-		func(row pgx.CollectableRow) (WALRmgrStat, error) {
-			var r WALRmgrStat
-			err := row.Scan(&r.Name, &r.Count, &r.RecordSize, &r.FPISize, &r.CombinedSize)
-			return r, err
-		})
+	return collect(ctx, pool, fmt.Sprintf("wal rmgr stats in %q", db), sqlWALRmgrStats, []any{start, end}, scanWALRmgrStat)
+}
+
+// scanWALRmgrStat scans one (name, count, record/FPI/combined size) stats row —
+// shared by the per-rmgr and per-record-type breakdowns.
+func scanWALRmgrStat(row pgx.CollectableRow) (WALRmgrStat, error) {
+	var r WALRmgrStat
+	err := row.Scan(&r.Name, &r.Count, &r.RecordSize, &r.FPISize, &r.CombinedSize)
+	return r, err
 }
 
 // WALRecordTypeStats returns the per-record-type byte/count breakdown for one
@@ -165,12 +163,7 @@ func (c *Client) WALRecordTypeStats(ctx context.Context, db, start, end, rmgr st
 	if err != nil {
 		return nil, err
 	}
-	return collect(ctx, pool, fmt.Sprintf("wal record-type stats in %q", db), sqlWALRecordTypeStats, []any{start, end, rmgr},
-		func(row pgx.CollectableRow) (WALRmgrStat, error) {
-			var r WALRmgrStat
-			err := row.Scan(&r.Name, &r.Count, &r.RecordSize, &r.FPISize, &r.CombinedSize)
-			return r, err
-		})
+	return collect(ctx, pool, fmt.Sprintf("wal record-type stats in %q", db), sqlWALRecordTypeStats, []any{start, end, rmgr}, scanWALRmgrStat)
 }
 
 // WALRecords lists the individual records of one resource manager within the
@@ -208,15 +201,5 @@ func (c *Client) WALBlocks(ctx context.Context, db, start, end string) ([]WALBlo
 	if err != nil {
 		return nil, err
 	}
-	return collect(ctx, pool, fmt.Sprintf("wal block info at %s in %q", start, db), sqlWALBlocks, []any{start, end},
-		func(row pgx.CollectableRow) (WALBlockRef, error) {
-			var b WALBlockRef
-			err := row.Scan(
-				&b.BlockID, &b.RelTablespace, &b.RelDatabase, &b.RelFileNode,
-				&b.ForkNumber, &b.BlockNumber, &b.Rmgr, &b.RecordType,
-				&b.BlockDataLength, &b.FPILength, &b.FPIInfo, &b.Description, &b.RelName,
-				&b.IsToast, &b.DBName,
-			)
-			return b, err
-		})
+	return collect(ctx, pool, fmt.Sprintf("wal block info at %s in %q", start, db), sqlWALBlocks, []any{start, end}, scanWALBlockRef)
 }

@@ -84,6 +84,85 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 	return ""
 }
 
+// colCfgRow is one checkbox row of a column-config overlay. note is the badge
+// appended to an unavailable row (e.g. "track_planning off"); desc may be
+// empty for pickers over dynamic column sets with no descriptions.
+type colCfgRow struct {
+	name, desc                string
+	on, mandatory, unavailable bool
+	note                      string
+}
+
+// renderColCfgOverlay draws the htop-style column picker shared by the
+// top-queries, activity, table-overview and diagnostic-result C overlays: the
+// badge help line, a subtitle, and one checkbox row per column with the cursor
+// row highlighted.
+func (m *Model) renderColCfgOverlay(subtitle string, rows []colCfgRow, cursor, height int) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+
+	b.WriteString("\n")
+	b.WriteString("  " + styleSelected.Render("configure columns") + mu("  ·  ") +
+		styleBadge.Render("space") + mu(" toggles · ") +
+		styleBadge.Render("↑/↓") + mu(" move · ") +
+		styleBadge.Render("r") + mu(" reset · ") +
+		styleBadge.Render("C") + mu(" or ") + styleBadge.Render("esc") + mu(" to close") + "\n")
+	b.WriteString("  " + mu(subtitle) + "\n\n")
+
+	nameW := 0
+	for _, r := range rows {
+		if n := len(r.name); n > nameW {
+			nameW = n
+		}
+	}
+	for i, r := range rows {
+		box := "[ ]"
+		switch {
+		case r.unavailable:
+			box = "[·]"
+		case r.on:
+			box = "[x]"
+		}
+		cur := "  "
+		if i == cursor {
+			cur = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
+		}
+		label := box + "  " + padRight(r.name, nameW)
+		var rendered string
+		switch {
+		case r.unavailable:
+			rendered = mu(label+"  "+r.desc) + "  " + styleBadge.Render(r.note)
+		case i == cursor:
+			rendered = styleSelected.Render(label)
+			if r.desc != "" {
+				rendered += "  " + mu(r.desc)
+			}
+		default:
+			rendered = label
+			if r.desc != "" {
+				rendered += "  " + mu(r.desc)
+			}
+		}
+		if r.mandatory {
+			rendered += mu("  (always shown)")
+		}
+		b.WriteString(cur + rendered + "\n")
+	}
+	return padInfo(&b, height)
+}
+
+// confirmBanner renders the shared one-line two-step confirmation prompt
+// ("confirm: <action> — press [y] to run, [n] … to cancel") used by the
+// reindex, vacuum and stats-reset flows.
+func confirmBanner(action string) string {
+	return "  " + styleSelected.Render("confirm: ") +
+		styleMuted.Render(action+" — press ") +
+		styleBadge.Render("y") +
+		styleMuted.Render(" to run, ") +
+		styleBadge.Render("n") +
+		styleMuted.Render(" (or any other key) to cancel")
+}
+
 // renderLegend returns a one-line colour legend for the current level so
 // the user can decode the bar colours without guessing. Returns "" on
 // levels whose bars are monochrome (no legend needed).
@@ -221,12 +300,7 @@ func (m *Model) renderReindexBanner(s *screen) string {
 		}
 		return line
 	case s.pendingReindex != "":
-		return "  " + styleSelected.Render("confirm: ") +
-			styleMuted.Render("REINDEX INDEX CONCURRENTLY "+s.pendingReindex+" — press ") +
-			styleBadge.Render("y") +
-			styleMuted.Render(" to run, ") +
-			styleBadge.Render("n") +
-			styleMuted.Render(" (or any other key) to cancel")
+		return confirmBanner("REINDEX INDEX CONCURRENTLY " + s.pendingReindex)
 	case s.reindexErr != nil:
 		return "  " + styleErr.Render("reindex failed: "+s.reindexErr.Error())
 	}

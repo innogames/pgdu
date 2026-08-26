@@ -28,8 +28,8 @@ func (c *Client) RelPages(ctx context.Context, t Table) (int32, error) {
 		return 0, err
 	}
 	var n int32
-	if err := pool.QueryRow(ctx, sqlRelPages, t.OID).Scan(&n); err != nil {
-		return 0, fmt.Errorf("relpages for %q: %w", t.Qualified(), err)
+	if err := queryRelRow(ctx, pool, fmt.Sprintf("relpages for %q", t.Qualified()), sqlRelPages, []any{t.OID}, &n); err != nil {
+		return 0, err
 	}
 	return n, nil
 }
@@ -43,8 +43,8 @@ func (c *Client) RelPages(ctx context.Context, t Table) (int32, error) {
 // is returned.
 func (c *Client) clampPageWindow(ctx context.Context, pool *pgxpool.Pool, oid uint32, qualified string, start, count, minPages int32) (int32, bool, error) {
 	var relpages int32
-	if err := pool.QueryRow(ctx, sqlRelPages, oid).Scan(&relpages); err != nil {
-		return 0, false, fmt.Errorf("relpages for %q: %w", qualified, err)
+	if err := queryRelRow(ctx, pool, fmt.Sprintf("relpages for %q", qualified), sqlRelPages, []any{oid}, &relpages); err != nil {
+		return 0, false, err
 	}
 	if relpages < minPages || start >= relpages {
 		return 0, false, nil
@@ -55,47 +55,43 @@ func (c *Client) clampPageWindow(ctx context.Context, pool *pgxpool.Pool, oid ui
 	return count, true, nil
 }
 
-// ListHeapPages returns up to `count` per-page summaries starting at `start`.
-func (c *Client) ListHeapPages(ctx context.Context, t Table, start, count int32) ([]HeapPageStat, error) {
-	if err := c.EnsurePageInspect(ctx, t.DB); err != nil {
+// listPageWindow is the shared preamble of every List*Pages reader: ensure
+// pageinspect, clamp the requested window to the relation's real page count
+// (nil result when nothing is browsable), then run the summary query over
+// (regclass, start, count) and collect the rows.
+func listPageWindow[T any](ctx context.Context, c *Client, db, schema, name string, oid uint32, qualified, op, sql string, start, count, minPages int32, scan func(pgx.CollectableRow) (T, error)) ([]T, error) {
+	if err := c.EnsurePageInspect(ctx, db); err != nil {
 		return nil, err
 	}
-	pool, err := c.PoolFor(ctx, t.DB)
+	pool, err := c.PoolFor(ctx, db)
 	if err != nil {
 		return nil, err
 	}
-	regclass := qualifiedIdent(t.Schema, t.Name)
-
-	count, ok, err := c.clampPageWindow(ctx, pool, t.OID, t.Qualified(), start, count, 1)
+	regclass := qualifiedIdent(schema, name)
+	count, ok, err := c.clampPageWindow(ctx, pool, oid, qualified, start, count, minPages)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
 		return nil, nil
 	}
+	return collect(ctx, pool, op, sql, []any{regclass, start, count}, scan)
+}
 
-	rows, err := pool.Query(ctx, sqlHeapPagesSummary, regclass, start, count)
-	if err != nil {
-		return nil, fmt.Errorf("list heap pages in %q: %w", t.Qualified(), err)
-	}
-	defer rows.Close()
-	var out []HeapPageStat
-	for rows.Next() {
-		var p HeapPageStat
-		if err := rows.Scan(
-			&p.Blkno, &p.LSN, &p.Lower, &p.Upper, &p.Special, &p.PageSize, &p.Flags,
-			&p.FreeBytes,
-			&p.LiveLP, &p.RedirectLP, &p.DeadLP, &p.UnusedLP,
-			&p.LiveBytes, &p.DeadBytes, &p.HotUpdated, &p.HasExternal,
-		); err != nil {
-			return nil, fmt.Errorf("list heap pages in %q: %w", t.Qualified(), err)
-		}
-		out = append(out, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list heap pages in %q: %w", t.Qualified(), err)
-	}
-	return out, nil
+// ListHeapPages returns up to `count` per-page summaries starting at `start`.
+func (c *Client) ListHeapPages(ctx context.Context, t Table, start, count int32) ([]HeapPageStat, error) {
+	return listPageWindow(ctx, c, t.DB, t.Schema, t.Name, t.OID, t.Qualified(),
+		fmt.Sprintf("list heap pages in %q", t.Qualified()), sqlHeapPagesSummary, start, count, 1,
+		func(row pgx.CollectableRow) (HeapPageStat, error) {
+			var p HeapPageStat
+			err := row.Scan(
+				&p.Blkno, &p.LSN, &p.Lower, &p.Upper, &p.Special, &p.PageSize, &p.Flags,
+				&p.FreeBytes,
+				&p.LiveLP, &p.RedirectLP, &p.DeadLP, &p.UnusedLP,
+				&p.LiveBytes, &p.DeadBytes, &p.HotUpdated, &p.HasExternal,
+			)
+			return p, err
+		})
 }
 
 // ListTupleRow returns the column-by-column decoding of one heap row,
@@ -116,23 +112,12 @@ func (c *Client) ListTupleRow(ctx context.Context, t Table, ctid string) ([]Tupl
 		tmpl = sqlToastTupleRow
 	}
 	sql := fmt.Sprintf(tmpl, regclass)
-	rows, err := pool.Query(ctx, sql, ctid)
-	if err != nil {
-		return nil, fmt.Errorf("read tuple in %q ctid %s: %w", t.Qualified(), ctid, err)
-	}
-	defer rows.Close()
-	var out []TupleCell
-	for rows.Next() {
-		var c TupleCell
-		if err := rows.Scan(&c.Name, &c.Value); err != nil {
-			return nil, fmt.Errorf("read tuple in %q ctid %s: %w", t.Qualified(), ctid, err)
-		}
-		out = append(out, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read tuple in %q ctid %s: %w", t.Qualified(), ctid, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("read tuple in %q ctid %s", t.Qualified(), ctid), sql, []any{ctid},
+		func(row pgx.CollectableRow) (TupleCell, error) {
+			var c TupleCell
+			err := row.Scan(&c.Name, &c.Value)
+			return c, err
+		})
 }
 
 // ReadToastValue fetches all chunks for one out-of-line value from a TOAST
@@ -150,26 +135,19 @@ func (c *Client) ReadToastValue(ctx context.Context, t Table, chunkID uint32) ([
 	}
 	regclass := qualifiedIdent(t.Schema, t.Name)
 	sql := fmt.Sprintf(sqlToastValueChunks, regclass)
-	rows, err := pool.Query(ctx, sql, chunkID)
-	if err != nil {
-		return nil, fmt.Errorf("read toast value in %q chunk %d: %w", t.Qualified(), chunkID, err)
-	}
-	defer rows.Close()
 
 	type chunk struct {
 		seq  int32
 		data []byte
 	}
-	var chunks []chunk
-	for rows.Next() {
-		var ch chunk
-		if err := rows.Scan(&ch.seq, &ch.data); err != nil {
-			return nil, fmt.Errorf("read toast value in %q chunk %d: %w", t.Qualified(), chunkID, err)
-		}
-		chunks = append(chunks, ch)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read toast value in %q chunk %d: %w", t.Qualified(), chunkID, err)
+	chunks, err := collect(ctx, pool, fmt.Sprintf("read toast value in %q chunk %d", t.Qualified(), chunkID), sql, []any{chunkID},
+		func(row pgx.CollectableRow) (chunk, error) {
+			var ch chunk
+			err := row.Scan(&ch.seq, &ch.data)
+			return ch, err
+		})
+	if err != nil {
+		return nil, err
 	}
 
 	var assembled []byte
@@ -230,47 +208,20 @@ func (c *Client) ToastChunkLocation(ctx context.Context, db string, toastOID, ch
 // on it, so the SQL clamps the window to start at 1 internally — callers
 // can pass start=0 without surprising failure.
 func (c *Client) ListIndexPages(ctx context.Context, r Relation, start, count int32) ([]IndexPageStat, error) {
-	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
-		return nil, err
-	}
-	pool, err := c.PoolFor(ctx, r.DB)
-	if err != nil {
-		return nil, err
-	}
-	regclass := qualifiedIdent(r.Schema, r.Name)
-
 	// minPages=2: an index's block 0 is the meta page, which bt_page_stats
 	// can't summarise, so a one-page index has nothing browsable.
-	count, ok, err := c.clampPageWindow(ctx, pool, r.OID, r.Qualified(), start, count, 2)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	rows, err := pool.Query(ctx, sqlIndexPagesSummary, regclass, start, count)
-	if err != nil {
-		return nil, fmt.Errorf("list index pages in %q: %w", r.Qualified(), err)
-	}
-	defer rows.Close()
-	var out []IndexPageStat
-	for rows.Next() {
-		var p IndexPageStat
-		if err := rows.Scan(
-			&p.Blkno, &p.Type,
-			&p.LiveItems, &p.DeadItems,
-			&p.AvgItemSize, &p.PageSize, &p.FreeSize,
-			&p.BtpoPrev, &p.BtpoNext, &p.BtpoLevel, &p.BtpoFlags,
-		); err != nil {
-			return nil, fmt.Errorf("list index pages in %q: %w", r.Qualified(), err)
-		}
-		out = append(out, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list index pages in %q: %w", r.Qualified(), err)
-	}
-	return out, nil
+	return listPageWindow(ctx, c, r.DB, r.Schema, r.Name, r.OID, r.Qualified(),
+		fmt.Sprintf("list index pages in %q", r.Qualified()), sqlIndexPagesSummary, start, count, 2,
+		func(row pgx.CollectableRow) (IndexPageStat, error) {
+			var p IndexPageStat
+			err := row.Scan(
+				&p.Blkno, &p.Type,
+				&p.LiveItems, &p.DeadItems,
+				&p.AvgItemSize, &p.PageSize, &p.FreeSize,
+				&p.BtpoPrev, &p.BtpoNext, &p.BtpoLevel, &p.BtpoFlags,
+			)
+			return p, err
+		})
 }
 
 // ListIndexTuples returns the items on one B-tree page via bt_page_items.
@@ -312,23 +263,12 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 		}
 	}
 
-	rows, err := pool.Query(ctx, sql, regclass, blkno)
-	if err != nil {
-		return nil, fmt.Errorf("list index tuples in %q page %d: %w", r.Qualified(), blkno, err)
-	}
-	defer rows.Close()
-	var out []IndexTuple
-	for rows.Next() {
-		var it IndexTuple
-		if err := rows.Scan(&it.ItemOffset, &it.Ctid, &it.ItemLen, &it.Nulls, &it.Vars, &it.Data, &it.Decoded); err != nil {
-			return nil, fmt.Errorf("list index tuples in %q page %d: %w", r.Qualified(), blkno, err)
-		}
-		out = append(out, it)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list index tuples in %q page %d: %w", r.Qualified(), blkno, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("list index tuples in %q page %d", r.Qualified(), blkno), sql, []any{regclass, blkno},
+		func(row pgx.CollectableRow) (IndexTuple, error) {
+			var it IndexTuple
+			err := row.Scan(&it.ItemOffset, &it.Ctid, &it.ItemLen, &it.Nulls, &it.Vars, &it.Data, &it.Decoded)
+			return it, err
+		})
 }
 
 // BtreeMeta reads the B-tree metapage for the index page-list banner (root
@@ -343,10 +283,10 @@ func (c *Client) BtreeMeta(ctx context.Context, r Relation) (BtreeMeta, error) {
 		return m, err
 	}
 	regclass := qualifiedIdent(r.Schema, r.Name)
-	if err := pool.QueryRow(ctx, sqlBtreeMeta, regclass).Scan(
+	if err := queryRelRow(ctx, pool, fmt.Sprintf("bt_metap for %q", r.Qualified()), sqlBtreeMeta, []any{regclass},
 		&m.Magic, &m.Version, &m.Root, &m.Level, &m.FastRoot, &m.FastLevel, &m.AllEqualImage,
 	); err != nil {
-		return m, fmt.Errorf("bt_metap for %q: %w", r.Qualified(), err)
+		return m, err
 	}
 	return m, nil
 }
@@ -376,23 +316,12 @@ func (c *Client) BtreeLevelCounts(ctx context.Context, r Relation) ([]BtreeLevel
 	if nblocks <= 1 {
 		return nil, nil // just the metapage (or an empty file): nothing to census
 	}
-	rows, err := pool.Query(ctx, sqlBtreeLevelCounts, regclass, nblocks-1)
-	if err != nil {
-		return nil, fmt.Errorf("btree level counts for %q: %w", r.Qualified(), err)
-	}
-	defer rows.Close()
-	var out []BtreeLevelCount
-	for rows.Next() {
-		var lc BtreeLevelCount
-		if err := rows.Scan(&lc.Level, &lc.Type, &lc.Pages); err != nil {
-			return nil, fmt.Errorf("btree level counts for %q: %w", r.Qualified(), err)
-		}
-		out = append(out, lc)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("btree level counts for %q: %w", r.Qualified(), err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("btree level counts for %q", r.Qualified()), sqlBtreeLevelCounts, []any{regclass, nblocks - 1},
+		func(row pgx.CollectableRow) (BtreeLevelCount, error) {
+			var lc BtreeLevelCount
+			err := row.Scan(&lc.Level, &lc.Type, &lc.Pages)
+			return lc, err
+		})
 }
 
 // BtreePageType returns one B-tree page's bt_page_stats type ('l' leaf, 'r'
@@ -412,8 +341,9 @@ func (c *Client) BtreePageType(ctx context.Context, r Relation, blkno int32) (st
 		level int32
 	)
 	regclass := qualifiedIdent(r.Schema, r.Name)
-	if err := pool.QueryRow(ctx, sqlBtreePageType, regclass, blkno).Scan(&t, &level); err != nil {
-		return "", 0, fmt.Errorf("bt_page_stats type for %q page %d: %w", r.Qualified(), blkno, err)
+	if err := queryRelRow(ctx, pool, fmt.Sprintf("bt_page_stats type for %q page %d", r.Qualified(), blkno),
+		sqlBtreePageType, []any{regclass, blkno}, &t, &level); err != nil {
+		return "", 0, err
 	}
 	return t, level, nil
 }
@@ -426,24 +356,13 @@ func (c *Client) IndexKeyColumns(ctx context.Context, r Relation) ([]IndexKeyCol
 	if err != nil {
 		return nil, err
 	}
-	rows, err := pool.Query(ctx, sqlIndexKeyColumns, r.OID)
-	if err != nil {
-		return nil, fmt.Errorf("index key columns for %q: %w", r.Qualified(), err)
-	}
-	defer rows.Close()
-	var out []IndexKeyColumn
-	for rows.Next() {
-		var k IndexKeyColumn
-		if err := rows.Scan(&k.Ordinal, &k.Def, &k.IsKey,
-			&k.TypLen, &k.TypAlign, &k.TypName, &k.TypCategory); err != nil {
-			return nil, fmt.Errorf("index key columns for %q: %w", r.Qualified(), err)
-		}
-		out = append(out, k)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("index key columns for %q: %w", r.Qualified(), err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("index key columns for %q", r.Qualified()), sqlIndexKeyColumns, []any{r.OID},
+		func(row pgx.CollectableRow) (IndexKeyColumn, error) {
+			var k IndexKeyColumn
+			err := row.Scan(&k.Ordinal, &k.Def, &k.IsKey,
+				&k.TypLen, &k.TypAlign, &k.TypName, &k.TypCategory)
+			return k, err
+		})
 }
 
 // ListHeapTuples returns the line-pointer array for one heap page. The page
@@ -464,47 +383,25 @@ func (c *Client) ListHeapTuples(ctx context.Context, t Table, blkno int32) ([]He
 	regclass := qualifiedIdent(t.Schema, t.Name)
 
 	isToast := t.Schema == "pg_toast"
-	var rows pgx.Rows
-	var queryErr error
+	sql := sqlHeapTuples
 	if isToast {
-		sql := fmt.Sprintf(sqlToastTuples, regclass)
-		rows, queryErr = pool.Query(ctx, sql, regclass, blkno)
-	} else {
-		rows, queryErr = pool.Query(ctx, sqlHeapTuples, regclass, blkno)
+		sql = fmt.Sprintf(sqlToastTuples, regclass)
 	}
-	if queryErr != nil {
-		return nil, fmt.Errorf("list heap tuples in %q page %d: %w", t.Qualified(), blkno, queryErr)
-	}
-	defer rows.Close()
-	var out []HeapTuple
-	for rows.Next() {
-		var h HeapTuple
-		if isToast {
-			if err := rows.Scan(
+	return collect(ctx, pool, fmt.Sprintf("list heap tuples in %q page %d", t.Qualified(), blkno), sql, []any{regclass, blkno},
+		func(row pgx.CollectableRow) (HeapTuple, error) {
+			var h HeapTuple
+			dest := []any{
 				&h.LP, &h.LPOff, &h.LPFlags, &h.LPLen,
 				&h.Xmin, &h.Xmax, &h.Field3, &h.Ctid,
 				&h.Infomask2, &h.Infomask, &h.Hoff,
 				&h.Bits, &h.Oid, &h.Data,
-				&h.ChunkID, &h.ChunkSeq,
-			); err != nil {
-				return nil, fmt.Errorf("list heap tuples in %q page %d: %w", t.Qualified(), blkno, err)
 			}
-		} else {
-			if err := rows.Scan(
-				&h.LP, &h.LPOff, &h.LPFlags, &h.LPLen,
-				&h.Xmin, &h.Xmax, &h.Field3, &h.Ctid,
-				&h.Infomask2, &h.Infomask, &h.Hoff,
-				&h.Bits, &h.Oid, &h.Data,
-			); err != nil {
-				return nil, fmt.Errorf("list heap tuples in %q page %d: %w", t.Qualified(), blkno, err)
+			if isToast {
+				dest = append(dest, &h.ChunkID, &h.ChunkSeq)
 			}
-		}
-		out = append(out, h)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list heap tuples in %q page %d: %w", t.Qualified(), blkno, err)
-	}
-	return out, nil
+			err := row.Scan(dest...)
+			return h, err
+		})
 }
 
 // ListTupleAttrs splits one heap tuple (identified by block + line pointer)
@@ -521,25 +418,14 @@ func (c *Client) ListTupleAttrs(ctx context.Context, t Table, blkno, lp int32) (
 		return nil, err
 	}
 	regclass := qualifiedIdent(t.Schema, t.Name)
-	rows, err := pool.Query(ctx, sqlTupleAttrs, regclass, blkno, lp)
-	if err != nil {
-		return nil, fmt.Errorf("tuple attrs in %q page %d lp %d: %w", t.Qualified(), blkno, lp, err)
-	}
-	defer rows.Close()
-	var out []TupleAttr
-	for rows.Next() {
-		var a TupleAttr
-		if err := rows.Scan(&a.Attnum, &a.Name, &a.TypeName,
-			&a.Len, &a.Align, &a.Dropped, &a.Stored,
-			&a.TypName, &a.TypCategory, &a.EnumLabel, &a.Value); err != nil {
-			return nil, fmt.Errorf("tuple attrs in %q page %d lp %d: %w", t.Qualified(), blkno, lp, err)
-		}
-		out = append(out, a)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("tuple attrs in %q page %d lp %d: %w", t.Qualified(), blkno, lp, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("tuple attrs in %q page %d lp %d", t.Qualified(), blkno, lp), sqlTupleAttrs, []any{regclass, blkno, lp},
+		func(row pgx.CollectableRow) (TupleAttr, error) {
+			var a TupleAttr
+			err := row.Scan(&a.Attnum, &a.Name, &a.TypeName,
+				&a.Len, &a.Align, &a.Dropped, &a.Stored,
+				&a.TypName, &a.TypCategory, &a.EnumLabel, &a.Value)
+			return a, err
+		})
 }
 
 // --- GiST ---
@@ -548,39 +434,14 @@ func (c *Client) ListTupleAttrs(ctx context.Context, t Table, blkno, lp int32) (
 // `start`. GiST has no metapage (block 0 is the root), so minPages=1 and the
 // window starts wherever the caller asks.
 func (c *Client) ListGistPages(ctx context.Context, r Relation, start, count int32) ([]GistPageStat, error) {
-	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
-		return nil, err
-	}
-	pool, err := c.PoolFor(ctx, r.DB)
-	if err != nil {
-		return nil, err
-	}
-	regclass := qualifiedIdent(r.Schema, r.Name)
-	count, ok, err := c.clampPageWindow(ctx, pool, r.OID, r.Qualified(), start, count, 1)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-	rows, err := pool.Query(ctx, sqlGistPagesSummary, regclass, start, count)
-	if err != nil {
-		return nil, fmt.Errorf("list gist pages in %q: %w", r.Qualified(), err)
-	}
-	defer rows.Close()
-	var out []GistPageStat
-	for rows.Next() {
-		var p GistPageStat
-		if err := rows.Scan(&p.Blkno, &p.IsLeaf, &p.IsDeleted, &p.Items,
-			&p.FreeSize, &p.PageSize, &p.RightLink); err != nil {
-			return nil, fmt.Errorf("list gist pages in %q: %w", r.Qualified(), err)
-		}
-		out = append(out, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list gist pages in %q: %w", r.Qualified(), err)
-	}
-	return out, nil
+	return listPageWindow(ctx, c, r.DB, r.Schema, r.Name, r.OID, r.Qualified(),
+		fmt.Sprintf("list gist pages in %q", r.Qualified()), sqlGistPagesSummary, start, count, 1,
+		func(row pgx.CollectableRow) (GistPageStat, error) {
+			var p GistPageStat
+			err := row.Scan(&p.Blkno, &p.IsLeaf, &p.IsDeleted, &p.Items,
+				&p.FreeSize, &p.PageSize, &p.RightLink)
+			return p, err
+		})
 }
 
 // ListGistItems lists one GiST page's items. It prefers gist_page_items, whose
@@ -652,8 +513,9 @@ func (c *Client) GistPageFlags(ctx context.Context, r Relation, blkno int32) (is
 		return false, false, err
 	}
 	regclass := qualifiedIdent(r.Schema, r.Name)
-	if err := pool.QueryRow(ctx, sqlGistPageFlags, regclass, blkno).Scan(&isLeaf, &isDeleted); err != nil {
-		return false, false, fmt.Errorf("gist_page_opaque_info for %q page %d: %w", r.Qualified(), blkno, err)
+	if err := queryRelRow(ctx, pool, fmt.Sprintf("gist_page_opaque_info for %q page %d", r.Qualified(), blkno),
+		sqlGistPageFlags, []any{regclass, blkno}, &isLeaf, &isDeleted); err != nil {
+		return false, false, err
 	}
 	return isLeaf, isDeleted, nil
 }
@@ -669,9 +531,9 @@ func (c *Client) BrinMeta(ctx context.Context, r Relation) (BrinMeta, error) {
 		return m, err
 	}
 	regclass := qualifiedIdent(r.Schema, r.Name)
-	if err := pool.QueryRow(ctx, sqlBrinMeta, regclass).Scan(
+	if err := queryRelRow(ctx, pool, fmt.Sprintf("brin_metapage_info for %q", r.Qualified()), sqlBrinMeta, []any{regclass},
 		&m.Magic, &m.Version, &m.PagesPerRange, &m.LastRevmapPage); err != nil {
-		return m, fmt.Errorf("brin_metapage_info for %q: %w", r.Qualified(), err)
+		return m, err
 	}
 	return m, nil
 }
@@ -679,38 +541,13 @@ func (c *Client) BrinMeta(ctx context.Context, r Relation) (BrinMeta, error) {
 // ListBrinPages returns up to `count` BRIN page summaries from `start`. Block 0
 // (meta) is browsable — brin_page_type handles every page type — so minPages=1.
 func (c *Client) ListBrinPages(ctx context.Context, r Relation, start, count int32) ([]BrinPageStat, error) {
-	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
-		return nil, err
-	}
-	pool, err := c.PoolFor(ctx, r.DB)
-	if err != nil {
-		return nil, err
-	}
-	regclass := qualifiedIdent(r.Schema, r.Name)
-	count, ok, err := c.clampPageWindow(ctx, pool, r.OID, r.Qualified(), start, count, 1)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-	rows, err := pool.Query(ctx, sqlBrinPagesSummary, regclass, start, count)
-	if err != nil {
-		return nil, fmt.Errorf("list brin pages in %q: %w", r.Qualified(), err)
-	}
-	defer rows.Close()
-	var out []BrinPageStat
-	for rows.Next() {
-		var p BrinPageStat
-		if err := rows.Scan(&p.Blkno, &p.PageType, &p.FreeSize, &p.PageSize); err != nil {
-			return nil, fmt.Errorf("list brin pages in %q: %w", r.Qualified(), err)
-		}
-		out = append(out, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list brin pages in %q: %w", r.Qualified(), err)
-	}
-	return out, nil
+	return listPageWindow(ctx, c, r.DB, r.Schema, r.Name, r.OID, r.Qualified(),
+		fmt.Sprintf("list brin pages in %q", r.Qualified()), sqlBrinPagesSummary, start, count, 1,
+		func(row pgx.CollectableRow) (BrinPageStat, error) {
+			var p BrinPageStat
+			err := row.Scan(&p.Blkno, &p.PageType, &p.FreeSize, &p.PageSize)
+			return p, err
+		})
 }
 
 // ListBrinItems lists one BRIN regular page's range-summary tuples. A non-regular
@@ -725,24 +562,13 @@ func (c *Client) ListBrinItems(ctx context.Context, r Relation, blkno int32) ([]
 		return nil, err
 	}
 	regclass := qualifiedIdent(r.Schema, r.Name)
-	rows, err := pool.Query(ctx, sqlBrinItems, regclass, blkno)
-	if err != nil {
-		return nil, fmt.Errorf("list brin items in %q page %d: %w", r.Qualified(), blkno, err)
-	}
-	defer rows.Close()
-	var out []BrinItem
-	for rows.Next() {
-		var it BrinItem
-		if err := rows.Scan(&it.ItemOffset, &it.BlockNum, &it.AttNum,
-			&it.AllNulls, &it.HasNulls, &it.Placeholder, &it.Empty, &it.Value); err != nil {
-			return nil, fmt.Errorf("list brin items in %q page %d: %w", r.Qualified(), blkno, err)
-		}
-		out = append(out, it)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list brin items in %q page %d: %w", r.Qualified(), blkno, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("list brin items in %q page %d", r.Qualified(), blkno), sqlBrinItems, []any{regclass, blkno},
+		func(row pgx.CollectableRow) (BrinItem, error) {
+			var it BrinItem
+			err := row.Scan(&it.ItemOffset, &it.BlockNum, &it.AttNum,
+				&it.AllNulls, &it.HasNulls, &it.Placeholder, &it.Empty, &it.Value)
+			return it, err
+		})
 }
 
 // --- GIN ---
@@ -755,10 +581,10 @@ func (c *Client) GinMeta(ctx context.Context, r Relation) (GinMeta, error) {
 		return m, err
 	}
 	regclass := qualifiedIdent(r.Schema, r.Name)
-	if err := pool.QueryRow(ctx, sqlGinMeta, regclass).Scan(
+	if err := queryRelRow(ctx, pool, fmt.Sprintf("gin_metapage_info for %q", r.Qualified()), sqlGinMeta, []any{regclass},
 		&m.PendingPages, &m.PendingTuples, &m.TotalPages,
 		&m.EntryPages, &m.DataPages, &m.Entries, &m.Version); err != nil {
-		return m, fmt.Errorf("gin_metapage_info for %q: %w", r.Qualified(), err)
+		return m, err
 	}
 	return m, nil
 }
@@ -767,38 +593,13 @@ func (c *Client) GinMeta(ctx context.Context, r Relation) (GinMeta, error) {
 // metapage (block 0) is skipped (minPages=2; the SQL clamps the lower bound to
 // block 1) since its opaque area differs and it's covered by the banner.
 func (c *Client) ListGinPages(ctx context.Context, r Relation, start, count int32) ([]GinPageStat, error) {
-	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
-		return nil, err
-	}
-	pool, err := c.PoolFor(ctx, r.DB)
-	if err != nil {
-		return nil, err
-	}
-	regclass := qualifiedIdent(r.Schema, r.Name)
-	count, ok, err := c.clampPageWindow(ctx, pool, r.OID, r.Qualified(), start, count, 2)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-	rows, err := pool.Query(ctx, sqlGinPagesSummary, regclass, start, count)
-	if err != nil {
-		return nil, fmt.Errorf("list gin pages in %q: %w", r.Qualified(), err)
-	}
-	defer rows.Close()
-	var out []GinPageStat
-	for rows.Next() {
-		var p GinPageStat
-		if err := rows.Scan(&p.Blkno, &p.Flags, &p.MaxOff, &p.FreeSize, &p.PageSize); err != nil {
-			return nil, fmt.Errorf("list gin pages in %q: %w", r.Qualified(), err)
-		}
-		out = append(out, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list gin pages in %q: %w", r.Qualified(), err)
-	}
-	return out, nil
+	return listPageWindow(ctx, c, r.DB, r.Schema, r.Name, r.OID, r.Qualified(),
+		fmt.Sprintf("list gin pages in %q", r.Qualified()), sqlGinPagesSummary, start, count, 2,
+		func(row pgx.CollectableRow) (GinPageStat, error) {
+			var p GinPageStat
+			err := row.Scan(&p.Blkno, &p.Flags, &p.MaxOff, &p.FreeSize, &p.PageSize)
+			return p, err
+		})
 }
 
 // ListGinItems lists posting-list segments on a compressed GIN data-leaf page.
@@ -813,21 +614,10 @@ func (c *Client) ListGinItems(ctx context.Context, r Relation, blkno int32) ([]G
 		return nil, err
 	}
 	regclass := qualifiedIdent(r.Schema, r.Name)
-	rows, err := pool.Query(ctx, sqlGinItems, regclass, blkno)
-	if err != nil {
-		return nil, fmt.Errorf("list gin items in %q page %d: %w", r.Qualified(), blkno, err)
-	}
-	defer rows.Close()
-	var out []GinItem
-	for rows.Next() {
-		var it GinItem
-		if err := rows.Scan(&it.FirstTid, &it.NBytes, &it.TidCount, &it.TidsText); err != nil {
-			return nil, fmt.Errorf("list gin items in %q page %d: %w", r.Qualified(), blkno, err)
-		}
-		out = append(out, it)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list gin items in %q page %d: %w", r.Qualified(), blkno, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("list gin items in %q page %d", r.Qualified(), blkno), sqlGinItems, []any{regclass, blkno},
+		func(row pgx.CollectableRow) (GinItem, error) {
+			var it GinItem
+			err := row.Scan(&it.FirstTid, &it.NBytes, &it.TidCount, &it.TidsText)
+			return it, err
+		})
 }

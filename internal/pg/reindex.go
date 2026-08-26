@@ -66,13 +66,9 @@ func (p ReindexProgress) Waiting() bool { return strings.HasPrefix(p.Phase, "wai
 // estimates (reltuples) and briefly read 0 on phase transitions, so callers
 // must also clamp the result monotonic across polls.
 func (p ReindexProgress) OverallPct() float64 {
-	span, ok := reindexPhaseSpan[p.Phase]
+	span, ok := resolvePhaseSpan(reindexPhaseSpan, p.Phase)
 	if !ok {
-		// An unmapped AM-specific subphase still bounds us to the build slice.
-		if !strings.HasPrefix(p.Phase, "building index:") {
-			return -1
-		}
-		span = reindexPhaseSpan["building index"]
+		return -1
 	}
 	done, total := p.Done, p.Total
 	if p.Waiting() {

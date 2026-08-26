@@ -20,21 +20,8 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	}
 
 	info := &MaintenanceInfo{
-		Settings:    make(map[string]string),
+		Settings:    settingsMap(ctx, pool, sqlMaintSettings, maintSettingsKeys),
 		ConnByState: make(map[string]int),
-	}
-
-	// --- curated GUCs ---
-	rows, err := pool.Query(ctx, sqlMaintSettings, maintSettingsKeys)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var name, setting string
-			if rows.Scan(&name, &setting) == nil {
-				info.Settings[name] = setting
-			}
-		}
-		rows.Close()
 	}
 
 	// --- max_connections (also in Settings, but parse once to int) ---
