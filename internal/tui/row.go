@@ -121,7 +121,7 @@ func renderRow(r row) string {
 	if r.hasBreakdown {
 		breakdownStr = styleHeapSeg.Render(padRight(humanize.Bytes(r.heap), breakdownColW)) + "  " +
 			styleIndexSeg.Render(padRight(humanize.Bytes(r.idx), breakdownColW)) + "  " +
-			styleToastSeg.Render(padRight(humanize.Bytes(r.toast), breakdownColW)) + "  "
+			toastSegStyle(r.toast).Render(padRight(toastSizeStr(r.toast), breakdownColW)) + "  "
 	}
 	rowsStr := ""
 	if r.hasRows {
@@ -156,6 +156,29 @@ const rowsColW = 7
 // breakdownColW is the width of the heap, idx and toast columns on the tables
 // level; a humanize.Bytes value ("1023.99 MB") fits in 10 cells.
 const breakdownColW = 10
+
+// toastMinBytes is the footprint of a TOAST relation with no rows toasted
+// (one heap page); at or below it there's no real TOAST data, so we render a
+// dash instead of a byte count that would misleadingly suggest otherwise.
+const toastMinBytes = 8192
+
+// toastSizeStr renders a table's toast size, collapsing the "empty toast
+// relation" floor to a dash.
+func toastSizeStr(toast int64) string {
+	if toast <= toastMinBytes {
+		return "-"
+	}
+	return humanize.Bytes(toast)
+}
+
+// toastSegStyle mutes the dash rendered for toastSizeStr's empty case instead
+// of tinting it like a real value.
+func toastSegStyle(toast int64) lipgloss.Style {
+	if toast <= toastMinBytes {
+		return styleMuted
+	}
+	return styleToastSeg
+}
 
 // pagesColW matches rowsColW: formatRows output (max 6 chars) + a "p" suffix.
 const pagesColW = 7
@@ -791,7 +814,7 @@ func (m *Model) renderTablesTotals(s *screen) string {
 	} else {
 		line += padRight(humanize.Bytes(heap), breakdownColW) + "  " +
 			padRight(humanize.Bytes(idx), breakdownColW) + "  " +
-			padRight(humanize.Bytes(toast), breakdownColW) + "  " +
+			padRight(toastSizeStr(toast), breakdownColW) + "  " +
 			padRight(formatRows(rows), rowsColW) + "  "
 		if anyBloat {
 			cell := "-"
