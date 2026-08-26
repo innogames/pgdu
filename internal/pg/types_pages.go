@@ -148,10 +148,13 @@ type IndexTuple struct {
 
 // TupleCell is one column of a heap row decoded for the row-detail view.
 // Value is nil for SQL NULLs so the renderer can show them distinctly from
-// empty strings or zero values.
+// empty strings or zero values. Value is capped server-side (tupleValueCap);
+// FullBytes is the untruncated value's octet_length, so FullBytes >
+// len(*Value) means the tail was dropped.
 type TupleCell struct {
-	Name  string
-	Value *string
+	Name      string
+	Value     *string
+	FullBytes int64
 }
 
 // TupleAttr is one column of a heap tuple split into raw bytes by

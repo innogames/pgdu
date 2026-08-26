@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -576,26 +577,42 @@ func (m *Model) renderTupleRowList(s *screen, height int) string {
 	return m.renderRowList(s, height, header,
 		func(it item, selected bool) string {
 			c, _ := it.data.(pg.TupleCell)
-			value := truncateValue(c.Value, valW)
+			w := valW
+			tag := ""
+			// Value arrived truncated from the server (tupleValueCap) —
+			// surface the real size, since the on-screen "…" alone would
+			// undersell a 60 MB jsonb as merely "wider than the terminal".
+			if c.Value != nil && c.FullBytes > int64(len(*c.Value)) {
+				tag = "  · " + humanize.Bytes(c.FullBytes) + " total"
+				w = max(valW-lipgloss.Width(tag), 8)
+				tag = styleMuted.Render(tag)
+			}
+			value := truncateValue(c.Value, w) + tag
 			return selectedCursor(selected) + padRight(highlightName(c.Name, selected), tupleRowNameColW) + "  " + value
 		})
 }
 
 // truncateValue renders a column value for the row-detail view: NULL gets
 // the muted style, anything else is clipped to width with a trailing
-// ellipsis so wide jsonb/bytea columns don't break alignment.
+// ellipsis so wide jsonb/bytea columns don't break alignment. Embedded
+// newlines/tabs (multi-line text columns) are folded to single spaces —
+// but only within the byte-capped prefix clipCells can render, so a huge
+// value costs O(width), never O(len).
 func truncateValue(v *string, width int) string {
 	if v == nil {
 		return styleMuted.Render("NULL")
 	}
 	s := *v
-	if lipgloss.Width(s) <= width {
-		return s
+	if maxB := width * 4; len(s) > maxB {
+		for maxB > 0 && !utf8.RuneStart(s[maxB]) {
+			maxB--
+		}
+		// Bake the ellipsis in: flattening below may collapse the prefix
+		// enough to fit width, and clipCells wouldn't know we dropped bytes.
+		s = s[:maxB] + "…"
 	}
-	// Trim runewise so we don't slice into a UTF-8 sequence.
-	r := []rune(s)
-	for len(r) > 0 && lipgloss.Width(string(r))+1 > width {
-		r = r[:len(r)-1]
+	if strings.ContainsAny(s, "\n\r\t\v\f") {
+		s = flattenQuery(s)
 	}
-	return string(r) + "…"
+	return clipCells(s, width)
 }

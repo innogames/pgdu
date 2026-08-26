@@ -228,13 +228,15 @@ func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 			}, true
 
 	case levelTupleRow:
-		return []string{"column", "value"},
+		// value is capped server-side (tupleValueCap); total_bytes carries the
+		// untruncated size so a capped export is recognisable as such.
+		return []string{"column", "value", "total_bytes"},
 			func(it item) []string {
 				c, ok := it.data.(pg.TupleCell)
 				if !ok {
 					return nil
 				}
-				return []string{c.Name, csvStrP(c.Value)}
+				return []string{c.Name, csvStrP(c.Value), csvInt(c.FullBytes)}
 			}, true
 
 	case levelIndexPages:

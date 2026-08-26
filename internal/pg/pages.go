@@ -115,14 +115,15 @@ func (c *Client) ListTupleRow(ctx context.Context, t Table, ctid string) ([]Tupl
 	return collect(ctx, pool, fmt.Sprintf("read tuple in %q ctid %s", t.Qualified(), ctid), sql, []any{ctid},
 		func(row pgx.CollectableRow) (TupleCell, error) {
 			var c TupleCell
-			err := row.Scan(&c.Name, &c.Value)
+			err := row.Scan(&c.Name, &c.Value, &c.FullBytes)
 			return c, err
 		})
 }
 
-// ReadToastValue fetches all chunks for one out-of-line value from a TOAST
-// table, assembles them in chunk_seq order, and returns a small slice of
-// TupleCell rows suitable for the row-detail view:
+// ReadToastValue fetches the leading chunks of one out-of-line value from a
+// TOAST table (just enough for the hex preview — never the whole value),
+// assembles them in chunk_seq order, and returns a small slice of TupleCell
+// rows suitable for the row-detail view:
 //
 //	chunk_id   – the OID of the out-of-line value
 //	chunks     – number of chunks stored on disk
@@ -136,14 +137,24 @@ func (c *Client) ReadToastValue(ctx context.Context, t Table, chunkID uint32) ([
 	regclass := qualifiedIdent(t.Schema, t.Name)
 	sql := fmt.Sprintf(sqlToastValueChunks, regclass)
 
+	// The view previews at most maxHexBytes of the assembled value, so only
+	// the chunks covering that prefix are fetched — TOAST chunks are ~2000 B
+	// (TOAST_MAX_CHUNK_SIZE), so 2 always suffice; +1 spare in case the
+	// value was toasted with an unusually small chunk size. Totals come from
+	// the query's window aggregates, which see every chunk.
+	const maxHexBytes = 2048
+	const maxChunks = maxHexBytes/1500 + 2
+
 	type chunk struct {
-		seq  int32
-		data []byte
+		seq        int32
+		data       []byte
+		chunks     int32
+		totalBytes int64
 	}
-	chunks, err := collect(ctx, pool, fmt.Sprintf("read toast value in %q chunk %d", t.Qualified(), chunkID), sql, []any{chunkID},
+	chunks, err := collect(ctx, pool, fmt.Sprintf("read toast value in %q chunk %d", t.Qualified(), chunkID), sql, []any{chunkID, maxChunks},
 		func(row pgx.CollectableRow) (chunk, error) {
 			var ch chunk
-			err := row.Scan(&ch.seq, &ch.data)
+			err := row.Scan(&ch.seq, &ch.data, &ch.chunks, &ch.totalBytes)
 			return ch, err
 		})
 	if err != nil {
@@ -151,23 +162,30 @@ func (c *Client) ReadToastValue(ctx context.Context, t Table, chunkID uint32) ([
 	}
 
 	var assembled []byte
+	var nChunks int32
+	var totalBytes int64
 	for _, ch := range chunks {
-		assembled = append(assembled, ch.data...)
+		if len(assembled) < maxHexBytes {
+			assembled = append(assembled, ch.data...)
+		}
+		nChunks, totalBytes = ch.chunks, ch.totalBytes
 	}
 
-	const maxHexBytes = 2048
 	var hexData string
-	if len(assembled) <= maxHexBytes {
+	if int64(len(assembled)) >= totalBytes {
 		hexData = fmt.Sprintf(`\x%x`, assembled)
 	} else {
-		hexData = fmt.Sprintf(`\x%x…`, assembled[:maxHexBytes])
+		if len(assembled) > maxHexBytes {
+			assembled = assembled[:maxHexBytes]
+		}
+		hexData = fmt.Sprintf(`\x%x…`, assembled)
 	}
 
 	str := func(s string) *string { return &s }
 	return []TupleCell{
 		{Name: "chunk_id", Value: str(strconv.FormatUint(uint64(chunkID), 10))},
-		{Name: "chunks", Value: str(strconv.Itoa(len(chunks)))},
-		{Name: "total_bytes", Value: str(strconv.Itoa(len(assembled)))},
+		{Name: "chunks", Value: str(strconv.Itoa(int(nChunks)))},
+		{Name: "total_bytes", Value: str(strconv.FormatInt(totalBytes, 10))},
 		{Name: "data", Value: str(hexData)},
 	}, nil
 }

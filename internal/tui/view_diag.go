@@ -184,15 +184,7 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 		if m.width <= 4 {
 			return v
 		}
-		w := m.width - 4 // 4 = leading "    " indent
-		if lipgloss.Width(v) <= w {
-			return v
-		}
-		r := []rune(v)
-		for len(r) > 0 && lipgloss.Width(string(r))+1 > w {
-			r = r[:len(r)-1]
-		}
-		return string(r) + "…"
+		return clipCells(v, m.width-4) // 4 = leading "    " indent
 	}
 
 	switch d.Kind {
@@ -1012,16 +1004,8 @@ func truncateDiagCell(s string, maxW int) string {
 	// Slow path: non-ASCII or control bytes. Fold any whitespace run (newlines,
 	// tabs, indentation) to a single space so the cell stays one line — the same
 	// normalisation the top-queries table applies to its query column — then
-	// measure with grapheme-aware widths.
-	s = flattenQuery(s)
-	if lipgloss.Width(s) <= maxW {
-		return s
-	}
-	r := []rune(s)
-	for len(r) > 0 && lipgloss.Width(string(r))+1 > maxW {
-		r = r[:len(r)-1]
-	}
-	return string(r) + "…"
+	// clip with grapheme-aware widths.
+	return clipCells(flattenQuery(s), maxW)
 }
 
 // padLeft right-aligns s in a field of width n (like padRight but for numbers).

@@ -391,12 +391,8 @@ func (m *Model) renderStatementSamples(s *screen, height int) string {
 // kept on single lines rather than wrapped, to preserve plan-tree indentation).
 func (m *Model) clipDetail(line string) string {
 	w := m.width - 4
-	if w < 8 || lipgloss.Width(line) <= w {
+	if w < 8 {
 		return line
 	}
-	r := []rune(line)
-	for len(r) > 0 && lipgloss.Width(string(r))+1 > w {
-		r = r[:len(r)-1]
-	}
-	return string(r) + "…"
+	return clipCells(line, w)
 }

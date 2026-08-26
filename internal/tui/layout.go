@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"unicode/utf8"
+
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -265,4 +267,41 @@ func truncateToWidth(s string, width int) string {
 		return s
 	}
 	return ansi.Truncate(s, width, "…") + "\x1b[0m"
+}
+
+// clipCells clips a plain (unstyled) string to at most width terminal cells,
+// appending "…" when it doesn't fit. It exists because every width primitive
+// underneath (lipgloss.Width, ansi.Truncate) starts by grapheme-scanning the
+// *entire* input — and the trim-from-the-end loops this replaced re-scanned it
+// once per removed rune, O(n²). A 60 MB detoasted column value fed to that
+// pinned a core indefinitely. Here anything past width*4 bytes is sliced off
+// first (in UTF-8 a cell never costs more than 4 bytes except degenerate
+// combining runs, which the generous slack plus the ellipsis make harmless),
+// so all width work is O(width) regardless of input size.
+func clipCells(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	capped := false
+	if maxB := width * 4; len(s) > maxB {
+		for maxB > 0 && !utf8.RuneStart(s[maxB]) {
+			maxB--
+		}
+		s, capped = s[:maxB], true
+	}
+	if w, ok := asciiWidth(s); ok {
+		// A capped ASCII prefix is width*4 bytes = width*4 cells, so the
+		// fits branch is only ever the un-capped whole string.
+		if w <= width {
+			return s
+		}
+		return s[:width-1] + "…"
+	}
+	if !capped && lipgloss.Width(s) <= width {
+		return s
+	}
+	// A capped prefix can fit width cells only via a degenerate combining
+	// run; the input was longer than what we kept, so the ellipsis stays
+	// honest there too.
+	return ansi.Truncate(s, width-1, "") + "…"
 }
