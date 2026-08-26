@@ -51,36 +51,42 @@ type QueryStat struct {
 	WALBytes   int64
 }
 
+// intCounters returns the addresses of every window-decomposable integer
+// counter, in one canonical order shared by sub and clampNonNeg — a new counter
+// field only needs to be added here to participate in both.
+func (q *QueryStat) intCounters() []*int64 {
+	return []*int64{
+		&q.Calls, &q.Rows, &q.Plans,
+		&q.SharedBlksHit, &q.SharedBlksRead, &q.SharedBlksDirtied, &q.SharedBlksWritten,
+		&q.LocalBlksHit, &q.LocalBlksRead, &q.LocalBlksDirtied, &q.LocalBlksWritten,
+		&q.TempBlksRead, &q.TempBlksWritten,
+		&q.WALRecords, &q.WALFPI, &q.WALBytes,
+	}
+}
+
+// floatCounters is intCounters' float sibling.
+func (q *QueryStat) floatCounters() []*float64 {
+	return []*float64{
+		&q.TotalExecTime, &q.TotalPlanTime,
+		&q.SharedBlkReadTime, &q.SharedBlkWriteTime,
+		&q.LocalBlkReadTime, &q.LocalBlkWriteTime,
+		&q.TempBlkReadTime, &q.TempBlkWriteTime,
+	}
+}
+
 // sub returns the window delta of q relative to a baseline snapshot b. Counter
 // fields are subtracted; identity (QueryID/Query/ids) comes from q (the newer
 // snapshot, in case the query text was re-normalised). MeanExecTime is
 // recomputed from the delta; the extrema are not subtractable so they're zero.
 func (q QueryStat) sub(b QueryStat) QueryStat {
 	d := q
-	d.Calls = q.Calls - b.Calls
-	d.Rows = q.Rows - b.Rows
-	d.TotalExecTime = q.TotalExecTime - b.TotalExecTime
-	d.Plans = q.Plans - b.Plans
-	d.TotalPlanTime = q.TotalPlanTime - b.TotalPlanTime
-	d.SharedBlksHit = q.SharedBlksHit - b.SharedBlksHit
-	d.SharedBlksRead = q.SharedBlksRead - b.SharedBlksRead
-	d.SharedBlksDirtied = q.SharedBlksDirtied - b.SharedBlksDirtied
-	d.SharedBlksWritten = q.SharedBlksWritten - b.SharedBlksWritten
-	d.LocalBlksHit = q.LocalBlksHit - b.LocalBlksHit
-	d.LocalBlksRead = q.LocalBlksRead - b.LocalBlksRead
-	d.LocalBlksDirtied = q.LocalBlksDirtied - b.LocalBlksDirtied
-	d.LocalBlksWritten = q.LocalBlksWritten - b.LocalBlksWritten
-	d.TempBlksRead = q.TempBlksRead - b.TempBlksRead
-	d.TempBlksWritten = q.TempBlksWritten - b.TempBlksWritten
-	d.SharedBlkReadTime = q.SharedBlkReadTime - b.SharedBlkReadTime
-	d.SharedBlkWriteTime = q.SharedBlkWriteTime - b.SharedBlkWriteTime
-	d.LocalBlkReadTime = q.LocalBlkReadTime - b.LocalBlkReadTime
-	d.LocalBlkWriteTime = q.LocalBlkWriteTime - b.LocalBlkWriteTime
-	d.TempBlkReadTime = q.TempBlkReadTime - b.TempBlkReadTime
-	d.TempBlkWriteTime = q.TempBlkWriteTime - b.TempBlkWriteTime
-	d.WALRecords = q.WALRecords - b.WALRecords
-	d.WALFPI = q.WALFPI - b.WALFPI
-	d.WALBytes = q.WALBytes - b.WALBytes
+	bi, bf := b.intCounters(), b.floatCounters()
+	for i, p := range d.intCounters() {
+		*p -= *bi[i]
+	}
+	for i, p := range d.floatCounters() {
+		*p -= *bf[i]
+	}
 	d.MinExecTime, d.MaxExecTime, d.StddevExecTime = 0, 0, 0
 	if d.Calls > 0 {
 		d.MeanExecTime = d.TotalExecTime / float64(d.Calls)
@@ -134,15 +140,19 @@ func (q QueryStat) BlocksPerRow() (float64, bool) {
 	return float64(q.SharedBlksHit+q.SharedBlksRead) / float64(q.Rows), true
 }
 
-// DiffStatements computes the window deltas of a fresh snapshot against a
+// diffStatements computes the window deltas of a fresh snapshot against a
 // baseline keyed by queryid. Queries with no activity in the window (≤0 calls)
-// are dropped; queries new since the baseline keep their full counters.
-func DiffStatements(baseline map[int64]QueryStat, current []QueryStat) []QueryStat {
+// are dropped; queries new since the baseline keep their full counters. When
+// clamp is set, negative deltas are zeroed (see clampNonNeg).
+func diffStatements(baseline map[int64]QueryStat, current []QueryStat, clamp bool) []QueryStat {
 	out := make([]QueryStat, 0, len(current))
 	for _, c := range current {
 		d := c
 		if b, ok := baseline[c.QueryID]; ok {
 			d = c.sub(b)
+			if clamp {
+				d = d.clampNonNeg()
+			}
 		}
 		if d.Calls <= 0 {
 			continue
@@ -152,46 +162,29 @@ func DiffStatements(baseline map[int64]QueryStat, current []QueryStat) []QuerySt
 	return out
 }
 
+// DiffStatements computes the window deltas of a fresh snapshot against a
+// baseline keyed by queryid. Queries with no activity in the window (≤0 calls)
+// are dropped; queries new since the baseline keep their full counters.
+func DiffStatements(baseline map[int64]QueryStat, current []QueryStat) []QueryStat {
+	return diffStatements(baseline, current, false)
+}
+
 // clampNonNeg zeroes any negative counter field. A delta against a *disk*
 // baseline can go negative when pg_stat_statements was reset, or the query was
 // evicted and re-added with smaller counters, between the snapshot and now —
 // in which case the difference is meaningless. We clamp so the table shows 0
 // rather than nonsense, and the caller surfaces a warning separately.
 func (q QueryStat) clampNonNeg() QueryStat {
-	nz := func(v *int64) {
-		if *v < 0 {
-			*v = 0
+	for _, p := range q.intCounters() {
+		if *p < 0 {
+			*p = 0
 		}
 	}
-	nf := func(v *float64) {
-		if *v < 0 {
-			*v = 0
+	for _, p := range q.floatCounters() {
+		if *p < 0 {
+			*p = 0
 		}
 	}
-	nz(&q.Calls)
-	nz(&q.Rows)
-	nf(&q.TotalExecTime)
-	nz(&q.Plans)
-	nf(&q.TotalPlanTime)
-	nz(&q.SharedBlksHit)
-	nz(&q.SharedBlksRead)
-	nz(&q.SharedBlksDirtied)
-	nz(&q.SharedBlksWritten)
-	nz(&q.LocalBlksHit)
-	nz(&q.LocalBlksRead)
-	nz(&q.LocalBlksDirtied)
-	nz(&q.LocalBlksWritten)
-	nz(&q.TempBlksRead)
-	nz(&q.TempBlksWritten)
-	nf(&q.SharedBlkReadTime)
-	nf(&q.SharedBlkWriteTime)
-	nf(&q.LocalBlkReadTime)
-	nf(&q.LocalBlkWriteTime)
-	nf(&q.TempBlkReadTime)
-	nf(&q.TempBlkWriteTime)
-	nz(&q.WALRecords)
-	nz(&q.WALFPI)
-	nz(&q.WALBytes)
 	if q.Calls > 0 {
 		q.MeanExecTime = q.TotalExecTime / float64(q.Calls)
 	} else {
@@ -205,18 +198,7 @@ func (q QueryStat) clampNonNeg() QueryStat {
 // eviction between capture and now can otherwise yield negative deltas. The
 // in-memory live baseline can't go backwards, so it keeps the plain DiffStatements.
 func DiffStatementsClamped(baseline map[int64]QueryStat, current []QueryStat) []QueryStat {
-	out := make([]QueryStat, 0, len(current))
-	for _, c := range current {
-		d := c
-		if b, ok := baseline[c.QueryID]; ok {
-			d = c.sub(b).clampNonNeg()
-		}
-		if d.Calls <= 0 {
-			continue
-		}
-		out = append(out, d)
-	}
-	return out
+	return diffStatements(baseline, current, true)
 }
 
 // ParamType describes one positional parameter ($1, $2, …) of a normalized

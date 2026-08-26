@@ -78,49 +78,34 @@ func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, erro
 		EstRows:   t.EstRows,
 	}
 
-	// Columns
-	rows, err := pool.Query(ctx, sqlDescribeColumns, t.OID)
+	d.Columns, err = collect(ctx, pool, fmt.Sprintf("describe columns for %q.%q", t.Schema, t.Name), sqlDescribeColumns, []any{t.OID},
+		func(row pgx.CollectableRow) (DescribeColumn, error) {
+			var col DescribeColumn
+			err := row.Scan(&col.Name, &col.Type, &col.NotNull, &col.Default, &col.Indexed)
+			return col, err
+		})
 	if err != nil {
-		return nil, fmt.Errorf("describe columns for %q.%q: %w", t.Schema, t.Name, err)
+		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var col DescribeColumn
-		if err := rows.Scan(&col.Name, &col.Type, &col.NotNull, &col.Default, &col.Indexed); err != nil {
-			return nil, fmt.Errorf("describe columns for %q.%q: %w", t.Schema, t.Name, err)
-		}
-		d.Columns = append(d.Columns, col)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("describe columns for %q.%q: %w", t.Schema, t.Name, err)
-	}
-	rows.Close()
 
-	// Indexes
-	idxRows, err := pool.Query(ctx, sqlDescribeIndexes, t.OID)
+	d.Indexes, err = collect(ctx, pool, fmt.Sprintf("describe indexes for %q.%q", t.Schema, t.Name), sqlDescribeIndexes, []any{t.OID},
+		func(row pgx.CollectableRow) (DescribeIndexDef, error) {
+			var idx DescribeIndexDef
+			err := row.Scan(&idx.Name, &idx.Def, &idx.IsPrimary, &idx.IsUnique, &idx.Clustered)
+			return idx, err
+		})
 	if err != nil {
-		return nil, fmt.Errorf("describe indexes for %q.%q: %w", t.Schema, t.Name, err)
+		return nil, err
 	}
-	defer idxRows.Close()
-	for idxRows.Next() {
-		var idx DescribeIndexDef
-		if err := idxRows.Scan(&idx.Name, &idx.Def, &idx.IsPrimary, &idx.IsUnique, &idx.Clustered); err != nil {
-			return nil, fmt.Errorf("describe indexes for %q.%q: %w", t.Schema, t.Name, err)
-		}
-		d.Indexes = append(d.Indexes, idx)
-	}
-	if err := idxRows.Err(); err != nil {
-		return nil, fmt.Errorf("describe indexes for %q.%q: %w", t.Schema, t.Name, err)
-	}
-	idxRows.Close()
 
 	// Foreign keys, both directions. Both are cheap pg_constraint scans, so
 	// they ride this same describe round-trip rather than a separate Cmd.
-	if d.FKOutgoing, err = queryFKs(ctx, pool, sqlDescribeFKOutgoing, t.OID); err != nil {
-		return nil, fmt.Errorf("describe foreign keys for %q.%q: %w", t.Schema, t.Name, err)
+	fkOp := fmt.Sprintf("describe foreign keys for %q.%q", t.Schema, t.Name)
+	if d.FKOutgoing, err = queryFKs(ctx, pool, fkOp, sqlDescribeFKOutgoing, t.OID); err != nil {
+		return nil, err
 	}
-	if d.FKIncoming, err = queryFKs(ctx, pool, sqlDescribeFKIncoming, t.OID); err != nil {
-		return nil, fmt.Errorf("describe foreign keys for %q.%q: %w", t.Schema, t.Name, err)
+	if d.FKIncoming, err = queryFKs(ctx, pool, fkOp, sqlDescribeFKIncoming, t.OID); err != nil {
+		return nil, err
 	}
 
 	// Options
@@ -133,25 +118,18 @@ func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, erro
 
 // queryFKs runs one of the describe FK queries (outgoing/incoming share a column
 // shape) against a table oid and maps the action codes to labels.
-func queryFKs(ctx context.Context, pool *pgxpool.Pool, sql string, oid uint32) ([]DescribeFK, error) {
-	rows, err := pool.Query(ctx, sql, oid)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var fks []DescribeFK
-	for rows.Next() {
-		var fk DescribeFK
-		var delCode, updCode string
-		if err := rows.Scan(&fk.Name, &fk.LocalCols, &fk.OtherTable, &fk.OtherCols, &delCode, &updCode); err != nil {
-			return nil, err
-		}
-		fk.OnDelete = fkAction(delCode)
-		fk.OnUpdate = fkAction(updCode)
-		fks = append(fks, fk)
-	}
-	return fks, rows.Err()
+func queryFKs(ctx context.Context, pool *pgxpool.Pool, op, sql string, oid uint32) ([]DescribeFK, error) {
+	return collect(ctx, pool, op, sql, []any{oid},
+		func(row pgx.CollectableRow) (DescribeFK, error) {
+			var fk DescribeFK
+			var delCode, updCode string
+			if err := row.Scan(&fk.Name, &fk.LocalCols, &fk.OtherTable, &fk.OtherCols, &delCode, &updCode); err != nil {
+				return fk, err
+			}
+			fk.OnDelete = fkAction(delCode)
+			fk.OnUpdate = fkAction(updCode)
+			return fk, nil
+		})
 }
 
 // fkAction maps a pg_constraint confdeltype/confupdtype code to a label,

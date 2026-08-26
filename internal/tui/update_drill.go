@@ -251,16 +251,8 @@ func (m *Model) drillIn() tea.Cmd {
 			return nil
 		}
 		lvl := p.BtpoLevel
-		next := &screen{
-			level: levelIndexTuples, title: "index tuples", tool: s.tool,
-			db: s.db, schema: s.schema, index: s.index,
-			indexKeyCols:   s.indexKeyCols, // carry the keys banner; no refetch
-			heapPageCount:  s.heapPageCount,
-			indexPageBlkno: p.Blkno,
-			indexPageType:  indexTuplePageType(p.Type, p.BtpoLevel),
-			indexPageLevel: &lvl,
-			sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
-		}
+		next := indexTuplesScreen(s, "index tuples", p.Blkno, indexTuplePageType(p.Type, p.BtpoLevel))
+		next.indexPageLevel = &lvl
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
 	case levelIndexTuples:
@@ -285,19 +277,10 @@ func (m *Model) drillIn() tea.Cmd {
 			if !ok {
 				return nil
 			}
-			next := &screen{
-				level: levelIndexTuples, title: "index tuples", tool: s.tool,
-				db: s.db, schema: s.schema, index: s.index,
-				indexKeyCols:   s.indexKeyCols,
-				heapPageCount:  s.heapPageCount,
-				indexPageBlkno: child,
-				// Child page type is unknown here; leave it empty and let
-				// loadIndexTuplesCmd probe it (bt_page_stats) so the decode path
-				// and further downlink navigation stay correct mid-descent.
-				indexPageType: "",
-				sort:          sortByLP, sortDesc: sortByLP.defaultDesc(),
-			}
-			m.stack = append(m.stack, next)
+			// Child page type is unknown here; leave it empty and let
+			// loadIndexTuplesCmd probe it (bt_page_stats) so the decode path
+			// and further downlink navigation stay correct mid-descent.
+			m.stack = append(m.stack, indexTuplesScreen(s, "index tuples", child, ""))
 			return m.loadCurrent()
 		}
 		if t.Ctid == nil || t.Decoded == nil {
@@ -503,6 +486,23 @@ func downlinkChildBlock(t pg.IndexTuple, pageCount, current int32) (int32, bool)
 	return blk, true
 }
 
+// indexTuplesScreen builds the per-page items screen every index drill pushes:
+// same index/context as the parent page list (the keys banner and page count
+// carry over — no refetch), positioned at blkno with the given resolved (or
+// to-be-probed, when empty) page type. Callers set per-AM extras
+// (indexPageLevel, brinMeta) on the result.
+func indexTuplesScreen(s *screen, title string, blkno int32, pageType string) *screen {
+	return &screen{
+		level: levelIndexTuples, title: title, tool: s.tool,
+		db: s.db, schema: s.schema, index: s.index,
+		indexKeyCols:   s.indexKeyCols,
+		heapPageCount:  s.heapPageCount,
+		indexPageBlkno: blkno,
+		indexPageType:  pageType,
+		sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
+	}
+}
+
 // --- GiST / BRIN / GIN drill handlers (called from drillIn) ---
 
 // drillGistPage opens a GiST page's items. Leaf and internal pages both carry
@@ -520,16 +520,7 @@ func (m *Model) drillGistPage(s *screen, cur item) tea.Cmd {
 		m.notice = "empty page — no items to inspect"
 		return nil
 	}
-	next := &screen{
-		level: levelIndexTuples, title: "index tuples", tool: s.tool,
-		db: s.db, schema: s.schema, index: s.index,
-		indexKeyCols:   s.indexKeyCols,
-		heapPageCount:  s.heapPageCount,
-		indexPageBlkno: p.Blkno,
-		indexPageType:  gistPageRole(p.IsLeaf, p.IsDeleted),
-		sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
-	}
-	m.stack = append(m.stack, next)
+	m.stack = append(m.stack, indexTuplesScreen(s, "index tuples", p.Blkno, gistPageRole(p.IsLeaf, p.IsDeleted)))
 	return m.loadCurrent()
 }
 
@@ -545,16 +536,8 @@ func (m *Model) drillGistItem(s *screen, cur item) tea.Cmd {
 		if !ok {
 			return nil
 		}
-		next := &screen{
-			level: levelIndexTuples, title: "index tuples", tool: s.tool,
-			db: s.db, schema: s.schema, index: s.index,
-			indexKeyCols:   s.indexKeyCols,
-			heapPageCount:  s.heapPageCount,
-			indexPageBlkno: child,
-			indexPageType:  "", // probed by loadGistItemsCmd mid-descent
-			sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
-		}
-		m.stack = append(m.stack, next)
+		// Page type probed by loadGistItemsCmd mid-descent.
+		m.stack = append(m.stack, indexTuplesScreen(s, "index tuples", child, ""))
 		return m.loadCurrent()
 	}
 	if t.Dead || t.Ctid == nil {
@@ -596,16 +579,8 @@ func (m *Model) drillBrinPage(s *screen, cur item) tea.Cmd {
 		m.notice = p.PageType + " page holds no range summaries — open a regular page to see them"
 		return nil
 	}
-	next := &screen{
-		level: levelIndexTuples, title: "brin ranges", tool: s.tool,
-		db: s.db, schema: s.schema, index: s.index,
-		indexKeyCols:   s.indexKeyCols,
-		heapPageCount:  s.heapPageCount,
-		indexPageBlkno: p.Blkno,
-		indexPageType:  "regular",
-		brinMeta:       s.brinMeta,
-		sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
-	}
+	next := indexTuplesScreen(s, "brin ranges", p.Blkno, "regular")
+	next.brinMeta = s.brinMeta
 	m.stack = append(m.stack, next)
 	return m.loadCurrent()
 }
@@ -644,16 +619,7 @@ func (m *Model) drillGinPage(s *screen, cur item) tea.Cmd {
 		m.notice = "only data-leaf pages are itemizable (pageinspect can't read entry-tree keys) — sort by type (→) to find them"
 		return nil
 	}
-	next := &screen{
-		level: levelIndexTuples, title: "gin posting lists", tool: s.tool,
-		db: s.db, schema: s.schema, index: s.index,
-		indexKeyCols:   s.indexKeyCols,
-		heapPageCount:  s.heapPageCount,
-		indexPageBlkno: p.Blkno,
-		indexPageType:  "data-leaf",
-		sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
-	}
-	m.stack = append(m.stack, next)
+	m.stack = append(m.stack, indexTuplesScreen(s, "gin posting lists", p.Blkno, "data-leaf"))
 	return m.loadCurrent()
 }
 

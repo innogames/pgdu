@@ -5,107 +5,117 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// handleColumnConfigKey drives the modal column-config overlay (C on the
-// top-queries table): Up/Down/Top/Bottom move the cursor over the column
-// registry, space/Enter toggle the highlighted column's visibility and rebuild
-// the table from the cached window (no DB), and C/esc close it. The mandatory
-// query column and columns unavailable under the current track_planning setting
-// can't be toggled. Quit still quits.
-func (m *Model) handleColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
-	reg := stmtColumnRegistry()
+// colCfgSpec describes one column-config overlay to handleColCfgKey: the row
+// count, the cursor to move, and the close/reset/toggle actions. The behavioral
+// differences between the pickers (availability gates, last-visible-column
+// guard, conditional rebuilds) live inside each spec's closures.
+type colCfgSpec struct {
+	n      int
+	cursor *int
+	close  func()
+	reset  func()
+	toggle func(i int)
+}
+
+// handleColCfgKey drives a modal column-config overlay: Up/Down/Top/Bottom move
+// the cursor over the column set, space/Enter toggle the highlighted column's
+// visibility, r resets to defaults, and C/esc close it. Quit still quits.
+func (m *Model) handleColCfgKey(msg tea.KeyMsg, sp colCfgSpec) tea.Cmd {
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return tea.Quit
 	case key.Matches(msg, m.keys.Columns), msg.Type == tea.KeyEsc:
-		m.showColumnConfig = false
+		sp.close()
 	case key.Matches(msg, m.keys.Up):
-		if m.colCfgCursor > 0 {
-			m.colCfgCursor--
+		if *sp.cursor > 0 {
+			*sp.cursor--
 		}
 	case key.Matches(msg, m.keys.Down):
-		if m.colCfgCursor < len(reg)-1 {
-			m.colCfgCursor++
+		if *sp.cursor < sp.n-1 {
+			*sp.cursor++
 		}
 	case key.Matches(msg, m.keys.Top):
-		m.colCfgCursor = 0
+		*sp.cursor = 0
 	case key.Matches(msg, m.keys.Bottom):
-		m.colCfgCursor = len(reg) - 1
+		*sp.cursor = sp.n - 1
 	case key.Matches(msg, m.keys.ResetCols):
-		// Re-seed from the registry defaults (nil → ensure*Init rebuilds the map).
-		m.stmtColsVisible = nil
-		m.ensureStmtColsInit()
-		m.rebuildStatementItems(s)
-		m.saveColPrefs(colPrefsQueries, colVisToStrings(m.stmtColsVisible))
+		sp.reset()
 	case key.Matches(msg, m.keys.Refresh), key.Matches(msg, m.keys.Enter):
 		// Refresh is space — the natural htop toggle; Enter also toggles.
-		if m.colCfgCursor < 0 || m.colCfgCursor >= len(reg) {
-			break
+		if i := *sp.cursor; i >= 0 && i < sp.n {
+			sp.toggle(i)
 		}
-		d := reg[m.colCfgCursor]
-		if d.mandatory {
-			break
-		}
-		if d.available != nil && !d.available(stmtCtx{trackPlanning: s.statTrackPlanning}) {
-			break // can't show a column that isn't collected (e.g. plan_ms with track_planning off)
-		}
-		m.ensureStmtColsInit()
-		m.stmtColsVisible[d.id] = !m.stmtColEnabled(d.id, d.defaultOn)
-		m.rebuildStatementItems(s)
-		m.saveColPrefs(colPrefsQueries, colVisToStrings(m.stmtColsVisible))
 	}
 	return nil
 }
 
-// handleActColumnConfigKey drives the modal column-config overlay for the
-// Activity tool (C on levelActivity). Mirrors handleColumnConfigKey.
+// handleColumnConfigKey drives the column-config overlay for the top-queries
+// table (C on levelStatements). The mandatory query column and columns
+// unavailable under the current track_planning setting can't be toggled.
+func (m *Model) handleColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+	reg := stmtColumnRegistry()
+	return m.handleColCfgKey(msg, colCfgSpec{
+		n:      len(reg),
+		cursor: &m.colCfgCursor,
+		close:  func() { m.showColumnConfig = false },
+		reset: func() {
+			// Re-seed from the registry defaults (nil → ensure*Init rebuilds the map).
+			m.stmtColsVisible = nil
+			m.ensureStmtColsInit()
+			m.rebuildStatementItems(s)
+			m.saveColPrefs(colPrefsQueries, colVisToStrings(m.stmtColsVisible))
+		},
+		toggle: func(i int) {
+			d := reg[i]
+			if d.mandatory {
+				return
+			}
+			if d.available != nil && !d.available(stmtCtx{trackPlanning: s.statTrackPlanning}) {
+				return // can't show a column that isn't collected (e.g. plan_ms with track_planning off)
+			}
+			m.ensureStmtColsInit()
+			m.stmtColsVisible[d.id] = !m.stmtColEnabled(d.id, d.defaultOn)
+			m.rebuildStatementItems(s)
+			m.saveColPrefs(colPrefsQueries, colVisToStrings(m.stmtColsVisible))
+		},
+	})
+}
+
+// handleActColumnConfigKey drives the column-config overlay for the Activity
+// tool (C on levelActivity). Rebuilds only when a snapshot has been loaded.
 func (m *Model) handleActColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	reg := actColumnRegistry()
-	switch {
-	case key.Matches(msg, m.keys.Quit):
-		return tea.Quit
-	case key.Matches(msg, m.keys.Columns), msg.Type == tea.KeyEsc:
-		m.showActColumnConfig = false
-	case key.Matches(msg, m.keys.Up):
-		if m.actColCfgCursor > 0 {
-			m.actColCfgCursor--
-		}
-	case key.Matches(msg, m.keys.Down):
-		if m.actColCfgCursor < len(reg)-1 {
-			m.actColCfgCursor++
-		}
-	case key.Matches(msg, m.keys.Top):
-		m.actColCfgCursor = 0
-	case key.Matches(msg, m.keys.Bottom):
-		m.actColCfgCursor = len(reg) - 1
-	case key.Matches(msg, m.keys.ResetCols):
-		m.actColsVisible = nil
-		m.ensureActColsInit()
-		if s.actRows != nil {
-			m.rebuildActivityItems(s)
-		}
-		m.saveColPrefs(colPrefsActivity, colVisToStrings(m.actColsVisible))
-	case key.Matches(msg, m.keys.Refresh), key.Matches(msg, m.keys.Enter):
-		if m.actColCfgCursor < 0 || m.actColCfgCursor >= len(reg) {
-			break
-		}
-		d := reg[m.actColCfgCursor]
-		if d.mandatory {
-			break
-		}
-		m.ensureActColsInit()
-		m.actColsVisible[d.id] = !m.actColEnabled(d.id, d.defaultOn)
-		if s.actRows != nil {
-			m.rebuildActivityItems(s)
-		}
-		m.saveColPrefs(colPrefsActivity, colVisToStrings(m.actColsVisible))
-	}
-	return nil
+	return m.handleColCfgKey(msg, colCfgSpec{
+		n:      len(reg),
+		cursor: &m.actColCfgCursor,
+		close:  func() { m.showActColumnConfig = false },
+		reset: func() {
+			m.actColsVisible = nil
+			m.ensureActColsInit()
+			if s.actRows != nil {
+				m.rebuildActivityItems(s)
+			}
+			m.saveColPrefs(colPrefsActivity, colVisToStrings(m.actColsVisible))
+		},
+		toggle: func(i int) {
+			d := reg[i]
+			if d.mandatory {
+				return
+			}
+			m.ensureActColsInit()
+			m.actColsVisible[d.id] = !m.actColEnabled(d.id, d.defaultOn)
+			if s.actRows != nil {
+				m.rebuildActivityItems(s)
+			}
+			m.saveColPrefs(colPrefsActivity, colVisToStrings(m.actColsVisible))
+		},
+	})
 }
 
-// handleDiagColumnConfigKey drives the modal column-config overlay for a
-// diagnostic result (C on levelDiagnosticResult). Unlike the registry-backed
-// pickers it operates on the result's dynamic column set; visibility is kept
-// per diagnostic key and by column name (see diagVis). The last visible column
+// handleDiagColumnConfigKey drives the column-config overlay for a diagnostic
+// result (C on levelDiagnosticResult). Unlike the registry-backed pickers it
+// operates on the result's dynamic column set; visibility is kept per
+// diagnostic key and by column name (see diagVis). The last visible column
 // can't be hidden.
 func (m *Model) handleDiagColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	res := s.diagResult
@@ -114,99 +124,69 @@ func (m *Model) handleDiagColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	cols := res.Columns
-	switch {
-	case key.Matches(msg, m.keys.Quit):
-		return tea.Quit
-	case key.Matches(msg, m.keys.Columns), msg.Type == tea.KeyEsc:
-		m.showDiagColumnConfig = false
-	case key.Matches(msg, m.keys.Up):
-		if m.diagColCfgCursor > 0 {
-			m.diagColCfgCursor--
-		}
-	case key.Matches(msg, m.keys.Down):
-		if m.diagColCfgCursor < len(cols)-1 {
-			m.diagColCfgCursor++
-		}
-	case key.Matches(msg, m.keys.Top):
-		m.diagColCfgCursor = 0
-	case key.Matches(msg, m.keys.Bottom):
-		m.diagColCfgCursor = len(cols) - 1
-	case key.Matches(msg, m.keys.ResetCols):
-		// Reset restores the diagnostic's defaults (which may hide columns), not
-		// an all-visible view; persisting an empty map re-seeds from defaults on
-		// reload.
-		m.diagColsVisible[s.diag.Key] = defaultDiagVis(s.diag.Key)
-		m.rebuildDiagItems(s)
-		m.saveColPrefs(diagPrefsKey(s.diag.Key), map[string]bool{})
-	case key.Matches(msg, m.keys.Refresh), key.Matches(msg, m.keys.Enter):
-		if m.diagColCfgCursor < 0 || m.diagColCfgCursor >= len(cols) {
-			break
-		}
-		name := cols[m.diagColCfgCursor].Name
-		vis := m.diagVis(s.diag.Key)
-		if vis == nil {
-			vis = make(map[string]bool, len(cols))
-			for _, c := range cols {
-				vis[c.Name] = true
-			}
-		}
-		if diagColOn(vis, name) {
-			visible := 0
-			for _, c := range cols {
-				if diagColOn(vis, c.Name) {
-					visible++
+	return m.handleColCfgKey(msg, colCfgSpec{
+		n:      len(cols),
+		cursor: &m.diagColCfgCursor,
+		close:  func() { m.showDiagColumnConfig = false },
+		reset: func() {
+			// Reset restores the diagnostic's defaults (which may hide columns), not
+			// an all-visible view; persisting an empty map re-seeds from defaults on
+			// reload.
+			m.diagColsVisible[s.diag.Key] = defaultDiagVis(s.diag.Key)
+			m.rebuildDiagItems(s)
+			m.saveColPrefs(diagPrefsKey(s.diag.Key), map[string]bool{})
+		},
+		toggle: func(i int) {
+			name := cols[i].Name
+			vis := m.diagVis(s.diag.Key)
+			if vis == nil {
+				vis = make(map[string]bool, len(cols))
+				for _, c := range cols {
+					vis[c.Name] = true
 				}
 			}
-			if visible <= 1 {
-				break // keep at least one column on screen
+			if diagColOn(vis, name) {
+				visible := 0
+				for _, c := range cols {
+					if diagColOn(vis, c.Name) {
+						visible++
+					}
+				}
+				if visible <= 1 {
+					return // keep at least one column on screen
+				}
 			}
-		}
-		vis[name] = !diagColOn(vis, name)
-		m.diagColsVisible[s.diag.Key] = vis
-		m.rebuildDiagItems(s)
-		m.saveColPrefs(diagPrefsKey(s.diag.Key), vis)
-	}
-	return nil
+			vis[name] = !diagColOn(vis, name)
+			m.diagColsVisible[s.diag.Key] = vis
+			m.rebuildDiagItems(s)
+			m.saveColPrefs(diagPrefsKey(s.diag.Key), vis)
+		},
+	})
 }
 
-// handleTblColumnConfigKey drives the modal column-config overlay for the Table
-// overview tool (C on levelTableStats). Mirrors handleActColumnConfigKey.
+// handleTblColumnConfigKey drives the column-config overlay for the Table
+// overview tool (C on levelTableStats).
 func (m *Model) handleTblColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	reg := tableColumnRegistry()
-	switch {
-	case key.Matches(msg, m.keys.Quit):
-		return tea.Quit
-	case key.Matches(msg, m.keys.Columns), msg.Type == tea.KeyEsc:
-		m.showTblColumnConfig = false
-	case key.Matches(msg, m.keys.Up):
-		if m.tblColCfgCursor > 0 {
-			m.tblColCfgCursor--
-		}
-	case key.Matches(msg, m.keys.Down):
-		if m.tblColCfgCursor < len(reg)-1 {
-			m.tblColCfgCursor++
-		}
-	case key.Matches(msg, m.keys.Top):
-		m.tblColCfgCursor = 0
-	case key.Matches(msg, m.keys.Bottom):
-		m.tblColCfgCursor = len(reg) - 1
-	case key.Matches(msg, m.keys.ResetCols):
-		m.tblColsVisible = nil
-		m.ensureTblColsInit()
-		m.rebuildTableStatItems(s)
-		m.saveColPrefs(colPrefsTableStats, colVisToStrings(m.tblColsVisible))
-	case key.Matches(msg, m.keys.Refresh), key.Matches(msg, m.keys.Enter):
-		if m.tblColCfgCursor < 0 || m.tblColCfgCursor >= len(reg) {
-			break
-		}
-		d := reg[m.tblColCfgCursor]
-		if d.mandatory {
-			break
-		}
-		m.ensureTblColsInit()
-		m.tblColsVisible[d.id] = !m.tblColEnabled(d.id, d.defaultOn)
-		m.rebuildTableStatItems(s)
-		m.saveColPrefs(colPrefsTableStats, colVisToStrings(m.tblColsVisible))
-	}
-	return nil
+	return m.handleColCfgKey(msg, colCfgSpec{
+		n:      len(reg),
+		cursor: &m.tblColCfgCursor,
+		close:  func() { m.showTblColumnConfig = false },
+		reset: func() {
+			m.tblColsVisible = nil
+			m.ensureTblColsInit()
+			m.rebuildTableStatItems(s)
+			m.saveColPrefs(colPrefsTableStats, colVisToStrings(m.tblColsVisible))
+		},
+		toggle: func(i int) {
+			d := reg[i]
+			if d.mandatory {
+				return
+			}
+			m.ensureTblColsInit()
+			m.tblColsVisible[d.id] = !m.tblColEnabled(d.id, d.defaultOn)
+			m.rebuildTableStatItems(s)
+			m.saveColPrefs(colPrefsTableStats, colVisToStrings(m.tblColsVisible))
+		},
+	})
 }

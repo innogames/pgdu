@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // QualstatsExampleQuery returns one real example query for queryID — the
@@ -36,23 +38,12 @@ func (c *Client) QualstatsSamples(ctx context.Context, db string, queryID int64)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := pool.Query(ctx, sqlQualstatsSamples, queryID)
-	if err != nil {
-		return nil, fmt.Errorf("qualstats samples in %q: %w", db, err)
-	}
-	defer rows.Close()
-	var out []QualSample
-	for rows.Next() {
-		var s QualSample
-		if err := rows.Scan(&s.Relation, &s.Column, &s.Operator, &s.ConstValue, &s.Position, &s.Occurrences); err != nil {
-			return nil, fmt.Errorf("qualstats samples in %q: %w", db, err)
-		}
-		out = append(out, s)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("qualstats samples in %q: %w", db, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("qualstats samples in %q", db), sqlQualstatsSamples, []any{queryID},
+		func(row pgx.CollectableRow) (QualSample, error) {
+			var s QualSample
+			err := row.Scan(&s.Relation, &s.Column, &s.Operator, &s.ConstValue, &s.Position, &s.Occurrences)
+			return s, err
+		})
 }
 
 // InferParams discovers the types of a normalized query's $n placeholders by

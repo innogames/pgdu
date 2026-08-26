@@ -11,6 +11,20 @@ import (
 	"pgdu/internal/pg"
 )
 
+// settleLoad finishes the common *LoadedMsg prologue after the caller's
+// identity guard: flips loading→loaded, promotes a missing-extension error to
+// the blocking install prompt (stop=true — the caller returns cmd right away),
+// and otherwise records the error on the screen.
+func settleLoad(s *screen, err error, reason string) (cmd tea.Cmd, stop bool) {
+	s.loading = false
+	s.loaded = true
+	if ext := asMissingExt(err); ext != nil {
+		return setExtensionPrompt(s, ext, reason), true
+	}
+	s.err = err
+	return nil, false
+}
+
 func (m *Model) onDatabasesLoaded(msg databasesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelDatabases)
 	if s == nil {
@@ -150,13 +164,9 @@ func (m *Model) onBufferStatsLoaded(msg bufferStatsLoadedMsg) tea.Cmd {
 	if s == nil || s.db != msg.db || s.schema != msg.schema {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		// Promote to a blocking install prompt instead of an opaque error.
-		return setExtensionPrompt(s, ext, extPromptReasonBufferCache)
+	if cmd, stop := settleLoad(s, msg.err, extPromptReasonBufferCache); stop {
+		return cmd
 	}
-	s.err = msg.err
 	s.items = s.items[:0]
 	for _, st := range msg.stats {
 		s.items = append(s.items, bufferStatToItem(st))

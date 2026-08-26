@@ -23,6 +23,13 @@ func max32(a, b int32) int32 {
 	return b
 }
 
+// confirmGate resolves an armed two-step confirmation: `y` (case-insensitive)
+// confirms, any other key cancels. Callers capture the pending target and
+// clear the arming field before checking, so the next key is always consumed.
+func confirmGate(msg tea.KeyMsg) bool {
+	return msg.String() == "y" || msg.String() == "Y"
+}
+
 // pageStep is the cursor jump distance for PageUp/PageDown. Roughly the
 // visible row count: terminal height minus header (3 lines), the inter-block
 // blank, and the help row. Always at least 1 so a one-row jump still happens
@@ -84,9 +91,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// (case-insensitive) executes; anything else cancels. Using y/n instead of
 	// a second Enter avoids running REINDEX on an accidental double-tap.
 	if s.pendingReindex != "" {
-		if msg.String() == "y" || msg.String() == "Y" {
-			idx := s.pendingReindex
-			s.pendingReindex = ""
+		idx := s.pendingReindex
+		s.pendingReindex = ""
+		if confirmGate(msg) {
 			s.reindexing = idx
 			s.reindexProg = nil
 			s.reindexPctMax = 0
@@ -95,13 +102,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// pg_stat_progress_create_index so the banner shows a live bar.
 			return m, tea.Batch(m.reindexIndexCmd(s.table, idx), m.reindexTick())
 		}
-		s.pendingReindex = ""
 		return m, nil
 	}
 	// VACUUM confirmation on levelParts: `v` armed it, y/Y executes, any other key cancels.
 	if s.pendingVacuum {
 		s.pendingVacuum = false
-		if msg.String() == "y" || msg.String() == "Y" {
+		if confirmGate(msg) {
 			return m, m.vacuumTableCmd(s.table)
 		}
 		return m, nil
@@ -110,7 +116,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if s.pendingReset != "" {
 		which := s.pendingReset
 		s.pendingReset = ""
-		if msg.String() == "y" || msg.String() == "Y" {
+		if confirmGate(msg) {
 			switch which {
 			case "statements":
 				return m, m.resetStatementsCmd(s.db)
@@ -128,7 +134,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.pendingDeleteSnap != "" {
 		path := m.pendingDeleteSnap
 		m.pendingDeleteSnap = ""
-		if msg.String() == "y" || msg.String() == "Y" {
+		if confirmGate(msg) {
 			return m, m.deleteSnapshotCmd(path, m.snapshotDir, s.db)
 		}
 		return m, nil
@@ -140,7 +146,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s.pendingBackendAction = ""
 		s.pendingBackendPID = 0
 		s.pendingBackendQuery = ""
-		if msg.String() == "y" || msg.String() == "Y" {
+		if confirmGate(msg) {
 			switch action {
 			case "cancel":
 				return m, m.cancelBackendCmd(s.db, pid)

@@ -106,50 +106,20 @@ func (m *Model) renderActivityHeader(s *screen) string {
 // renderActColumnConfig draws the htop-style column picker for the Activity
 // tool (C on levelActivity). Same look-and-feel as renderColumnConfig for the
 // top-queries table.
-func (m *Model) renderActColumnConfig(s *screen, height int) string {
-	mu := styleMuted.Render
-	var b strings.Builder
-
-	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("configure columns") + mu("  ·  ") +
-		styleBadge.Render("space") + mu(" toggles · ") +
-		styleBadge.Render("↑/↓") + mu(" move · ") +
-		styleBadge.Render("r") + mu(" reset · ") +
-		styleBadge.Render("C") + mu(" or ") + styleBadge.Render("esc") + mu(" to close") + "\n")
-	b.WriteString("  " + mu("choose which columns the activity table shows") + "\n\n")
-
+func (m *Model) renderActColumnConfig(_ *screen, height int) string {
 	m.ensureActColsInit()
 	reg := actColumnRegistry()
-	nameW := 0
-	for _, d := range reg {
-		if n := len(d.name); n > nameW {
-			nameW = n
-		}
-	}
+	rows := make([]colCfgRow, len(reg))
 	for i, d := range reg {
-		on := d.mandatory || m.actColEnabled(d.id, d.defaultOn)
-		box := "[ ]"
-		if on {
-			box = "[x]"
+		rows[i] = colCfgRow{
+			name:      d.name,
+			desc:      d.desc,
+			on:        d.mandatory || m.actColEnabled(d.id, d.defaultOn),
+			mandatory: d.mandatory,
 		}
-		cursor := "  "
-		if i == m.actColCfgCursor {
-			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-		}
-		label := box + "  " + padRight(d.name, nameW)
-		var rendered string
-		switch i {
-		case m.actColCfgCursor:
-			rendered = styleSelected.Render(label) + "  " + mu(d.desc)
-		default:
-			rendered = label + "  " + mu(d.desc)
-		}
-		if d.mandatory {
-			rendered += mu("  (always shown)")
-		}
-		b.WriteString(cursor + rendered + "\n")
 	}
-	return padInfo(&b, height)
+	return m.renderColCfgOverlay("choose which columns the activity table shows",
+		rows, m.actColCfgCursor, height)
 }
 
 // renderActivityInfo is the ? overlay for the Activity tool. It explains the

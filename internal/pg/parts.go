@@ -42,21 +42,14 @@ func (c *Client) TableParts(ctx context.Context, t Table) ([]Part, error) {
 			ToastName: t.ToastName,
 		})
 	}
-	rows, err := pool.Query(ctx, sqlIndexes, t.OID)
+	idx, err := collect(ctx, pool, fmt.Sprintf("list indexes for %q.%q", t.Schema, t.Name), sqlIndexes, []any{t.OID},
+		func(row pgx.CollectableRow) (Part, error) {
+			p := Part{Kind: PartIndex}
+			err := row.Scan(&p.OID, &p.Name, &p.SizeBytes, &p.IsPrimary, &p.IsUnique, &p.AccessMethod)
+			return p, err
+		})
 	if err != nil {
-		return nil, fmt.Errorf("list indexes for %q.%q: %w", t.Schema, t.Name, err)
+		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var p Part
-		p.Kind = PartIndex
-		if err := rows.Scan(&p.OID, &p.Name, &p.SizeBytes, &p.IsPrimary, &p.IsUnique, &p.AccessMethod); err != nil {
-			return nil, fmt.Errorf("list indexes for %q.%q: %w", t.Schema, t.Name, err)
-		}
-		parts = append(parts, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list indexes for %q.%q: %w", t.Schema, t.Name, err)
-	}
-	return parts, nil
+	return append(parts, idx...), nil
 }

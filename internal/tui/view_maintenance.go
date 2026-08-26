@@ -250,13 +250,7 @@ func (m *Model) renderMaintHint(s *screen) string {
 	if s.pendingReset == "" {
 		return ""
 	}
-	name := maintResetTarget(s.pendingReset)
-	return "  " + styleSelected.Render("confirm: ") +
-		styleMuted.Render("reset "+name+" — press ") +
-		styleBadge.Render("y") +
-		styleMuted.Render(" to run, ") +
-		styleBadge.Render("n") +
-		styleMuted.Render(" (or any other key) to cancel")
+	return confirmBanner("reset " + maintResetTarget(s.pendingReset))
 }
 
 // formatUptime formats a duration as "Xd Yh Zm" or "Yh Zm" or "Zm" depending

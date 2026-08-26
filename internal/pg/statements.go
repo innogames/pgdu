@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // EnsureStatements makes sure pg_stat_statements is installed in db. Mirrors
@@ -86,35 +88,24 @@ func (c *Client) StatementSnapshot(ctx context.Context, db string) ([]QueryStat,
 			Updatable: def != "" && statementsAtLeast(dMaj, dMin, statementsMinMajor, statementsMinMinor),
 		}
 	}
-	rows, err := pool.Query(ctx, statementsQuery(major, minor))
-	if err != nil {
-		return nil, fmt.Errorf("read pg_stat_statements in %q: %w", db, err)
-	}
-	defer rows.Close()
-	var out []QueryStat
-	for rows.Next() {
-		var q QueryStat
-		if err := rows.Scan(
-			&q.QueryID, &q.UserID, &q.DBID, &q.Query,
-			&q.Calls, &q.Rows,
-			&q.TotalExecTime, &q.MinExecTime, &q.MaxExecTime, &q.MeanExecTime, &q.StddevExecTime,
-			&q.Plans, &q.TotalPlanTime,
-			&q.SharedBlksHit, &q.SharedBlksRead, &q.SharedBlksDirtied, &q.SharedBlksWritten,
-			&q.LocalBlksHit, &q.LocalBlksRead, &q.LocalBlksDirtied, &q.LocalBlksWritten,
-			&q.TempBlksRead, &q.TempBlksWritten,
-			&q.SharedBlkReadTime, &q.SharedBlkWriteTime,
-			&q.LocalBlkReadTime, &q.LocalBlkWriteTime,
-			&q.TempBlkReadTime, &q.TempBlkWriteTime,
-			&q.WALRecords, &q.WALFPI, &q.WALBytes,
-		); err != nil {
-			return nil, fmt.Errorf("read pg_stat_statements in %q: %w", db, err)
-		}
-		out = append(out, q)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read pg_stat_statements in %q: %w", db, err)
-	}
-	return out, nil
+	return collect(ctx, pool, fmt.Sprintf("read pg_stat_statements in %q", db), statementsQuery(major, minor), nil,
+		func(row pgx.CollectableRow) (QueryStat, error) {
+			var q QueryStat
+			err := row.Scan(
+				&q.QueryID, &q.UserID, &q.DBID, &q.Query,
+				&q.Calls, &q.Rows,
+				&q.TotalExecTime, &q.MinExecTime, &q.MaxExecTime, &q.MeanExecTime, &q.StddevExecTime,
+				&q.Plans, &q.TotalPlanTime,
+				&q.SharedBlksHit, &q.SharedBlksRead, &q.SharedBlksDirtied, &q.SharedBlksWritten,
+				&q.LocalBlksHit, &q.LocalBlksRead, &q.LocalBlksDirtied, &q.LocalBlksWritten,
+				&q.TempBlksRead, &q.TempBlksWritten,
+				&q.SharedBlkReadTime, &q.SharedBlkWriteTime,
+				&q.LocalBlkReadTime, &q.LocalBlkWriteTime,
+				&q.TempBlkReadTime, &q.TempBlkWriteTime,
+				&q.WALRecords, &q.WALFPI, &q.WALBytes,
+			)
+			return q, err
+		})
 }
 
 // StatementsInfo returns the last time pg_stat_statements counters were reset

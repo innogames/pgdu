@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"pgdu/internal/pg"
 )
 
 // onToastTargetResolved completes the "ENTER on a TOASTed value" jump: the
@@ -48,17 +50,53 @@ func pageTempHint(s *screen, bufsErr error) {
 	}
 }
 
+// applyAMPages settles an access-method page-list load on an already
+// identity-matched screen: banner data (key columns, per-AM metapage via
+// setMeta), the buffer temperatures, and the n pages projected through toItem.
+// Banner data rides along with the page list; both are nil on a best-effort
+// failure, in which case the banner simply isn't drawn.
+func (m *Model) applyAMPages(s *screen, err error, totalPages int32, keyCols []pg.IndexKeyColumn,
+	bufs map[int64]pg.PageBuffer, bufsErr error, n int, toItem func(i int) item, setMeta func(*screen)) tea.Cmd {
+	if cmd, stop := settleLoad(s, err, extPromptReasonPageInspect); stop {
+		return cmd
+	}
+	s.heapPageCount = totalPages
+	s.indexKeyCols = keyCols
+	if setMeta != nil {
+		setMeta(s)
+	}
+	s.pageBufs = bufs
+	pageTempHint(s, bufsErr)
+	s.items = s.items[:0]
+	for i := 0; i < n; i++ {
+		s.items = append(s.items, toItem(i))
+	}
+	m.applySort(s)
+	return nil
+}
+
+// applyAMItems settles an access-method page-items load on an already
+// identity-matched levelIndexTuples screen: n entries projected through toItem.
+func (m *Model) applyAMItems(s *screen, err error, n int, toItem func(i int) item) tea.Cmd {
+	if cmd, stop := settleLoad(s, err, extPromptReasonPageInspect); stop {
+		return cmd
+	}
+	s.items = s.items[:0]
+	for i := 0; i < n; i++ {
+		s.items = append(s.items, toItem(i))
+	}
+	m.applySort(s)
+	return nil
+}
+
 func (m *Model) onHeapPagesLoaded(msg heapPagesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelHeapPages)
 	if s == nil || s.table.OID != msg.table.OID || s.heapWindowStart != msg.start {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	if cmd, stop := settleLoad(s, msg.err, extPromptReasonPageInspect); stop {
+		return cmd
 	}
-	s.err = msg.err
 	s.heapPageCount = msg.totalPages
 	s.pageBufs = msg.bufs
 	pageTempHint(s, msg.bufsErr)
@@ -107,12 +145,9 @@ func (m *Model) onHeapTuplesLoaded(msg heapTuplesLoadedMsg) tea.Cmd {
 	if s == nil || s.table.OID != msg.tableOID || s.heapPageBlkno != msg.blkno {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	if cmd, stop := settleLoad(s, msg.err, extPromptReasonPageInspect); stop {
+		return cmd
 	}
-	s.err = msg.err
 	s.items = s.items[:0]
 	for _, t := range msg.tuples {
 		s.items = append(s.items, heapTupleToItem(t))
@@ -153,25 +188,10 @@ func (m *Model) onIndexPagesLoaded(msg indexPagesLoadedMsg) tea.Cmd {
 	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
-	}
-	s.err = msg.err
-	s.heapPageCount = msg.totalPages
-	// Banner data rides along with the page list; both are nil on a best-effort
-	// failure, in which case the banner simply isn't drawn.
-	s.indexKeyCols = msg.keyCols
-	s.btreeMeta = msg.meta
-	s.pageBufs = msg.bufs
-	pageTempHint(s, msg.bufsErr)
-	s.items = s.items[:0]
-	for _, p := range msg.pages {
-		s.items = append(s.items, withPageBuf(indexPageToItem(p), msg.bufs))
-	}
-	m.applySort(s)
-	return nil
+	return m.applyAMPages(s, msg.err, msg.totalPages, msg.keyCols, msg.bufs, msg.bufsErr,
+		len(msg.pages),
+		func(i int) item { return withPageBuf(indexPageToItem(msg.pages[i]), msg.bufs) },
+		func(s *screen) { s.btreeMeta = msg.meta })
 }
 
 func (m *Model) onBtreeLevelsLoaded(msg btreeLevelsLoadedMsg) tea.Cmd {
@@ -206,12 +226,9 @@ func (m *Model) onIndexTuplesLoaded(msg indexTuplesLoadedMsg) tea.Cmd {
 	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	if cmd, stop := settleLoad(s, msg.err, extPromptReasonPageInspect); stop {
+		return cmd
 	}
-	s.err = msg.err
 	// Adopt the resolved page type so the renderer's labels (→ blk N / pivot)
 	// and the downlink-drill guard see the child page's real role.
 	s.indexPageType = msg.pageType
@@ -234,22 +251,10 @@ func (m *Model) onGistPagesLoaded(msg gistPagesLoadedMsg) tea.Cmd {
 	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
-	}
-	s.err = msg.err
-	s.heapPageCount = msg.totalPages
-	s.indexKeyCols = msg.keyCols
-	s.pageBufs = msg.bufs
-	pageTempHint(s, msg.bufsErr)
-	s.items = s.items[:0]
-	for _, p := range msg.pages {
-		s.items = append(s.items, withPageBuf(gistPageToItem(p), msg.bufs))
-	}
-	m.applySort(s)
-	return nil
+	return m.applyAMPages(s, msg.err, msg.totalPages, msg.keyCols, msg.bufs, msg.bufsErr,
+		len(msg.pages),
+		func(i int) item { return withPageBuf(gistPageToItem(msg.pages[i]), msg.bufs) },
+		nil)
 }
 
 func (m *Model) onGistItemsLoaded(msg gistItemsLoadedMsg) tea.Cmd {
@@ -257,12 +262,9 @@ func (m *Model) onGistItemsLoaded(msg gistItemsLoadedMsg) tea.Cmd {
 	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
+	if cmd, stop := settleLoad(s, msg.err, extPromptReasonPageInspect); stop {
+		return cmd
 	}
-	s.err = msg.err
 	s.indexPageType = msg.pageType
 	s.items = s.items[:0]
 	for _, it := range msg.items {
@@ -277,23 +279,10 @@ func (m *Model) onBrinPagesLoaded(msg brinPagesLoadedMsg) tea.Cmd {
 	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
-	}
-	s.err = msg.err
-	s.heapPageCount = msg.totalPages
-	s.indexKeyCols = msg.keyCols
-	s.brinMeta = msg.meta
-	s.pageBufs = msg.bufs
-	pageTempHint(s, msg.bufsErr)
-	s.items = s.items[:0]
-	for _, p := range msg.pages {
-		s.items = append(s.items, withPageBuf(brinPageToItem(p), msg.bufs))
-	}
-	m.applySort(s)
-	return nil
+	return m.applyAMPages(s, msg.err, msg.totalPages, msg.keyCols, msg.bufs, msg.bufsErr,
+		len(msg.pages),
+		func(i int) item { return withPageBuf(brinPageToItem(msg.pages[i]), msg.bufs) },
+		func(s *screen) { s.brinMeta = msg.meta })
 }
 
 func (m *Model) onBrinItemsLoaded(msg brinItemsLoadedMsg) tea.Cmd {
@@ -301,18 +290,8 @@ func (m *Model) onBrinItemsLoaded(msg brinItemsLoadedMsg) tea.Cmd {
 	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
-	}
-	s.err = msg.err
-	s.items = s.items[:0]
-	for _, it := range msg.items {
-		s.items = append(s.items, brinItemToItem(it))
-	}
-	m.applySort(s)
-	return nil
+	return m.applyAMItems(s, msg.err, len(msg.items),
+		func(i int) item { return brinItemToItem(msg.items[i]) })
 }
 
 func (m *Model) onGinPagesLoaded(msg ginPagesLoadedMsg) tea.Cmd {
@@ -320,23 +299,10 @@ func (m *Model) onGinPagesLoaded(msg ginPagesLoadedMsg) tea.Cmd {
 	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
-	}
-	s.err = msg.err
-	s.heapPageCount = msg.totalPages
-	s.indexKeyCols = msg.keyCols
-	s.ginMeta = msg.meta
-	s.pageBufs = msg.bufs
-	pageTempHint(s, msg.bufsErr)
-	s.items = s.items[:0]
-	for _, p := range msg.pages {
-		s.items = append(s.items, withPageBuf(ginPageToItem(p), msg.bufs))
-	}
-	m.applySort(s)
-	return nil
+	return m.applyAMPages(s, msg.err, msg.totalPages, msg.keyCols, msg.bufs, msg.bufsErr,
+		len(msg.pages),
+		func(i int) item { return withPageBuf(ginPageToItem(msg.pages[i]), msg.bufs) },
+		func(s *screen) { s.ginMeta = msg.meta })
 }
 
 func (m *Model) onGinItemsLoaded(msg ginItemsLoadedMsg) tea.Cmd {
@@ -344,18 +310,8 @@ func (m *Model) onGinItemsLoaded(msg ginItemsLoadedMsg) tea.Cmd {
 	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonPageInspect)
-	}
-	s.err = msg.err
-	s.items = s.items[:0]
-	for _, it := range msg.items {
-		s.items = append(s.items, ginItemToItem(it))
-	}
-	m.applySort(s)
-	return nil
+	return m.applyAMItems(s, msg.err, len(msg.items),
+		func(i int) item { return ginItemToItem(msg.items[i]) })
 }
 
 func (m *Model) onWALOverviewLoaded(msg walOverviewLoadedMsg) tea.Cmd {
@@ -363,12 +319,9 @@ func (m *Model) onWALOverviewLoaded(msg walOverviewLoadedMsg) tea.Cmd {
 	if s == nil || s.db != msg.db {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
+	if cmd, stop := settleLoad(s, msg.err, extPromptReasonWALInspect); stop {
+		return cmd
 	}
-	s.err = msg.err
 	s.walStart = msg.start
 	s.walEnd = msg.end
 	s.items = s.items[:0]
@@ -410,13 +363,10 @@ func (m *Model) onWALRecordsLoaded(msg walRecordsLoadedMsg) tea.Cmd {
 	if s == nil || s.db != msg.db || s.walRmgr != msg.rmgr {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
+	if cmd, stop := settleLoad(s, msg.err, extPromptReasonWALInspect); stop {
 		s.walRecTypeStats = nil
-		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
+		return cmd
 	}
-	s.err = msg.err
 	s.walRecTypeStats = msg.typeStats
 	s.items = s.items[:0]
 	for _, r := range msg.records {
@@ -431,12 +381,9 @@ func (m *Model) onWALBlocksLoaded(msg walBlocksLoadedMsg) tea.Cmd {
 	if s == nil || s.db != msg.db || s.walRecLSN != msg.recLSN {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
+	if cmd, stop := settleLoad(s, msg.err, extPromptReasonWALInspect); stop {
+		return cmd
 	}
-	s.err = msg.err
 	s.items = s.items[:0]
 	for _, b := range msg.blocks {
 		s.items = append(s.items, walBlockToItem(b))
@@ -466,12 +413,9 @@ func (m *Model) onWALRelationsLoaded(msg walRelationsLoadedMsg) tea.Cmd {
 	if s == nil || s.db != msg.db {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
+	if cmd, stop := settleLoad(s, msg.err, extPromptReasonWALInspect); stop {
+		return cmd
 	}
-	s.err = msg.err
 	s.walStart = msg.start
 	s.walEnd = msg.end
 	s.items = s.items[:0]
@@ -487,12 +431,9 @@ func (m *Model) onWALRelBlocksLoaded(msg walRelBlocksLoadedMsg) tea.Cmd {
 	if s == nil || s.db != msg.db || s.walRelFilenode != msg.relfilenode {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonWALInspect)
+	if cmd, stop := settleLoad(s, msg.err, extPromptReasonWALInspect); stop {
+		return cmd
 	}
-	s.err = msg.err
 	s.items = s.items[:0]
 	for _, b := range msg.blocks {
 		s.items = append(s.items, walBlockToItem(b))

@@ -78,32 +78,34 @@ func (m *Model) loadProgressCmd(db string) tea.Cmd {
 	})
 }
 
-func (m *Model) resetStatementsCmd(db string) tea.Cmd {
+// resetCmd wraps one stats-reset client call into the shared
+// maintResetDoneMsg{which} completion the maintenance handler dispatches on.
+func resetCmd(which string, fn func(context.Context) error) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
-		err := m.client.ResetStatements(ctx, db)
-		return maintResetDoneMsg{which: "statements", err: err}
+		return maintResetDoneMsg{which: which, err: fn(ctx)}
+	})
+}
+
+func (m *Model) resetStatementsCmd(db string) tea.Cmd {
+	return resetCmd("statements", func(ctx context.Context) error {
+		return m.client.ResetStatements(ctx, db)
 	})
 }
 
 func (m *Model) resetQualstatsCmd(db string) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		err := m.client.ResetQualstats(ctx, db)
-		return maintResetDoneMsg{which: "qualstats", err: err}
+	return resetCmd("qualstats", func(ctx context.Context) error {
+		return m.client.ResetQualstats(ctx, db)
 	})
 }
 
 func (m *Model) resetTableStatsCmd(db string) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		err := m.client.ResetTableStats(ctx, db)
-		return maintResetDoneMsg{which: "tablestats", err: err}
+	return resetCmd("tablestats", func(ctx context.Context) error {
+		return m.client.ResetTableStats(ctx, db)
 	})
 }
 
 func (m *Model) resetTableStatsAllDBsCmd() tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		err := m.client.ResetTableStatsAllDBs(ctx)
-		return maintResetDoneMsg{which: "tablestats-all", err: err}
-	})
+	return resetCmd("tablestats-all", m.client.ResetTableStatsAllDBs)
 }
 
 func (m *Model) loadTableStatsCmd(t pg.Table) tea.Cmd {

@@ -168,12 +168,7 @@ func (m *Model) renderVacuumBanner(s *screen) string {
 	if s.level != levelParts || !s.pendingVacuum {
 		return ""
 	}
-	return "  " + styleSelected.Render("confirm: ") +
-		styleMuted.Render("VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) "+s.table.Qualified()+" — press ") +
-		styleBadge.Render("y") +
-		styleMuted.Render(" to run, ") +
-		styleBadge.Render("n") +
-		styleMuted.Render(" (or any other key) to cancel")
+	return confirmBanner("VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) " + s.table.Qualified())
 }
 
 // renderVacuumPane renders the streaming VACUUM output pane (header + output body).
