@@ -127,8 +127,20 @@ func describeToastPointer(v []byte) string {
 		}
 		s += fmt.Sprintf(" (%s compressed · %.0f%%)", humanize.Bytes(extSize), pct)
 	}
+	// The TOAST table stores what's on disk (extSize — compressed if the
+	// pointer is), sliced into TOAST_MAX_CHUNK_SIZE rows.
+	if chunks := (extSize + toastMaxChunkSize - 1) / toastMaxChunkSize; chunks > 1 {
+		s += fmt.Sprintf(" · %d chunks", chunks)
+	} else if extSize > 0 {
+		s += " · 1 chunk"
+	}
 	return s
 }
+
+// toastMaxChunkSize is TOAST_MAX_CHUNK_SIZE for a standard 8 KiB-BLCKSZ build
+// (same assumption as heapPageBlockSize): the largest payload one TOAST-table
+// chunk row holds, sized so four chunk tuples fill a page.
+const toastMaxChunkSize int64 = 1996
 
 // toastPointerRef extracts the two identities an on-disk TOAST pointer carries:
 // va_valueid (the value's chunk_id) and va_toastrelid (the OID of the TOAST
