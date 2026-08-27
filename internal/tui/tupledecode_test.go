@@ -42,7 +42,7 @@ func TestDecodeAttrValue(t *testing.T) {
 		}}, "52d19188-55fd-428a-a244-5974f2d5fb43"},
 		{"text 4B header", pg.TupleAttr{Len: -1, TypCategory: "S", Value: append(le32(8<<2), 'a', 'b', 'c', 'd')}, "abcd"},
 		{"bytea short header", pg.TupleAttr{Len: -1, TypCategory: "U", Value: []byte{0x07, 0x00, 0xff}}, `\x00ff`},
-		{"toast pointer", pg.TupleAttr{Len: -1, TypCategory: "S", Value: toast}, "→ toast chunk 42 · 9.77 KB"},
+		{"toast pointer", pg.TupleAttr{Len: -1, TypCategory: "S", Value: toast}, "→ toast chunk 42 · 9.77 KB · 6 chunks"},
 		{"compressed inline", pg.TupleAttr{Len: -1, TypCategory: "S", Value: compressed}, "compressed · 4.88 KB raw"},
 		{"fixed length mismatch", pg.TupleAttr{Len: 4, TypName: "int4", Value: le64(1)}, ""},
 		{"cstring undecodable", pg.TupleAttr{Len: -2, Value: []byte{'x', 0}}, ""},

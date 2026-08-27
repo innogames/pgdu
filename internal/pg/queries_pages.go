@@ -92,6 +92,11 @@ ORDER  BY hpi.lp
 // ourselves. NULL values surface as SQL NULL in `v` so the renderer can
 // show them distinctly from an empty string.
 //
+// Values are capped server-side at tupleValueCap characters (a detoasted
+// column can be tens of MB — far more than any terminal renders, and enough
+// to stall the TUI in transfer alone); octet_length of the full value rides
+// along so the renderer can flag the truncation with the real size.
+//
 // $1 is the table reference as a regclass-castable text (e.g. "s"."t");
 // $2 is the ctid text "(blk,off)" — both are bind parameters, so no
 // identifier-injection risk.
@@ -99,8 +104,14 @@ const sqlTupleRow = `
 WITH r AS (
   SELECT row_to_json(t) AS j FROM %s t WHERE ctid = $1::tid
 )
-SELECT key, value FROM r, json_each_text(r.j)
+SELECT key, left(value, ` + tupleValueCap + `), COALESCE(octet_length(value), 0)
+FROM r, json_each_text(r.j)
 `
+
+// tupleValueCap bounds the characters of one column value shipped to the
+// row-detail view. 4096 outruns any realistic terminal width (the renderer
+// clips to the screen) while keeping a full TOAST chunk's hex text intact.
+const tupleValueCap = "4096"
 
 // sqlToastTupleRow replaces sqlTupleRow for TOAST heap tables. TOAST relations
 // (relkind 't') don't have a composite type registered in pg_type, so
@@ -110,11 +121,13 @@ SELECT key, value FROM r, json_each_text(r.j)
 // representation so it's safely truncatable by the value renderer.
 //
 // An absent ctid yields zero rows from the CTE; ListTupleRow treats that as
-// "row gone" and returns an empty slice — same behaviour as sqlTupleRow.
+// "row gone" and returns an empty slice — same behaviour as sqlTupleRow,
+// including the tupleValueCap truncation (a max-size chunk's hex text is
+// 3994 chars, so in practice chunk_data always arrives whole).
 // %s is the quoted toast regclass; $1 is the ctid text.
 const sqlToastTupleRow = `
 WITH r AS (SELECT chunk_id, chunk_seq, chunk_data FROM %s WHERE ctid = $1::tid)
-SELECT col, val FROM (
+SELECT col, left(val, ` + tupleValueCap + `), COALESCE(octet_length(val), 0) FROM (
   SELECT 1 AS o, 'chunk_id'::text  AS col, chunk_id::text   AS val FROM r
   UNION ALL
   SELECT 2,      'chunk_seq',              chunk_seq::text   FROM r
@@ -386,14 +399,21 @@ WHERE  idx.indexrelid = $1::oid
 ORDER  BY k
 `
 
-// sqlToastValueChunks returns all chunks for one out-of-line value in a TOAST
-// table, ordered by chunk_seq so the caller can concatenate them in order.
+// sqlToastValueChunks returns the leading chunks of one out-of-line value in
+// a TOAST table, ordered by chunk_seq so the caller can concatenate them in
+// order, plus the value's total chunk count and byte size. Only the first
+// $2 chunks ship their data (the view previews at most 2 KB — a 60 MB value
+// must not cross the wire whole); the aggregates still cover every chunk.
 // %s is the quoted toast regclass; $1 is the chunk_id OID.
 const sqlToastValueChunks = `
-SELECT chunk_seq::int, chunk_data
+SELECT chunk_seq::int,
+       chunk_data,
+       count(*)                 OVER ()::int    AS chunks,
+       sum(octet_length(chunk_data)) OVER ()::bigint AS total_bytes
 FROM   %s
 WHERE  chunk_id = $1
 ORDER  BY chunk_seq
+LIMIT  $2
 `
 
 // sqlRelPages reports the current heap block count by dividing the file
