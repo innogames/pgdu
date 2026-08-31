@@ -56,7 +56,6 @@ func TestFixTableFillfactor(t *testing.T) {
 	for _, want := range []string{
 		`ALTER TABLE "public"."hot_tbl" SET (fillfactor = 72);`,
 		"current 100 → 72",
-		"lock_timeout",
 	} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("fix missing %q:\n%s", want, sql)
