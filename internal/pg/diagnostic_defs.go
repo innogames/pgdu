@@ -26,6 +26,14 @@ type Diagnostic struct {
 	// wide result. Empty = every column shown.
 	DefaultHidden []string
 
+	// Fix builds a copy-pasteable remediation statement for one result row —
+	// shown by the TUI on Enter, never executed. get returns a column's
+	// Display value by (case-insensitive) name from the full, unprojected row;
+	// ok=false when the row can't produce a fix. Builders live in
+	// diagnostic_fixes.go and must stay lock-safe (CONCURRENTLY, ANALYZE,
+	// plain VACUUM) — heavier remedies only as SQL comments.
+	Fix func(get func(col string) (string, bool)) (sql string, ok bool)
+
 	// Help is the long-form explanation shown in the ? reference overlay:
 	// what the diagnostic is for and how to interpret its result (which
 	// columns matter, what good/bad looks like, what action a bad row
@@ -57,6 +65,7 @@ var Diagnostics = []Diagnostic{
 		Description: "estimated bloat % and wasted bytes for btree indexes (>50% bloat, >10 MB waste)",
 		SQL:         sqlDiagBloatIndex,
 		Bar:         "bloat_pct",
+		Fix:         fixReindex("schema_name", "index_name"),
 		Help: `Statistical estimate of dead space inside btree indexes, derived from
 			pg_stats column widths (an estimate, not an exact measurement); only
 			indexes over 50% bloat wasting more than 10 MB are listed. bloat_bytes is
@@ -107,6 +116,7 @@ var Diagnostics = []Diagnostic{
 		SQL:         sqlDiagIndexClusterCandidates,
 		Bar:         "scatter_pct",
 		Sort:        "disk_pain",
+		Fix:         fixClusterOn,
 		Kinds: map[string]DiagColumnKind{
 			"scatter_pct":   DiagPercentBad,
 			"heap_miss_pct": DiagPercentBad,
@@ -153,6 +163,8 @@ var Diagnostics = []Diagnostic{
 		Description: "indexes left INVALID by a failed CREATE/REINDEX CONCURRENTLY — unusable by plans but still maintained on writes",
 		SQL:         sqlDiagIndexInvalid,
 		Bar:         "index_size_bytes",
+		Fix: fixReindex("schema", "index_name",
+			"-- or, for a _ccnew/_ccold leftover of a failed CONCURRENTLY build: DROP INDEX CONCURRENTLY"),
 		Help: `Indexes marked INVALID — the residue of a failed or cancelled CREATE
 			INDEX CONCURRENTLY / REINDEX CONCURRENTLY. The planner never uses
 			them, but every write still maintains them, so they are pure write
@@ -186,6 +198,7 @@ var Diagnostics = []Diagnostic{
 		Description: "btree indexes whose key columns are a leading prefix of a wider index — usually droppable write amplification",
 		SQL:         sqlDiagIndexRedundantPrefix,
 		Bar:         "redundant_size_bytes",
+		Fix:         fixDropRedundantIndex,
 		Help: `Btree indexes whose key columns are a strict leading prefix of a
 			wider index on the same table (matching column order, opclasses, sort
 			options and partial predicate) — covered_by can serve every query the
@@ -217,6 +230,7 @@ var Diagnostics = []Diagnostic{
 		SQL:         sqlDiagIndexShowDuplicate,
 		Bar:         "",
 		Sort:        "size",
+		Fix:         fixDropDuplicateIndex,
 		Help: `Indexes on the same table with identical key columns, operator
 			classes, expressions and predicate — fully interchangeable, so one of
 			each pair is pure write amplification and cache waste. idx1/idx2 are
@@ -250,6 +264,8 @@ var Diagnostics = []Diagnostic{
 		SQL:         sqlDiagIndexShowUnused,
 		Bar:         "index_size_bytes",
 		Sort:        "size_per_scan_bytes",
+		Fix: fixDropIndex("schema", "index_name",
+			"-- verify the stats window covers periodic workloads and replicas don't rely on it"),
 		Help: `Ranks indexes by amortised cost: size_per_scan = index size ÷
 			(scans + 1), so large never- or rarely-used indexes float to the top.
 			idx_scan counts planner lookups only. PK/unique indexes are excluded:
@@ -281,6 +297,9 @@ var Diagnostics = []Diagnostic{
 		SQL:         sqlDiagBloatTable,
 		Bar:         "pct_bloat",
 		Sort:        "bloat_bytes",
+		Fix: fixTableStmt("VACUUM (VERBOSE)", "schemaname", "tablename",
+			"-- reclaims dead space for reuse only; returning it to the OS needs",
+			"-- VACUUM FULL (exclusive lock!) or pg_repack — confirm with pgstattuple first"),
 		Help: `Statistical estimate of heap bloat — dead space plain VACUUM keeps
 			but never returns to the OS — derived from pg_stats row widths; only
 			significant offenders are shown (≥50% and ≥50 MB, or ≥25% and ≥1 GB).
@@ -300,6 +319,7 @@ var Diagnostics = []Diagnostic{
 		SQL:         sqlDiagStaleStatistics,
 		Bar:         "stale_pct",
 		Kinds:       map[string]DiagColumnKind{"stale_pct": DiagPercentBad},
+		Fix:         fixTableStmt("ANALYZE", "schema", "table_name"),
 		Help: `Tables whose planner statistics no longer describe their contents:
 			modified_rows accumulated since the last ANALYZE as a share of
 			live_rows (only tables ≥ 10k rows and > 10% modified appear). Stale
@@ -307,6 +327,43 @@ var Diagnostics = []Diagnostic{
 			scans where an index was cheaper. analyzed_ago shows how long the
 			staleness has built up. Fix now with ANALYZE; fix recurrence by
 			lowering the table's autovacuum_analyze_scale_factor.`,
+	},
+	{
+		Key:         "table_fillfactor",
+		PerDB:       true,
+		Title:       "Fillfactor advisor",
+		Category:    "table",
+		Description: "update-active tables ≥1 MB: current vs suggested FILLFACTOR from avg row size, update intensity and HOT ratio",
+		SQL:         sqlDiagTableFillfactor,
+		Bar:         "non_hot_updates",
+		Kinds: map[string]DiagColumnKind{
+			"hot_pct": DiagPercentGraded,
+			// DiagFloat, not DiagInt: fillfactors are settings, and the Σ footer
+			// sums DiagInt columns — a summed fillfactor is nonsense.
+			"current_fill":    DiagFloat,
+			"suggested_fill":  DiagFloat,
+			"updates":         DiagCount,
+			"non_hot_updates": DiagCount,
+			"live_rows":       DiagCount,
+		},
+		DefaultHidden: []string{"updates", "live_rows"},
+		Fix:           fixTableFillfactor,
+		Help: `Suggests a starting FILLFACTOR per update-active table: 100 minus the
+			share of an 8 kB page one average row occupies (avg_row_bytes =
+			heap size / live rows), so a page keeps room for roughly one more
+			row version and updates can land HOT — on the same page, touching
+			no index. Rarely-updated tables (upd_per_row < 0.1) are suggested
+			100: packed pages cache better and the free space would go unused.
+			Update-heavy tables still missing HOT (upd_per_row ≥ 1, hot_pct
+			< 80) get 10 extra points of headroom. Caveats: counters are
+			cumulative since the stats reset, so an old workload skews them;
+			avg_row_bytes is inflated by bloat, so trust it after ANALYZE on a
+			reasonably un-bloated table; an update touching any indexed column
+			can never be HOT regardless of fillfactor — check over-indexing
+			first (Table HOT update ratio). Apply with ALTER TABLE … SET
+			(fillfactor = N); it only affects newly written pages, so rewrite
+			with VACUUM FULL or pg_repack to take effect immediately, then
+			watch hot_pct, bloat and WAL volume and adjust.`,
 	},
 	{
 		Key:         "table_scan_types",
@@ -466,6 +523,7 @@ var Diagnostics = []Diagnostic{
 		Description: "last vacuum/analyze timestamps, dead tuple counts and autovacuum threshold per table",
 		SQL:         sqlDiagVacuumStats,
 		Bar:         "dead_tuples",
+		Fix:         fixTableStmt("VACUUM (ANALYZE, VERBOSE)", "schema", "relname"),
 		Help: `Per-table vacuum and analyze recency, plus dead tuples against the
 			autovacuum trigger (av_threshold = threshold + scale_factor × rows,
 			honouring per-table overrides). A * in expect_av means dead_tuples
@@ -493,6 +551,8 @@ var Diagnostics = []Diagnostic{
 			"toast_xid_age":    DiagFloat,
 			"autovacuum_count": DiagFloat,
 		},
+		Fix: fixTableStmt("VACUUM (FREEZE, VERBOSE)", "schema", "table_name",
+			"-- run off-peak; check for an old xmin (idle transactions, stalled slots) first"),
 		Help: `Each table's XID freeze age: how far its oldest unfrozen transaction
 			ID (including its TOAST relation) trails the current XID.
 			pct_freeze_max is that age against autovacuum_freeze_max_age — at

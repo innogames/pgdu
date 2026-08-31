@@ -64,6 +64,31 @@ func (m *Model) renderDiagQuery(s *screen, height int) string {
 	return b.String()
 }
 
+// renderDiagFix prints the suggested-fix statement built for the row Enter was
+// pressed on (screen.diagFixSQL), so it can be selected and copied out of the
+// terminal — pgdu never executes it. Modal like the s SQL viewer: any key
+// dismisses; padded to `height` so the help row stays pinned to the bottom.
+func (m *Model) renderDiagFix(s *screen, height int) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+	b.WriteString("\n")
+	title := "suggested fix"
+	if s.diag != nil {
+		title = s.diag.Title + " — suggested fix"
+	}
+	b.WriteString("  " + styleSelected.Render(title) + mu("  ·  copy & review — not executed  ·  press any key to dismiss") + "\n\n")
+
+	used := 2
+	for line := range strings.SplitSeq(strings.Trim(s.diagFixSQL, "\n"), "\n") {
+		b.WriteString("  " + line + "\n")
+		used++
+	}
+	for i := used; i < height; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // renderDiagnosticInfo draws the ? reference overlay for the diagnostics tool:
 // the running diagnostic's (result screen) or the highlighted entry's (list)
 // purpose and how to interpret its result, from the registry's Description and
@@ -100,7 +125,11 @@ func (m *Model) renderDiagnosticInfo(s *screen, height int) string {
 	if s.level == levelDiagnosticResult {
 		b.WriteString("    " + kb("s", "show SQL") + mu("  ·  ") + kb("C", "columns") + mu("  ·  ") +
 			kb("←/→", "sort column") + mu("  ·  ") + kb("r", "reverse") + "\n")
-		b.WriteString("    " + kb("/", "filter rows") + mu("  ·  ") + kb("e", "export csv") + "\n")
+		b.WriteString("    " + kb("/", "filter rows") + mu("  ·  ") + kb("e", "export csv"))
+		if d.Fix != nil {
+			b.WriteString(mu("  ·  ") + kb("enter", "suggested fix SQL"))
+		}
+		b.WriteString("\n")
 	} else {
 		b.WriteString("    " + kb("enter", "run") + mu("  ·  ") + kb("s", "preview SQL") + mu("  ·  ") +
 			kb("f", "cycle category") + mu("  ·  ") + kb("/", "filter") + "\n")
@@ -571,7 +600,8 @@ func (m *Model) renderDiagnosticList(s *screen, height int) string {
 		label = s.diagCatFilter
 	}
 	b.WriteString("  " + styleMuted.Render("category: ") + diagCatStyle(label).Render(label) +
-		styleMuted.Render("  ·  ") + styleBadge.Render("f") + styleMuted.Render(" cycles") + "\n")
+		styleMuted.Render("  ·  ") + styleBadge.Render("f") + styleMuted.Render(" cycles") +
+		styleMuted.Render("  ·  ") + styleBadge.Render("⚑ fix") + styleMuted.Render(" = suggests a fix statement (↵ on a result row)") + "\n")
 	height--
 
 	catW := 0
@@ -604,15 +634,23 @@ func (m *Model) renderDiagnosticList(s *screen, height int) string {
 			name = styleSelected.Render(name)
 		}
 		cat := ""
+		hasFix := false
 		if d, ok := it.data.(pg.Diagnostic); ok {
 			cat = d.Category
+			hasFix = d.Fix != nil
 		}
 		badge := diagCatStyle(cat).Render(padRight(cat, catW))
+		// Fixed-width fix marker column so titles stay aligned whether or not
+		// the diagnostic offers a suggested-fix statement on its result rows.
+		fix := strings.Repeat(" ", 6)
+		if hasFix {
+			fix = styleBadge.Render("⚑ fix ")
+		}
 		detail := ""
 		if it.detail != "" {
 			detail = "  " + styleMuted.Render(it.detail)
 		}
-		b.WriteString(cursor + badge + "  " + name + detail + "\n")
+		b.WriteString(cursor + badge + "  " + name + "  " + fix + detail + "\n")
 	}
 	for i := end - s.offset; i < rowsH; i++ {
 		b.WriteString("\n")
