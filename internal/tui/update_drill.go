@@ -396,17 +396,21 @@ func (m *Model) drillIn() tea.Cmd {
 		// Find the ActivityRow by QueryID (first match).
 		var queryText string
 		var backendPID int32
+		db := s.db
 		for _, r := range s.actRows {
 			if r.QueryID == cur.statQueryID {
 				queryText = r.Query
 				backendPID = r.PID
+				if r.Database != "" {
+					db = r.Database
+				}
 				break
 			}
 		}
 		// Push a loading placeholder while we fetch the QueryStat snapshot.
-		next := &screen{level: levelStatementDetail, title: "query", tool: s.tool, db: s.db, loading: true}
+		next := &screen{level: levelStatementDetail, title: "query", tool: s.tool, db: db, loading: true}
 		m.stack = append(m.stack, next)
-		return m.loadActivityStatementCmd(s.db, backendPID, cur.statQueryID, queryText)
+		return m.loadActivityStatementCmd(db, backendPID, cur.statQueryID, queryText)
 	case levelTriage:
 		// Drill into the screen that backs the selected triage line. The
 		// collapsed "N checks ok" summary row carries no TriageResult and is
