@@ -189,6 +189,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showDiagQuery = false
 		return m, nil
 	}
+	// The suggested-fix overlay (Enter on a diagnostic-result row) is modal the
+	// same way: any key dismisses it. Quit still quits.
+	if m.showDiagFix {
+		if key.Matches(msg, m.keys.Quit) {
+			return m, tea.Quit
+		}
+		m.showDiagFix = false
+		return m, nil
+	}
 	// The ? reference overlay is modal: while it's up, scroll keys move it and
 	// the close keys dismiss it; nothing else fires, so the list hidden beneath
 	// it never moves. Closing (Help/Back) is handled inside handleInfoKey.
@@ -716,6 +725,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if s.level == levelDiagnosticResult {
+			// Diagnostic rows don't drill; Enter opens the suggested-fix overlay
+			// for diagnostics that define one (display-only, never executed).
+			if fix, ok := m.diagFixForCursor(s); ok {
+				s.diagFixSQL = fix
+				m.showDiagFix = true
+			} else if s.diag != nil && s.diag.Fix != nil {
+				m.notice = "no suggested fix for this row"
+			}
+			return m, nil
+		}
 		if s.level == levelParts && reindexCandidate(s) != "" {
 			// First ENTER on a bloated index row → request confirmation;
 			// don't drill (index rows don't drill anyway).
@@ -1040,6 +1060,36 @@ func diagDescribeIndexName(cols []pg.DiagColumn, cells []pg.DiagCell) (string, b
 // to_regclass unchanged regardless of case or special characters.
 func quoteDiagIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// diagFixForCursor builds the suggested-fix SQL for the highlighted diagnostic
+// row via the diagnostic's Fix builder. It reads the full, unprojected result
+// row (item.diagRow) so columns hidden via the C picker stay available, and in
+// all-databases mode — where s.db doesn't identify the row — prepends the
+// row's database as a comment.
+func (m *Model) diagFixForCursor(s *screen) (string, bool) {
+	if s.diag == nil || s.diag.Fix == nil || s.diagResult == nil {
+		return "", false
+	}
+	vis := s.visibleIndexes()
+	if s.cursor < 0 || s.cursor >= len(vis) {
+		return "", false
+	}
+	it := s.items[vis[s.cursor]]
+	if it.diagRow <= 0 || it.diagRow > len(s.diagResult.Rows) {
+		return "", false
+	}
+	get := pg.DiagRowGetter(s.diagResult.Columns, s.diagResult.Rows[it.diagRow-1])
+	fix, ok := s.diag.Fix(get)
+	if !ok {
+		return "", false
+	}
+	if s.diagAllDBs {
+		if db, ok := get("database"); ok {
+			fix = "-- database: " + db + "\n" + fix
+		}
+	}
+	return fix, true
 }
 
 // triggerInstall is a no-op unless the current screen has an extPrompt

@@ -234,7 +234,16 @@ func (k *keyMap) applyContext(s *screen) {
 	// via d is the only action. Drop the misleading drill/sort hints from its
 	// footer and surface d instead, so the footer matches what the level does.
 	progress := s.level == levelProgress
-	k.Enter.SetEnabled(!progress)
+	// Diagnostic result rows don't drill either: Enter opens the suggested-fix
+	// overlay where the diagnostic defines one, and is disabled (like progress)
+	// where none does, so the footer never advertises a dead key.
+	diagFix := diagResult && s.diag != nil && s.diag.Fix != nil
+	k.Enter.SetEnabled(!progress && !(diagResult && !diagFix))
+	if diagFix {
+		k.Enter.SetHelp("↵", "fix sql")
+	} else {
+		k.Enter.SetHelp("↵", "drill in")
+	}
 	k.SortPrev.SetEnabled(!progress)
 	k.SortNext.SetEnabled(!progress)
 	k.ReverseSort.SetEnabled(!progress)

@@ -101,7 +101,7 @@ func (m *Model) rebuildDiagItems(s *screen) {
 	// item.name is the space-joined cell display so the fuzzy filter can match
 	// any (visible) column value.
 	s.items = s.items[:0]
-	for _, row := range res.Rows {
+	for ri, row := range res.Rows {
 		cells := make([]pg.DiagCell, len(idxs))
 		parts := make([]string, len(idxs))
 		for j, i := range idxs {
@@ -110,7 +110,9 @@ func (m *Model) rebuildDiagItems(s *screen) {
 			}
 			parts[j] = cells[j].Display
 		}
-		s.items = append(s.items, item{name: strings.Join(parts, " "), data: cells})
+		// diagRow points back at the unprojected source row so per-row actions
+		// (the Enter fix builder) keep every column even when hidden via C.
+		s.items = append(s.items, item{name: strings.Join(parts, " "), data: cells, diagRow: ri + 1})
 	}
 	s.diagTotalRow = diagFooterCells(cols, s.items)
 

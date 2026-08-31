@@ -8,6 +8,7 @@ package pg
 const sqlDiagTableShowHitratio = `
 WITH hitratio AS (
     SELECT
+        schemaname AS schema,
         relname,
         round(cast(heap_blks_hit AS numeric) / (heap_blks_hit + heap_blks_read) * 100, 2) AS hit_pct,
         heap_blks_hit AS from_cache,
@@ -20,6 +21,7 @@ SELECT * FROM hitratio WHERE hit_pct < 80 ORDER BY from_disk DESC
 
 const sqlDiagTableShowModifyRatio = `
 SELECT
+    schemaname AS schema,
     relname,
     round(cast(n_tup_ins AS numeric) / (n_tup_ins + n_tup_upd + n_tup_del) * 100, 2) AS ins_pct,
     round(cast(n_tup_upd AS numeric) / (n_tup_ins + n_tup_upd + n_tup_del) * 100, 2) AS upd_pct,
@@ -36,6 +38,7 @@ ORDER BY relname
 // why it is the default sort rather than the ratio.
 const sqlDiagTableShowHotRatio = `
 SELECT
+    schemaname AS schema,
     relname,
     n_tup_upd                  AS updates,
     n_tup_hot_upd              AS hot_updates,
@@ -46,19 +49,76 @@ WHERE n_tup_upd > 0
 ORDER BY non_hot_updates DESC
 `
 
+// sqlDiagTableFillfactor suggests a per-table FILLFACTOR for update-active
+// tables (n_tup_upd > 0, heap ≥ 1 MB — below that the setting is noise).
+// Starting point per the row-size method: 100 − ceil(avg_row/8192×100), i.e.
+// leave one average row's worth of free space per page so an update can land
+// HOT; clamped to ≥ 50 because wide/toasted rows would otherwise push the
+// suggestion into wasteful territory. Adjustments: tables updated less than
+// 0.1× per live row keep 100 (free space would only dilute the cache); tables
+// updated ≥ 1× per row that still miss HOT (hot_pct < 80) get 10 extra points
+// of headroom for repeated in-place rewrites. avg_row_bytes is heap/live-rows,
+// so bloat and stale n_live_tup inflate it — hence the ANALYZE caveat in Help.
+const sqlDiagTableFillfactor = `
+WITH t AS (
+    SELECT
+        s.schemaname AS schema,
+        s.relname,
+        s.n_live_tup,
+        s.n_tup_upd,
+        s.n_tup_hot_upd,
+        pg_relation_size(s.relid) AS table_size_bytes,
+        coalesce((SELECT option_value::int
+                  FROM pg_options_to_table(c.reloptions)
+                  WHERE option_name = 'fillfactor'), 100) AS current_fill,
+        pg_relation_size(s.relid) / s.n_live_tup AS avg_row_bytes
+    FROM pg_stat_user_tables s
+    JOIN pg_class c ON c.oid = s.relid
+    WHERE s.n_tup_upd > 0
+      AND s.n_live_tup > 0
+      AND pg_relation_size(s.relid) >= 1048576
+),
+calc AS (
+    SELECT *,
+        round(100.0 * n_tup_hot_upd / n_tup_upd, 1) AS hot_pct,
+        round(n_tup_upd::numeric / n_live_tup, 2)   AS upd_per_row,
+        greatest(50, 100 - ceil(100.0 * avg_row_bytes / 8192))::int AS start_fill
+    FROM t
+)
+SELECT
+    schema,
+    relname,
+    current_fill,
+    CASE
+        WHEN upd_per_row < 0.1 THEN 100
+        WHEN upd_per_row >= 1 AND hot_pct < 80 THEN greatest(50, start_fill - 10)
+        ELSE start_fill
+    END AS suggested_fill,
+    hot_pct,
+    n_tup_upd                 AS updates,
+    n_tup_upd - n_tup_hot_upd AS non_hot_updates,
+    upd_per_row,
+    avg_row_bytes,
+    n_live_tup                AS live_rows,
+    table_size_bytes
+FROM calc
+ORDER BY non_hot_updates DESC
+`
+
 const sqlDiagTableScanTypes = `
 SELECT
+    schemaname AS schema,
     relname,
     seq_scan,
     idx_scan,
     seq_tup_read,
     idx_tup_fetch,
     round(cast(idx_tup_fetch AS numeric) / (idx_tup_fetch + seq_tup_read) * 100, 2) AS index_read_pct,
-    pg_size_pretty(pg_relation_size(to_regclass(relname))) AS size_on_disk
+    pg_size_pretty(pg_relation_size(relid)) AS size_on_disk
 FROM pg_stat_user_tables
 WHERE (idx_tup_fetch + seq_tup_read) > 0
   AND cast(idx_tup_fetch AS numeric) / (idx_tup_fetch + seq_tup_read) < 0.8
-  AND pg_relation_size(to_regclass(relname)) > 800000
+  AND pg_relation_size(relid) > 800000
 ORDER BY seq_tup_read DESC
 `
 
@@ -256,6 +316,7 @@ ORDER BY abs(s.correlation) DESC, pg_relation_size(t.oid) DESC
 // hottest counters on fully-cached tables.
 const sqlDiagIndexClusterCandidates = `
 SELECT
+    n.nspname                                           AS schema,
     t.relname                                           AS table_name,
     i.relname                                           AS index_name,
     a.attname                                           AS column_name,
@@ -560,6 +621,7 @@ WITH rel_set AS (
     FROM pg_class
 )
 SELECT
+    PSUT.schemaname AS schema,
     PSUT.relname,
     to_char(PSUT.last_vacuum, 'YYYY-MM-DD HH24:MI') AS last_vacuum,
     to_char(PSUT.last_autovacuum, 'YYYY-MM-DD HH24:MI') AS last_autovacuum,

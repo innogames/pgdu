@@ -150,6 +150,12 @@ type item struct {
 	// drill can look the full QueryStat back up from screen.statRows.
 	statQueryID int64
 
+	// diagRow is 1 + the row's index into screen.diagResult.Rows on
+	// levelDiagnosticResult (0 = not a diagnostic row). It survives sorting
+	// and lets actions read the full, unprojected row — item.data only holds
+	// the C-picker's visible column subset.
+	diagRow int
+
 	// snapPath is the file path of the snapshot a levelSnapshots row represents,
 	// so the load/delete actions can act on the highlighted file. The row's
 	// SnapshotMeta is held in the parallel screen.statSnapMetas slice.
@@ -393,6 +399,11 @@ type screen struct {
 	// columns have no stable ids) so the sort survives a visibility rebuild.
 	diagResult   *pg.DiagResult
 	diagSortName string
+
+	// diagFixSQL holds the suggested-fix statement built for the row Enter was
+	// pressed on (Diagnostic.Fix); Model.showDiagFix displays it. Display-only —
+	// pgdu never executes it.
+	diagFixSQL string
 
 	// diagCatFilter restricts the levelDiagnostics list to one category
 	// (f cycles all → index → table → …); "" shows every diagnostic.
@@ -647,6 +658,11 @@ type Model struct {
 	// showDiagQuery toggles the overlay that prints the executed SQL of the
 	// current diagnostic (s key on levelDiagnosticResult) so it can be copied.
 	showDiagQuery bool
+
+	// showDiagFix toggles the suggested-fix overlay (Enter on a diagnostic
+	// result row with a Fix builder); the text lives on screen.diagFixSQL.
+	// Modal like showDiagQuery: any key dismisses it.
+	showDiagFix bool
 
 	// Top-queries column configuration (C key on levelStatements). stmtColsVisible
 	// is the per-column-id visibility set (nil = registry defaults, so a fresh run
