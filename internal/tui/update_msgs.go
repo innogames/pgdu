@@ -332,14 +332,16 @@ func (m *Model) onDescribeLoaded(msg describeLoadedMsg) tea.Cmd {
 	s.loaded = true
 	s.err = msg.err
 	s.describe = msg.desc
-	// (Re)load the cache-footprint section for table describes. Triggering here
-	// — rather than at push time — covers every entry point uniformly (the `d`
-	// push, the name-resolved push from top-queries, and Refresh), and gives us
-	// the resolved OID even when the screen was pushed by table name. Reset the
+	// (Re)load the cache-footprint section for table describes — but only while
+	// detail mode is showing it: the plain view never scans pg_buffercache (the
+	// `d` toggle issues the first load instead). Triggering here — rather than
+	// at push time — covers refresh-with-detail-open uniformly and gives us the
+	// resolved OID even when the screen was pushed by table name. Reset the
 	// prior section state first so a refresh doesn't show stale figures.
 	s.descBuf = nil
 	s.descBufErr = nil
-	if msg.err == nil && msg.desc != nil && msg.desc.Kind == pg.DescribeTable && msg.desc.OID != 0 {
+	if s.descDetail && msg.err == nil && msg.desc != nil &&
+		msg.desc.Kind == pg.DescribeTable && msg.desc.OID != 0 {
 		return m.loadDescribeBuffersCmd(s.db, msg.desc.OID)
 	}
 	return nil

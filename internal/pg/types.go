@@ -305,6 +305,83 @@ type DescribeIndexDef struct {
 	IsPrimary bool
 	IsUnique  bool
 	Clustered bool // pg_index.indisclustered: table is CLUSTERed on this index
+
+	// Size + usage counters for the detail mode (pg_stat/pg_statio_all_indexes).
+	SizeBytes int64
+	Scans     int64
+	LastScan  *time.Time // last_idx_scan; nil = never scanned (or stats reset)
+	TupRead   int64
+	TupFetch  int64
+	BlksHit   int64
+	BlksRead  int64
+}
+
+// HitPct is the index's buffer-cache hit percentage; ok is false when no
+// blocks were touched yet.
+func (i DescribeIndexDef) HitPct() (float64, bool) {
+	total := i.BlksHit + i.BlksRead
+	if total == 0 {
+		return 0, false
+	}
+	return float64(i.BlksHit) / float64(total) * 100, true
+}
+
+// DescribeStats carries the per-table counters behind the describe panel's
+// detail mode: size split, tuple churn, scan mix, and maintenance recency.
+// All from one sqlDescribeStats row; timestamps are nil when the event never
+// happened (or pg_stat has no row for the relation).
+type DescribeStats struct {
+	HeapBytes  int64 // pg_relation_size (main fork)
+	IndexBytes int64 // pg_indexes_size
+	ToastBytes int64 // pg_total_relation_size of the toast relation
+
+	LiveTup         int64
+	DeadTup         int64
+	Inserts         int64
+	Updates         int64
+	Deletes         int64
+	HotUpdates      int64
+	ModSinceAnalyze int64
+	InsSinceVacuum  int64
+
+	SeqScans    int64
+	IdxScans    int64
+	LastSeqScan *time.Time
+	LastIdxScan *time.Time
+
+	LastVacuum   *time.Time // most recent of manual/auto
+	LastAnalyze  *time.Time // most recent of manual/auto
+	VacuumCount  int64      // manual + auto
+	AnalyzeCount int64      // manual + auto
+	FrozenXIDAge int64      // age(relfrozenxid); 0 for partitioned parents
+}
+
+// HotRatio is the share of updates that were HOT, in percent; ok is false
+// when there were no updates to grade.
+func (s DescribeStats) HotRatio() (float64, bool) {
+	if s.Updates == 0 {
+		return 0, false
+	}
+	return float64(s.HotUpdates) / float64(s.Updates) * 100, true
+}
+
+// DeadPct is the dead share of all tuples in percent (0 for an empty table).
+func (s DescribeStats) DeadPct() float64 {
+	total := s.LiveTup + s.DeadTup
+	if total == 0 {
+		return 0
+	}
+	return float64(s.DeadTup) / float64(total) * 100
+}
+
+// IdxScanPct is the share of scans served by indexes, in percent; ok is false
+// when the table was never scanned.
+func (s DescribeStats) IdxScanPct() (float64, bool) {
+	total := s.SeqScans + s.IdxScans
+	if total == 0 {
+		return 0, false
+	}
+	return float64(s.IdxScans) / float64(total) * 100, true
 }
 
 // DescribeFK is one foreign-key relationship in the describe-table view, used
@@ -328,6 +405,10 @@ type Description struct {
 	Kind  DescribeKind
 	OID   uint32 // target relation oid; used to guard the loaded message
 	Title string // qualified object name for the panel header
+	// LoadedAt anchors relative ages ("last scan 3s ago") to when the counters
+	// were actually sampled, so they don't tick up between refreshes while the
+	// underlying numbers stand still.
+	LoadedAt time.Time
 
 	// Table describe fields.
 	Columns    []DescribeColumn
@@ -337,6 +418,7 @@ type Description struct {
 	Options    []string     // reloptions incl. toast.* entries; empty for none
 	SizeBytes  int64
 	EstRows    int64
+	Stats      *DescribeStats // detail-mode counters; nil only on scan failure
 
 	// Index describe fields.
 	IndexDef     string // pg_get_indexdef(oid) — full CREATE INDEX statement
@@ -345,4 +427,21 @@ type Description struct {
 	IdxPrimary   bool
 	Predicate    string // pg_get_expr(indpred) for partial indexes; "" otherwise
 	ParentTable  string // indrelid::regclass::text
+	IdxSizeBytes int64
+	IdxScans     int64
+	IdxLastScan  *time.Time // nil = never scanned (or stats reset)
+	IdxTupRead   int64
+	IdxTupFetch  int64
+	IdxBlksHit   int64
+	IdxBlksRead  int64
+}
+
+// IdxHitPct is the described index's buffer-cache hit percentage; ok is false
+// when no blocks were touched yet.
+func (d *Description) IdxHitPct() (float64, bool) {
+	total := d.IdxBlksHit + d.IdxBlksRead
+	if total == 0 {
+		return 0, false
+	}
+	return float64(d.IdxBlksHit) / float64(total) * 100, true
 }

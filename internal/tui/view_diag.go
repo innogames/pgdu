@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -234,7 +235,11 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 				if idx.Clustered {
 					badges += " " + styleBadge.Render("clustered")
 				}
-				b.WriteString("    " + idx.Name + badges + "\n")
+				line := "    " + idx.Name + badges + "  " + mu(humanize.Bytes(idx.SizeBytes))
+				if s.descDetail {
+					line += mu(" · ") + describeIndexUsage(idx, d.LoadedAt)
+				}
+				b.WriteString(line + "\n")
 				b.WriteString("      " + mu(truncLine(idx.Def)) + "\n")
 			}
 		}
@@ -266,9 +271,18 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 			formatRows(d.EstRows),
 		)) + "\n")
 
-		// --- cache footprint (shared_buffers occupancy of this table) ---
-		b.WriteString("\n  " + styleHeader.Render(" cache footprint ") + "\n")
-		b.WriteString(m.renderDescribeBufferRows(s))
+		if s.descDetail {
+			// --- cache footprint (shared_buffers occupancy of this table) ---
+			b.WriteString("\n  " + styleHeader.Render(" cache footprint ") + "\n")
+			b.WriteString(m.renderDescribeBufferRows(s))
+			b.WriteString(m.renderDescribeStats(d))
+		}
+
+		hint := " to show details (cache footprint, index usage, activity)"
+		if s.descDetail {
+			hint = " to hide details"
+		}
+		b.WriteString("\n    " + mu("press ") + styleBadge.Render("d") + mu(hint) + "\n")
 
 	case pg.DescribeIndex:
 		b.WriteString("  " + styleSelected.Render(d.Title) + "\n\n")
@@ -290,6 +304,25 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 			b.WriteString("\n  " + styleHeader.Render(" partial predicate ") + "\n")
 			b.WriteString("    " + mu(truncLine(d.Predicate)) + "\n")
 		}
+
+		// --- usage (always: the index panel is small, no detail mode needed) ---
+		scansVal := formatRows(d.IdxScans) + mu(" scans")
+		if d.IdxScans == 0 && !d.IdxPrimary && !d.IdxUnique {
+			scansVal += "  " + styleErr.Render("unused")
+		} else if d.IdxLastScan != nil {
+			scansVal += mu(" · last " + relativeAge(d.LoadedAt.Sub(*d.IdxLastScan)))
+		}
+		hitVal := "—"
+		if pct, ok := d.IdxHitPct(); ok {
+			hitVal = gradedPercentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct))
+		}
+		b.WriteString("\n  " + styleHeader.Render(" usage ") + "\n")
+		b.WriteString(renderKVRows([][2]string{
+			{"size", humanize.Bytes(d.IdxSizeBytes)},
+			{"scans", scansVal},
+			{"tuples", formatRows(d.IdxTupRead) + mu(" read · ") + formatRows(d.IdxTupFetch) + mu(" fetched")},
+			{"hit ratio", hitVal},
+		}))
 	}
 
 	return scrollWindow(b.String(), &s.offset, height)
@@ -339,14 +372,19 @@ func (m *Model) renderDescribeBufferRows(s *screen) string {
 		pct := hr * 100
 		hitVal = gradedPercentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct))
 	}
-	rows := [][2]string{
+	return renderKVRows([][2]string{
 		{"buffered", humanize.Bytes(st.BufferedBytes)},
 		{"table size", humanize.Bytes(st.TotalBytes)},
 		{"cached", cachedVal},
 		{"hit ratio", hitVal},
 		{"dirty", humanize.Bytes(st.DirtyBytes)},
 		{"avg usage", fmt.Sprintf("%.1f / 5", st.UsageAvg)},
-	}
+	})
+}
+
+// renderKVRows renders a describe-panel label/value block: muted labels padded
+// to the widest, values as given (already styled).
+func renderKVRows(rows [][2]string) string {
 	labelW := 0
 	for _, kv := range rows {
 		if n := len(kv[0]); n > labelW {
@@ -355,8 +393,126 @@ func (m *Model) renderDescribeBufferRows(s *screen) string {
 	}
 	var b strings.Builder
 	for _, kv := range rows {
-		b.WriteString("    " + mu(padRight(kv[0], labelW)) + "  " + kv[1] + "\n")
+		b.WriteString("    " + styleMuted.Render(padRight(kv[0], labelW)) + "  " + kv[1] + "\n")
 	}
+	return b.String()
+}
+
+// describeIndexUsage is the detail-mode usage fragment appended to an index
+// line: scan count with last-use age and cache-hit grade. A never-scanned
+// index that isn't enforcing a constraint gets a red "unused" flag instead —
+// the same bar the unused-indexes diagnostic applies (primary/unique indexes
+// earn their keep without scans). asOf is the description's load time, so the
+// age stays put until the next refresh.
+func describeIndexUsage(idx pg.DescribeIndexDef, asOf time.Time) string {
+	mu := styleMuted.Render
+	var parts []string
+	if idx.Scans == 0 && !idx.IsPrimary && !idx.IsUnique {
+		parts = append(parts, styleErr.Render("unused"))
+	} else {
+		parts = append(parts, mu(formatRows(idx.Scans)+" scans"))
+		if idx.LastScan != nil {
+			parts = append(parts, mu("last "+relativeAge(asOf.Sub(*idx.LastScan))))
+		}
+	}
+	if pct, ok := idx.HitPct(); ok {
+		parts = append(parts, mu("hit ")+gradedPercentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct)))
+	}
+	return strings.Join(parts, mu(" · "))
+}
+
+// renderDescribeStats renders the describe detail mode's table-metric sections
+// (size breakdown, tuple activity, scans, maintenance) from d.Stats. All
+// figures are cumulative pg_stat counters since the last stats reset.
+func (m *Model) renderDescribeStats(d *pg.Description) string {
+	st := d.Stats
+	if st == nil {
+		return ""
+	}
+	mu := styleMuted.Render
+	var b strings.Builder
+	barW := bufferDetailBarWidth(m.width)
+
+	// --- size breakdown (values carry the matching bar-segment colour) ---
+	b.WriteString("\n  " + styleHeader.Render(" size breakdown ") + "\n")
+	b.WriteString(renderKVRows([][2]string{
+		{"heap", styleHeapSeg.Render(humanize.Bytes(st.HeapBytes))},
+		{"indexes", styleIndexSeg.Render(humanize.Bytes(st.IndexBytes))},
+		{"toast", styleToastSeg.Render(humanize.Bytes(st.ToastBytes))},
+	}))
+	b.WriteString("    " + renderSegmentedBar(st.HeapBytes, st.IndexBytes, st.ToastBytes, d.SizeBytes, barW) + "\n")
+
+	// --- tuple activity ---
+	liveDead := formatRows(st.LiveTup) + mu(" live · ") + formatRows(st.DeadTup) + mu(" dead")
+	if pct := int(st.DeadPct()); pct > 0 {
+		// Same absolute bands as maintTuplesLine: past the default autovacuum
+		// scale factor (20%) is a real problem, double that is red.
+		s := mu(fmt.Sprintf(" (%d%%)", pct))
+		switch {
+		case pct >= 40:
+			s = " " + styleBloat.Render(fmt.Sprintf("(%d%% dead)", pct))
+		case pct >= 20:
+			s = " " + styleBarAlt.Render(fmt.Sprintf("(%d%% dead)", pct))
+		case pct >= 10:
+			s = " " + lipgloss.NewStyle().Foreground(colorCostLow).Render(fmt.Sprintf("(%d%%)", pct))
+		}
+		liveDead += s
+	}
+	hotVal := mu("no updates yet")
+	if pct, ok := st.HotRatio(); ok {
+		hotVal = percentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct)) +
+			"  " + renderSolidBar(st.HotUpdates, st.Updates, barW, percentStyle(pct)) +
+			"  " + mu(formatRows(st.HotUpdates)+" of "+formatRows(st.Updates)+" updates")
+	}
+	b.WriteString("\n  " + styleHeader.Render(" tuple activity ") + "\n")
+	b.WriteString(renderKVRows([][2]string{
+		{"live / dead", liveDead},
+		{"writes", formatRows(st.Inserts) + mu(" ins · ") + formatRows(st.Updates) + mu(" upd · ") + formatRows(st.Deletes) + mu(" del")},
+		{"HOT updates", hotVal},
+	}))
+
+	// --- scans ---
+	scanRow := func(count int64, last *time.Time) string {
+		v := formatRows(count)
+		if last != nil {
+			v += mu(" · last " + relativeAge(d.LoadedAt.Sub(*last)))
+		}
+		return v
+	}
+	idxShare := mu("—")
+	if pct, ok := st.IdxScanPct(); ok {
+		idxShare = percentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct)) + mu(" of scans use an index")
+	}
+	b.WriteString("\n  " + styleHeader.Render(" scans ") + "\n")
+	b.WriteString(renderKVRows([][2]string{
+		{"seq scans", scanRow(st.SeqScans, st.LastSeqScan)},
+		{"index scans", scanRow(st.IdxScans, st.LastIdxScan)},
+		{"index share", idxShare},
+	}))
+
+	// --- maintenance ---
+	vacVal := styleBarAlt.Render("never")
+	if st.LastVacuum != nil {
+		vacVal = mu("last ") + maintAgeStr(d.LoadedAt.Sub(*st.LastVacuum))
+	}
+	vacVal += mu(" · " + formatRows(st.VacuumCount) + " runs")
+	if st.InsSinceVacuum > 0 {
+		vacVal += mu(" · " + formatRows(st.InsSinceVacuum) + " inserts since")
+	}
+	anaVal := styleBarAlt.Render("never")
+	if st.LastAnalyze != nil {
+		anaVal = mu("last ") + maintAgeStr(d.LoadedAt.Sub(*st.LastAnalyze))
+	}
+	anaVal += mu(" · " + formatRows(st.AnalyzeCount) + " runs")
+	if st.ModSinceAnalyze > 0 {
+		anaVal += mu(" · " + formatRows(st.ModSinceAnalyze) + " rows modified since")
+	}
+	b.WriteString("\n  " + styleHeader.Render(" maintenance ") + "\n")
+	b.WriteString(renderKVRows([][2]string{
+		{"vacuum", vacVal},
+		{"analyze", anaVal},
+		{"xid age", mu(formatRows(st.FrozenXIDAge))},
+	}))
 	return b.String()
 }
 

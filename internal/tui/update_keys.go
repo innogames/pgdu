@@ -580,8 +580,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.notice = "nothing to export on this screen"
 	case key.Matches(msg, m.keys.Describe):
-		// Inert when already on a describe panel so `d` doesn't stack.
+		// On the describe panel itself, `d` toggles the detail mode instead of
+		// stacking another panel. The pg_buffercache footprint is loaded lazily
+		// the first time detail opens (it scans all of shared_buffers, so the
+		// plain view never pays for it); an extPrompt or a prior error stands
+		// in for the stat and suppresses the re-fetch.
 		if s.level == levelDescribe {
+			s.descDetail = !s.descDetail
+			if s.descDetail && s.describe != nil && s.describe.Kind == pg.DescribeTable &&
+				s.describe.OID != 0 && s.descBuf == nil && s.descBufErr == nil && s.extPrompt == nil {
+				return m, m.loadDescribeBuffersCmd(s.db, s.describe.OID)
+			}
 			break
 		}
 		t, ok := describeTarget(s)

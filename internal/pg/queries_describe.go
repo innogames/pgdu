@@ -65,32 +65,87 @@ ORDER  BY a.attnum
 `
 
 // sqlDescribeIndexes lists a table's indexes with their full CREATE INDEX
-// definitions. Ordered primary-first then alphabetically. $1 = table oid.
+// definitions, size, and usage counters for the detail mode. The stat joins are
+// LEFT JOINs: pg_stat_all_indexes has no rows for indexes on partitioned
+// parents, and statio rows can lag a fresh index. last_idx_scan needs PG 16+
+// (we support 17+). $1 = table oid.
 const sqlDescribeIndexes = `
 SELECT i.relname,
        pg_get_indexdef(idx.indexrelid) AS def,
        idx.indisprimary,
        idx.indisunique,
-       idx.indisclustered
+       idx.indisclustered,
+       pg_relation_size(idx.indexrelid)  AS size_bytes,
+       COALESCE(st.idx_scan, 0),
+       st.last_idx_scan,
+       COALESCE(st.idx_tup_read, 0),
+       COALESCE(st.idx_tup_fetch, 0),
+       COALESCE(io.idx_blks_hit, 0),
+       COALESCE(io.idx_blks_read, 0)
 FROM   pg_index idx
 JOIN   pg_class i ON i.oid = idx.indexrelid
+LEFT   JOIN pg_stat_all_indexes   st ON st.indexrelid = idx.indexrelid
+LEFT   JOIN pg_statio_all_indexes io ON io.indexrelid = idx.indexrelid
 WHERE  idx.indrelid = $1
 ORDER  BY idx.indisprimary DESC, i.relname
 `
 
-// sqlDescribeIndex returns the definition and metadata for a single index.
-// indpred is COALESCE'd to ” so it's never NULL. $1 = index oid. PG 12+.
+// sqlDescribeIndex returns the definition, metadata, size and usage counters
+// for a single index. indpred is COALESCE'd to ” so it's never NULL; the stat
+// joins are LEFT JOINs for the same reasons as sqlDescribeIndexes. $1 = index
+// oid. PG 16+ (last_idx_scan).
 const sqlDescribeIndex = `
 SELECT pg_get_indexdef(c.oid)                                AS def,
        am.amname                                             AS access_method,
        idx.indisunique,
        idx.indisprimary,
        COALESCE(pg_get_expr(idx.indpred, idx.indrelid), '')  AS predicate,
-       idx.indrelid::regclass::text                          AS parent_table
+       idx.indrelid::regclass::text                          AS parent_table,
+       pg_relation_size(c.oid)                               AS size_bytes,
+       COALESCE(st.idx_scan, 0),
+       st.last_idx_scan,
+       COALESCE(st.idx_tup_read, 0),
+       COALESCE(st.idx_tup_fetch, 0),
+       COALESCE(io.idx_blks_hit, 0),
+       COALESCE(io.idx_blks_read, 0)
 FROM   pg_index idx
 JOIN   pg_class c  ON c.oid = idx.indexrelid
 JOIN   pg_am am    ON am.oid = c.relam
+LEFT   JOIN pg_stat_all_indexes   st ON st.indexrelid = idx.indexrelid
+LEFT   JOIN pg_statio_all_indexes io ON io.indexrelid = idx.indexrelid
 WHERE  idx.indexrelid = $1
+`
+
+// sqlDescribeStats gathers the per-table counters the describe detail mode
+// shows: size split (heap/indexes/toast), tuple churn incl. HOT updates, scan
+// mix with last-scan times, vacuum/analyze recency and xid age. GREATEST folds
+// manual and auto timestamps into one "most recent" each (NULL only when both
+// are NULL). LEFT JOIN because foreign tables and partitioned parents may lack
+// a pg_stat row. $1 = table oid. PG 16+ (last_seq_scan/last_idx_scan).
+const sqlDescribeStats = `
+SELECT pg_relation_size(c.oid),
+       pg_indexes_size(c.oid),
+       COALESCE(pg_total_relation_size(NULLIF(c.reltoastrelid, 0)), 0),
+       COALESCE(s.n_live_tup, 0),
+       COALESCE(s.n_dead_tup, 0),
+       COALESCE(s.n_tup_ins, 0),
+       COALESCE(s.n_tup_upd, 0),
+       COALESCE(s.n_tup_del, 0),
+       COALESCE(s.n_tup_hot_upd, 0),
+       COALESCE(s.n_mod_since_analyze, 0),
+       COALESCE(s.n_ins_since_vacuum, 0),
+       COALESCE(s.seq_scan, 0),
+       COALESCE(s.idx_scan, 0),
+       s.last_seq_scan,
+       s.last_idx_scan,
+       GREATEST(s.last_vacuum,  s.last_autovacuum),
+       GREATEST(s.last_analyze, s.last_autoanalyze),
+       COALESCE(s.vacuum_count, 0)  + COALESCE(s.autovacuum_count, 0),
+       COALESCE(s.analyze_count, 0) + COALESCE(s.autoanalyze_count, 0),
+       CASE WHEN c.relkind = 'p' THEN 0 ELSE age(c.relfrozenxid)::bigint END
+FROM   pg_class c
+LEFT   JOIN pg_stat_all_tables s ON s.relid = c.oid
+WHERE  c.oid = $1
 `
 
 // sqlDescribeOptions returns a table's storage options (pg_class.reloptions)
