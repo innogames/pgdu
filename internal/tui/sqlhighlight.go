@@ -102,6 +102,16 @@ func clauseStartLen(toks []sqlToken, i int) int {
 	return 0
 }
 
+// clauseMode selects extra line-splitting inside a clause body, so the parts a
+// reader scans for (updated columns, predicate conditions) each get a line.
+type clauseMode int
+
+const (
+	clausePlain clauseMode = iota
+	clauseSet              // SET: break after each top-level comma (one assignment per line)
+	clauseCond             // WHERE/HAVING: break before each top-level AND/OR
+)
+
 // highlightSQL renders a SQL statement as ready-to-print styled lines for the
 // detail panel: width is the usable text width (clamped to 8, like the old
 // hard wrap). Lines never contain newlines, so scrollWindow's split stays valid.
@@ -111,11 +121,14 @@ func highlightSQL(query string, width int) []string {
 	if len(toks) == 0 {
 		return nil
 	}
+	const bodyLead = "  "
 	var out []string
 	var cur []sqlToken
+	curLead := ""
+	mode := clausePlain
 	flush := func() {
 		if len(cur) > 0 {
-			out = append(out, wrapSQLTokens(cur, width)...)
+			out = append(out, wrapSQLTokens(cur, width, curLead)...)
 			cur = nil
 		}
 	}
@@ -124,7 +137,7 @@ func highlightSQL(query string, width int) []string {
 		// Leading comments (ORM query tags) get their own line so the
 		// statement itself starts flush-left below them.
 		if leading && toks[i].kind == tokComment {
-			out = append(out, wrapSQLTokens(toks[i:i+1], width)...)
+			out = append(out, wrapSQLTokens(toks[i:i+1], width, "")...)
 			i++
 			continue
 		}
@@ -133,28 +146,57 @@ func highlightSQL(query string, width int) []string {
 		// can't re-match as a fresh (shorter) clause on the next iteration.
 		if n := clauseStartLen(toks, i); n > 0 {
 			flush()
-			cur = append(cur, toks[i:i+n]...)
+			curLead = ""
+			switch {
+			case n == 1 && strings.EqualFold(toks[i].text, "SET"):
+				// SET stands alone; every assignment below it gets its own line.
+				out = append(out, wrapSQLTokens(toks[i:i+1], width, "")...)
+				mode = clauseSet
+				curLead = bodyLead
+			case n == 1 && (strings.EqualFold(toks[i].text, "WHERE") ||
+				strings.EqualFold(toks[i].text, "HAVING")):
+				mode = clauseCond
+				cur = append(cur, toks[i])
+			default:
+				mode = clausePlain
+				cur = append(cur, toks[i:i+n]...)
+			}
 			i += n
 			continue
 		}
-		cur = append(cur, toks[i])
+		t := toks[i]
+		switch {
+		case mode == clauseSet && t.kind == tokOp && t.text == "," && t.depth == 0:
+			cur = append(cur, t)
+			flush()
+			curLead = bodyLead
+		case mode == clauseCond && t.kind == tokKeyword && t.depth == 0 &&
+			(strings.EqualFold(t.text, "AND") || strings.EqualFold(t.text, "OR")):
+			flush()
+			curLead = bodyLead
+			cur = append(cur, t)
+		default:
+			cur = append(cur, t)
+		}
 		i++
 	}
 	flush()
 	return out
 }
 
-// wrapSQLTokens greedily fills physical lines with one clause's tokens,
-// measuring plain text and styling each token as it is written. Continuation
-// lines get a 2-space indent so wrapped clause bodies read as such.
-func wrapSQLTokens(toks []sqlToken, width int) []string {
-	indent := "  "
+// wrapSQLTokens greedily fills physical lines with one segment's tokens,
+// measuring plain text and styling each token as it is written. The first line
+// starts with lead (the segment's clause-body indent); continuation lines get
+// two further spaces so wrapped bodies read as such.
+func wrapSQLTokens(toks []sqlToken, width int, lead string) []string {
+	indent := lead + "  "
 	if width <= len(indent) {
-		indent = ""
+		lead, indent = "", ""
 	}
 	var out []string
 	var b strings.Builder
-	lineW := 0
+	b.WriteString(lead)
+	lineW := len(lead)
 	atStart := true
 
 	newline := func() {
