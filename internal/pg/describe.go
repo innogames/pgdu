@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -61,9 +62,10 @@ func (e *MissingRelationError) Error() string {
 }
 
 // DescribeTable fetches a psql-\d-style description of a table: its columns
-// (with types, NOT NULL, and defaults) and its indexes (full CREATE INDEX
-// text). Size and row-count come from the Table struct passed in — no extra
-// round-trip for those.
+// (with types, NOT NULL, and defaults), its indexes (full CREATE INDEX text
+// plus size/usage counters), and the detail-mode stat counters (Stats). Size
+// and row-count come from the Table struct passed in — no extra round-trip
+// for those.
 func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, error) {
 	pool, err := c.PoolFor(ctx, t.DB)
 	if err != nil {
@@ -76,6 +78,7 @@ func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, erro
 		Title:     t.Qualified(),
 		SizeBytes: t.TotalBytes,
 		EstRows:   t.EstRows,
+		LoadedAt:  time.Now(),
 	}
 
 	d.Columns, err = collect(ctx, pool, fmt.Sprintf("describe columns for %q.%q", t.Schema, t.Name), sqlDescribeColumns, []any{t.OID},
@@ -91,7 +94,9 @@ func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, erro
 	d.Indexes, err = collect(ctx, pool, fmt.Sprintf("describe indexes for %q.%q", t.Schema, t.Name), sqlDescribeIndexes, []any{t.OID},
 		func(row pgx.CollectableRow) (DescribeIndexDef, error) {
 			var idx DescribeIndexDef
-			err := row.Scan(&idx.Name, &idx.Def, &idx.IsPrimary, &idx.IsUnique, &idx.Clustered)
+			err := row.Scan(&idx.Name, &idx.Def, &idx.IsPrimary, &idx.IsUnique, &idx.Clustered,
+				&idx.SizeBytes, &idx.Scans, &idx.LastScan, &idx.TupRead, &idx.TupFetch,
+				&idx.BlksHit, &idx.BlksRead)
 			return idx, err
 		})
 	if err != nil {
@@ -112,6 +117,21 @@ func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, erro
 	if err := pool.QueryRow(ctx, sqlDescribeOptions, t.OID).Scan(&d.Options); err != nil {
 		return nil, fmt.Errorf("describe options for %q.%q: %w", t.Schema, t.Name, err)
 	}
+
+	// Detail-mode counters (size split, tuple churn, scans, maintenance).
+	st := &DescribeStats{}
+	if err := pool.QueryRow(ctx, sqlDescribeStats, t.OID).Scan(
+		&st.HeapBytes, &st.IndexBytes, &st.ToastBytes,
+		&st.LiveTup, &st.DeadTup,
+		&st.Inserts, &st.Updates, &st.Deletes, &st.HotUpdates,
+		&st.ModSinceAnalyze, &st.InsSinceVacuum,
+		&st.SeqScans, &st.IdxScans, &st.LastSeqScan, &st.LastIdxScan,
+		&st.LastVacuum, &st.LastAnalyze, &st.VacuumCount, &st.AnalyzeCount,
+		&st.FrozenXIDAge,
+	); err != nil {
+		return nil, fmt.Errorf("describe stats for %q.%q: %w", t.Schema, t.Name, err)
+	}
+	d.Stats = st
 
 	return d, nil
 }
@@ -159,9 +179,10 @@ func (c *Client) DescribeIndex(ctx context.Context, db string, oid uint32, name 
 	}
 
 	d := &Description{
-		Kind:  DescribeIndex,
-		OID:   oid,
-		Title: name,
+		Kind:     DescribeIndex,
+		OID:      oid,
+		Title:    name,
+		LoadedAt: time.Now(),
 	}
 	if err := pool.QueryRow(ctx, sqlDescribeIndex, oid).Scan(
 		&d.IndexDef,
@@ -170,6 +191,13 @@ func (c *Client) DescribeIndex(ctx context.Context, db string, oid uint32, name 
 		&d.IdxPrimary,
 		&d.Predicate,
 		&d.ParentTable,
+		&d.IdxSizeBytes,
+		&d.IdxScans,
+		&d.IdxLastScan,
+		&d.IdxTupRead,
+		&d.IdxTupFetch,
+		&d.IdxBlksHit,
+		&d.IdxBlksRead,
 	); err != nil {
 		return nil, fmt.Errorf("describe index %q: %w", name, err)
 	}

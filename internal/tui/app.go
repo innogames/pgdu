@@ -337,6 +337,11 @@ type screen struct {
 	// describe holds the loaded \d-style description for levelDescribe screens.
 	// Nil until the async load completes.
 	describe *pg.Description
+	// descDetail toggles the describe panel's detail mode (`d` on the panel):
+	// cache footprint, per-index usage, tuple churn, scans and maintenance.
+	// Off by default so the plain view stays psql-lean and never pays the
+	// pg_buffercache scan.
+	descDetail bool
 	// descBuf is the cache-footprint stat for the describe-table screen's
 	// shared-buffers section, loaded asynchronously and independently of
 	// describe (nil until loaded; descBufErr non-nil on a non-extension error).
