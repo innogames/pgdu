@@ -148,6 +148,7 @@ func (m *Model) onHeapTuplesLoaded(msg heapTuplesLoadedMsg) tea.Cmd {
 	if cmd, stop := settleLoad(s, msg.err, extPromptReasonPageInspect); stop {
 		return cmd
 	}
+	s.tuplePKCols = msg.pkCols
 	s.items = s.items[:0]
 	for _, t := range msg.tuples {
 		s.items = append(s.items, heapTupleToItem(t))

@@ -218,13 +218,16 @@ func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 			}, true
 
 	case levelHeapTuples:
-		return []string{"lp", "lp_off", "lp_flags", "lp_len", "xmin", "xmax", "ctid", "infomask", "infomask2", "hoff", "oid", "chunk_id", "chunk_seq"},
+		// pk is empty both for a table without a primary key and for a line
+		// pointer whose row isn't visible to this session — lp_flags/xmax tell
+		// the two apart, so the export doesn't need a third state.
+		return []string{"lp", "lp_off", "lp_flags", "lp_len", "xmin", "xmax", "ctid", "pk", "infomask", "infomask2", "hoff", "oid", "chunk_id", "chunk_seq"},
 			func(it item) []string {
 				t, ok := it.data.(pg.HeapTuple)
 				if !ok {
 					return nil
 				}
-				return []string{csvInt(t.LP), csvInt(t.LPOff), csvInt(t.LPFlags), csvInt(t.LPLen), csvUintP(t.Xmin), csvUintP(t.Xmax), csvStrP(t.Ctid), csvInt(t.Infomask), csvInt(t.Infomask2), csvIntP(t.Hoff), csvUintP(t.Oid), csvUintP(t.ChunkID), csvIntP(t.ChunkSeq)}
+				return []string{csvInt(t.LP), csvInt(t.LPOff), csvInt(t.LPFlags), csvInt(t.LPLen), csvUintP(t.Xmin), csvUintP(t.Xmax), csvStrP(t.Ctid), csvStrP(t.PK), csvInt(t.Infomask), csvInt(t.Infomask2), csvIntP(t.Hoff), csvUintP(t.Oid), csvUintP(t.ChunkID), csvIntP(t.ChunkSeq)}
 			}, true
 
 	case levelTupleRow:

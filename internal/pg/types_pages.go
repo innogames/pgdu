@@ -37,7 +37,8 @@ func (p HeapPageStat) DeadFrac() float64 {
 // chiefly for LP_UNUSED and LP_REDIRECT line pointers.
 // ChunkID/ChunkSeq are non-nil only for TOAST tables (schema = "pg_toast"),
 // and only when the line pointer holds a live chunk row — DEAD/UNUSED/REDIRECT
-// entries yield nil here too.
+// entries yield nil here too. PK is non-nil only for a table with a primary
+// key whose row at this line pointer is visible to our snapshot.
 type HeapTuple struct {
 	LP        int32
 	LPOff     int32
@@ -55,6 +56,13 @@ type HeapTuple struct {
 	Data      []byte
 	ChunkID   *uint32 // TOAST only: chunk_id of this chunk row
 	ChunkSeq  *int32  // TOAST only: chunk_seq within its chunk_id
+
+	// PK is the primary-key value of the row this line pointer holds, already
+	// rendered as text ("42", or "(7, 42)" for a composite key). It is nil when
+	// the table has no primary key, and also when no row visible to our
+	// snapshot lives at this ctid — a dead, aborted or not-yet-committed tuple
+	// still occupies the page but has no key you could look up.
+	PK *string
 }
 
 // Line-pointer flag values from src/include/storage/itemid.h.
@@ -136,6 +144,15 @@ func (p IndexPageStat) DeadFrac() float64 {
 // nil for internal-page downlinks and entries whose heap tuple is gone
 // (vacuumed away after the page snapshot, or beyond the snapshot's
 // visibility horizon).
+//
+// Dead is bt_page_items' own LP_DEAD hint bit — the only authoritative
+// "this entry is reclaimable" signal. A nil Decoded is *not* one: an
+// index entry whose ctid names a HOT-chain root resolves through a
+// redirect line pointer that a plain ctid = … Tid Scan won't follow.
+// HotCtid/HotDecoded carry that second hop when it exists: HotCtid is
+// the live tid the redirect points at, HotDecoded the key projected
+// from it (nil when the chain continues past that tuple, i.e. the page
+// hasn't been pruned since the last update).
 type IndexTuple struct {
 	ItemOffset int32
 	Ctid       *string
@@ -144,6 +161,9 @@ type IndexTuple struct {
 	Vars       *bool
 	Data       *string
 	Decoded    *string
+	Dead       bool
+	HotCtid    *string
+	HotDecoded *string
 }
 
 // TupleCell is one column of a heap row decoded for the row-detail view.

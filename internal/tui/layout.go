@@ -141,7 +141,7 @@ func barReserve(s *screen) int {
 		}
 	case levelIndexTuples:
 		// cursor + offset + len + nulls/vars flags + ctid + key preview
-		const idxTupleReserve = 2 + 6 + 8 + 8 + 14 + 4
+		const idxTupleReserve = 2 + 6 + 8 + 8 + idxTupleCtidColW + 4
 		return idxTupleReserve
 	case levelDescribe, levelTriage:
 		// Plain-text panels — no bar drawn, so no space needs reserving.
@@ -214,7 +214,14 @@ const (
 	tupleLenColW  = 6
 	tupleXidColW  = 10
 	tupleCtidColW = 10
+	tuplePKColW   = 18
 )
+
+// tuplePKMinWidth is the narrowest terminal that still gets the tuple list's
+// pk column. The fixed columns plus the state verdict and its flag icons run
+// to ~94 cells; below that the pk column would push the row past the right
+// edge, and the physical identity (lp / ctid) is the one you can't do without.
+const tuplePKMinWidth = 96
 
 // Column widths shared by the index-pages header and rows.
 const (
@@ -238,7 +245,7 @@ const (
 	idxTupleOffColW   = 5 // "#NNNN"
 	idxTupleLenColW   = 6
 	idxTupleFlagsColW = 8  // "N/V"
-	idxTupleCtidColW  = 14 // "(blkno,off)" with room for big blocks
+	idxTupleCtidColW  = 18 // "(blkno,off)" with room for big blocks + a "▸off" HOT hop
 )
 
 // Parent-name column on levelRelations: muted "→ <table>" tail on index

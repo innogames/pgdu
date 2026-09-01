@@ -61,6 +61,53 @@ FROM   heap_page_items(get_raw_page($1, 'main', $2::int))
 ORDER  BY lp
 `
 
+// sqlHeapTuplesPK is sqlHeapTuples plus a primary-key projection, so the tuple
+// list can name the row a line pointer holds instead of only its physical
+// address. The join mirrors sqlToastTuples: the ctid is rebuilt from the block
+// number ($2) and the line pointer, which the planner resolves as a Tid Scan —
+// a single buffer hit on a page get_raw_page already pulled in.
+//
+// Only rows visible to our snapshot join, so dead / aborted / uncommitted
+// tuples project NULL: their ctid is still on the page, but no row you could
+// SELECT lives there. The src.ctid IS NULL guard is what produces that NULL —
+// concat_ws skips NULL inputs, so a composite key would otherwise render as
+// "()" for a line pointer with no visible row.
+//
+// The %s are the key expression (heapKeyProjection) and the quoted regclass;
+// $1 is the same regclass as text for get_raw_page, $2 the block number.
+const sqlHeapTuplesPK = `
+SELECT hpi.lp::int, hpi.lp_off::int, hpi.lp_flags::int, hpi.lp_len::int,
+       hpi.t_xmin, hpi.t_xmax, hpi.t_field3, hpi.t_ctid::text,
+       COALESCE(hpi.t_infomask2, 0)::int, COALESCE(hpi.t_infomask, 0)::int, hpi.t_hoff::int,
+       hpi.t_bits, hpi.t_oid, hpi.t_data,
+       CASE WHEN src.ctid IS NULL THEN NULL ELSE %s END AS pk
+FROM   heap_page_items(get_raw_page($1, 'main', $2::int)) hpi
+LEFT   JOIN %s src
+         ON src.ctid = ('(' || $2::text || ',' || hpi.lp::text || ')')::tid
+ORDER  BY hpi.lp
+`
+
+// sqlPrimaryKeyColumns lists a relation's primary-key columns in key order.
+// A primary key is always over plain columns — never expressions, never
+// INCLUDE columns — so every indkey entry resolves to a pg_attribute row.
+// Zero rows means the relation has no primary key. $1 is the quoted regclass.
+const sqlPrimaryKeyColumns = `
+SELECT a.attname::text
+FROM   pg_index i
+JOIN   LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+JOIN   pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+WHERE  i.indrelid = $1::regclass
+  AND  i.indisprimary
+  AND  k.ord <= i.indnkeyatts
+ORDER  BY k.ord
+`
+
+// heapKeyColCap bounds each key column's text in sqlHeapTuplesPK. The pk
+// column renders 18 cells and the expanded row 120, so this is already
+// generous — its job is to stop a fat text/bytea key from shipping kilobytes
+// per line pointer (a page holds up to ~290 of them).
+const heapKeyColCap = "64"
+
 // sqlToastTuples mirrors sqlHeapTuples for TOAST heap pages, adding
 // chunk_id/chunk_seq columns joined from the underlying TOAST relation so the
 // line-pointer list can display which chunk object and sequence number each live
@@ -308,6 +355,7 @@ SELECT itemoffset::int,
        nulls,
        vars,
        data,
+       COALESCE(dead, false),
        NULL::text AS decoded
 FROM   bt_page_items($1, $2::int)
 ORDER  BY itemoffset
@@ -330,9 +378,9 @@ FROM   generate_series(
 // sqlIndexTuplesDecoded mirrors sqlIndexTuples but adds a per-item
 // scalar-subquery projecting the index's columns from the heap row. The
 // subquery yields NULL when the ctid doesn't resolve to a live row
-// (vacuumed, beyond MVCC horizon, or — on internal pages — a downlink
-// rather than a heap address). Callers fall back to the raw hex `data`
-// when decoded is NULL.
+// (vacuumed, beyond MVCC horizon, HOT-updated — see sqlHeapRedirectKeys —
+// or, on internal pages, a downlink rather than a heap address). Callers
+// fall back to the raw hex `data` when decoded is NULL.
 //
 // %s 1 is the index expression list (built by sqlIndexExprList, e.g.
 // "a, b, lower(c)"); %s 2 is the parent table's quoted regclass. Both
@@ -346,9 +394,53 @@ SELECT i.itemoffset::int,
        i.nulls,
        i.vars,
        i.data,
+       COALESCE(i.dead, false),
        (SELECT (%s)::text FROM %s WHERE ctid = i.ctid::tid) AS decoded
 FROM   bt_page_items($1, $2::int) i
 ORDER  BY i.itemoffset
+`
+
+// sqlHeapRedirectKeys resolves the index entries sqlIndexTuplesDecoded had to
+// give up on because their ctid names a HOT-chain root. After a HOT update the
+// index entry keeps pointing at the original line pointer, which pruning turns
+// into an LP_REDIRECT to the current tuple elsewhere on the same page. A Tid
+// Scan (ctid = …) does not follow redirects — only an index scan does — so the
+// heap projection comes back NULL even though the row is perfectly alive.
+//
+// This walks one hop by hand: read the referenced heap pages, keep their
+// redirect line pointers, and project the key from the tuple each one targets.
+// One hop is enough for a pruned page (the redirect is rewritten to the newest
+// tuple); if the chain still continues past that tuple, decoded stays NULL and
+// the caller shows the entry unresolved rather than guessing.
+//
+// The block filter is what keeps the get_raw_page calls safe: pivot and
+// posting-list tuples encode markers in their ctid rather than heap addresses,
+// and a concurrent truncation can shrink the relation under us — either way an
+// out-of-range block would error out the whole query instead of one row. Cost
+// is bounded by the number of distinct heap blocks one index page references,
+// and those are the same blocks sqlIndexTuplesDecoded's Tid Scans already
+// touched, so this adds no reads the decode path didn't already do.
+//
+// %s 1 is the index expression list (sqlIndexExprList), %s 2 the parent
+// table's quoted regclass. $1 is the "(blk,off)" texts to resolve, $2 the
+// parent regclass as text, $3 the distinct blocks those ctids live on.
+const sqlHeapRedirectKeys = `
+WITH blk AS (
+    SELECT DISTINCT b
+    FROM   unnest($3::int[]) AS b
+    WHERE  b >= 0
+      AND  b < pg_relation_size($2::regclass) / current_setting('block_size')::int
+), red AS (
+    SELECT '(' || blk.b || ',' || hpi.lp     || ')' AS root,
+           '(' || blk.b || ',' || hpi.lp_off || ')' AS live
+    FROM   blk, LATERAL heap_page_items(get_raw_page($2, 'main', blk.b)) hpi
+    WHERE  hpi.lp_flags = 2
+)
+SELECT red.root,
+       red.live,
+       (SELECT (%s)::text FROM %s WHERE ctid = red.live::tid) AS decoded
+FROM   red
+WHERE  red.root = ANY($1::text[])
 `
 
 // sqlBtreePageType reports just the bt_page_stats type ('l'/'r'/'i'/'d') for one

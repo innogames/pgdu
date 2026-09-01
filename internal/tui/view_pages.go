@@ -126,8 +126,18 @@ func (m *Model) renderIndexTuplesInfo(height int) string {
 		mu(" downlink (internal), or ") +
 		styleHeapToastTag.Render("pivot") + mu(" / ") +
 		styleHeapHot.Render("posting ×N") + mu(" labels") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 8) +
+		mu("a ") + styleHeapHot.Render("▸off") + mu(" tail means the line pointer is an LP_REDIRECT: the row was HOT-updated") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 8) +
+		mu("and now sits at ") + styleHeapHot.Render("off") +
+		mu(" on the same page, while the entry still points at the chain root") + "\n")
 	b.WriteString("    " + padRight("key", 8) +
-		mu("decoded key from the heap when reachable, else dimmed hex of the raw key bytes") + "\n")
+		mu("decoded from the heap when reachable (through a HOT redirect if there is one),") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 8) +
+		mu("else the dimmed raw key bytes. ") + styleBloat.Render("dead") +
+		mu(" is bt_page_items' LP_DEAD bit — a dimmed key") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 8) +
+		mu("without it is merely invisible from this snapshot, not a reclaimable entry") + "\n")
 	b.WriteString("    " + strings.Repeat(" ", 8) +
 		mu("on internal pages this becomes a ") + styleIndexSeg.Render("low … high") +
 		mu(" range: the keys that child block holds") + "\n")
@@ -146,7 +156,9 @@ func (m *Model) renderIndexTuplesInfo(height int) string {
 		mu(") descend one level into that child page,") + "\n")
 	b.WriteString("    " + mu("so ENTER walks the tree structurally toward the leaves. Pivot high keys,") + "\n")
 	b.WriteString("    " + mu("posting tuples, and entries whose heap row was vacuumed since the snapshot") + "\n")
-	b.WriteString("    " + mu("don't drill — there's no single heap row to land on.") + "\n\n")
+	b.WriteString("    " + mu("don't drill — there's no single heap row to land on. A ") + styleHeapHot.Render("▸off") +
+		mu(" entry drills") + "\n")
+	b.WriteString("    " + mu("into the redirect target, i.e. the row as it exists now.") + "\n\n")
 	b.WriteString("    " + mu("Reading bt_page_items / bt_metap needs a superuser (or pg_read_server_files).") + "\n")
 
 	return padInfo(&b, height)
@@ -662,17 +674,27 @@ func renderIndexTupleRow(t pg.IndexTuple, pageType, blockRange string, cols []pg
 			ctidLabel = styleHeapHot.Render("posting")
 		}
 	default:
-		if t.Ctid != nil {
-			ctidLabel = *t.Ctid
-		} else {
+		switch {
+		case t.Ctid == nil:
 			ctidLabel = "—"
+		case t.HotCtid != nil:
+			// The entry points at a HOT-chain root: show the hop to the tuple
+			// actually holding the row. Only the offset differs — HOT never
+			// leaves the page — so printing the target block again would just
+			// eat the column.
+			if off, ok := parseCtidOffset(t.HotCtid); ok {
+				ctidLabel = *t.Ctid + styleHeapHot.Render("▸"+strconv.Itoa(int(off)))
+			} else {
+				ctidLabel = *t.Ctid
+			}
+		default:
+			ctidLabel = *t.Ctid
 		}
 	}
-	// Prefer the heap-projected decoded value (e.g. "(42,alice)") — the hex
-	// `data` is still useful when the heap join missed (pivot/posting/dead
-	// entries) so we fall back to it, dimmed to signal "raw bytes, not a
-	// decoded value".
-	deadTag := styleBloat.Render("dead") + " "
+	// Prefer the heap-projected decoded value (e.g. "(42,alice)"), taking the
+	// HOT-redirect projection when the direct one missed. The raw `data` is
+	// still what's left for pivot/posting entries and rows we can't reach, so
+	// we fall back to it dimmed — "raw bytes, not a decoded value".
 	var key string
 	switch {
 	case blockRange != "":
@@ -682,14 +704,25 @@ func renderIndexTupleRow(t pg.IndexTuple, pageType, blockRange string, cols []pg
 		key = blockRange
 	case t.Decoded != nil:
 		key = truncateValue(t.Decoded, keyW)
+	case t.HotDecoded != nil && kind == idxTupleNormal:
+		// Resolved through the HOT redirect: this is the live row's key, so it
+		// renders exactly like a directly-decoded one.
+		key = truncateValue(t.HotDecoded, keyW)
 	case t.Data != nil && kind == idxTupleNormal:
-		// Normal leaf entry whose ctid didn't resolve to a live heap row: the
-		// row was deleted/updated since the last VACUUM. Decode the raw key
-		// bytes type-aware when possible, else fall back to the hex.
+		// Normal leaf entry with no heap row visible to our snapshot. Only
+		// bt_page_items' own LP_DEAD bit says "reclaimable" — an unresolved
+		// ctid on its own means nothing more than "not visible from here"
+		// (uncommitted or aborted insert, a HOT chain we couldn't follow, a
+		// row deleted since the page was read), so it gets no tag. Decode the
+		// raw key bytes type-aware when possible, else fall back to the hex.
+		tag, avail := "", keyW
+		if t.Dead {
+			tag, avail = styleBloat.Render("dead")+" ", keyW-5
+		}
 		if s, ok := indexKeyText(t, cols); ok {
-			key = deadTag + styleMuted.Render(truncateToWidth(s, keyW-5))
+			key = tag + styleMuted.Render(truncateToWidth(s, avail))
 		} else {
-			key = deadTag + styleMuted.Render(truncateValue(t.Data, keyW-5))
+			key = tag + styleMuted.Render(truncateValue(t.Data, avail))
 		}
 	case t.Data != nil:
 		keyText := indexKeyText
@@ -747,6 +780,20 @@ const (
 	btpoHasGarbage      = 0x40 // BTP_HAS_GARBAGE — has LP_DEAD items reclaimable on vacuum
 	btpoIncompleteSplit = 0x80 // BTP_INCOMPLETE_SPLIT — split not yet completed
 )
+
+// parseCtidOffset extracts the offset (line pointer) from a "(blk,off)" ctid
+// text. Returns false when ctid is nil/unparseable.
+func parseCtidOffset(ctid *string) (int32, bool) {
+	if ctid == nil {
+		return 0, false
+	}
+	var blk, off int
+	if _, err := fmt.Sscanf(*ctid, "(%d,%d)", &blk, &off); err != nil {
+		return 0, false
+	}
+	_ = blk
+	return int32(off), true
+}
 
 // parseCtidBlock extracts the block number from a "(blk,off)" ctid text. On a
 // B-tree internal page this block is the downlink to a child index page; on a

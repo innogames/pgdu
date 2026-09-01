@@ -58,8 +58,8 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 }
 
 // renderHeapTuplesInfo draws a static explainer for the per-tuple drill view:
-// the meaning of each column (lp, lp_flags, len, xmin/xmax, ctid, state), the
-// visibility verdicts and structural-flag icons, and the three expanded-row
+// the meaning of each column (lp, lp_flags, len, xmin/xmax, ctid, pk, state),
+// the visibility verdicts and structural-flag icons, and the expanded-row
 // lines. Sized to fill `height` lines so the help row stays pinned to the
 // bottom; shown when the user toggles `?` on levelHeapTuples.
 func (m *Model) renderHeapTuplesInfo(height int) string {
@@ -79,6 +79,10 @@ func (m *Model) renderHeapTuplesInfo(height int) string {
 	b.WriteString("    " + padRight("xmin", 12) + mu("inserting transaction id (visible only to xacts after xmin commits)") + "\n")
 	b.WriteString("    " + padRight("xmax", 12) + mu("deleting / locking xid; 0 means \"no xmax set\" — the tuple is still live") + "\n")
 	b.WriteString("    " + padRight("ctid", 12) + mu("forward pointer: own (block,offset) for NORMAL · → #NNNN target lp for REDIRECT") + "\n")
+	b.WriteString("    " + padRight("pk", 12) + mu("primary key of the row in this slot — the logical identity behind the ctid.") + "\n")
+	b.WriteString("    " + padRight("", 12) + mu("Shown for tables that have one; the key is read through this session's") + "\n")
+	b.WriteString("    " + padRight("", 12) + mu("snapshot, so dead / aborted / uncommitted tuples read — (no row to look up).") + "\n")
+	b.WriteString("    " + padRight("", 12) + mu("The / filter matches it, so a key value jumps straight to its line pointer.") + "\n")
 	b.WriteString("    " + padRight("state", 12) + mu("visibility verdict decoded from xmin/xmax + commit bits (see below)") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" state ") + "  " +
@@ -108,7 +112,8 @@ func (m *Model) renderHeapTuplesInfo(height int) string {
 		mu("HEAP_HASEXTERNAL — at least one value lives out-of-line in the TOAST relation") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" expanded row ") + "  " +
-		mu("the selected row expands to three lines decoding its internals") + "\n")
+		mu("the selected row expands to a few lines decoding its internals") + "\n")
+	b.WriteString("    " + padRight("key:", 12) + mu("primary key in WHERE-clause shape (\"id = 42\") — omitted when the table has none") + "\n")
 	b.WriteString("    " + padRight("data:", 12) + mu("first bytes of t_data in hex, tagged with the payload byte count") + "\n")
 	b.WriteString("    " + padRight("lifecycle:", 12) + mu("MVCC story — who inserted it (and if that committed), then deleted/locked/live") + "\n")
 	b.WriteString("    " + padRight("layout:", 12) + mu("header vs payload bytes (split at t_hoff) with a bar, plus the page byte span") + "\n\n")
@@ -228,9 +233,11 @@ func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool, show
 }
 
 // renderHeapTuplesList draws one row per line-pointer. The selected row
-// expands to three additional lines (data preview, infomask details,
-// lp_off/raw_len) so the user can see decoded internals without a separate
-// detail pane; other rows render only the headline.
+// expands to a few additional lines (primary key, data preview, MVCC
+// lifecycle, byte anatomy) so the user can see decoded internals without a
+// separate detail pane; other rows render only the headline. The expansion is
+// all-or-nothing: it is skipped near the bottom of the viewport rather than
+// clipped mid-block.
 func (m *Model) renderHeapTuplesList(s *screen, height int) string {
 	vis := s.visibleIndexes()
 	rowsH := max(height-1, 0)
@@ -238,23 +245,27 @@ func (m *Model) renderHeapTuplesList(s *screen, height int) string {
 		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
 	}
 	end := min(s.offset+rowsH, len(vis))
+	showPK := m.showTuplePK(s)
 
 	var b strings.Builder
-	b.WriteString(renderHeapTuplesHeader(s.sort, s.sortDesc))
+	b.WriteString(renderHeapTuplesHeader(s.sort, s.sortDesc, showPK))
 	b.WriteString("\n")
 	lines := 0
 	for vi := s.offset; vi < end && lines < rowsH; vi++ {
 		it := s.items[vis[vi]]
 		t, _ := it.data.(pg.HeapTuple)
 		selected := vi == s.cursor
-		b.WriteString(renderHeapTupleHeadline(t, selected))
+		b.WriteString(renderHeapTupleHeadline(t, selected, showPK))
 		b.WriteString("\n")
 		lines++
-		if selected && lines+3 <= rowsH {
-			for _, l := range renderHeapTupleExpand(t) {
-				b.WriteString(l)
-				b.WriteString("\n")
-				lines++
+		if selected {
+			exp := renderHeapTupleExpand(t, s.tuplePKCols)
+			if lines+len(exp) <= rowsH {
+				for _, l := range exp {
+					b.WriteString(l)
+					b.WriteString("\n")
+					lines++
+				}
 			}
 		}
 	}
@@ -264,7 +275,14 @@ func (m *Model) renderHeapTuplesList(s *screen, height int) string {
 	return b.String()
 }
 
-func renderHeapTuplesHeader(sort sortMode, sortDesc bool) string {
+// showTuplePK reports whether the tuple list renders its pk column: the table
+// needs a primary key to project, and the terminal needs the room (see
+// tuplePKMinWidth — the physical columns win a fight for the last cells).
+func (m *Model) showTuplePK(s *screen) bool {
+	return len(s.tuplePKCols) > 0 && m.width >= tuplePKMinWidth
+}
+
+func renderHeapTuplesHeader(sort sortMode, sortDesc bool, showPK bool) string {
 	// Indentation matches the row: cursor (2) + "#NNNN" idx col (5) + gap.
 	// The "● " dot+space takes 2 cells before the flag-name column.
 	line := "  " + padRight(sortMark("lp", sort == sortByLP, sortDesc), 5) + "  " +
@@ -272,12 +290,14 @@ func renderHeapTuplesHeader(sort sortMode, sortDesc bool) string {
 		padRight(sortMark("len", sort == sortBySize, sortDesc), tupleLenColW) + "  " +
 		padRight("xmin", tupleXidColW) + "  " +
 		padRight("xmax", tupleXidColW) + "  " +
-		padRight("ctid", tupleCtidColW) + "  " +
-		"state"
-	return styleMuted.Render(line)
+		padRight("ctid", tupleCtidColW) + "  "
+	if showPK {
+		line += padRight("pk", tuplePKColW) + "  "
+	}
+	return styleMuted.Render(line + "state")
 }
 
-func renderHeapTupleHeadline(t pg.HeapTuple, selected bool) string {
+func renderHeapTupleHeadline(t pg.HeapTuple, selected, showPK bool) string {
 	cursor := selectedCursor(selected)
 	dot, flagName := lpFlagDecoration(t.LPFlags)
 	idx := highlightName(fmt.Sprintf("#%04d", t.LP), selected)
@@ -305,13 +325,28 @@ func renderHeapTupleHeadline(t pg.HeapTuple, selected bool) string {
 		// which chunk object this row belongs to without drilling in.
 		chunkInfo = "  " + styleMuted.Render(fmt.Sprintf("chunk %d  seq %d", *t.ChunkID, *t.ChunkSeq))
 	}
+	pk := ""
+	if showPK {
+		pk = padRight(tuplePKCell(t), tuplePKColW) + "  "
+	}
 	return cursor + idx + "  " +
 		dot + " " + padRight(flagName, tupleFlagColW) + "  " +
 		padRight(strconv.Itoa(int(t.LPLen)), tupleLenColW) + "  " +
 		padRight(xmin, tupleXidColW) + "  " +
 		padRight(xmax, tupleXidColW) + "  " +
 		padRight(ctid, tupleCtidColW) + "  " +
-		state + icons + chunkInfo
+		pk + state + icons + chunkInfo
+}
+
+// tuplePKCell renders the primary key of the row a line pointer holds, clipped
+// to the column. A nil PK means no row visible to our snapshot lives at this
+// ctid — a dead, aborted or uncommitted tuple — which reads as the same "—"
+// the other columns use for "nothing to show here".
+func tuplePKCell(t pg.HeapTuple) string {
+	if t.PK == nil {
+		return styleMuted.Render("—")
+	}
+	return clipCells(flattenQuery(*t.PK), tuplePKColW)
 }
 
 // heapTupleState collapses a line pointer's slot flag plus the tuple's
@@ -384,7 +419,7 @@ func heapTupleFlagIcons(t pg.HeapTuple) string {
 // a tiny overhead-vs-payload bar (replacing the bare lp_off/raw_len numbers).
 // Line pointers with no tuple body — REDIRECT/DEAD/UNUSED — get a single
 // purposeful one-liner instead of a meaningless hex dump.
-func renderHeapTupleExpand(t pg.HeapTuple) []string {
+func renderHeapTupleExpand(t pg.HeapTuple, pkCols []string) []string {
 	indent := "       "
 	switch t.LPFlags {
 	case pg.LPRedirect:
@@ -398,12 +433,40 @@ func renderHeapTupleExpand(t pg.HeapTuple) []string {
 		return []string{indent +
 			styleMuted.Render("unused slot  ·  free line pointer, available for a new tuple")}
 	}
-	return []string{
+	lines := make([]string, 0, 4)
+	// The key leads: it is the one line that says *which row* this is, and the
+	// only one you can paste into a WHERE clause.
+	if len(pkCols) > 0 {
+		lines = append(lines, tupleKeyLine(t, pkCols, indent))
+	}
+	return append(lines,
 		tupleDataLine(t, indent),
 		tupleLifecycleLine(t, indent),
 		tupleAnatomyLine(t, indent),
-	}
+	)
 }
+
+// tupleKeyLine names the row this line pointer holds in WHERE-clause shape:
+// "key: id = 42", or "key: (tenant_id, id) = (7, 42)" for a composite key.
+// Only rows visible to our snapshot project a key, so a nil PK says so
+// explicitly rather than showing an empty value — on a bloated page that is
+// most of the tuples, and "no visible row" is the real answer.
+func tupleKeyLine(t pg.HeapTuple, pkCols []string, indent string) string {
+	name := pkCols[0]
+	if len(pkCols) > 1 {
+		name = "(" + strings.Join(pkCols, ", ") + ")"
+	}
+	if t.PK == nil {
+		return indent + styleMuted.Render("key: "+name+" = ? · no row visible to this session at this ctid")
+	}
+	return indent + styleMuted.Render("key: "+name+" = ") +
+		clipCells(flattenQuery(*t.PK), tupleKeyLineCap)
+}
+
+// tupleKeyLineCap bounds the key text on the expanded row. Wider than the pk
+// column (which has neighbours to make room for) but still short of any
+// terminal's width, so a long text key can't wrap the expanded block.
+const tupleKeyLineCap = 120
 
 // tupleDataLine previews the raw t_data bytes (still the most direct look at
 // the payload) and tags it with the payload byte count.

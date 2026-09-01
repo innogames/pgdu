@@ -283,11 +283,17 @@ func (m *Model) drillIn() tea.Cmd {
 			m.stack = append(m.stack, indexTuplesScreen(s, "index tuples", child, ""))
 			return m.loadCurrent()
 		}
-		if t.Ctid == nil || t.Decoded == nil {
+		if t.Ctid == nil || (t.Decoded == nil && t.HotDecoded == nil) {
 			// Leaf entries drill only when a live heap row was projected.
 			// Pivot/posting entries and vacuumed rows land here too; none has a
 			// single heap row to show in the per-column view.
 			return nil
+		}
+		// A HOT-updated row lives at the redirect target, not at the ctid the
+		// index entry stores — open the tuple that actually holds the row.
+		ctid := *t.Ctid
+		if t.Decoded == nil && t.HotCtid != nil {
+			ctid = *t.HotCtid
 		}
 		// The parent's schema matches the index's by Postgres rule — indexes
 		// live in the same namespace as their table.
@@ -298,7 +304,7 @@ func (m *Model) drillIn() tea.Cmd {
 		next := &screen{
 			level: levelTupleRow, title: "row", tool: s.tool,
 			db: s.db, schema: s.schema, table: parent,
-			tupleCtid: *t.Ctid,
+			tupleCtid: ctid,
 			sort:      sortByName, sortDesc: false,
 		}
 		m.stack = append(m.stack, next)

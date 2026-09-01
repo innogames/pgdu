@@ -97,6 +97,20 @@ empty prefs). The TUI seeds the per-table `*ColsVisible` maps from it in
   values (`toolDisk`, `toolBuffers`, `toolPageInspect`, `toolTools` (diagnostics), `toolWAL`,
   `toolQueries` (top queries), `toolMaintenance`, `toolActivity`, `toolTableStats`,
   `toolTriage`) and drill through that tool's own `level*` chain. Both enums live in `app.go`.
+- **Tuple `pk` column** (`levelHeapTuples`): `ListHeapTuples` looks up the table's
+  primary key and joins it back per line pointer by ctid (`sqlHeapTuplesPK`), so a
+  slot shows the row it holds, not just its physical address. The join runs under the
+  session's snapshot, so dead/aborted/uncommitted tuples read `—`; both the catalog
+  lookup and the join are best-effort (either failing degrades to the plain
+  `sqlHeapTuples`, never to a broken view). The key also rides in `item.name`, which is
+  what the `/` filter matches, and leads the selected row's expanded block.
+- **Index entries and HOT** (`levelIndexTuples`): a `ctid = …` Tid Scan does not follow
+  LP_REDIRECT line pointers, so the heap projection in `sqlIndexTuplesDecoded` comes back
+  NULL for every HOT-updated row — its index entry still points at the chain root.
+  `fillHotChains` walks that one hop (`sqlHeapRedirectKeys`, best-effort) and fills
+  `HotCtid`/`HotDecoded`; the row then renders the resolved key plus a `▸off` hop and
+  drills into the redirect target. A missing projection is therefore *not* a dead-entry
+  signal — only `IndexTuple.Dead` (bt_page_items' own LP_DEAD bit) earns the `dead` tag.
 - **Two-step confirm is a shared pattern**: reindex, snapshot delete (`pendingDeleteSnap`),
   backend cancel/terminate (`pendingBackend*`), streaming VACUUM (`pendingVacuum`), and
   extension reset all use the same flow — Enter arms a `pending*` field, any next key

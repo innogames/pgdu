@@ -281,6 +281,12 @@ type screen struct {
 	// levelHeapTuples: which page we drilled into.
 	heapPageBlkno int32
 
+	// tuplePKCols names the table's primary-key columns, in key order, as of
+	// the last tuple load. Non-empty enables the tuple list's pk column and
+	// names the key in the expanded row; empty means the table has no primary
+	// key, so there is nothing to project.
+	tuplePKCols []string
+
 	// Tuple byte-layout overlay (Enter on levelHeapTuples): the per-attribute
 	// split of the selected tuple, loaded async when the overlay opens.
 	// tupleAttrsLP names the line pointer the data belongs to (0 = none) so

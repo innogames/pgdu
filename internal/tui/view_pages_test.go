@@ -163,3 +163,124 @@ func TestIndexTuplePageType(t *testing.T) {
 		})
 	}
 }
+
+func TestHeapTuplesHeaderPKColumn(t *testing.T) {
+	with := stripANSI(renderHeapTuplesHeader(sortByLP, false, true))
+	if !strings.Contains(with, "pk") {
+		t.Errorf("header with pk = %q, want a pk column", with)
+	}
+	// pk sits between the physical address and the visibility verdict.
+	if strings.Index(with, "ctid") > strings.Index(with, "pk") ||
+		strings.Index(with, "pk") > strings.Index(with, "state") {
+		t.Errorf("header column order = %q, want ctid … pk … state", with)
+	}
+	without := stripANSI(renderHeapTuplesHeader(sortByLP, false, false))
+	if strings.Contains(without, "pk") {
+		t.Errorf("header without pk = %q, want no pk column", without)
+	}
+}
+
+func TestTuplePKCell(t *testing.T) {
+	pk := "42"
+	if got := stripANSI(tuplePKCell(pg.HeapTuple{PK: &pk})); got != "42" {
+		t.Errorf("pk cell = %q, want 42", got)
+	}
+	// No visible row at this ctid (dead/aborted/uncommitted tuple).
+	if got := stripANSI(tuplePKCell(pg.HeapTuple{})); got != "—" {
+		t.Errorf("nil pk cell = %q, want —", got)
+	}
+	// A key wider than the column is clipped, not wrapped.
+	long := strings.Repeat("x", tuplePKColW+20)
+	if got := stripANSI(tuplePKCell(pg.HeapTuple{PK: &long})); len([]rune(got)) > tuplePKColW {
+		t.Errorf("pk cell = %d cells, want <= %d", len([]rune(got)), tuplePKColW)
+	}
+}
+
+func TestTupleKeyLine(t *testing.T) {
+	pk := "42"
+	single := stripANSI(tupleKeyLine(pg.HeapTuple{PK: &pk}, []string{"id"}, ""))
+	if single != "key: id = 42" {
+		t.Errorf("single-column key line = %q, want %q", single, "key: id = 42")
+	}
+	composite := "(7, 42)"
+	multi := stripANSI(tupleKeyLine(pg.HeapTuple{PK: &composite}, []string{"tenant_id", "id"}, ""))
+	if multi != "key: (tenant_id, id) = (7, 42)" {
+		t.Errorf("composite key line = %q", multi)
+	}
+	// A tuple with no visible row says so instead of showing an empty value.
+	missing := stripANSI(tupleKeyLine(pg.HeapTuple{}, []string{"id"}, ""))
+	if !strings.Contains(missing, "no row visible") {
+		t.Errorf("missing-row key line = %q, want a no-visible-row note", missing)
+	}
+}
+
+func TestHeapTupleExpandLeadsWithKey(t *testing.T) {
+	pk := "42"
+	tup := pg.HeapTuple{LP: 1, LPFlags: pg.LPNormal, LPLen: 40, PK: &pk}
+	withKey := renderHeapTupleExpand(tup, []string{"id"})
+	if len(withKey) != 4 || !strings.Contains(stripANSI(withKey[0]), "key: id = 42") {
+		t.Fatalf("expand with pk = %d lines, first %q", len(withKey), stripANSI(withKey[0]))
+	}
+	// No primary key → no key line, and the block keeps its original height.
+	if plain := renderHeapTupleExpand(tup, nil); len(plain) != 3 {
+		t.Errorf("expand without pk = %d lines, want 3", len(plain))
+	}
+	// Bodyless line pointers keep their one-liner regardless of the key.
+	if red := renderHeapTupleExpand(pg.HeapTuple{LPFlags: pg.LPRedirect, LPOff: 7}, []string{"id"}); len(red) != 1 {
+		t.Errorf("REDIRECT expand = %d lines, want 1", len(red))
+	}
+}
+
+// A HOT-updated row keeps its index entry pointing at the chain root, which
+// pruning turned into an LP_REDIRECT. The row is alive, so the entry must show
+// the resolved key and the hop — never the dead tag.
+func TestIndexTupleRowHotRedirect(t *testing.T) {
+	root, live, key := "(0,50)", "(0,112)", "allies-129ece0"
+	row := stripANSI(renderIndexTupleRow(pg.IndexTuple{
+		ItemOffset: 2, ItemLen: 56, Ctid: &root,
+		Data: hexText("allies-129ece0"), HotCtid: &live, HotDecoded: &key,
+	}, "l", "", nil, 60, false))
+	if !strings.Contains(row, "(0,50)▸112") {
+		t.Errorf("row = %q, want the ctid to show the redirect hop (0,50)▸112", row)
+	}
+	if !strings.Contains(row, key) {
+		t.Errorf("row = %q, want the key resolved through the redirect", row)
+	}
+	if strings.Contains(row, "dead") {
+		t.Errorf("row = %q, want no dead tag on a live HOT-updated entry", row)
+	}
+}
+
+// The dead tag tracks bt_page_items' LP_DEAD bit and nothing else: an entry
+// whose ctid simply isn't visible from our snapshot is not a dead entry.
+func TestIndexTupleRowDeadTagFollowsLPDead(t *testing.T) {
+	ctid := "(0,50)"
+	tup := pg.IndexTuple{ItemOffset: 2, ItemLen: 56, Ctid: &ctid, Data: hexText("allies-129ece0")}
+
+	unresolved := stripANSI(renderIndexTupleRow(tup, "l", "", nil, 60, false))
+	if strings.Contains(unresolved, "dead") {
+		t.Errorf("row = %q, want no dead tag when the heap join merely missed", unresolved)
+	}
+	if !strings.Contains(unresolved, "allies-129ece0") {
+		t.Errorf("row = %q, want the key decoded from the raw index bytes", unresolved)
+	}
+
+	tup.Dead = true
+	dead := stripANSI(renderIndexTupleRow(tup, "l", "", nil, 60, false))
+	if !strings.Contains(dead, "dead") {
+		t.Errorf("row = %q, want a dead tag when LP_DEAD is set", dead)
+	}
+}
+
+// The directly-decoded key wins over the redirect projection, and a pivot's
+// ctid keeps its label even if a redirect happened to resolve underneath it.
+func TestIndexTupleRowDecodedPrecedence(t *testing.T) {
+	ctid, live, direct, hot := "(0,50)", "(0,112)", "direct", "viaredirect"
+	row := stripANSI(renderIndexTupleRow(pg.IndexTuple{
+		ItemOffset: 2, ItemLen: 56, Ctid: &ctid,
+		Decoded: &direct, HotCtid: &live, HotDecoded: &hot,
+	}, "l", "", nil, 60, false))
+	if !strings.Contains(row, direct) || strings.Contains(row, hot) {
+		t.Errorf("row = %q, want the directly-decoded key", row)
+	}
+}

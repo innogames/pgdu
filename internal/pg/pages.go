@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -252,6 +253,11 @@ func (c *Client) ListIndexPages(ctx context.Context, r Relation, start, count in
 // the user sees the actual key value (e.g. "(42,alice)") instead of a
 // hex blob. Internal-page downlinks and DEAD/empty entries return
 // Decoded = nil; the renderer falls back to the raw hex `data`.
+//
+// Entries left undecoded get a second chance through fillHotChains: a
+// HOT-updated row's index entry points at a redirect line pointer that the
+// ctid join can't follow, and resolving that hop is the difference between
+// showing the live row and writing the entry off as dead.
 func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, pageType string) ([]IndexTuple, error) {
 	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
 		return nil, err
@@ -263,6 +269,7 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 	regclass := qualifiedIdent(r.Schema, r.Name)
 
 	sql := sqlIndexTuples
+	var exprs, parent string
 	// Only leaf pages carry heap ctids worth decoding; internal pages store
 	// downlinks (child block addresses) that would either miss the heap
 	// entirely or — worse — match an unrelated row by coincidence, printing
@@ -271,22 +278,95 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 	// taller tree's (internal) root to 'i' first (see indexTuplePageType), so a
 	// non-leaf root never takes the decode path.
 	if (pageType == "l" || pageType == "r") && r.ParentOID != 0 && r.ParentName != "" {
-		var exprs string
 		// Fetching the expression list per call avoids a stale cache when
 		// the index is redefined under us. It's a one-shot pg_index lookup
 		// — cheap next to the per-row heap fetches below.
 		if err := pool.QueryRow(ctx, sqlIndexExprList, r.OID).Scan(&exprs); err == nil && exprs != "" {
-			parent := qualifiedIdent(r.Schema, r.ParentName)
+			parent = qualifiedIdent(r.Schema, r.ParentName)
 			sql = fmt.Sprintf(sqlIndexTuplesDecoded, exprs, parent)
 		}
 	}
 
-	return collect(ctx, pool, fmt.Sprintf("list index tuples in %q page %d", r.Qualified(), blkno), sql, []any{regclass, blkno},
+	tuples, err := collect(ctx, pool, fmt.Sprintf("list index tuples in %q page %d", r.Qualified(), blkno), sql, []any{regclass, blkno},
 		func(row pgx.CollectableRow) (IndexTuple, error) {
 			var it IndexTuple
-			err := row.Scan(&it.ItemOffset, &it.Ctid, &it.ItemLen, &it.Nulls, &it.Vars, &it.Data, &it.Decoded)
+			err := row.Scan(&it.ItemOffset, &it.Ctid, &it.ItemLen, &it.Nulls, &it.Vars, &it.Data, &it.Dead, &it.Decoded)
 			return it, err
 		})
+	if err != nil {
+		return nil, err
+	}
+	if parent != "" {
+		fillHotChains(ctx, pool, exprs, parent, tuples)
+	}
+	return tuples, nil
+}
+
+// btAltTIDOffsetBase is the lowest offset value nbtree steals for its own
+// markers: BT_PIVOT_HEAP_TID_ATTR (0x1000) and INDEX_ALT_TID_MASK (0x2000) sit
+// in the high bits of a pivot's or posting tuple's ctid offset word. A real heap
+// offset never comes close — MaxHeapTuplesPerPage is 291 on an 8K page — so an
+// offset at or above this is a marker, not an address worth resolving.
+const btAltTIDOffsetBase = 0x1000
+
+// fillHotChains fills HotCtid/HotDecoded for the leaf entries whose ctid didn't
+// resolve to a visible row, by following the HOT redirect line pointer their
+// ctid names (see sqlHeapRedirectKeys for why the plain ctid join can't).
+//
+// Best-effort by design: this only adds detail to rows that already render, so
+// any failure — a truncated relation, a lost privilege, the caller's timeout —
+// leaves the tuples exactly as the main query returned them.
+func fillHotChains(ctx context.Context, pool *pgxpool.Pool, exprs, parent string, tuples []IndexTuple) {
+	roots := make([]string, 0, len(tuples))
+	blocks := make([]int32, 0, len(tuples))
+	byRoot := make(map[string][]int, len(tuples))
+	for i, t := range tuples {
+		if t.Decoded != nil || t.Ctid == nil {
+			continue
+		}
+		blk, off, ok := parseTidText(*t.Ctid)
+		if !ok || off >= btAltTIDOffsetBase {
+			continue
+		}
+		if _, seen := byRoot[*t.Ctid]; !seen {
+			roots = append(roots, *t.Ctid)
+			blocks = append(blocks, blk)
+		}
+		byRoot[*t.Ctid] = append(byRoot[*t.Ctid], i)
+	}
+	if len(roots) == 0 {
+		return
+	}
+	type redirect struct {
+		root, live string
+		decoded    *string
+	}
+	hits := collectBestEffort(ctx, pool, fmt.Sprintf(sqlHeapRedirectKeys, exprs, parent),
+		[]any{roots, parent, blocks},
+		func(rows pgx.Rows) (redirect, bool) {
+			var rd redirect
+			if err := rows.Scan(&rd.root, &rd.live, &rd.decoded); err != nil {
+				return rd, false
+			}
+			return rd, true
+		})
+	for _, rd := range hits {
+		live := rd.live
+		for _, i := range byRoot[rd.root] {
+			tuples[i].HotCtid = &live
+			tuples[i].HotDecoded = rd.decoded
+		}
+	}
+}
+
+// parseTidText splits pageinspect's "(blk,off)" tid rendering. Returns false for
+// anything that isn't that shape, so a NULL-ish or unexpected value is skipped
+// rather than resolved against block 0.
+func parseTidText(s string) (blk int32, off int32, ok bool) {
+	if _, err := fmt.Sscanf(s, "(%d,%d)", &blk, &off); err != nil {
+		return 0, 0, false
+	}
+	return blk, off, true
 }
 
 // BtreeMeta reads the B-tree metapage for the index page-list banner (root
@@ -383,43 +463,110 @@ func (c *Client) IndexKeyColumns(ctx context.Context, r Relation) ([]IndexKeyCol
 		})
 }
 
-// ListHeapTuples returns the line-pointer array for one heap page. The page
-// must exist (caller already saw it in ListHeapPages); a missing block here
-// surfaces as a pageinspect error from the server.
+// ListHeapTuples returns the line-pointer array for one heap page, plus the
+// primary-key columns the tuples' PK field was projected from (nil when there
+// are none). The page must exist (caller already saw it in ListHeapPages); a
+// missing block here surfaces as a pageinspect error from the server.
 //
-// For TOAST tables (t.Schema == "pg_toast") the query also joins back into the
-// toast relation to project chunk_id/chunk_seq per live row; each HeapTuple's
-// ChunkID/ChunkSeq fields are populated only in that case.
-func (c *Client) ListHeapTuples(ctx context.Context, t Table, blkno int32) ([]HeapTuple, error) {
+// For TOAST tables (t.Schema == "pg_toast") the query joins back into the toast
+// relation to project chunk_id/chunk_seq per live row instead — those relations
+// have no primary key, and the chunk identity is the useful handle there. Each
+// HeapTuple's ChunkID/ChunkSeq fields are populated only in that case.
+//
+// The key projection is best-effort in both directions: a failed catalog lookup
+// costs the pk column, and a key join that the server rejects (a role granted
+// pageinspect but not SELECT on the table) falls back to the plain query. The
+// line pointers are the half worth having, so they never fail for the key's sake.
+func (c *Client) ListHeapTuples(ctx context.Context, t Table, blkno int32) ([]HeapTuple, []string, error) {
 	if err := c.EnsurePageInspect(ctx, t.DB); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	pool, err := c.PoolFor(ctx, t.DB)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	regclass := qualifiedIdent(t.Schema, t.Name)
+	op := fmt.Sprintf("list heap tuples in %q page %d", t.Qualified(), blkno)
+	args := []any{regclass, blkno}
 
-	isToast := t.Schema == "pg_toast"
-	sql := sqlHeapTuples
-	if isToast {
-		sql = fmt.Sprintf(sqlToastTuples, regclass)
+	if t.Schema == "pg_toast" {
+		tuples, err := collect(ctx, pool, op, fmt.Sprintf(sqlToastTuples, regclass), args, scanHeapTuple(heapTupleExtraChunk))
+		return tuples, nil, err
 	}
-	return collect(ctx, pool, fmt.Sprintf("list heap tuples in %q page %d", t.Qualified(), blkno), sql, []any{regclass, blkno},
-		func(row pgx.CollectableRow) (HeapTuple, error) {
-			var h HeapTuple
-			dest := []any{
-				&h.LP, &h.LPOff, &h.LPFlags, &h.LPLen,
-				&h.Xmin, &h.Xmax, &h.Field3, &h.Ctid,
-				&h.Infomask2, &h.Infomask, &h.Hoff,
-				&h.Bits, &h.Oid, &h.Data,
-			}
-			if isToast {
-				dest = append(dest, &h.ChunkID, &h.ChunkSeq)
-			}
-			err := row.Scan(dest...)
-			return h, err
+
+	pkCols, _ := primaryKeyColumns(ctx, pool, regclass)
+	if keyExpr := heapKeyProjection("src", pkCols); keyExpr != "" {
+		sql := fmt.Sprintf(sqlHeapTuplesPK, keyExpr, regclass)
+		if tuples, err := collect(ctx, pool, op, sql, args, scanHeapTuple(heapTupleExtraPK)); err == nil {
+			return tuples, pkCols, nil
+		}
+	}
+	tuples, err := collect(ctx, pool, op, sqlHeapTuples, args, scanHeapTuple(heapTupleExtraNone))
+	return tuples, nil, err
+}
+
+// heapTupleExtra names the trailing column(s) a heap-tuple query projects on
+// top of the heap_page_items set every variant shares.
+type heapTupleExtra int
+
+const (
+	heapTupleExtraNone heapTupleExtra = iota
+	// heapTupleExtraChunk: chunk_id, chunk_seq (TOAST relations).
+	heapTupleExtraChunk
+	// heapTupleExtraPK: the primary key, already rendered as text.
+	heapTupleExtraPK
+)
+
+func scanHeapTuple(extra heapTupleExtra) func(pgx.CollectableRow) (HeapTuple, error) {
+	return func(row pgx.CollectableRow) (HeapTuple, error) {
+		var h HeapTuple
+		dest := []any{
+			&h.LP, &h.LPOff, &h.LPFlags, &h.LPLen,
+			&h.Xmin, &h.Xmax, &h.Field3, &h.Ctid,
+			&h.Infomask2, &h.Infomask, &h.Hoff,
+			&h.Bits, &h.Oid, &h.Data,
+		}
+		switch extra {
+		case heapTupleExtraChunk:
+			dest = append(dest, &h.ChunkID, &h.ChunkSeq)
+		case heapTupleExtraPK:
+			dest = append(dest, &h.PK)
+		}
+		err := row.Scan(dest...)
+		return h, err
+	}
+}
+
+// primaryKeyColumns returns the relation's primary-key column names in key
+// order, or nil when it has no primary key.
+func primaryKeyColumns(ctx context.Context, pool *pgxpool.Pool, regclass string) ([]string, error) {
+	return collect(ctx, pool, fmt.Sprintf("primary key columns of %s", regclass), sqlPrimaryKeyColumns, []any{regclass},
+		func(row pgx.CollectableRow) (string, error) {
+			var name string
+			err := row.Scan(&name)
+			return name, err
 		})
+}
+
+// heapKeyProjection builds the SQL text expression that renders one heap row's
+// primary key for the tuple list: a single column projects bare ("42"), a
+// composite key as a tuple literal ("(7, 42)") so it reads the same way the
+// user would write it in a WHERE clause. Every column is capped at
+// heapKeyColCap characters *before* concatenation, bounding what a wide text
+// key can ship per line pointer. Returns "" when there is no key to project,
+// which is the caller's signal to use the plain (pk-less) query.
+func heapKeyProjection(alias string, cols []string) string {
+	if len(cols) == 0 {
+		return ""
+	}
+	parts := make([]string, len(cols))
+	for i, c := range cols {
+		parts[i] = "left(" + alias + "." + quoteIdent(c) + "::text, " + heapKeyColCap + ")"
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return "'(' || concat_ws(', ', " + strings.Join(parts, ", ") + ") || ')'"
 }
 
 // ListTupleAttrs splits one heap tuple (identified by block + line pointer)
