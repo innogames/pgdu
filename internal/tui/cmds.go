@@ -424,6 +424,13 @@ func (m *Model) upgradeExtensionCmd(db, ext string) tea.Cmd {
 
 func (m *Model) loadHeapPagesCmd(t pg.Table, start, count int32) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
+		// Buffer temperature is best-effort decoration: without pg_buffercache
+		// (or the privileges to read it) the temp column simply stays hidden.
+		// It must be sampled BEFORE ListHeapPages — get_raw_page reads every
+		// page in the window through shared buffers, so sampling afterwards
+		// would report the inspector's own reads (every page cached at
+		// usagecount 1), not the pre-inspection residency.
+		bufs, bufsErr := m.client.PageBuffers(ctx, t.DB, t.OID, start, count)
 		pages, err := m.client.ListHeapPages(ctx, t, start, count)
 		if err != nil {
 			return heapPagesLoadedMsg{table: t, start: start, count: count, err: err}
@@ -432,9 +439,6 @@ func (m *Model) loadHeapPagesCmd(t pg.Table, start, count int32) tea.Cmd {
 		// "pages N–M / total" status snippet shows ?/?? — much better than
 		// dropping the whole load on a transient pg_class read error.
 		rp, _ := m.client.RelPages(ctx, t)
-		// Buffer temperature is best-effort decoration: without pg_buffercache
-		// (or the privileges to read it) the temp column simply stays hidden.
-		bufs, bufsErr := m.client.PageBuffers(ctx, t.DB, t.OID, start, count)
 		return heapPagesLoadedMsg{table: t, start: start, count: count, pages: pages, totalPages: rp, bufs: bufs, bufsErr: bufsErr}
 	})
 }
@@ -483,6 +487,9 @@ func (m *Model) loadRelationsCmd(db, schema string) tea.Cmd {
 
 func (m *Model) loadIndexPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
+		// Sampled before the page walk for the same reason as loadHeapPagesCmd:
+		// bt_page_stats pulls every window page into shared buffers.
+		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
 		pages, err := m.client.ListIndexPages(ctx, r, start, count)
 		if err != nil {
 			return indexPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
@@ -499,7 +506,6 @@ func (m *Model) loadIndexPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		if bm, err := m.client.BtreeMeta(ctx, r); err == nil {
 			meta = &bm
 		}
-		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
 		return indexPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta, bufs: bufs, bufsErr: bufsErr}
 	})
 }
@@ -541,13 +547,15 @@ func (m *Model) loadIndexTuplesCmd(r pg.Relation, blkno int32, pageType string) 
 
 func (m *Model) loadGistPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
+		// Sampled before the page walk for the same reason as loadHeapPagesCmd:
+		// get_raw_page pulls every window page into shared buffers.
+		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
 		pages, err := m.client.ListGistPages(ctx, r, start, count)
 		if err != nil {
 			return gistPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
 		}
 		rp, _ := m.client.RelPages(ctx, pg.Table{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
 		keyCols, _ := m.client.IndexKeyColumns(ctx, r) // best-effort banner
-		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
 		return gistPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, bufs: bufs, bufsErr: bufsErr}
 	})
 }
@@ -568,6 +576,9 @@ func (m *Model) loadGistItemsCmd(r pg.Relation, blkno int32, pageType string) te
 
 func (m *Model) loadBrinPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
+		// Sampled before the page walk for the same reason as loadHeapPagesCmd:
+		// get_raw_page pulls every window page into shared buffers.
+		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
 		pages, err := m.client.ListBrinPages(ctx, r, start, count)
 		if err != nil {
 			return brinPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
@@ -578,7 +589,6 @@ func (m *Model) loadBrinPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		if bm, err := m.client.BrinMeta(ctx, r); err == nil {
 			meta = &bm
 		}
-		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
 		return brinPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta, bufs: bufs, bufsErr: bufsErr}
 	})
 }
@@ -592,6 +602,9 @@ func (m *Model) loadBrinItemsCmd(r pg.Relation, blkno int32) tea.Cmd {
 
 func (m *Model) loadGinPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
+		// Sampled before the page walk for the same reason as loadHeapPagesCmd:
+		// get_raw_page pulls every window page into shared buffers.
+		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
 		pages, err := m.client.ListGinPages(ctx, r, start, count)
 		if err != nil {
 			return ginPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
@@ -602,7 +615,6 @@ func (m *Model) loadGinPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		if gm, err := m.client.GinMeta(ctx, r); err == nil {
 			meta = &gm
 		}
-		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
 		return ginPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta, bufs: bufs, bufsErr: bufsErr}
 	})
 }
