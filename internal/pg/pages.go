@@ -253,6 +253,11 @@ func (c *Client) ListIndexPages(ctx context.Context, r Relation, start, count in
 // the user sees the actual key value (e.g. "(42,alice)") instead of a
 // hex blob. Internal-page downlinks and DEAD/empty entries return
 // Decoded = nil; the renderer falls back to the raw hex `data`.
+//
+// Entries left undecoded get a second chance through fillHotChains: a
+// HOT-updated row's index entry points at a redirect line pointer that the
+// ctid join can't follow, and resolving that hop is the difference between
+// showing the live row and writing the entry off as dead.
 func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, pageType string) ([]IndexTuple, error) {
 	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
 		return nil, err
@@ -264,6 +269,7 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 	regclass := qualifiedIdent(r.Schema, r.Name)
 
 	sql := sqlIndexTuples
+	var exprs, parent string
 	// Only leaf pages carry heap ctids worth decoding; internal pages store
 	// downlinks (child block addresses) that would either miss the heap
 	// entirely or — worse — match an unrelated row by coincidence, printing
@@ -272,22 +278,95 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 	// taller tree's (internal) root to 'i' first (see indexTuplePageType), so a
 	// non-leaf root never takes the decode path.
 	if (pageType == "l" || pageType == "r") && r.ParentOID != 0 && r.ParentName != "" {
-		var exprs string
 		// Fetching the expression list per call avoids a stale cache when
 		// the index is redefined under us. It's a one-shot pg_index lookup
 		// — cheap next to the per-row heap fetches below.
 		if err := pool.QueryRow(ctx, sqlIndexExprList, r.OID).Scan(&exprs); err == nil && exprs != "" {
-			parent := qualifiedIdent(r.Schema, r.ParentName)
+			parent = qualifiedIdent(r.Schema, r.ParentName)
 			sql = fmt.Sprintf(sqlIndexTuplesDecoded, exprs, parent)
 		}
 	}
 
-	return collect(ctx, pool, fmt.Sprintf("list index tuples in %q page %d", r.Qualified(), blkno), sql, []any{regclass, blkno},
+	tuples, err := collect(ctx, pool, fmt.Sprintf("list index tuples in %q page %d", r.Qualified(), blkno), sql, []any{regclass, blkno},
 		func(row pgx.CollectableRow) (IndexTuple, error) {
 			var it IndexTuple
-			err := row.Scan(&it.ItemOffset, &it.Ctid, &it.ItemLen, &it.Nulls, &it.Vars, &it.Data, &it.Decoded)
+			err := row.Scan(&it.ItemOffset, &it.Ctid, &it.ItemLen, &it.Nulls, &it.Vars, &it.Data, &it.Dead, &it.Decoded)
 			return it, err
 		})
+	if err != nil {
+		return nil, err
+	}
+	if parent != "" {
+		fillHotChains(ctx, pool, exprs, parent, tuples)
+	}
+	return tuples, nil
+}
+
+// btAltTIDOffsetBase is the lowest offset value nbtree steals for its own
+// markers: BT_PIVOT_HEAP_TID_ATTR (0x1000) and INDEX_ALT_TID_MASK (0x2000) sit
+// in the high bits of a pivot's or posting tuple's ctid offset word. A real heap
+// offset never comes close — MaxHeapTuplesPerPage is 291 on an 8K page — so an
+// offset at or above this is a marker, not an address worth resolving.
+const btAltTIDOffsetBase = 0x1000
+
+// fillHotChains fills HotCtid/HotDecoded for the leaf entries whose ctid didn't
+// resolve to a visible row, by following the HOT redirect line pointer their
+// ctid names (see sqlHeapRedirectKeys for why the plain ctid join can't).
+//
+// Best-effort by design: this only adds detail to rows that already render, so
+// any failure — a truncated relation, a lost privilege, the caller's timeout —
+// leaves the tuples exactly as the main query returned them.
+func fillHotChains(ctx context.Context, pool *pgxpool.Pool, exprs, parent string, tuples []IndexTuple) {
+	roots := make([]string, 0, len(tuples))
+	blocks := make([]int32, 0, len(tuples))
+	byRoot := make(map[string][]int, len(tuples))
+	for i, t := range tuples {
+		if t.Decoded != nil || t.Ctid == nil {
+			continue
+		}
+		blk, off, ok := parseTidText(*t.Ctid)
+		if !ok || off >= btAltTIDOffsetBase {
+			continue
+		}
+		if _, seen := byRoot[*t.Ctid]; !seen {
+			roots = append(roots, *t.Ctid)
+			blocks = append(blocks, blk)
+		}
+		byRoot[*t.Ctid] = append(byRoot[*t.Ctid], i)
+	}
+	if len(roots) == 0 {
+		return
+	}
+	type redirect struct {
+		root, live string
+		decoded    *string
+	}
+	hits := collectBestEffort(ctx, pool, fmt.Sprintf(sqlHeapRedirectKeys, exprs, parent),
+		[]any{roots, parent, blocks},
+		func(rows pgx.Rows) (redirect, bool) {
+			var rd redirect
+			if err := rows.Scan(&rd.root, &rd.live, &rd.decoded); err != nil {
+				return rd, false
+			}
+			return rd, true
+		})
+	for _, rd := range hits {
+		live := rd.live
+		for _, i := range byRoot[rd.root] {
+			tuples[i].HotCtid = &live
+			tuples[i].HotDecoded = rd.decoded
+		}
+	}
+}
+
+// parseTidText splits pageinspect's "(blk,off)" tid rendering. Returns false for
+// anything that isn't that shape, so a NULL-ish or unexpected value is skipped
+// rather than resolved against block 0.
+func parseTidText(s string) (blk int32, off int32, ok bool) {
+	if _, err := fmt.Sscanf(s, "(%d,%d)", &blk, &off); err != nil {
+		return 0, 0, false
+	}
+	return blk, off, true
 }
 
 // BtreeMeta reads the B-tree metapage for the index page-list banner (root

@@ -230,3 +230,57 @@ func TestHeapTupleExpandLeadsWithKey(t *testing.T) {
 		t.Errorf("REDIRECT expand = %d lines, want 1", len(red))
 	}
 }
+
+// A HOT-updated row keeps its index entry pointing at the chain root, which
+// pruning turned into an LP_REDIRECT. The row is alive, so the entry must show
+// the resolved key and the hop — never the dead tag.
+func TestIndexTupleRowHotRedirect(t *testing.T) {
+	root, live, key := "(0,50)", "(0,112)", "allies-129ece0"
+	row := stripANSI(renderIndexTupleRow(pg.IndexTuple{
+		ItemOffset: 2, ItemLen: 56, Ctid: &root,
+		Data: hexText("allies-129ece0"), HotCtid: &live, HotDecoded: &key,
+	}, "l", "", nil, 60, false))
+	if !strings.Contains(row, "(0,50)▸112") {
+		t.Errorf("row = %q, want the ctid to show the redirect hop (0,50)▸112", row)
+	}
+	if !strings.Contains(row, key) {
+		t.Errorf("row = %q, want the key resolved through the redirect", row)
+	}
+	if strings.Contains(row, "dead") {
+		t.Errorf("row = %q, want no dead tag on a live HOT-updated entry", row)
+	}
+}
+
+// The dead tag tracks bt_page_items' LP_DEAD bit and nothing else: an entry
+// whose ctid simply isn't visible from our snapshot is not a dead entry.
+func TestIndexTupleRowDeadTagFollowsLPDead(t *testing.T) {
+	ctid := "(0,50)"
+	tup := pg.IndexTuple{ItemOffset: 2, ItemLen: 56, Ctid: &ctid, Data: hexText("allies-129ece0")}
+
+	unresolved := stripANSI(renderIndexTupleRow(tup, "l", "", nil, 60, false))
+	if strings.Contains(unresolved, "dead") {
+		t.Errorf("row = %q, want no dead tag when the heap join merely missed", unresolved)
+	}
+	if !strings.Contains(unresolved, "allies-129ece0") {
+		t.Errorf("row = %q, want the key decoded from the raw index bytes", unresolved)
+	}
+
+	tup.Dead = true
+	dead := stripANSI(renderIndexTupleRow(tup, "l", "", nil, 60, false))
+	if !strings.Contains(dead, "dead") {
+		t.Errorf("row = %q, want a dead tag when LP_DEAD is set", dead)
+	}
+}
+
+// The directly-decoded key wins over the redirect projection, and a pivot's
+// ctid keeps its label even if a redirect happened to resolve underneath it.
+func TestIndexTupleRowDecodedPrecedence(t *testing.T) {
+	ctid, live, direct, hot := "(0,50)", "(0,112)", "direct", "viaredirect"
+	row := stripANSI(renderIndexTupleRow(pg.IndexTuple{
+		ItemOffset: 2, ItemLen: 56, Ctid: &ctid,
+		Decoded: &direct, HotCtid: &live, HotDecoded: &hot,
+	}, "l", "", nil, 60, false))
+	if !strings.Contains(row, direct) || strings.Contains(row, hot) {
+		t.Errorf("row = %q, want the directly-decoded key", row)
+	}
+}

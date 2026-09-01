@@ -144,6 +144,15 @@ func (p IndexPageStat) DeadFrac() float64 {
 // nil for internal-page downlinks and entries whose heap tuple is gone
 // (vacuumed away after the page snapshot, or beyond the snapshot's
 // visibility horizon).
+//
+// Dead is bt_page_items' own LP_DEAD hint bit — the only authoritative
+// "this entry is reclaimable" signal. A nil Decoded is *not* one: an
+// index entry whose ctid names a HOT-chain root resolves through a
+// redirect line pointer that a plain ctid = … Tid Scan won't follow.
+// HotCtid/HotDecoded carry that second hop when it exists: HotCtid is
+// the live tid the redirect points at, HotDecoded the key projected
+// from it (nil when the chain continues past that tuple, i.e. the page
+// hasn't been pruned since the last update).
 type IndexTuple struct {
 	ItemOffset int32
 	Ctid       *string
@@ -152,6 +161,9 @@ type IndexTuple struct {
 	Vars       *bool
 	Data       *string
 	Decoded    *string
+	Dead       bool
+	HotCtid    *string
+	HotDecoded *string
 }
 
 // TupleCell is one column of a heap row decoded for the row-detail view.

@@ -264,7 +264,8 @@ func renderLegend(s *screen) string {
 		return "  " + styleLPNormal.Render("●") + " " + styleMuted.Render("leaf → heap row") + sep +
 			styleIndexSeg.Render("→ blk") + " " + styleMuted.Render("downlink") + sep +
 			styleHeapToastTag.Render("pivot") + " " + styleMuted.Render("high key") + sep +
-			styleHeapHot.Render("posting ×N") + " " + styleMuted.Render("packed tids")
+			styleHeapHot.Render("posting ×N") + " " + styleMuted.Render("packed tids") + sep +
+			styleHeapHot.Render("▸off") + " " + styleMuted.Render("HOT hop")
 	}
 	return ""
 }

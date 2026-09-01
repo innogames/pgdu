@@ -27,3 +27,28 @@ func TestHeapKeyProjection(t *testing.T) {
 		})
 	}
 }
+
+func TestParseTidText(t *testing.T) {
+	for _, tc := range []struct {
+		in       string
+		blk, off int32
+		ok       bool
+	}{
+		{"(0,50)", 0, 50, true},
+		{"(1382,4)", 1382, 4, true},
+		// nbtree markers: a pivot or posting tuple's offset word carries flag
+		// bits, not an address — callers reject these on btAltTIDOffsetBase.
+		{"(0,8193)", 0, 8193, true},
+		{"", 0, 0, false},
+		{"pivot", 0, 0, false},
+		{"(0)", 0, 0, false},
+	} {
+		t.Run(tc.in, func(t *testing.T) {
+			blk, off, ok := parseTidText(tc.in)
+			if ok != tc.ok || blk != tc.blk || off != tc.off {
+				t.Errorf("parseTidText(%q) = (%d, %d, %v), want (%d, %d, %v)",
+					tc.in, blk, off, ok, tc.blk, tc.off, tc.ok)
+			}
+		})
+	}
+}
