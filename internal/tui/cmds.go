@@ -128,7 +128,13 @@ type heapTuplesLoadedMsg struct {
 	tableOID uint32
 	blkno    int32
 	tuples   []pg.HeapTuple
-	err      error
+
+	// pkCols names the table's primary-key columns, in key order, that each
+	// tuple's PK value was projected from. Empty when the table has no primary
+	// key (or the catalog lookup failed) — the pk column then isn't rendered.
+	pkCols []string
+
+	err error
 }
 type tupleRowLoadedMsg struct {
 	tableOID uint32
@@ -452,8 +458,8 @@ func (m *Model) resolveToastTargetCmd(db string, toastOID, chunkID uint32) tea.C
 
 func (m *Model) loadHeapTuplesCmd(t pg.Table, blkno int32) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
-		tuples, err := m.client.ListHeapTuples(ctx, t, blkno)
-		return heapTuplesLoadedMsg{tableOID: t.OID, blkno: blkno, tuples: tuples, err: err}
+		tuples, pkCols, err := m.client.ListHeapTuples(ctx, t, blkno)
+		return heapTuplesLoadedMsg{tableOID: t.OID, blkno: blkno, tuples: tuples, pkCols: pkCols, err: err}
 	})
 }
 

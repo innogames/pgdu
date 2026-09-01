@@ -214,7 +214,14 @@ const (
 	tupleLenColW  = 6
 	tupleXidColW  = 10
 	tupleCtidColW = 10
+	tuplePKColW   = 18
 )
+
+// tuplePKMinWidth is the narrowest terminal that still gets the tuple list's
+// pk column. The fixed columns plus the state verdict and its flag icons run
+// to ~94 cells; below that the pk column would push the row past the right
+// edge, and the physical identity (lp / ctid) is the one you can't do without.
+const tuplePKMinWidth = 96
 
 // Column widths shared by the index-pages header and rows.
 const (

@@ -97,6 +97,13 @@ empty prefs). The TUI seeds the per-table `*ColsVisible` maps from it in
   values (`toolDisk`, `toolBuffers`, `toolPageInspect`, `toolTools` (diagnostics), `toolWAL`,
   `toolQueries` (top queries), `toolMaintenance`, `toolActivity`, `toolTableStats`,
   `toolTriage`) and drill through that tool's own `level*` chain. Both enums live in `app.go`.
+- **Tuple `pk` column** (`levelHeapTuples`): `ListHeapTuples` looks up the table's
+  primary key and joins it back per line pointer by ctid (`sqlHeapTuplesPK`), so a
+  slot shows the row it holds, not just its physical address. The join runs under the
+  session's snapshot, so dead/aborted/uncommitted tuples read `—`; both the catalog
+  lookup and the join are best-effort (either failing degrades to the plain
+  `sqlHeapTuples`, never to a broken view). The key also rides in `item.name`, which is
+  what the `/` filter matches, and leads the selected row's expanded block.
 - **Two-step confirm is a shared pattern**: reindex, snapshot delete (`pendingDeleteSnap`),
   backend cancel/terminate (`pendingBackend*`), streaming VACUUM (`pendingVacuum`), and
   extension reset all use the same flow — Enter arms a `pending*` field, any next key

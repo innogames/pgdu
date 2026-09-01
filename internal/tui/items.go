@@ -63,12 +63,19 @@ func heapPageToItem(p pg.HeapPageStat) item {
 }
 
 func heapTupleToItem(t pg.HeapTuple) item {
+	// The filter matches on name, and the renderer builds its own "#NNNN"
+	// label, so the primary key rides along here: typing a key value into the
+	// filter narrows a page to the line pointer holding that row.
+	name := fmt.Sprintf("#%04d", t.LP)
+	if t.PK != nil {
+		name += " " + *t.PK
+	}
 	// hasChildren is set only for NORMAL line pointers — DEAD/UNUSED have
 	// no row to fetch, and REDIRECT points at a target on (potentially)
 	// another page that we'd need to chase, which the row-detail view
 	// doesn't currently do.
 	return item{
-		name:        fmt.Sprintf("#%04d", t.LP),
+		name:        name,
 		size:        int64(t.LPLen),
 		hasChildren: t.LPFlags == pg.LPNormal && t.Ctid != nil,
 		data:        t,

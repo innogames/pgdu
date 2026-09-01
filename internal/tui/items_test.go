@@ -163,6 +163,12 @@ func TestHeapTupleToItem(t *testing.T) {
 	if noCtid.hasChildren {
 		t.Error("NORMAL tuple without ctid should not be drillable")
 	}
+	// The primary key rides along in the name so the / filter can match it.
+	pk := "42"
+	keyed := heapTupleToItem(pg.HeapTuple{LP: 8, LPFlags: pg.LPNormal, Ctid: &ctid, PK: &pk})
+	if keyed.name != "#0008 42" {
+		t.Errorf("keyed tuple name = %q, want %q", keyed.name, "#0008 42")
+	}
 }
 
 func TestWALRecordToItem(t *testing.T) {

@@ -42,7 +42,7 @@ func TestIntegration_ListTupleAttrs(t *testing.T) {
 	}
 	table := Table{DB: db, Schema: "public", Name: "pgdu_xray", OID: oid}
 
-	tuples, err := c.ListHeapTuples(ctx, table, 0)
+	tuples, _, err := c.ListHeapTuples(ctx, table, 0)
 	if err != nil {
 		t.Fatalf("ListHeapTuples: %v", err)
 	}

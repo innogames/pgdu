@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -383,43 +384,110 @@ func (c *Client) IndexKeyColumns(ctx context.Context, r Relation) ([]IndexKeyCol
 		})
 }
 
-// ListHeapTuples returns the line-pointer array for one heap page. The page
-// must exist (caller already saw it in ListHeapPages); a missing block here
-// surfaces as a pageinspect error from the server.
+// ListHeapTuples returns the line-pointer array for one heap page, plus the
+// primary-key columns the tuples' PK field was projected from (nil when there
+// are none). The page must exist (caller already saw it in ListHeapPages); a
+// missing block here surfaces as a pageinspect error from the server.
 //
-// For TOAST tables (t.Schema == "pg_toast") the query also joins back into the
-// toast relation to project chunk_id/chunk_seq per live row; each HeapTuple's
-// ChunkID/ChunkSeq fields are populated only in that case.
-func (c *Client) ListHeapTuples(ctx context.Context, t Table, blkno int32) ([]HeapTuple, error) {
+// For TOAST tables (t.Schema == "pg_toast") the query joins back into the toast
+// relation to project chunk_id/chunk_seq per live row instead — those relations
+// have no primary key, and the chunk identity is the useful handle there. Each
+// HeapTuple's ChunkID/ChunkSeq fields are populated only in that case.
+//
+// The key projection is best-effort in both directions: a failed catalog lookup
+// costs the pk column, and a key join that the server rejects (a role granted
+// pageinspect but not SELECT on the table) falls back to the plain query. The
+// line pointers are the half worth having, so they never fail for the key's sake.
+func (c *Client) ListHeapTuples(ctx context.Context, t Table, blkno int32) ([]HeapTuple, []string, error) {
 	if err := c.EnsurePageInspect(ctx, t.DB); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	pool, err := c.PoolFor(ctx, t.DB)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	regclass := qualifiedIdent(t.Schema, t.Name)
+	op := fmt.Sprintf("list heap tuples in %q page %d", t.Qualified(), blkno)
+	args := []any{regclass, blkno}
 
-	isToast := t.Schema == "pg_toast"
-	sql := sqlHeapTuples
-	if isToast {
-		sql = fmt.Sprintf(sqlToastTuples, regclass)
+	if t.Schema == "pg_toast" {
+		tuples, err := collect(ctx, pool, op, fmt.Sprintf(sqlToastTuples, regclass), args, scanHeapTuple(heapTupleExtraChunk))
+		return tuples, nil, err
 	}
-	return collect(ctx, pool, fmt.Sprintf("list heap tuples in %q page %d", t.Qualified(), blkno), sql, []any{regclass, blkno},
-		func(row pgx.CollectableRow) (HeapTuple, error) {
-			var h HeapTuple
-			dest := []any{
-				&h.LP, &h.LPOff, &h.LPFlags, &h.LPLen,
-				&h.Xmin, &h.Xmax, &h.Field3, &h.Ctid,
-				&h.Infomask2, &h.Infomask, &h.Hoff,
-				&h.Bits, &h.Oid, &h.Data,
-			}
-			if isToast {
-				dest = append(dest, &h.ChunkID, &h.ChunkSeq)
-			}
-			err := row.Scan(dest...)
-			return h, err
+
+	pkCols, _ := primaryKeyColumns(ctx, pool, regclass)
+	if keyExpr := heapKeyProjection("src", pkCols); keyExpr != "" {
+		sql := fmt.Sprintf(sqlHeapTuplesPK, keyExpr, regclass)
+		if tuples, err := collect(ctx, pool, op, sql, args, scanHeapTuple(heapTupleExtraPK)); err == nil {
+			return tuples, pkCols, nil
+		}
+	}
+	tuples, err := collect(ctx, pool, op, sqlHeapTuples, args, scanHeapTuple(heapTupleExtraNone))
+	return tuples, nil, err
+}
+
+// heapTupleExtra names the trailing column(s) a heap-tuple query projects on
+// top of the heap_page_items set every variant shares.
+type heapTupleExtra int
+
+const (
+	heapTupleExtraNone heapTupleExtra = iota
+	// heapTupleExtraChunk: chunk_id, chunk_seq (TOAST relations).
+	heapTupleExtraChunk
+	// heapTupleExtraPK: the primary key, already rendered as text.
+	heapTupleExtraPK
+)
+
+func scanHeapTuple(extra heapTupleExtra) func(pgx.CollectableRow) (HeapTuple, error) {
+	return func(row pgx.CollectableRow) (HeapTuple, error) {
+		var h HeapTuple
+		dest := []any{
+			&h.LP, &h.LPOff, &h.LPFlags, &h.LPLen,
+			&h.Xmin, &h.Xmax, &h.Field3, &h.Ctid,
+			&h.Infomask2, &h.Infomask, &h.Hoff,
+			&h.Bits, &h.Oid, &h.Data,
+		}
+		switch extra {
+		case heapTupleExtraChunk:
+			dest = append(dest, &h.ChunkID, &h.ChunkSeq)
+		case heapTupleExtraPK:
+			dest = append(dest, &h.PK)
+		}
+		err := row.Scan(dest...)
+		return h, err
+	}
+}
+
+// primaryKeyColumns returns the relation's primary-key column names in key
+// order, or nil when it has no primary key.
+func primaryKeyColumns(ctx context.Context, pool *pgxpool.Pool, regclass string) ([]string, error) {
+	return collect(ctx, pool, fmt.Sprintf("primary key columns of %s", regclass), sqlPrimaryKeyColumns, []any{regclass},
+		func(row pgx.CollectableRow) (string, error) {
+			var name string
+			err := row.Scan(&name)
+			return name, err
 		})
+}
+
+// heapKeyProjection builds the SQL text expression that renders one heap row's
+// primary key for the tuple list: a single column projects bare ("42"), a
+// composite key as a tuple literal ("(7, 42)") so it reads the same way the
+// user would write it in a WHERE clause. Every column is capped at
+// heapKeyColCap characters *before* concatenation, bounding what a wide text
+// key can ship per line pointer. Returns "" when there is no key to project,
+// which is the caller's signal to use the plain (pk-less) query.
+func heapKeyProjection(alias string, cols []string) string {
+	if len(cols) == 0 {
+		return ""
+	}
+	parts := make([]string, len(cols))
+	for i, c := range cols {
+		parts[i] = "left(" + alias + "." + quoteIdent(c) + "::text, " + heapKeyColCap + ")"
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return "'(' || concat_ws(', ', " + strings.Join(parts, ", ") + ") || ')'"
 }
 
 // ListTupleAttrs splits one heap tuple (identified by block + line pointer)

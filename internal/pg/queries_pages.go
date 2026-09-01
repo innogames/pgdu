@@ -61,6 +61,53 @@ FROM   heap_page_items(get_raw_page($1, 'main', $2::int))
 ORDER  BY lp
 `
 
+// sqlHeapTuplesPK is sqlHeapTuples plus a primary-key projection, so the tuple
+// list can name the row a line pointer holds instead of only its physical
+// address. The join mirrors sqlToastTuples: the ctid is rebuilt from the block
+// number ($2) and the line pointer, which the planner resolves as a Tid Scan —
+// a single buffer hit on a page get_raw_page already pulled in.
+//
+// Only rows visible to our snapshot join, so dead / aborted / uncommitted
+// tuples project NULL: their ctid is still on the page, but no row you could
+// SELECT lives there. The src.ctid IS NULL guard is what produces that NULL —
+// concat_ws skips NULL inputs, so a composite key would otherwise render as
+// "()" for a line pointer with no visible row.
+//
+// The %s are the key expression (heapKeyProjection) and the quoted regclass;
+// $1 is the same regclass as text for get_raw_page, $2 the block number.
+const sqlHeapTuplesPK = `
+SELECT hpi.lp::int, hpi.lp_off::int, hpi.lp_flags::int, hpi.lp_len::int,
+       hpi.t_xmin, hpi.t_xmax, hpi.t_field3, hpi.t_ctid::text,
+       COALESCE(hpi.t_infomask2, 0)::int, COALESCE(hpi.t_infomask, 0)::int, hpi.t_hoff::int,
+       hpi.t_bits, hpi.t_oid, hpi.t_data,
+       CASE WHEN src.ctid IS NULL THEN NULL ELSE %s END AS pk
+FROM   heap_page_items(get_raw_page($1, 'main', $2::int)) hpi
+LEFT   JOIN %s src
+         ON src.ctid = ('(' || $2::text || ',' || hpi.lp::text || ')')::tid
+ORDER  BY hpi.lp
+`
+
+// sqlPrimaryKeyColumns lists a relation's primary-key columns in key order.
+// A primary key is always over plain columns — never expressions, never
+// INCLUDE columns — so every indkey entry resolves to a pg_attribute row.
+// Zero rows means the relation has no primary key. $1 is the quoted regclass.
+const sqlPrimaryKeyColumns = `
+SELECT a.attname::text
+FROM   pg_index i
+JOIN   LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+JOIN   pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+WHERE  i.indrelid = $1::regclass
+  AND  i.indisprimary
+  AND  k.ord <= i.indnkeyatts
+ORDER  BY k.ord
+`
+
+// heapKeyColCap bounds each key column's text in sqlHeapTuplesPK. The pk
+// column renders 18 cells and the expanded row 120, so this is already
+// generous — its job is to stop a fat text/bytea key from shipping kilobytes
+// per line pointer (a page holds up to ~290 of them).
+const heapKeyColCap = "64"
+
 // sqlToastTuples mirrors sqlHeapTuples for TOAST heap pages, adding
 // chunk_id/chunk_seq columns joined from the underlying TOAST relation so the
 // line-pointer list can display which chunk object and sequence number each live
