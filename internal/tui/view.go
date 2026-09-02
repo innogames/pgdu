@@ -298,7 +298,7 @@ func (m *Model) View() string {
 				b.WriteString(m.renderLogFiles(s, contentHeight))
 			}
 		case levelLogs:
-			if s.logView == logViewTimeline && s.logErr == nil && s.logReport != nil {
+			if s.logView.table() && s.logErr == nil && s.logReport != nil {
 				b.WriteString(m.renderDiagResult(s, contentHeight))
 			} else {
 				b.WriteString(m.renderLogGroups(s, contentHeight))

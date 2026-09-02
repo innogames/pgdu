@@ -153,6 +153,36 @@ func TestRenderLogGroupsAndHeader(t *testing.T) {
 	if !strings.Contains(table, "WARNING") || !strings.Contains(table, "pgbouncer") {
 		t.Errorf("timeline table:\n%s", table)
 	}
+
+	// Slow pane: the same table restricted to duration: entries, slowest first,
+	// with its own remembered sort so tabbing back to the timeline keeps time↓.
+	s.logView = s.logView.next()
+	if s.logView != logViewSlow {
+		t.Fatalf("tab after timeline = %v", s.logView)
+	}
+	m.rebuildLogItems(s)
+	if len(s.items) != 2 {
+		t.Fatalf("slow pane rows = %d", len(s.items))
+	}
+	if s.diagCols[s.diagSortCol].Name != "dur" || !s.sortDesc {
+		t.Errorf("slow default sort = %s desc=%v", s.diagCols[s.diagSortCol].Name, s.sortDesc)
+	}
+	var prev float64 = -1
+	for i, it := range s.items {
+		e := s.logEntryOf(it)
+		if e == nil || e.Category != pg.CatSlowQuery {
+			t.Fatalf("slow row %d: %+v", i, e)
+		}
+		if prev >= 0 && e.DurationMs > prev {
+			t.Errorf("slow rows not duration-desc: %v after %v", e.DurationMs, prev)
+		}
+		prev = e.DurationMs
+	}
+	s.logView = s.logView.next().next() // groups → timeline
+	m.rebuildLogItems(s)
+	if s.diagCols[s.diagSortCol].Name != "time" || len(s.items) != 8 {
+		t.Errorf("timeline after slow: sort=%s items=%d", s.diagCols[s.diagSortCol].Name, len(s.items))
+	}
 }
 
 func TestLogGroupAndEntryScreens(t *testing.T) {

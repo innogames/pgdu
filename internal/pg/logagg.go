@@ -206,6 +206,9 @@ func Fingerprint(e *LogEntry) (key, title string) {
 		}
 		norm := NormalizeSQL(string(e.SQL))
 		return boundedKey("slow|", norm), clipTitle(norm)
+	case CatStatement:
+		norm := NormalizeSQL(string(e.SQL))
+		return boundedKey("stmt|", norm), clipTitle(norm)
 	case CatCheckpoint:
 		msg := e.FirstLine()
 		kind := "checkpoint"

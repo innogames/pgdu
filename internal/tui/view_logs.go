@@ -68,7 +68,7 @@ func logCatStyle(c pg.LogCategory) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(colorAccent)
 	case pg.CatTempFile:
 		return lipgloss.NewStyle().Foreground(colorBloat)
-	case pg.CatSlowQuery:
+	case pg.CatSlowQuery, pg.CatStatement:
 		return lipgloss.NewStyle().Foreground(colorBar)
 	}
 	return lipgloss.NewStyle().Foreground(colorMuted)
@@ -159,6 +159,9 @@ func (m *Model) renderLogHeader(s *screen) string {
 		count(r.ByCategory[pg.CatSlowQuery], "slow", logCatStyle(pg.CatSlowQuery)),
 		mu(fmt.Sprintf("%d ckpt", r.ByCategory[pg.CatCheckpoint])),
 	)
+	if n := r.ByCategory[pg.CatStatement]; n > 0 {
+		parts = append(parts, count(n, "stmts", logCatStyle(pg.CatStatement)))
+	}
 	if n := r.ByCategory[pg.CatAutovacuum]; n > 0 {
 		parts = append(parts, mu(fmt.Sprintf("%d autovac", n)))
 	}
@@ -172,8 +175,8 @@ func (m *Model) renderLogHeader(s *screen) string {
 
 	var badges []string
 	if s.level == levelLogs {
-		if logs.logView == logViewTimeline {
-			badges = append(badges, styleBadge.Render("timeline"))
+		if logs.logView.table() {
+			badges = append(badges, styleBadge.Render(logs.logView.label()))
 		} else {
 			badges = append(badges, styleBadge.Render(logs.logGroupBy.label()))
 		}
@@ -277,7 +280,7 @@ func (m *Model) renderLogGroups(s *screen, height int) string {
 	mu := styleMuted.Render
 	if s.logErr != nil {
 		b.WriteString(styleErr.Render("  error: "+s.logErr.Error()) + "\n")
-		b.WriteString("  " + mu("space reloads · o picks another file · ? explains the privileges server-side reads need") + "\n")
+		b.WriteString("  " + mu("space reloads · esc picks another file · ? explains the privileges server-side reads need") + "\n")
 		for i := 2; i < height; i++ {
 			b.WriteString("\n")
 		}
@@ -461,7 +464,7 @@ func (m *Model) renderLogGroup(s *screen, height int) string {
 			dur += styleBadge.Render("▤") + " "
 		}
 		msg := it.name
-		if e.Category == pg.CatSlowQuery && len(e.SQL) > 0 {
+		if len(e.SQL) > 0 {
 			msg = collapseWS(string(e.SQL), 300)
 		}
 		extra := ""
@@ -534,6 +537,8 @@ func (m *Model) renderLogEntry(s *screen, height int) string {
 		}
 		if tbl := pg.MainTable(string(sql)); tbl != "" {
 			field("table", tbl+mu("  ·  d describes it"))
+		} else if idx := pg.MainIndex(string(sql)); idx != "" {
+			field("index", idx+mu("  ·  d describes it"))
 		}
 	}
 	if e.Orphan {
@@ -556,10 +561,14 @@ func (m *Model) renderLogEntry(s *screen, height int) string {
 			b.WriteString("  " + l + "\n")
 		}
 	}
-	if e.Category == pg.CatSlowQuery && len(e.SQL) > 0 {
+	if len(e.SQL) > 0 {
+		// Keep only the lead-in ("duration: N ms" / "execute <unnamed>:") —
+		// the SQL itself gets its own highlighted section.
 		head := e.FirstLine()
 		if i := strings.Index(head, "ms  "); i >= 0 {
 			head = head[:i+2]
+		} else if i := strings.Index(head, string(e.SQL[:min(len(e.SQL), 20)])); i > 0 {
+			head = strings.TrimRight(head[:i], " ")
 		}
 		section("MESSAGE", []byte(head), false)
 		section("STATEMENT", e.SQL, true)
@@ -671,6 +680,7 @@ func (m *Model) renderLogsInfo(height int) string {
 		{pg.CatReplication, "recovery, streaming, archiving, startup/shutdown"},
 		{pg.CatOther, "everything else"},
 		{pg.CatSlowQuery, "duration: lines (log_min_duration_statement), grouped by normalized SQL — /* comments */ kept; auto_explain plans fold into their statement (▤)"},
+		{pg.CatStatement, "statement: / execute lines (log_statement), grouped by normalized SQL like slow queries"},
 		{pg.CatCheckpoint, "checkpoint / restartpoint starting and complete"},
 		{pg.CatAutovacuum, "automatic vacuum / analyze of table"},
 		{pg.CatConnection, "connection received / authorized / disconnection"},
@@ -683,16 +693,16 @@ func (m *Model) renderLogsInfo(height int) string {
 	b.WriteString("  " + styleHeader.Render(" keys ") + "\n")
 	keys := []struct{ k, d string }{
 		{"↵", "groups pane: open the group's entries · entry rows: the full record (message, DETAIL, STATEMENT highlighted)"},
-		{"tab", "switch between the aggregated groups and the chronological timeline (sortable, C picks columns)"},
+		{"tab", "cycle the panes: aggregated groups → chronological timeline → slow queries by duration (both tables sortable, C picks columns)"},
 		{"m", "section mode: by category ⇄ flat"},
 		{"j", "on an entry or a group's rows: jump to that line in the timeline"},
-		{"d", "describe the main table of the statement behind the row (slow query SQL or an error's STATEMENT)"},
+		{"d", "describe the main table of the statement behind the row (slow query / log_statement SQL or an error's STATEMENT)"},
 		{"←/→ r", "sort groups by count / last seen / title (timeline: by column)"},
 		{"/", "substring search over titles (timeline: over every visible cell)"},
 		{"w", "widen the tail window: 32 → 64 → 128 → 256 → 512 MiB → whole file"},
 		{"t", "live tail cadence: off → 5s → 15s → 60s (incremental re-read; a rotation reloads)"},
 		{"space", "reload now"},
-		{"o", "back to the file picker (rotated / .gz / other cluster)"},
+		{"esc", "back — to the group, the overview, then the file picker (rotated / .gz files)"},
 		{"e", "export the current pane as CSV"},
 	}
 	for _, k := range keys {

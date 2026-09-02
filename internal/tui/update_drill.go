@@ -424,7 +424,7 @@ func (m *Model) drillIn() tea.Cmd {
 		m.stack = append(m.stack, m.logScreen(s.logCands[cur.logIdx-1].Open()))
 		return m.loadCurrent()
 	case levelLogs:
-		if s.logView == logViewTimeline {
+		if s.logView.table() {
 			if e := s.logEntryOf(cur); e != nil {
 				m.stack = append(m.stack, m.logEntryScreen(s, e))
 				return m.loadCurrent()

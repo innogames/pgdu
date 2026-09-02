@@ -124,7 +124,12 @@ func tableForStmt(toks []string, kw int) string {
 		}
 		return cleanTable(toks, i)
 	case "create":
-		return tableForCreateIndex(toks, kw)
+		return tableForCreate(toks, kw)
+	case "alter", "drop", "truncate", "reindex", "cluster":
+		// DDL and maintenance commands on an existing relation (log_statement
+		// output, DDL migrations in pg_stat_activity). ALTER/DROP INDEX are not
+		// tables — MainIndex covers those.
+		return tableForDDL(toks, kw)
 	case "vacuum", "analyze":
 		// VACUUM/ANALYZE <table> — manual commands and the autovacuum worker
 		// status line (after its prefix is stripped). Options can sit between the
@@ -135,22 +140,124 @@ func tableForStmt(toks []string, kw int) string {
 	}
 }
 
-// tableForCreateIndex resolves the relation an index build targets: CREATE
-// [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] [name] ON [ONLY] <table> … —
-// the shape a long-running manual build or a pg_repack rebuild shows in
-// pg_stat_activity. Scanning for the ON keyword skips the optional modifiers
-// and index name in one go (identifiers are single tokens, so a bare "on" can
-// only be the keyword). Any other CREATE statement yields "" — there's no
-// existing relation to point at.
-func tableForCreateIndex(toks []string, kw int) string {
+// tableForCreate resolves the relation a CREATE statement is about: for CREATE
+// [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] [name] ON [ONLY] <table> — the
+// shape a long-running manual build or a pg_repack rebuild shows in
+// pg_stat_activity — that is the indexed table; scanning for the ON keyword
+// skips the optional modifiers and index name in one go (identifiers are single
+// tokens, so a bare "on" can only be the keyword). CREATE [TEMP|UNLOGGED] TABLE
+// [IF NOT EXISTS] <table> names the table itself, which exists once the
+// statement is logged. Other CREATE statements yield "" — there's no relation
+// to point at.
+func tableForCreate(toks []string, kw int) string {
 	i := kw + 1
 	if i < len(toks) && strings.EqualFold(toks[i], "unique") {
 		i++
 	}
-	if i >= len(toks) || !strings.EqualFold(toks[i], "index") {
+	if i >= len(toks) {
 		return ""
 	}
-	return tableAfter(toks, indexOfAfter(toks, "on", i+1, len(toks)))
+	if strings.EqualFold(toks[i], "index") {
+		return tableAfter(toks, indexOfAfter(toks, "on", i+1, len(toks)))
+	}
+	for i < len(toks) && isCreateTableModifier(toks[i]) {
+		i++
+	}
+	if i < len(toks) && strings.EqualFold(toks[i], "table") {
+		return cleanTable(toks, skipIfExists(toks, i+1))
+	}
+	return ""
+}
+
+func isCreateTableModifier(tok string) bool {
+	switch strings.ToLower(tok) {
+	case "global", "local", "temporary", "temp", "unlogged":
+		return true
+	}
+	return false
+}
+
+// tableForDDL resolves the relation of ALTER TABLE, DROP TABLE, TRUNCATE
+// [TABLE], REINDEX [(opts)] TABLE and CLUSTER [VERBOSE] <table>: the name sits
+// after the object keyword and the optional IF EXISTS / ONLY / CONCURRENTLY
+// modifiers. ALTER and DROP on other object kinds (INDEX, SEQUENCE, …) yield "".
+// A DROP TABLE target is usually gone by the time the log is read, but the name
+// still labels the row; resolution failing is reported by the describe action.
+func tableForDDL(toks []string, kw int) string {
+	i := kw + 1
+	if i < len(toks) && toks[i] == "(" { // REINDEX (VERBOSE) TABLE t
+		i = skipParens(toks, i)
+	}
+	if i < len(toks) && strings.EqualFold(toks[i], "verbose") { // CLUSTER VERBOSE t
+		i++
+	}
+	switch strings.ToLower(toks[kw]) {
+	case "alter", "drop", "reindex":
+		if i >= len(toks) || !strings.EqualFold(toks[i], "table") {
+			return ""
+		}
+		i++
+	case "truncate":
+		if i < len(toks) && strings.EqualFold(toks[i], "table") {
+			i++
+		}
+	}
+	return cleanTable(toks, skipRelModifiers(toks, i))
+}
+
+// MainIndex is MainTable's counterpart for statements whose subject is an
+// index rather than a table: DROP INDEX [CONCURRENTLY] [IF EXISTS] <index>,
+// ALTER INDEX [IF EXISTS] <index> … and REINDEX [(opts)] INDEX [CONCURRENTLY]
+// <index>. It returns "" for everything else, so callers try MainTable first
+// and fall back to this. Like MainTable it is a shallow keyword parse.
+func MainIndex(query string) string {
+	toks := sqlWords(query)
+	if len(toks) < 3 {
+		return ""
+	}
+	i := 1
+	if toks[i] == "(" {
+		i = skipParens(toks, i)
+	}
+	switch strings.ToLower(toks[0]) {
+	case "drop", "alter", "reindex":
+		if i >= len(toks) || !strings.EqualFold(toks[i], "index") {
+			return ""
+		}
+		return cleanTable(toks, skipRelModifiers(toks, i+1))
+	}
+	return ""
+}
+
+// skipRelModifiers steps over the optional words that may precede a relation
+// name in DDL: CONCURRENTLY, IF EXISTS, ONLY (cleanTable also skips ONLY, but
+// it can precede IF EXISTS in TRUNCATE).
+func skipRelModifiers(toks []string, i int) int {
+	for i < len(toks) {
+		switch {
+		case strings.EqualFold(toks[i], "concurrently"), strings.EqualFold(toks[i], "only"):
+			i++
+		case strings.EqualFold(toks[i], "if"):
+			i = skipIfExists(toks, i)
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// skipIfExists steps over IF EXISTS / IF NOT EXISTS starting at i.
+func skipIfExists(toks []string, i int) int {
+	if i < len(toks) && strings.EqualFold(toks[i], "if") {
+		i++
+		if i < len(toks) && strings.EqualFold(toks[i], "not") {
+			i++
+		}
+		if i < len(toks) && strings.EqualFold(toks[i], "exists") {
+			i++
+		}
+	}
+	return i
 }
 
 // tableForVacuum resolves the target relation of a VACUUM or ANALYZE. The table

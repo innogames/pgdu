@@ -116,9 +116,9 @@ func logColumnRegistry() []logColDesc {
 				return pg.DiagCell{}
 			}},
 		{id: logColMessage, name: "message", kind: pg.DiagText, defaultOn: true, mandatory: true,
-			desc: "first line of the message (slow queries: the statement text; ▤ = an auto_explain plan is attached)",
+			desc: "first line of the message (slow queries / statements: the SQL text; ▤ = an auto_explain plan is attached)",
 			cell: func(e *pg.LogEntry, _ logCtx) pg.DiagCell {
-				if e.Category == pg.CatSlowQuery && len(e.SQL) > 0 {
+				if len(e.SQL) > 0 {
 					msg := collapseWS(string(e.SQL), 300)
 					if len(e.Plan) > 0 {
 						msg = "▤ " + msg
@@ -191,14 +191,29 @@ func logDiagColumnsFrom(descs []logColDesc) []pg.DiagColumn {
 	return cols
 }
 
-// syncLogSort maps the remembered sort column onto the projected set, falling
-// back to time descending (newest first) — the natural order for a log tail.
+// syncLogSort maps the pane's remembered sort column onto the projected set.
+// The timeline falls back to time descending (newest first) — the natural
+// order for a log tail; the slow pane to duration descending (slowest first),
+// or time when the dur column is hidden.
 func (m *Model) syncLogSort(s *screen, descs []logColDesc) {
-	if i := indexOfLogCol(descs, m.logSortColID); i >= 0 {
+	id := m.logSortCol(s.logView)
+	if i := indexOfLogCol(descs, *id); i >= 0 {
 		s.diagSortCol = i
 		return
 	}
-	s.diagSortCol = max(indexOfLogCol(descs, logColTime), 0)
+	*id = logColTime
+	if s.logView == logViewSlow && indexOfLogCol(descs, logColDuration) >= 0 {
+		*id = logColDuration
+	}
+	s.diagSortCol = max(indexOfLogCol(descs, *id), 0)
 	s.sortDesc = true
-	m.logSortColID = logColTime
+}
+
+// logSortCol is the remembered sort column of a table pane; each pane keeps
+// its own so tabbing between them restores the order the user chose there.
+func (m *Model) logSortCol(v logView) *logColID {
+	if v == logViewSlow {
+		return &m.logSlowSortColID
+	}
+	return &m.logSortColID
 }

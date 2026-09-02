@@ -40,9 +40,9 @@ const logMaxHostLookups = 200
 
 // logHostsCmd resolves the client addresses the visible timeline needs and the
 // cache does not have yet. nil when the hostname column is hidden, the pane is
-// not the timeline, or everything is already known.
+// not a table (timeline/slow), or everything is already known.
 func (m *Model) logHostsCmd(s *screen) tea.Cmd {
-	if s.logView != logViewTimeline || s.logReport == nil || indexOfLogCol(s.logCols, logColHostname) < 0 {
+	if !s.logView.table() || s.logReport == nil || indexOfLogCol(s.logCols, logColHostname) < 0 {
 		return nil
 	}
 	seen := map[string]bool{}

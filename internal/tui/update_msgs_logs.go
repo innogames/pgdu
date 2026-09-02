@@ -20,7 +20,33 @@ type logView int
 const (
 	logViewGroups   logView = iota // aggregated messages under section headers
 	logViewTimeline                // every entry chronologically, generic table
+	logViewSlow                    // only the duration: entries, slowest first
 )
+
+// table reports whether the pane is one of the generic-table views (timeline,
+// slow), as opposed to the self-ordering groups pane.
+func (v logView) table() bool { return v != logViewGroups }
+
+// next cycles the panes on tab: groups → timeline → slow → groups.
+func (v logView) next() logView {
+	switch v {
+	case logViewGroups:
+		return logViewTimeline
+	case logViewTimeline:
+		return logViewSlow
+	}
+	return logViewGroups
+}
+
+func (v logView) label() string {
+	switch v {
+	case logViewTimeline:
+		return "timeline"
+	case logViewSlow:
+		return "slow queries"
+	}
+	return ""
+}
 
 // logGroupBy is how the groups pane is sectioned.
 type logGroupBy int
@@ -209,7 +235,7 @@ func (m *Model) onLogHosts(msg logHostsMsg) tea.Cmd {
 		s.logHosts = make(map[string]string)
 	}
 	maps.Copy(s.logHosts, msg.hosts)
-	if s.logView == logViewTimeline && s.logReport != nil {
+	if s.logView.table() && s.logReport != nil {
 		m.rebuildLogItems(s)
 	}
 	return nil
@@ -265,8 +291,9 @@ func (m *Model) skipLogHeader(s *screen, dir int) {
 }
 
 // rebuildLogItems regenerates the levelLogs rows for the current pane. The groups pane is ordered here (sections + per-section sort), so
-// applySort leaves it alone; the timeline goes through the generic
-// diagnostic-table path (diagCols + []pg.DiagCell rows) and its sort.
+// applySort leaves it alone; the timeline and slow panes go through the generic
+// diagnostic-table path (diagCols + []pg.DiagCell rows) and its sort — the
+// slow pane is the timeline restricted to CatSlowQuery rows.
 func (m *Model) rebuildLogItems(s *screen) {
 	r := s.logReport
 	if r == nil {
@@ -275,7 +302,7 @@ func (m *Model) rebuildLogItems(s *screen) {
 		s.itemsRev++
 		return
 	}
-	if s.logView == logViewTimeline {
+	if s.logView.table() {
 		m.rebuildLogTimeline(s)
 		return
 	}
@@ -376,6 +403,9 @@ func (m *Model) rebuildLogTimeline(s *screen) {
 	items := make([]item, 0, len(r.Entries))
 	for i := range r.Entries {
 		e := &r.Entries[i]
+		if s.logView == logViewSlow && e.Category != pg.CatSlowQuery {
+			continue
+		}
 		cells := make([]pg.DiagCell, len(descs))
 		parts := make([]string, len(descs))
 		for j, d := range descs {

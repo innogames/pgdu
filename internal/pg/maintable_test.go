@@ -58,14 +58,28 @@ func TestMainTable(t *testing.T) {
 		"SELECT unit_id FROM ( SELECT generate_series( $1, ( SELECT max(unit_id) FROM game_army_units WHERE player_id = $2 ) + $3 ) AS unit_id ) AS series WHERE series.unit_id NOT IN(SELECT unit_id FROM game_army_units WHERE player_id = $4) LIMIT $5": "game_army_units",
 		"SET search_path = $1": "",
 		"":                     "",
+		// DDL from log_statement: the relation the command acts on.
+		"ALTER TABLE\n    rift_promotion ADD COLUMN highlight_new boolean DEFAULT false": "rift_promotion",
+		"ALTER TABLE IF EXISTS ONLY public.player RENAME TO player_old":                  "public.player",
+		"CREATE TABLE player_search (\n id int)":                                         "player_search",
+		"CREATE UNLOGGED TABLE IF NOT EXISTS tmp_import (id int)":                        "tmp_import",
+		"DROP TABLE IF EXISTS tutorial_state":                                            "tutorial_state",
+		"TRUNCATE TABLE ONLY status_indicators":                                          "status_indicators",
+		"TRUNCATE a, b":                                                                  "a",
+		"REINDEX (VERBOSE) TABLE CONCURRENTLY player":                                    "player",
+		"CLUSTER VERBOSE player USING player_pkey":                                       "player",
+		"DROP INDEX IF EXISTS player_search__nickname__idx_old":                          "",
+		"ALTER INDEX IF EXISTS x RENAME TO y":                                            "",
+		"ALTER SEQUENCE s AS bigint":                                                     "",
+		"CREATE SEQUENCE IF NOT EXISTS s AS integer":                                     "",
 		// CREATE INDEX targets the ON relation — the shape a pg_repack rebuild or a
 		// manual build shows in pg_stat_activity, often truncated mid-column-list.
-		"CREATE INDEX index_1839593 ON repack.table_19180 USING btree (player_i": "repack.table_19180",
+		"CREATE INDEX index_1839593 ON repack.table_19180 USING btree (player_i":              "repack.table_19180",
 		"CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ix_p ON ONLY public.game_player (id)": "public.game_player",
-		`CREATE INDEX ON "MySchema"."Tbl" (id)`: "MySchema.Tbl",
-		// Other CREATE statements have no existing relation to point at; a
+		`CREATE INDEX ON "MySchema"."Tbl" (id)`:                                               "MySchema.Tbl",
+		// CREATE TABLE names the table being made (it exists once logged); a
 		// truncation that cuts CREATE INDEX off before ON must not mislabel.
-		"CREATE TABLE t AS SELECT * FROM src":  "",
+		"CREATE TABLE t AS SELECT * FROM src":  "t",
 		"CREATE INDEX CONCURRENTLY ix_long_na": "",
 		// Leading ORM comments must be skipped, not parsed as the statement.
 		"/* TechnologyRepository.findAllByPlayerId */ SELECT * FROM technology WHERE id = $1": "technology",
@@ -93,6 +107,23 @@ func TestMainTable(t *testing.T) {
 	for q, want := range cases {
 		if got := MainTable(q); got != want {
 			t.Errorf("MainTable(%q) = %q, want %q", q, got, want)
+		}
+	}
+}
+
+func TestMainIndex(t *testing.T) {
+	cases := map[string]string{
+		"DROP INDEX IF EXISTS player_search__nickname__idx_old":              "player_search__nickname__idx_old",
+		"DROP INDEX CONCURRENTLY public.idx_a":                               "public.idx_a",
+		"ALTER INDEX IF EXISTS player_search__nickname__idx RENAME TO x_old": "player_search__nickname__idx",
+		"REINDEX (VERBOSE) INDEX CONCURRENTLY idx_b":                         "idx_b",
+		"CREATE INDEX idx ON t (a)":                                          "",
+		"DROP TABLE t":                                                       "",
+		"SELECT 1 FROM t":                                                    "",
+	}
+	for q, want := range cases {
+		if got := MainIndex(q); got != want {
+			t.Errorf("MainIndex(%q) = %q, want %q", q, got, want)
 		}
 	}
 }

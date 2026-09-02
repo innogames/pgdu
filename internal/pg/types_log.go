@@ -75,6 +75,7 @@ const (
 	CatReplication                    // recovery / streaming / archiving
 	CatOther                          // anything unclassified
 	CatSlowQuery                      // duration: N ms  statement/execute …
+	CatStatement                      // log_statement: "statement: …" / "execute <name>: …"
 	CatCheckpoint                     // checkpoint/restartpoint starting/complete
 	CatAutovacuum                     // automatic vacuum/analyze of table
 	CatConnection                     // connection received/authorized/disconnection
@@ -84,7 +85,7 @@ const (
 // LogCategories lists categories in display order: signal first, chatter last.
 var LogCategories = []LogCategory{
 	CatError, CatWarning, CatLock, CatTempFile, CatReplication, CatOther,
-	CatSlowQuery, CatCheckpoint, CatAutovacuum, CatConnection,
+	CatSlowQuery, CatStatement, CatCheckpoint, CatAutovacuum, CatConnection,
 }
 
 func (c LogCategory) Label() string {
@@ -103,6 +104,8 @@ func (c LogCategory) Label() string {
 		return "other"
 	case CatSlowQuery:
 		return "slow queries"
+	case CatStatement:
+		return "statements"
 	case CatCheckpoint:
 		return "checkpoints"
 	case CatAutovacuum:
@@ -130,6 +133,8 @@ func (c LogCategory) Short() string {
 		return "other"
 	case CatSlowQuery:
 		return "slow"
+	case CatStatement:
+		return "stmt"
 	case CatCheckpoint:
 		return "ckpt"
 	case CatAutovacuum:
@@ -192,7 +197,7 @@ type LogEntry struct {
 	// Plan is the auto_explain output for this statement: the body of a
 	// "duration: … plan:" line, moved onto the matching "statement:" entry by
 	// MergePlans when both were logged for the same execution.
-	Plan []byte
+	Plan       []byte
 	Checkpoint *CheckpointFields
 	TempBytes  int64  // CatTempFile
 	AVTable    []byte // CatAutovacuum: "db.schema.table"

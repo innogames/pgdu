@@ -10,8 +10,8 @@ import (
 )
 
 // handleLogKey dispatches the log-analyzer-only bindings (m group mode, tab
-// pane, w window, o file picker, j jump) plus the shared t/C keys when they
-// land on a log level. Returns handled=false when the key is not ours so handleKey
+// pane, w window, j jump) plus the shared t/C keys when they land on a log
+// level. Esc/q walk back through the stack to the file picker. Returns handled=false when the key is not ours so handleKey
 // continues with its generic cases.
 func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bool) {
 	switch s.level {
@@ -34,18 +34,6 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 			}
 		}
 		return nil, true
-
-	case key.Matches(msg, m.keys.LogFiles):
-		// Back to (or open) the picker. When the picker is below us on the
-		// stack, pop to it; otherwise push a fresh one.
-		for i, v := range slices.Backward(m.stack) {
-			if v.level == levelLogFiles {
-				m.stack = m.stack[:i+1]
-				return nil, true
-			}
-		}
-		m.stack = append(m.stack, &screen{level: levelLogFiles, title: "log files", tool: toolLogs, db: m.client.DefaultDB(), loading: true})
-		return m.loadCurrent(), true
 	}
 
 	if key.Matches(msg, m.keys.LogJump) && logs != nil {
@@ -82,10 +70,8 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 		return nil, true
 
 	case key.Matches(msg, m.keys.LogPane):
+		s.logView = s.logView.next()
 		if s.logView == logViewGroups {
-			s.logView = logViewTimeline
-		} else {
-			s.logView = logViewGroups
 			s.sort, s.sortDesc = sortByCount, true
 		}
 		m.rebuildLogItems(s)
@@ -106,7 +92,7 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 		return m.loadCurrent(), true
 
 	case key.Matches(msg, m.keys.Columns):
-		if s.logView == logViewTimeline {
+		if s.logView.table() {
 			m.ensureLogColsInit()
 			m.showInfo = false
 			m.showLogColumnConfig = true
@@ -169,7 +155,7 @@ func (m *Model) jumpToLogEntry(logs *screen, e *pg.LogEntry) tea.Cmd {
 }
 
 // logDescribeTarget resolves `d` on the log levels: the main table of the
-// statement behind the entry under the cursor (a slow query's SQL, or the
+// statement behind the entry under the cursor (a slow query or log_statement SQL, or the
 // STATEMENT attached to an error), described in the entry's database when the
 // prefix carries %d and in the default database otherwise. On the groups pane
 // the group's newest sample stands in for the row.
@@ -209,13 +195,17 @@ func logDescribeTarget(s *screen) (descTarget, bool) {
 	if len(sql) == 0 {
 		return descTarget{}, false
 	}
-	name := pg.MainTable(string(sql))
-	if name == "" {
-		return descTarget{}, false
-	}
 	db := s.db
 	if len(e.DB) > 0 {
 		db = string(e.DB)
 	}
-	return descTarget{byName: true, db: db, tableName: name}, true
+	if name := pg.MainTable(string(sql)); name != "" {
+		return descTarget{byName: true, db: db, tableName: name}, true
+	}
+	// DDL on an index (DROP/ALTER/REINDEX INDEX) has no table to point at, but
+	// the index itself can be described.
+	if name := pg.MainIndex(string(sql)); name != "" {
+		return descTarget{indexByName: true, db: db, indexName: name}, true
+	}
+	return descTarget{}, false
 }

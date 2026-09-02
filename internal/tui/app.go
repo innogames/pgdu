@@ -606,8 +606,8 @@ type screen struct {
 	logSrc    pg.LogSource
 	logReport *pg.LogReport
 	logErr    error
-	// View state, all client-side over logReport: which pane (groups or
-	// timeline), whether groups are sectioned by category, and the requested
+	// View state, all client-side over logReport: which pane (groups,
+	// timeline or slow), whether groups are sectioned by category, and the requested
 	// tail window (0 = whole file).
 	logView    logView
 	logGroupBy logGroupBy
@@ -808,7 +808,8 @@ type Model struct {
 	// Timeline column picker state (C on the log timeline), mirroring the
 	// activity picker.
 	logColsVisible      map[logColID]bool
-	logSortColID        logColID
+	logSortColID        logColID // timeline pane
+	logSlowSortColID    logColID // slow-queries pane
 	showLogColumnConfig bool
 	logColCfgCursor     int
 
