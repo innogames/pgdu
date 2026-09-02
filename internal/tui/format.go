@@ -161,6 +161,14 @@ func levelLabel(l level) string {
 		return "triage"
 	case levelWaitProfile:
 		return "wait-profile"
+	case levelLogFiles:
+		return "log-files"
+	case levelLogs:
+		return "logs"
+	case levelLogGroup:
+		return "log-group"
+	case levelLogEntry:
+		return "log-entry"
 	}
 	return "?"
 }

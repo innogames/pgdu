@@ -245,6 +245,16 @@ func (m *Model) loadCurrent() tea.Cmd {
 		return m.loadTableOverviewCmd(s.db, s.schema)
 	case levelTriage:
 		return m.loadTriageCmd()
+	case levelLogFiles:
+		return m.discoverLogsCmd()
+	case levelLogs:
+		return tea.Batch(m.armLogTick([]tea.Cmd{m.loadLogCmd(s, false)})...)
+	case levelLogGroup, levelLogEntry:
+		// Both render from the parent levelLogs report already in memory.
+		m.rebuildLogChild(s)
+		s.loading = false
+		s.loaded = true
+		return nil
 	case levelProgress:
 		// Same live-refresh pattern as the activity table, reusing its tick loop.
 		return tea.Batch(m.armActivityTick([]tea.Cmd{m.loadProgressCmd(s.db)})...)

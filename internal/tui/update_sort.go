@@ -15,6 +15,20 @@ func (m *Model) applySort(s *screen) {
 	// cache must rebuild. applySort runs after every load/rebuild too, so this
 	// one bump covers the common item-mutation paths.
 	s.itemsRev++
+	// The log groups pane orders itself (sections, then s.sort within each) and
+	// the file picker keeps discovery order (current log first).
+	if s.level == levelLogs && s.diagCols == nil {
+		if s.logReport != nil {
+			s.items = m.buildLogGroupItems(s)
+			s.itemsRev++
+		}
+		s.clampCursor()
+		return
+	}
+	if s.level == levelLogFiles {
+		s.clampCursor()
+		return
+	}
 	if s.diagCols != nil {
 		// Generic diagnostic-table sort: compare by diagSortCol, numeric rows
 		// before text rows (HasNum=false sinks below rows with a value), then
@@ -240,6 +254,18 @@ func itemSchemaTables(it item) (int64, bool) {
 	return sc.TableCount, true
 }
 
+// itemLogTime is the sortByLast extractor: a group's last-seen time or an
+// entry's timestamp, as unix nanoseconds.
+func itemLogTime(it item) (int64, bool) {
+	switch v := it.data.(type) {
+	case *pg.LogGroup:
+		return v.Last.UnixNano(), true
+	case *pg.LogEntry:
+		return v.Time.UnixNano(), true
+	}
+	return 0, false
+}
+
 // validSorts declares which sort modes are meaningful at each level. Keys
 // outside the returned set are silently ignored in handleKey, so adding a new
 // level here is the single source of truth for "which sort keys do what".
@@ -287,6 +313,12 @@ func validSorts(l level) []sortMode {
 		return []sortMode{sortBySize, sortByFPI, sortByCount, sortByName}
 	case levelWALRelBlocks:
 		return []sortMode{sortBySize, sortByName}
+	case levelLogs:
+		return []sortMode{sortByCount, sortByLast, sortByName}
+	case levelLogGroup:
+		return []sortMode{sortByLast}
+	case levelLogFiles, levelLogEntry:
+		return []sortMode{sortByName}
 	default:
 		return []sortMode{sortBySize, sortByName}
 	}

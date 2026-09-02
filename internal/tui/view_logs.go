@@ -1,0 +1,756 @@
+package tui
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/lipgloss"
+
+	"pgdu/internal/humanize"
+	"pgdu/internal/pg"
+)
+
+// Column widths of the groups pane (shared with barReserve in layout.go).
+const (
+	logCountColW = 6  // "12.3k"
+	logSevColW   = 7  // "WARNING"
+	logSpanColW  = 13 // "00:15→07:18" or "09-01→09-02"
+)
+
+// logSevStyle colours a severity tag: errors and worse red, warnings yellow,
+// LOG muted, the debug family dimmer still.
+func logSevStyle(sev pg.LogSeverity) lipgloss.Style {
+	switch {
+	case sev >= pg.SevError:
+		return lipgloss.NewStyle().Foreground(colorError)
+	case sev == pg.SevWarning:
+		return lipgloss.NewStyle().Foreground(colorAccent)
+	case sev == pg.SevLog:
+		return lipgloss.NewStyle().Foreground(colorMuted)
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+}
+
+// logSevStyleByName is the timeline-cell variant (the generic renderer only has
+// the display text).
+func logSevStyleByName(name string) (lipgloss.Style, bool) {
+	switch name {
+	case "ERROR", "FATAL", "PANIC":
+		return lipgloss.NewStyle().Foreground(colorError), true
+	case "WARNING":
+		return lipgloss.NewStyle().Foreground(colorAccent), true
+	case "LOG":
+		return lipgloss.NewStyle().Foreground(colorMuted), true
+	case "NOTICE", "INFO", "DEBUG":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("240")), true
+	}
+	return lipgloss.Style{}, false
+}
+
+func logGlyph(sev pg.LogSeverity) string {
+	switch {
+	case sev >= pg.SevError:
+		return logSevStyle(sev).Render("✗")
+	case sev == pg.SevWarning:
+		return logSevStyle(sev).Render("▲")
+	}
+	return logSevStyle(sev).Render("●")
+}
+
+func logCatStyle(c pg.LogCategory) lipgloss.Style {
+	switch c {
+	case pg.CatError:
+		return lipgloss.NewStyle().Foreground(colorError)
+	case pg.CatWarning, pg.CatLock:
+		return lipgloss.NewStyle().Foreground(colorAccent)
+	case pg.CatTempFile:
+		return lipgloss.NewStyle().Foreground(colorBloat)
+	case pg.CatSlowQuery:
+		return lipgloss.NewStyle().Foreground(colorBar)
+	}
+	return lipgloss.NewStyle().Foreground(colorMuted)
+}
+
+// fmtCount renders an entry count compactly ("12.3k") for the count column.
+func fmtCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 10_000:
+		return fmt.Sprintf("%.0fk", float64(n)/1e3)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1e3)
+	}
+	return strconv.Itoa(n)
+}
+
+// fmtSpan renders a first→last pair: clock times inside one day, dates beyond.
+func fmtSpan(first, last time.Time) string {
+	if first.IsZero() {
+		return "—"
+	}
+	if last.Sub(first) > 24*time.Hour || first.YearDay() != last.YearDay() {
+		return first.Format("01-02") + "→" + last.Format("01-02")
+	}
+	if first.Equal(last) {
+		return first.Format("15:04:05")
+	}
+	return first.Format("15:04") + "→" + last.Format("15:04")
+}
+
+// renderLogHeader is the block above every log level: source + window +
+// prefix, the severity counts and view badges, and one sparkline per severity
+// class. On the group/entry levels a group summary line takes the badges' place.
+func (m *Model) renderLogHeader(s *screen) string {
+	mu := styleMuted.Render
+	logs := m.findLevel(levelLogs)
+	if logs == nil {
+		return ""
+	}
+	r := logs.logReport
+	var b strings.Builder
+	if r == nil {
+		if logs.logErr != nil && logs.logSrc != nil {
+			b.WriteString("  " + mu(logSourceLabel(logs.logSrc.Info())) + "\n")
+		}
+		return strings.TrimRight(b.String(), "\n")
+	}
+
+	// Line 1: file · kind · window · covered range · prefix.
+	l1 := []string{logSourceLabel(r.Source), logWindowLabel(r.Window)}
+	if !r.Window.From.IsZero() {
+		span := r.Window.To.Sub(r.Window.From)
+		l1 = append(l1, fmt.Sprintf("%s → %s (%s)", r.Window.From.Format("01-02 15:04:05"), r.Window.To.Format("15:04:05"), fmtDuration(span)))
+	}
+	prefix := "prefix " + r.Prefix
+	if r.Format != pg.LogFormatStderr {
+		prefix = r.Format.String()
+	}
+	if r.PrefixDetected {
+		prefix += " " + styleBadge.Render("detected")
+	}
+	l1 = append(l1, prefix)
+	b.WriteString("  " + mu(strings.Join(l1, "  ·  ")) + "\n")
+
+	// Line 2: counts + badges.
+	count := func(n int, name string, st lipgloss.Style) string {
+		if n == 0 {
+			return mu(fmt.Sprintf("%d %s", n, name))
+		}
+		return st.Render(fmt.Sprintf("%d %s", n, name))
+	}
+	total := len(r.Entries)
+	errs := r.BySeverity[pg.SevError]
+	fatal := r.BySeverity[pg.SevFatal] + r.BySeverity[pg.SevPanic]
+	parts := []string{
+		fmt.Sprintf("%d entries", total),
+		count(errs, "errors", logSevStyle(pg.SevError)),
+	}
+	if fatal > 0 {
+		parts = append(parts, count(fatal, "fatal", logSevStyle(pg.SevFatal)))
+	}
+	parts = append(parts,
+		count(r.BySeverity[pg.SevWarning], "warnings", logSevStyle(pg.SevWarning)),
+		count(r.ByCategory[pg.CatLock], "locks", logCatStyle(pg.CatLock)),
+		count(r.ByCategory[pg.CatTempFile], "temp files", logCatStyle(pg.CatTempFile)),
+		count(r.ByCategory[pg.CatSlowQuery], "slow", logCatStyle(pg.CatSlowQuery)),
+		mu(fmt.Sprintf("%d ckpt", r.ByCategory[pg.CatCheckpoint])),
+	)
+	if n := r.ByCategory[pg.CatAutovacuum]; n > 0 {
+		parts = append(parts, mu(fmt.Sprintf("%d autovac", n)))
+	}
+	if n := r.ByCategory[pg.CatConnection]; n > 0 {
+		parts = append(parts, mu(fmt.Sprintf("%d conn", n)))
+	}
+	if r.Unparsed > 0 {
+		parts = append(parts, styleErr.Render(fmt.Sprintf("%d unparsed lines", r.Unparsed)))
+	}
+	line2 := "  " + strings.Join(parts, mu("  ·  "))
+
+	var badges []string
+	if logs.logShowSpam {
+		badges = append(badges, styleBadge.Render("spam shown"))
+	} else {
+		badges = append(badges, mu(fmt.Sprintf("spam hidden (%s)", fmtCount(r.SpamCount()))))
+	}
+	if s.level == levelLogs {
+		if logs.logView == logViewTimeline {
+			badges = append(badges, styleBadge.Render("timeline"))
+		} else {
+			badges = append(badges, styleBadge.Render(logs.logGroupBy.label()))
+		}
+	}
+	if m.logRefresh > 0 {
+		badges = append(badges, styleSelected.Render(fmt.Sprintf("⟳ %s", m.logRefresh)))
+	} else {
+		badges = append(badges, mu("⟳ off"))
+	}
+	b.WriteString(truncateToWidth(line2+"   "+strings.Join(badges, " "), m.width) + "\n")
+
+	// Line 3+: sparklines (skipped when there is no time axis or the terminal
+	// is too narrow to be legible).
+	if len(r.Hist.Counts) > 1 && m.width >= 40 {
+		w := min(len(r.Hist.Counts), m.width-24)
+		row := func(label string, series []int, st lipgloss.Style) {
+			vals := make([]float64, len(series))
+			nonzero := false
+			for i, n := range series {
+				vals[i] = float64(n)
+				if n > 0 {
+					nonzero = true
+				}
+			}
+			if !nonzero {
+				return
+			}
+			b.WriteString("  " + mu(padRight(label, 8)) + st.Render(sparkline(vals, w, 0)) + "\n")
+		}
+		errSeries := r.Hist.Series(pg.SevError)
+		for i, n := range r.Hist.Series(pg.SevFatal) {
+			errSeries[i] += n
+		}
+		for i, n := range r.Hist.Series(pg.SevPanic) {
+			errSeries[i] += n
+		}
+		row("errors", errSeries, logSevStyle(pg.SevError))
+		row("warnings", r.Hist.Series(pg.SevWarning), logSevStyle(pg.SevWarning))
+		row("all", r.Hist.Total(), lipgloss.NewStyle().Foreground(colorBar))
+		b.WriteString("  " + mu(fmt.Sprintf("%-8s%s per cell, %s → %s", "", r.Hist.Bucket, r.Hist.Start.Format("15:04"), r.Window.To.Format("15:04"))) + "\n")
+	}
+
+	if s.level == levelLogGroup && s.logGroup != nil {
+		b.WriteString(m.renderLogGroupSummary(s.logGroup) + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderLogGroupSummary is the one-line stats strip for a group.
+func (m *Model) renderLogGroupSummary(g *pg.LogGroup) string {
+	mu := styleMuted.Render
+	parts := []string{
+		logGlyph(g.Severity) + " " + logSevStyle(g.Severity).Render(g.Severity.String()),
+		logCatStyle(g.Category).Render(g.Category.Label()),
+		fmt.Sprintf("%d entries", g.Count),
+		"first " + g.First.Format("01-02 15:04:05"),
+		"last " + g.Last.Format("01-02 15:04:05"),
+	}
+	parts = append(parts, logGroupStats(g)...)
+	if g.Plans > 0 {
+		parts = append(parts, logPlanBadge(g.Plans)+mu(" — ▤ rows carry one; Enter shows it"))
+	}
+	if len(g.Samples) < g.Count {
+		parts = append(parts, mu(fmt.Sprintf("showing the last %d", len(g.Samples))))
+	}
+	return "  " + strings.Join(parts, mu("  ·  "))
+}
+
+// logGroupStats returns the category-specific figures for a group.
+func logGroupStats(g *pg.LogGroup) []string {
+	var out []string
+	switch {
+	case g.Slow != nil:
+		out = append(out,
+			"avg "+durationStyle(g.Slow.AvgMs(g.Count)).Render(fmtAge(g.Slow.AvgMs(g.Count))),
+			"p95 "+durationStyle(g.Slow.P95Ms).Render(fmtAge(g.Slow.P95Ms)),
+			"max "+durationStyle(g.Slow.MaxMs).Render(fmtAge(g.Slow.MaxMs)),
+			"total "+fmtAge(g.Slow.SumMs))
+	case g.Checkpoint != nil && g.Checkpoint.Complete > 0:
+		c := g.Checkpoint
+		n := float64(c.Complete)
+		out = append(out,
+			fmt.Sprintf("avg write %.0fs", c.SumWrite/n),
+			fmt.Sprintf("avg total %.0fs", c.SumTotal/n),
+			fmt.Sprintf("max %.0fs", c.MaxTotal),
+			fmt.Sprintf("avg %s buffers", fmtCount(int(float64(c.SumBuffers)/n))))
+	case g.Temp != nil:
+		out = append(out, "total "+humanize.Bytes(g.Temp.TotalBytes), "max "+humanize.Bytes(g.Temp.MaxBytes))
+	case g.Autovac != nil:
+		tables := sortedAutovacTables(g.Autovac)
+		top := strings.Join(tables[:min(3, len(tables))], ", ")
+		out = append(out, fmt.Sprintf("%d table(s): %s", len(tables), top))
+	}
+	return out
+}
+
+// renderLogGroups is the default pane: section headers with the aggregated
+// rows beneath, each with a count bar scaled to its section's top group.
+func (m *Model) renderLogGroups(s *screen, height int) string {
+	var b strings.Builder
+	mu := styleMuted.Render
+	if s.logErr != nil {
+		b.WriteString(styleErr.Render("  error: "+s.logErr.Error()) + "\n")
+		b.WriteString("  " + mu("space reloads · o picks another file · ? explains the privileges server-side reads need") + "\n")
+		for i := 2; i < height; i++ {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+	if s.logReport == nil {
+		for range height {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+	vis := s.visibleIndexes()
+	if len(vis) == 0 {
+		msg := "(nothing to show"
+		if !s.logShowSpam && s.logReport.SpamCount() > 0 {
+			msg += " — press v to reveal " + fmtCount(s.logReport.SpamCount()) + " spam entries"
+		}
+		if s.filter != "" {
+			msg += " — esc clears the filter"
+		}
+		b.WriteString("  " + mu(msg+")") + "\n")
+		for i := 1; i < height; i++ {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+
+	// Section maxima drive the per-row bars: the biggest group in each section
+	// fills the bar, so a 13-entry error is as visible as a 1000-entry slow query.
+	sectionMax := map[int]int{}
+	sec := -1
+	for _, idx := range vis {
+		it := s.items[idx]
+		if _, ok := it.data.(logSection); ok {
+			sec = idx
+			continue
+		}
+		if g, ok := it.data.(*pg.LogGroup); ok && g.Count > sectionMax[sec] {
+			sectionMax[sec] = g.Count
+		}
+	}
+
+	barW := m.barWidth(s)
+	rowsH := height
+	if rowsH > 0 {
+		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
+	}
+	end := min(s.offset+rowsH, len(vis))
+	// The section a row belongs to is the last header at or before it.
+	secOf := func(vi int) int {
+		for j := vi; j >= 0; j-- {
+			if _, ok := s.items[vis[j]].data.(logSection); ok {
+				return vis[j]
+			}
+		}
+		return -1
+	}
+	for vi := s.offset; vi < end; vi++ {
+		it := s.items[vis[vi]]
+		selected := vi == s.cursor
+		if hdr, ok := it.data.(logSection); ok {
+			label := fmt.Sprintf(" %s  %d group(s) · %s entries ", hdr.title, hdr.groups, fmtCount(hdr.entries))
+			rule := strings.Repeat("─", max(m.width-displayWidth(label)-4, 0))
+			b.WriteString(truncateToWidth("  "+styleSelected.Render(hdr.title)+mu(label[len(hdr.title)+1:])+mu(rule), m.width) + "\n")
+			continue
+		}
+		g, ok := it.data.(*pg.LogGroup)
+		if !ok {
+			b.WriteString("\n")
+			continue
+		}
+		cursor := "  "
+		if selected {
+			cursor = styleSelected.Render("▶ ")
+		}
+		mx := sectionMax[secOf(vi)]
+		cells := 0
+		if mx > 0 {
+			cells = max(g.Count*barW/mx, 1)
+		}
+		bar := paintBar(barW, barSegment{cells: cells, style: logCatStyle(g.Category)})
+		count := padLeft(fmtCount(g.Count), logCountColW)
+		sev := padRight(g.Severity.String(), logSevColW)
+		span := padRight(fmtSpan(g.First, g.Last), logSpanColW)
+		title := g.Title
+		if g.Plans > 0 {
+			title = logPlanBadge(g.Plans) + " " + title
+		}
+		stats := strings.Join(logGroupStats(g), mu(" · "))
+		if selected {
+			count = styleSelected.Render(count)
+			sev = styleSelected.Render(sev)
+			title = styleSelected.Render(title)
+		} else {
+			sev = logSevStyle(g.Severity).Render(sev)
+			span = mu(span)
+		}
+		line := cursor + bar + " " + count + "  " + sev + "  " + span + "  " + title
+		if stats != "" {
+			line += "  " + mu("[") + stats + mu("]")
+		}
+		b.WriteString(truncateToWidth(line, m.width) + "\n")
+	}
+	for i := end - s.offset; i < rowsH; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// logPlanBadge marks slow-query rows that carry an auto_explain plan; n > 1
+// shows how many of the group's entries have one.
+func logPlanBadge(n int) string {
+	if n > 1 {
+		return styleBadge.Render(fmt.Sprintf("▤ plan ×%d", n))
+	}
+	return styleBadge.Render("▤ plan")
+}
+
+// renderLogFiles is the picker: path, kind, size, age, how it was found.
+func (m *Model) renderLogFiles(s *screen, height int) string {
+	var b strings.Builder
+	mu := styleMuted.Render
+	if len(s.items) == 0 {
+		b.WriteString("  " + mu("no readable log found") + "\n\n")
+		b.WriteString("  " + mu("pg_current_logfile() is empty (logging_collector off) and nothing matched /var/log/postgresql/postgresql-*.log*.") + "\n")
+		b.WriteString("  " + mu("Pass --log-file PATH (or PGDU_LOG_FILE) to analyze a specific file; reading the server's log directory") + "\n")
+		b.WriteString("  " + mu("remotely needs pg_read_server_files (pg_ls_logdir needs pg_monitor and logging_collector = on).") + "\n")
+		for i := 5; i < height; i++ {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+	nameW := 0
+	for i := range s.items {
+		nameW = max(nameW, displayWidth(s.items[i].name))
+	}
+	nameW = min(nameW, max(m.width/2, 20))
+	vis := s.visibleIndexes()
+	rowsH := height
+	if rowsH > 0 {
+		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
+	}
+	end := min(s.offset+rowsH, len(vis))
+	for vi := s.offset; vi < end; vi++ {
+		it := s.items[vis[vi]]
+		selected := vi == s.cursor
+		cursor := "  "
+		name := padRight(clipCells(it.name, nameW), nameW)
+		mark := " "
+		if c, ok := it.data.(pg.LogCandidate); ok && c.Info.Current {
+			mark = styleBadge.Render("●")
+		}
+		if selected {
+			cursor = styleSelected.Render("▶ ")
+			name = styleSelected.Render(name)
+		}
+		b.WriteString(truncateToWidth(cursor+mark+" "+name+"  "+mu(it.detail), m.width) + "\n")
+	}
+	for i := end - s.offset; i < rowsH; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// renderLogGroup lists the sampled entries behind one group, newest first.
+func (m *Model) renderLogGroup(s *screen, height int) string {
+	var b strings.Builder
+	mu := styleMuted.Render
+	vis := s.visibleIndexes()
+	if len(vis) == 0 {
+		b.WriteString("  " + mu("(no entries)") + "\n")
+		for i := 1; i < height; i++ {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+	rowsH := height
+	if rowsH > 0 {
+		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
+	}
+	end := min(s.offset+rowsH, len(vis))
+	for vi := s.offset; vi < end; vi++ {
+		it := s.items[vis[vi]]
+		e := s.logEntryOf(it)
+		if e == nil {
+			b.WriteString("\n")
+			continue
+		}
+		selected := vi == s.cursor
+		cursor := "  "
+		if selected {
+			cursor = styleSelected.Render("▶ ")
+		}
+		ts := "—"
+		if !e.Time.IsZero() {
+			ts = e.Time.Format("01-02 15:04:05")
+		}
+		who := ""
+		if e.PID != 0 {
+			who = fmt.Sprintf("pid %d", e.PID)
+		}
+		if len(e.User) > 0 {
+			who += " " + string(e.User)
+			if len(e.DB) > 0 {
+				who += "@" + string(e.DB)
+			} else if len(e.Host) > 0 {
+				who += "@" + string(e.Host)
+			}
+		}
+		dur := ""
+		if e.Category == pg.CatSlowQuery {
+			dur = durationStyle(e.DurationMs).Render(padLeft(fmtAge(e.DurationMs), 7)) + "  "
+		}
+		if len(e.Plan) > 0 {
+			dur += styleBadge.Render("▤") + " "
+		}
+		msg := it.name
+		if e.Category == pg.CatSlowQuery && len(e.SQL) > 0 {
+			msg = collapseWS(string(e.SQL), 300)
+		}
+		extra := ""
+		if len(e.Detail) > 0 {
+			extra = "  " + mu("DETAIL: "+collapseWS(string(e.Detail), 120))
+		}
+		if selected {
+			msg = styleSelected.Render(msg)
+		}
+		line := cursor + mu(ts) + "  " + padRight(who, 28) + "  " + dur + msg + extra
+		b.WriteString(truncateToWidth(line, m.width) + "\n")
+	}
+	for i := end - s.offset; i < rowsH; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// renderLogEntry shows one full record: prefix fields, then each text field
+// with SQL highlighted. Scrolls through s.offset like the statement detail.
+func (m *Model) renderLogEntry(s *screen, height int) string {
+	e := s.logEntry
+	if e == nil {
+		return strings.Repeat("\n", max(height, 0))
+	}
+	mu := styleMuted.Render
+	var b strings.Builder
+	width := max(m.width-4, 20)
+
+	field := func(k, v string) {
+		if v != "" {
+			b.WriteString("  " + mu(padRight(k, 10)) + v + "\n")
+		}
+	}
+	b.WriteString("\n")
+	ts := ""
+	if !e.Time.IsZero() {
+		ts = e.Time.Format("2006-01-02 15:04:05 MST")
+	}
+	field("time", ts)
+	field("severity", logSevStyle(e.Severity).Render(e.Severity.String())+mu("  ·  "+e.Category.Label()))
+	if e.PID != 0 {
+		pid := strconv.Itoa(int(e.PID))
+		if e.Line > 0 {
+			pid += fmt.Sprintf("  (session line %d)", e.Line)
+		}
+		field("pid", pid)
+	}
+	field("session", string(e.Session))
+	field("user", string(e.User))
+	field("database", string(e.DB))
+	field("host", string(e.Host))
+	field("app", string(e.App))
+	field("sqlstate", string(e.SQLState))
+	switch {
+	case e.Category == pg.CatSlowQuery:
+		field("duration", durationStyle(e.DurationMs).Render(fmtAge(e.DurationMs)))
+	case e.LockWaitMs > 0:
+		field("waited", fmtAge(e.LockWaitMs))
+	case e.TempBytes > 0:
+		field("temp file", humanize.Bytes(e.TempBytes))
+	case e.Checkpoint != nil && !e.Checkpoint.Starting:
+		c := e.Checkpoint
+		field("checkpoint", fmt.Sprintf("%s buffers (%.1f%%) · write %.1fs sync %.2fs total %.1fs · WAL +%d −%d ↻%d · distance %s",
+			fmtCount(int(c.Buffers)), c.BuffersPct, c.WriteSec, c.SyncSec, c.TotalSec, c.WALAdded, c.WALRemoved, c.WALRecycle, humanize.Bytes(c.DistanceKB*1024)))
+	}
+	if e.Orphan {
+		field("note", styleErr.Render("primary line lies before the window start — only its attachments are visible"))
+	}
+
+	section := func(title string, body []byte, sql bool) {
+		if len(body) == 0 {
+			return
+		}
+		b.WriteString("\n  " + styleHeader.Render(" "+title+" ") + "\n")
+		text := strings.TrimLeft(string(body), "\n")
+		if sql {
+			for _, l := range highlightSQL(text, width) {
+				b.WriteString("  " + l + "\n")
+			}
+			return
+		}
+		for _, l := range wrapPlain(dedent(text), width) {
+			b.WriteString("  " + l + "\n")
+		}
+	}
+	if e.Category == pg.CatSlowQuery && len(e.SQL) > 0 {
+		head := e.FirstLine()
+		if i := strings.Index(head, "ms  "); i >= 0 {
+			head = head[:i+2]
+		}
+		section("MESSAGE", []byte(head), false)
+		section("STATEMENT", e.SQL, true)
+		section("PLAN (auto_explain)", e.Plan, false)
+	} else {
+		section("MESSAGE", e.Message, false)
+	}
+	section("DETAIL", e.Detail, false)
+	section("HINT", e.Hint, false)
+	section("CONTEXT", e.Context, strings.HasPrefix(string(e.Context), "SQL statement"))
+	section("STATEMENT", e.Statement, true)
+	section("QUERY", e.Query, true)
+	section("LOCATION", e.Location, false)
+
+	return scrollWindow(b.String(), &s.offset, height)
+}
+
+// dedent strips the common leading tab indentation PostgreSQL adds to
+// continuation lines, keeping relative indentation.
+func dedent(text string) string {
+	lines := strings.Split(text, "\n")
+	common := -1
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		n := 0
+		for n < len(l) && l[n] == '\t' {
+			n++
+		}
+		if common < 0 || n < common {
+			common = n
+		}
+	}
+	if common <= 0 {
+		return text
+	}
+	for i, l := range lines {
+		if len(l) >= common {
+			lines[i] = l[common:]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// wrapPlain hard-wraps text to width runes, preferring a space to break at
+// and preserving existing line breaks.
+func wrapPlain(text string, width int) []string {
+	var out []string
+	for _, l := range strings.Split(text, "\n") {
+		r := []rune(strings.ReplaceAll(l, "\t", "    "))
+		for len(r) > width {
+			cut := width
+			for i := width; i > width/2; i-- {
+				if r[i] == ' ' {
+					cut = i
+					break
+				}
+			}
+			out = append(out, string(r[:cut]))
+			r = r[cut:]
+			for len(r) > 0 && r[0] == ' ' {
+				r = r[1:]
+			}
+		}
+		out = append(out, string(r))
+	}
+	return out
+}
+
+// renderLogColumnConfig is the C picker over the timeline columns.
+func (m *Model) renderLogColumnConfig(height int) string {
+	m.ensureLogColsInit()
+	reg := logColumnRegistry()
+	rows := make([]colCfgRow, len(reg))
+	for i, d := range reg {
+		rows[i] = colCfgRow{name: d.name, desc: d.desc, on: m.logColEnabled(d.id, d.defaultOn) || d.mandatory, mandatory: d.mandatory}
+	}
+	return m.renderColCfgOverlay("choose which columns the log timeline shows", rows, m.logColCfgCursor, height)
+}
+
+// renderLogsInfo is the ? reference for the log analyzer.
+func (m *Model) renderLogsInfo(height int) string {
+	mu := styleMuted.Render
+	badge := func(s string) string { return styleBadge.Render(s) }
+	var b strings.Builder
+	infoHeader(&b, "Log analyzer reference")
+
+	b.WriteString("  " + styleHeader.Render(" what it reads ") + "\n")
+	b.WriteString("  " + mu("The server log, parsed with log_line_prefix (taken from the server, or detected from the file when that") + "\n")
+	b.WriteString("  " + mu("does not match — rotated logs written under an older prefix, files copied from elsewhere). csvlog and jsonlog") + "\n")
+	b.WriteString("  " + mu("are recognised too. Only the tail window is read (w widens it); the header shows the covered time range.") + "\n")
+	b.WriteString("  " + mu("DETAIL / HINT / STATEMENT / CONTEXT lines are attached to their primary line, so a group's entry shows all of them.") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" where the file comes from ") + "\n")
+	b.WriteString("  " + mu("--log-file PATH (or PGDU_LOG_FILE) · pg_current_logfile() when logging_collector is on · the Debian/Ubuntu") + "\n")
+	b.WriteString("  " + mu("/var/log/postgresql/postgresql-*.log* files incl. rotated .1 / .2.gz · the server's log directory over the connection") + "\n")
+	b.WriteString("  " + mu("(pg_ls_logdir needs pg_monitor; reading any server file needs pg_read_server_files or superuser).") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" categories ") + "\n")
+	cats := []struct {
+		c pg.LogCategory
+		d string
+	}{
+		{pg.CatError, "ERROR / FATAL / PANIC, grouped by normalized message (identifiers kept, literals and numbers folded)"},
+		{pg.CatWarning, "WARNING lines"},
+		{pg.CatLock, "lock waits (log_lock_waits) and deadlocks"},
+		{pg.CatTempFile, "temporary file spills (log_temp_files), grouped by the statement in CONTEXT/STATEMENT"},
+		{pg.CatReplication, "recovery, streaming, archiving, startup/shutdown"},
+		{pg.CatOther, "everything else"},
+		{pg.CatSlowQuery, "duration: lines (log_min_duration_statement), grouped by normalized SQL — /* comments */ kept; auto_explain plans fold into their statement (▤)   [spam]"},
+		{pg.CatCheckpoint, "checkpoint / restartpoint starting and complete   [spam]"},
+		{pg.CatAutovacuum, "automatic vacuum / analyze of table   [spam]"},
+		{pg.CatConnection, "connection received / authorized / disconnection   [spam]"},
+	}
+	for _, c := range cats {
+		b.WriteString("  " + logCatStyle(c.c).Render(padRight(c.c.Label(), 14)) + mu(c.d) + "\n")
+	}
+	b.WriteString("  " + mu("v hides the [spam] categories to leave only the signal; they stay counted and aggregated.") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" keys ") + "\n")
+	keys := []struct{ k, d string }{
+		{"↵", "groups pane: open the group's entries · entry rows: the full record (message, DETAIL, STATEMENT highlighted)"},
+		{"tab", "switch between the aggregated groups and the chronological timeline (sortable, C picks columns)"},
+		{"v", "hide / show the spam categories (slow queries, checkpoints, autovacuum, connections)"},
+		{"m", "section mode: by category ⇄ flat"},
+		{"j", "on an entry or a group's rows: jump to that line in the timeline"},
+		{"←/→ r", "sort groups by count / last seen / title (timeline: by column)"},
+		{"/", "substring search over titles (timeline: over every visible cell)"},
+		{"w", "widen the tail window: 32 → 64 → 128 → 256 → 512 MiB → whole file"},
+		{"t", "live tail cadence: off → 5s → 15s → 60s (incremental re-read; a rotation reloads)"},
+		{"space", "reload now"},
+		{"o", "back to the file picker (rotated / .gz / other cluster)"},
+		{"e", "export the current pane as CSV"},
+	}
+	for _, k := range keys {
+		b.WriteString("  " + badge(padRight(k.k, 7)) + mu(k.d) + "\n")
+	}
+	b.WriteString("\n  " + styleHeader.Render(" timeline columns ") + "\n")
+	for _, d := range logColumnRegistry() {
+		b.WriteString("  " + padRight(d.name, 10) + mu(d.desc) + "\n")
+	}
+	return padInfo(&b, height)
+}
+
+// sortedAutovacTables lists a group's per-table counts, busiest first (used by
+// the group summary when the group is autovacuum).
+func sortedAutovacTables(av map[string]int) []string {
+	type kv struct {
+		k string
+		v int
+	}
+	kvs := make([]kv, 0, len(av))
+	for k, v := range av {
+		kvs = append(kvs, kv{k, v})
+	}
+	sort.Slice(kvs, func(i, j int) bool { return kvs[i].v > kvs[j].v || kvs[i].v == kvs[j].v && kvs[i].k < kvs[j].k })
+	out := make([]string, len(kvs))
+	for i, e := range kvs {
+		out[i] = fmt.Sprintf("%s ×%d", e.k, e.v)
+	}
+	return out
+}

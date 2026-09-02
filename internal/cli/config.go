@@ -49,8 +49,12 @@ type Config struct {
 
 	// Tool, when non-empty, names the top-level tool to open directly, skipping
 	// the tool-picker screen. One of the canonical tool names ("disk",
-	// "buffers", "queries", "activity"); empty means start on the picker.
+	// "buffers", "queries", "activity", "logs"); empty means start on the picker.
 	Tool string
+
+	// LogFile is an explicit server log to analyze (--log-file / PGDU_LOG_FILE).
+	// Empty means auto-detect: pg_current_logfile(), then /var/log/postgresql.
+	LogFile string
 }
 
 func Parse(args []string) (Config, error) {
@@ -69,6 +73,7 @@ func Parse(args []string) (Config, error) {
 
 		QueriesRefresh: envDurationOr("PGDU_QUERIES_REFRESH", defaultQueriesRefresh),
 		SnapshotDir:    envOr("PGDU_SNAPSHOT_DIR", defaultSnapshotDir()),
+		LogFile:        os.Getenv("PGDU_LOG_FILE"),
 	}
 
 	fs.StringVarP(&cfg.Host, "host", "h", cfg.Host, "database server host or socket path (empty = libpq default)")
@@ -79,17 +84,19 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.DSN, "dsn", "", "full PostgreSQL connection URL (overrides individual flags)")
 	fs.DurationVar(&cfg.QueriesRefresh, "queries-refresh", cfg.QueriesRefresh, "top-queries auto-refresh interval (e.g. 5s, 1m; 0 disables)")
 	fs.StringVar(&cfg.SnapshotDir, "snapshot-dir", cfg.SnapshotDir, "directory for top-queries snapshots (S saves, L loads)")
+	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "server log to analyze (plain or .gz; default: auto-detect via pg_current_logfile / /var/log/postgresql)")
 
 	var showVersion bool
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
 	// Tool shortcuts: each opens a top-level tool directly, skipping the picker.
 	// They are mutually exclusive — pick at most one.
-	var diskUsage, sharedBuffers, activity, topQueries bool
+	var diskUsage, sharedBuffers, activity, topQueries, logs bool
 	fs.BoolVar(&diskUsage, "disk-usage", false, "start directly in the disk-usage browser")
 	fs.BoolVar(&sharedBuffers, "shared-buffers", false, "start directly in the shared-buffers browser")
 	fs.BoolVar(&activity, "activity", false, "start directly in the activity tool (pg_stat_activity)")
 	fs.BoolVar(&topQueries, "top-queries", false, "start directly in the top-queries tool (pg_stat_statements)")
+	fs.BoolVar(&logs, "logs", false, "start directly in the log analyzer")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "pgdu - PostgreSQL disk usage explorer (ncdu-style TUI)\n\n")
@@ -113,13 +120,14 @@ func Parse(args []string) (Config, error) {
 		"buffers":  sharedBuffers,
 		"activity": activity,
 		"queries":  topQueries,
+		"logs":     logs,
 	}
 	for name, set := range tools {
 		if !set {
 			continue
 		}
 		if cfg.Tool != "" {
-			return Config{}, errors.New("only one of --disk-usage/--shared-buffers/--activity/--top-queries may be given")
+			return Config{}, errors.New("only one of --disk-usage/--shared-buffers/--activity/--top-queries/--logs may be given")
 		}
 		cfg.Tool = name
 	}

@@ -417,6 +417,34 @@ func (m *Model) drillIn() tea.Cmd {
 		next := &screen{level: levelStatementDetail, title: "query", tool: s.tool, db: db, loading: true}
 		m.stack = append(m.stack, next)
 		return m.loadActivityStatementCmd(db, backendPID, cur.statQueryID, queryText)
+	case levelLogFiles:
+		cand, ok := cur.data.(pg.LogCandidate)
+		if !ok {
+			return nil
+		}
+		m.stack = append(m.stack, m.logScreen(cand.Open()))
+		return m.loadCurrent()
+	case levelLogs:
+		if s.logView == logViewTimeline {
+			if e := s.logEntryOf(cur); e != nil {
+				m.stack = append(m.stack, m.logEntryScreen(s, e))
+				return m.loadCurrent()
+			}
+			return nil
+		}
+		g, ok := cur.data.(*pg.LogGroup)
+		if !ok {
+			return nil // section header rows are inert
+		}
+		m.stack = append(m.stack, m.logGroupScreen(s, g))
+		return m.loadCurrent()
+	case levelLogGroup:
+		e := s.logEntryOf(cur)
+		if e == nil {
+			return nil
+		}
+		m.stack = append(m.stack, m.logEntryScreen(s, e))
+		return m.loadCurrent()
 	case levelTriage:
 		// Drill into the screen that backs the selected triage line. The
 		// collapsed "N checks ok" summary row carries no TriageResult and is
@@ -658,6 +686,13 @@ func (m *Model) toolEntryScreen(t tool) *screen {
 		// Triage runs its battery cluster-wide: skip the database picker and go
 		// straight to the report, loading asynchronously (loadTriageCmd).
 		return &screen{level: levelTriage, title: "triage", tool: toolTriage, db: m.client.DefaultDB(), loading: true}
+	case toolLogs:
+		// An explicit --log-file skips the picker; otherwise discover candidates
+		// (pg_current_logfile, /var/log/postgresql, server log dir) first.
+		if m.logFile != "" {
+			return m.logScreen(pg.OpenLocalLog(m.logFile))
+		}
+		return &screen{level: levelLogFiles, title: "log files", tool: toolLogs, db: m.client.DefaultDB(), loading: true}
 	case toolActivity:
 		// Activity tool is cluster-wide: skip the database picker and go
 		// directly to the live pg_stat_activity list.

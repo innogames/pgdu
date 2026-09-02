@@ -84,7 +84,7 @@ func lowerASCII(b byte) byte {
 // matching instead; every other level keeps fuzzy matching, which is forgiving
 // of typos in short identifiers like game_player_inventory_log.
 func (s *screen) matchFilter(name string) bool {
-	if s.level == levelStatements {
+	if s.level == levelStatements || s.level == levelLogs || s.level == levelLogGroup {
 		return substringMatch(s.filter, name)
 	}
 	return fuzzyMatch(s.filter, name)

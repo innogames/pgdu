@@ -1282,6 +1282,12 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 					display = st.Render(display)
 				}
 			}
+			// Log severity: red for errors, yellow for warnings, muted for LOG.
+			if i < nCols && cols[i].Kind == pg.DiagLogSeverity && !selected {
+				if st, ok := logSevStyleByName(cell.Display); ok {
+					display = st.Render(display)
+				}
+			}
 
 			var rendered string
 			if isNumeric {

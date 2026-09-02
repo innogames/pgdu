@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -73,6 +74,14 @@ func (m *Model) View() string {
 		contentHeight -= strings.Count(hdr, "\n") + 1
 	}
 
+	if (s.level == levelLogs || s.level == levelLogGroup || s.level == levelLogEntry) && s.loaded {
+		if hdr := m.renderLogHeader(s); hdr != "" {
+			b.WriteString(hdr)
+			b.WriteString("\n")
+			contentHeight -= strings.Count(hdr, "\n") + 1
+		}
+	}
+
 	// B-tree page/tuple views carry an index-context banner (key columns, and on
 	// the page list the metapage summary). Suppressed under a blocking
 	// extension prompt, which takes over the whole content area.
@@ -142,6 +151,8 @@ func (m *Model) View() string {
 	switch {
 	case m.showActColumnConfig && s.level == levelActivity:
 		b.WriteString(m.renderActColumnConfig(s, contentHeight))
+	case m.showLogColumnConfig && s.level == levelLogs:
+		b.WriteString(m.renderLogColumnConfig(contentHeight))
 	case m.showColumnConfig && s.level == levelStatements:
 		b.WriteString(m.renderColumnConfig(s, contentHeight))
 	case m.showTblColumnConfig && s.level == levelTableStats:
@@ -176,7 +187,8 @@ func (m *Model) View() string {
 		s.level != levelStatementResult && s.level != levelSnapshots &&
 		s.level != levelBufferDetail && s.level != levelMaintenance && s.level != levelSettings &&
 		s.level != levelActivity && s.level != levelLockTree && s.level != levelTableStats &&
-		s.level != levelProgress && s.level != levelWaitProfile:
+		s.level != levelProgress && s.level != levelWaitProfile &&
+		s.level != levelLogs && s.level != levelLogFiles && s.level != levelLogGroup && s.level != levelLogEntry:
 		// levelDescribe never populates items — it renders from s.describe.
 		// levelDiagnosticResult and levelStatementResult with 0 items mean the
 		// query returned no rows, which is valid; fall through to the renderer
@@ -279,6 +291,18 @@ func (m *Model) View() string {
 			b.WriteString(m.renderTriageList(s, contentHeight))
 		case levelWaitProfile:
 			b.WriteString(m.renderWaitProfile(s, contentHeight))
+		case levelLogFiles:
+			b.WriteString(m.renderLogFiles(s, contentHeight))
+		case levelLogs:
+			if s.logView == logViewTimeline && s.logErr == nil && s.logReport != nil {
+				b.WriteString(m.renderDiagResult(s, contentHeight))
+			} else {
+				b.WriteString(m.renderLogGroups(s, contentHeight))
+			}
+		case levelLogGroup:
+			b.WriteString(m.renderLogGroup(s, contentHeight))
+		case levelLogEntry:
+			b.WriteString(m.renderLogEntry(s, contentHeight))
 		case levelTableStats:
 			// The table overview is a generic diagnostic-style table too.
 			b.WriteString(m.renderDiagResult(s, contentHeight))
@@ -461,6 +485,20 @@ func (m *Model) breadcrumb() string {
 			parts = append(parts, "triage")
 		case levelWaitProfile:
 			parts = append(parts, "wait profile")
+		case levelLogFiles:
+			parts = append(parts, "logs")
+		case levelLogs:
+			if sc.logSrc != nil {
+				parts = append(parts, filepath.Base(sc.logSrc.Info().Path))
+			} else {
+				parts = append(parts, "logs")
+			}
+		case levelLogGroup:
+			if sc.logGroup != nil {
+				parts = append(parts, sc.logGroup.Category.Short()+" group")
+			}
+		case levelLogEntry:
+			parts = append(parts, "entry")
 		}
 	}
 	out := make([]string, len(parts))

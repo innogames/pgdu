@@ -19,7 +19,7 @@ func TestNewModelSeedsTableStatsColumns(t *testing.T) {
 		string(tblColHeap):    true,  // show a default-off column
 	})
 
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", p, "")
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", p, "", "")
 
 	if m.tblColEnabled(tblColSeqScan, true) {
 		t.Errorf("tblColSeqScan should be hidden per persisted prefs")

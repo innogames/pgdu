@@ -162,6 +162,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.showActColumnConfig && s.level == levelActivity {
 		return m, m.handleActColumnConfigKey(s, msg)
 	}
+	if m.showLogColumnConfig && s.level == levelLogs {
+		return m, m.handleLogColumnConfigKey(s, msg)
+	}
 	// The column-config overlay is modal: while open (only on the top-queries
 	// table) it captures navigation and toggle keys instead of the normal list
 	// bindings (Quit still quits).
@@ -201,6 +204,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.showInfo && m.hasInfoOverlay(s) {
 		return m, m.handleInfoKey(msg)
 	}
+	// Log-analyzer keys (and the shared v/f/t/C keys when on a log level) are
+	// dispatched first; the handler reports whether it consumed the key.
+	if cmd, ok := m.handleLogKey(s, msg); ok {
+		return m, cmd
+	}
+
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
@@ -218,7 +227,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.level == levelMaintenance || s.level == levelSettings ||
 			s.level == levelActivity || s.level == levelTableStats || s.level == levelWaitProfile ||
 			s.level == levelDiagnostics || s.level == levelDiagnosticResult ||
-			s.level == levelDescribe {
+			s.level == levelDescribe ||
+			s.level == levelLogFiles || s.level == levelLogs || s.level == levelLogGroup || s.level == levelLogEntry {
 			m.showInfo = !m.showInfo
 			if m.showInfo {
 				m.infoOffset = 0 // always open scrolled to the top
@@ -236,7 +246,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s.seekStatus = ""
 		s.filterFocused = false
 	case key.Matches(msg, m.keys.Down):
-		if s.level == levelStatementDetail || s.level == levelDescribe {
+		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
 			s.offset++ // clamped to the last screen by scrollWindow
 			break
 		}
@@ -255,8 +265,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.cursor < s.visibleLen()-1 {
 			s.cursor++
 		}
+		if s.level == levelLogs && s.logView == logViewGroups {
+			m.skipLogHeader(s, 1) // section headers are inert; never rest on one
+		}
 	case key.Matches(msg, m.keys.Up):
-		if s.level == levelStatementDetail || s.level == levelDescribe {
+		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
 			s.offset = max(s.offset-1, 0)
 			break
 		}
@@ -272,8 +285,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.cursor > 0 {
 			s.cursor--
 		}
+		if s.level == levelLogs && s.logView == logViewGroups {
+			m.skipLogHeader(s, -1)
+		}
 	case key.Matches(msg, m.keys.PageDown):
-		if s.level == levelStatementDetail || s.level == levelDescribe {
+		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
 			s.offset += m.pageStep() // clamped by scrollWindow
 			break
 		}
@@ -299,7 +315,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		s.cursor = max(min(s.cursor+m.pageStep(), s.visibleLen()-1), 0)
 	case key.Matches(msg, m.keys.PageUp):
-		if s.level == levelStatementDetail || s.level == levelDescribe {
+		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
 			s.offset = max(s.offset-m.pageStep(), 0)
 			break
 		}
@@ -319,7 +335,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		s.cursor = max(s.cursor-m.pageStep(), 0)
 	case key.Matches(msg, m.keys.Top):
-		if s.level == levelStatementDetail || s.level == levelDescribe {
+		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
 			s.offset = 0
 			break
 		}
@@ -330,7 +346,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		s.cursor = 0
 	case key.Matches(msg, m.keys.Bottom):
-		if s.level == levelStatementDetail || s.level == levelDescribe {
+		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
 			s.offset = math.MaxInt32 // clamped to the last screen by scrollWindow
 			break
 		}

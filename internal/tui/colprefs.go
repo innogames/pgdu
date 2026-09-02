@@ -7,6 +7,7 @@ const (
 	colPrefsActivity   = "activity"
 	colPrefsQueries    = "queries"
 	colPrefsTableStats = "tablestats"
+	colPrefsLogs       = "logs"
 )
 
 // colVisToStrings converts a typed column-visibility map (e.g. map[actColID]bool)
