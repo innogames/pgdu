@@ -49,7 +49,7 @@ func (m *Model) logHostsCmd(s *screen) tea.Cmd {
 	var ips []string
 	for i := range s.logReport.Entries {
 		e := &s.logReport.Entries[i]
-		if !s.logEntryVisible(e) || len(e.Host) == 0 {
+		if len(e.Host) == 0 {
 			continue
 		}
 		h := string(e.Host)

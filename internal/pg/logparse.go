@@ -561,11 +561,11 @@ func parseDuration(e *LogEntry) {
 // the whole remainder counts as plan and the query text is its first line.
 func splitAutoExplain(body []byte) (sql, plan []byte) {
 	const marker = "Query Text: "
-	i := bytes.Index(body, []byte(marker))
-	if i < 0 {
+	_, after, ok := bytes.Cut(body, []byte(marker))
+	if !ok {
 		return nil, bytes.TrimSpace(body)
 	}
-	rest := body[i+len(marker):]
+	rest := after
 	off := 0
 	first := true
 	for off < len(rest) {
@@ -664,9 +664,9 @@ func parseCheckpoint(e *LogEntry, msg []byte) {
 	cf := &CheckpointFields{}
 	e.Checkpoint = cf
 	s := string(msg)
-	if i := strings.Index(s, " starting: "); i >= 0 {
+	if _, after, ok := strings.Cut(s, " starting: "); ok {
 		cf.Starting = true
-		cf.Reason = s[i+len(" starting: "):]
+		cf.Reason = after
 		return
 	}
 	m := checkpointCompleteRe.FindStringSubmatch(s)
@@ -718,8 +718,8 @@ func firstQuoted(b []byte) []byte {
 }
 
 func firstLineBytes(b []byte) []byte {
-	if i := bytes.IndexByte(b, '\n'); i >= 0 {
-		return b[:i]
+	if before, _, ok := bytes.Cut(b, []byte{'\n'}); ok {
+		return before
 	}
 	return b
 }

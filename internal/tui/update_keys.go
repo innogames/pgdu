@@ -788,6 +788,9 @@ func describeTarget(s *screen) (descTarget, bool) {
 	}
 
 	switch s.level {
+	case levelLogs, levelLogGroup, levelLogEntry:
+		return logDescribeTarget(s)
+
 	case levelStatements:
 		// item.name is the flattened statement text; parse out its main table and
 		// describe it by name (resolved server-side, since we have no OID here).

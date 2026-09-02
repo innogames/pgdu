@@ -65,14 +65,14 @@ func TestAggregate(t *testing.T) {
 		e := mk(i, SevLog, CatSlowQuery, "duration")
 		e.DurationMs = d
 		e.SQL = []byte("SELECT " + strings.Repeat("x", i)) // distinct texts …
-		e.SQL = []byte("SELECT 1")                          // … folded to one key
+		e.SQL = []byte("SELECT 1")                         // … folded to one key
 		r.Entries = append(r.Entries, e)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		r.Entries = append(r.Entries, mk(i, SevError, CatError, `database "pgbouncer" does not exist`))
 	}
 	r.Entries = append(r.Entries, mk(7, SevError, CatError, `column "x" does not exist at character 3`))
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		e := mk(i, SevLog, CatCheckpoint, "checkpoint complete: wrote 1 buffers")
 		e.Checkpoint = &CheckpointFields{WriteSec: 1000 + float64(i)*500, TotalSec: 1001, Buffers: 10}
 		r.Entries = append(r.Entries, e)
@@ -104,8 +104,8 @@ func TestAggregate(t *testing.T) {
 	if ck == nil || ck.Checkpoint.Complete != 2 || ck.Checkpoint.SumWrite != 2500 {
 		t.Errorf("checkpoint group = %+v", ck)
 	}
-	if r.BySeverity[SevError] != 4 || r.ByCategory[CatSlowQuery] != 4 || r.SpamCount() != 6 {
-		t.Errorf("counts: sev=%v cat=%v spam=%d", r.BySeverity, r.ByCategory, r.SpamCount())
+	if r.BySeverity[SevError] != 4 || r.ByCategory[CatSlowQuery] != 4 || r.ByCategory[CatCheckpoint] != 2 {
+		t.Errorf("counts: sev=%v cat=%v", r.BySeverity, r.ByCategory)
 	}
 	if r.Hist.Bucket != 5*time.Minute || len(r.Hist.Counts) != 7*12+1 {
 		t.Errorf("hist = %v × %d for a 7h span", r.Hist.Bucket, len(r.Hist.Counts))

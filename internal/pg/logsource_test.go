@@ -15,7 +15,7 @@ import (
 // survive a tail window.
 func numberedLog(n int) []byte {
 	var b bytes.Buffer
-	for i := 0; i < n; i++ {
+	for i := range n {
 		fmt.Fprintf(&b, "2026-09-02 00:00:%02d UTC [%d-1] u@h LOG:  line %06d %s\n", i%60, i+1, i, bytes.Repeat([]byte("x"), 40))
 	}
 	return b.Bytes()
@@ -94,12 +94,12 @@ func TestGzipTailWindow(t *testing.T) {
 func TestTailKeeperBoundaries(t *testing.T) {
 	for _, total := range []int{0, 5, 10, 15, 20, 21, 99} {
 		tk := &tailKeeper{n: 10}
-		for i := 0; i < total; i++ {
+		for i := range total {
 			_, _ = tk.Write([]byte{byte('a' + i%26)})
 		}
 		got := tk.Bytes()
 		want := make([]byte, 0, total)
-		for i := 0; i < total; i++ {
+		for i := range total {
 			want = append(want, byte('a'+i%26))
 		}
 		if len(want) > 10 {
@@ -189,5 +189,43 @@ func TestRotationOrdering(t *testing.T) {
 	}
 	if !isRotatedName("x.log.3.gz") || isRotatedName("x.log") || rotationIndex("x.log.10.gz") != 10 {
 		t.Error("rotation name helpers")
+	}
+}
+
+func TestEstimateLines(t *testing.T) {
+	dir := t.TempDir()
+	data := numberedLog(5000)
+	plain := filepath.Join(dir, "a.log")
+	if err := os.WriteFile(plain, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(plain)
+	if n := EstimateLines(plain, fi.Size()); n < 4500 || n > 5500 {
+		t.Errorf("plain estimate = %d, want ≈5000", n)
+	}
+	var z bytes.Buffer
+	zw := gzip.NewWriter(&z)
+	if _, err := zw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	gzPath := filepath.Join(dir, "a.log.1.gz")
+	if err := os.WriteFile(gzPath, z.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n := EstimateLines(gzPath, int64(z.Len())); n < 4500 || n > 5500 {
+		t.Errorf("gz estimate = %d, want ≈5000", n)
+	}
+	small := filepath.Join(dir, "small.log")
+	if err := os.WriteFile(small, []byte("a\nb\nc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n := EstimateLines(small, 5); n != 3 {
+		t.Errorf("small file = %d, want exact 3", n)
+	}
+	if n := EstimateLines(filepath.Join(dir, "missing.log"), 0); n != -1 {
+		t.Errorf("missing = %d", n)
 	}
 }

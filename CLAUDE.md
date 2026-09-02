@@ -145,8 +145,7 @@ empty prefs). The TUI seeds the per-table `*ColsVisible` maps from it in
   CONTEXT lines to their primary by pid (+ `%l` ordering), classifies each entry into one
   `LogCategory`, and `Aggregate` builds count-sorted `LogGroup`s (fingerprint =
   `normalizeMessage` for errors, `NormalizeSQL` — comments kept — for slow queries) plus
-  a per-severity histogram. Spam (`LogCategory.IsSpam`, hidden by `v`) is a *view* filter;
-  the report always holds everything. `RefreshLog` is incremental for seekable sources: it re-reads
+  a per-severity histogram. `RefreshLog` is incremental for seekable sources: it re-reads
   from the last entry's offset (`LogCursor`), re-feeds the retained `LogParser`, and falls
   back to a full load on inode change / shrink / gz. In the TUI the levelLogs screen owns
   `logReport`; group/entry children read it via `findLevel(levelLogs)` and are re-pointed

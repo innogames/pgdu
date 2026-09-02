@@ -211,14 +211,7 @@ func (k *keyMap) applyContext(s *screen) {
 	k.Execute.SetEnabled(stmtDetail)
 	// v is the verbose toggle on statement detail, the VACUUM trigger on parts,
 	// and the auxiliary-backend visibility toggle on the activity table.
-	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity || logs)
-	// The same physical key reads differently on the log analyzer: v shows/hides
-	// the spam categories.
-	if logs {
-		k.Verbose.SetHelp("v", "spam")
-	} else {
-		k.Verbose.SetHelp("v", "verbose")
-	}
+	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity)
 	k.DeleteSnapshot.SetEnabled(snapshots)
 	// Install is only actionable when the screen offers an installable extension
 	// (the prompt renders its own `i` hint); keep it out of the footer otherwise.
@@ -248,6 +241,7 @@ func (k *keyMap) applyContext(s *screen) {
 	logRow := s.level == levelLogGroup || s.level == levelLogEntry
 	k.LogJump.SetEnabled(logRow)
 	k.logJumpInFooter = logRow
+
 
 	// m opens the shared-memory map from the buffer-tables list; surface it in
 	// the footer there since nothing else advertises it.
@@ -286,7 +280,10 @@ func (k *keyMap) applyContext(s *screen) {
 	k.SortPrev.SetEnabled(!progress)
 	k.SortNext.SetEnabled(!progress)
 	k.ReverseSort.SetEnabled(!progress)
-	k.describeInFooter = progress
+	// … and on the log entry / group-rows levels, where d describes the main
+	// table of the statement behind the row — the only path from a slow query
+	// to its relation.
+	k.describeInFooter = progress || logRow
 
 	// W opens the wait-event profile over the activity table's sample stream.
 	k.WaitProfile.SetEnabled(activity)
@@ -303,7 +300,7 @@ func (k *keyMap) applyContext(s *screen) {
 func (k keyMap) ShortHelp() []key.Binding {
 	b := []key.Binding{k.Up, k.Down, k.Enter, k.Back, k.Filter, k.SortPrev, k.SortNext, k.ReverseSort, k.Refresh}
 	if k.logInFooter {
-		b = append(b, k.LogPane, k.Verbose, k.LogGroupMode, k.LogWindow, k.LogFiles)
+		b = append(b, k.LogPane, k.LogGroupMode, k.LogWindow, k.LogFiles)
 	}
 	if k.logJumpInFooter {
 		b = append(b, k.LogJump)

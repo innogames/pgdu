@@ -83,11 +83,11 @@ func logColumnRegistry() []logColDesc {
 		{id: logColDB, name: "db", kind: pg.DiagText,
 			desc: "database (%d) — only when the prefix carries it",
 			cell: func(e *pg.LogEntry, _ logCtx) pg.DiagCell { return text(e.DB) }},
-		{id: logColHost, name: "host", kind: pg.DiagText, defaultOn: true,
-			desc: "client host (%h / %r)",
+		{id: logColHost, name: "host", kind: pg.DiagText,
+			desc: "raw client address (%h / %r)",
 			cell: func(e *pg.LogEntry, _ logCtx) pg.DiagCell { return text(e.Host) }},
-		{id: logColHostname, name: "hostname", kind: pg.DiagText,
-			desc: "client host resolved via reverse DNS (falls back to the raw address; cached per session)",
+		{id: logColHostname, name: "hostname", kind: pg.DiagText, defaultOn: true,
+			desc: "client host resolved via reverse DNS (raw address until resolved; cached per session)",
 			cell: func(e *pg.LogEntry, ctx logCtx) pg.DiagCell {
 				h := string(e.Host)
 				if r, ok := ctx.hosts[h]; ok && r != "" {
@@ -102,21 +102,28 @@ func logColumnRegistry() []logColDesc {
 			desc: "SQLSTATE code (%e, csvlog/jsonlog)",
 			cell: func(e *pg.LogEntry, _ logCtx) pg.DiagCell { return text(e.SQLState) }},
 		{id: logColDuration, name: "dur", kind: pg.DiagDuration, defaultOn: true,
-			desc: "statement duration for slow-query lines; lock wait time for lock lines",
+			desc: "statement duration (slow queries), lock wait time (lock lines), total time of a completed checkpoint",
 			cell: func(e *pg.LogEntry, _ logCtx) pg.DiagCell {
 				switch {
 				case e.Category == pg.CatSlowQuery:
 					return pg.DiagCell{Display: fmtAge(e.DurationMs), Num: e.DurationMs, HasNum: true}
 				case e.LockWaitMs > 0:
 					return pg.DiagCell{Display: fmtAge(e.LockWaitMs), Num: e.LockWaitMs, HasNum: true}
+				case e.Checkpoint != nil && !e.Checkpoint.Starting && e.Checkpoint.TotalSec > 0:
+					ms := e.Checkpoint.TotalSec * 1000
+					return pg.DiagCell{Display: fmtAge(ms), Num: ms, HasNum: true}
 				}
 				return pg.DiagCell{}
 			}},
 		{id: logColMessage, name: "message", kind: pg.DiagText, defaultOn: true, mandatory: true,
-			desc: "first line of the message (slow queries: the statement text)",
+			desc: "first line of the message (slow queries: the statement text; ▤ = an auto_explain plan is attached)",
 			cell: func(e *pg.LogEntry, _ logCtx) pg.DiagCell {
 				if e.Category == pg.CatSlowQuery && len(e.SQL) > 0 {
-					return pg.DiagCell{Display: collapseWS(string(e.SQL), 300)}
+					msg := collapseWS(string(e.SQL), 300)
+					if len(e.Plan) > 0 {
+						msg = "▤ " + msg
+					}
+					return pg.DiagCell{Display: msg}
 				}
 				return pg.DiagCell{Display: e.FirstLine()}
 			}},
