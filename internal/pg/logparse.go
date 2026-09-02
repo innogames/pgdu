@@ -577,7 +577,7 @@ func splitAutoExplain(body []byte) (sql, plan []byte) {
 		}
 		line := rest[off:lineEnd]
 		if !first && (bytes.Contains(line, []byte("(cost=")) || bytes.Contains(line, []byte("(actual "))) {
-			return bytes.TrimSpace(rest[:off]), bytes.TrimRight(rest[off:], "\n\t ")
+			return bytes.TrimSpace(rest[:off]), dedentBytes(bytes.TrimRight(rest[off:], "\n\t "))
 		}
 		first = false
 		if end < 0 {
@@ -586,6 +586,40 @@ func splitAutoExplain(body []byte) (sql, plan []byte) {
 		off = lineEnd + 1
 	}
 	return bytes.TrimSpace(rest), nil
+}
+
+// dedentBytes strips the indentation the log continuation adds to every plan
+// line (the smallest common run of leading blanks), keeping the tree's own
+// relative indentation. It copies, so the result is independent of the window.
+func dedentBytes(b []byte) []byte {
+	lines := bytes.Split(b, []byte("\n"))
+	common := -1
+	for _, l := range lines {
+		if len(bytes.TrimSpace(l)) == 0 {
+			continue
+		}
+		n := 0
+		for n < len(l) && (l[n] == ' ' || l[n] == '\t') {
+			n++
+		}
+		if common < 0 || n < common {
+			common = n
+		}
+	}
+	if common <= 0 {
+		return b
+	}
+	out := make([]byte, 0, len(b))
+	for i, l := range lines {
+		if i > 0 {
+			out = append(out, '\n')
+		}
+		if len(l) >= common {
+			l = l[common:]
+		}
+		out = append(out, l...)
+	}
+	return out
 }
 
 // MergePlans folds each auto_explain "plan:" entry into the "statement:" entry

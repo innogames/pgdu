@@ -50,7 +50,9 @@ func (s *memLogSource) Cursor(context.Context) *pg.LogCursor              { retu
 
 func newLogTestModel(t *testing.T) (*Model, *screen) {
 	t.Helper()
-	m := &Model{width: 160, height: 40}
+	// Wide enough that the rows under test (title + stats suffix, DETAIL tail)
+	// are not clipped by truncateToWidth.
+	m := &Model{width: 320, height: 40}
 	// Built by hand rather than via logScreen, which needs a live client.
 	s := &screen{
 		level: levelLogs, title: "log", tool: toolLogs,
