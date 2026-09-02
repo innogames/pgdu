@@ -15,8 +15,8 @@ func TestWraparoundSeverity(t *testing.T) {
 		want    Severity
 	}{
 		{"quiet", 10_000_000, 200_000_000, SevOK},
-		{"halfway", 110_000_000, 200_000_000, SevWarn},
-		{"near freeze", 170_000_000, 200_000_000, SevCrit},
+		{"halfway", 170_000_000, 200_000_000, SevWarn},
+		{"near freeze", 196_000_000, 200_000_000, SevCrit},
 		{"unknown max", 170_000_000, 0, SevOK},
 	}
 	for _, tt := range tests {
@@ -29,7 +29,7 @@ func TestWraparoundSeverity(t *testing.T) {
 // The wraparound drill-down is per-database, so the line must name the
 // database holding the oldest datfrozenxid and carry it for the drill.
 func TestWraparoundGradeNamesDatabase(t *testing.T) {
-	info := &MaintenanceInfo{XidAge: 190_000_000, FreezeMaxAge: 200_000_000, XidAgeDB: "un1_game"}
+	info := &MaintenanceInfo{XidAge: 196_000_000, FreezeMaxAge: 200_000_000, XidAgeDB: "un1_game"}
 	sev, detail, err := wraparoundGrade(info)
 	if err != nil || sev != SevCrit {
 		t.Fatalf("grade = %v, %v, want SevCrit", sev, err)
