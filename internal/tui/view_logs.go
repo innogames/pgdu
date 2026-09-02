@@ -175,9 +175,6 @@ func (m *Model) renderLogHeader(s *screen) string {
 	} else {
 		badges = append(badges, mu(fmt.Sprintf("spam hidden (%s)", fmtCount(r.SpamCount()))))
 	}
-	if logs.logMinSev > 0 {
-		badges = append(badges, styleBadge.Render("≥ "+logs.logMinSev.String()))
-	}
 	if s.level == levelLogs {
 		if logs.logView == logViewTimeline {
 			badges = append(badges, styleBadge.Render("timeline"))
@@ -301,9 +298,6 @@ func (m *Model) renderLogGroups(s *screen, height int) string {
 		msg := "(nothing to show"
 		if !s.logShowSpam && s.logReport.SpamCount() > 0 {
 			msg += " — press v to reveal " + fmtCount(s.logReport.SpamCount()) + " spam entries"
-		}
-		if s.logMinSev > 0 {
-			msg += " — press f to lower the severity floor"
 		}
 		if s.filter != "" {
 			msg += " — esc clears the filter"
@@ -718,8 +712,8 @@ func (m *Model) renderLogsInfo(height int) string {
 		{"↵", "groups pane: open the group's entries · entry rows: the full record (message, DETAIL, STATEMENT highlighted)"},
 		{"tab", "switch between the aggregated groups and the chronological timeline (sortable, C picks columns)"},
 		{"v", "hide / show the spam categories (slow queries, checkpoints, autovacuum, connections)"},
-		{"f", "severity floor: all → ≥ WARNING → ≥ ERROR"},
-		{"m", "section mode: by category → by severity → flat"},
+		{"m", "section mode: by category ⇄ flat"},
+		{"j", "on an entry or a group's rows: jump to that line in the timeline"},
 		{"←/→ r", "sort groups by count / last seen / title (timeline: by column)"},
 		{"/", "substring search over titles (timeline: over every visible cell)"},
 		{"w", "widen the tail window: 32 → 64 → 128 → 256 → 512 MiB → whole file"},

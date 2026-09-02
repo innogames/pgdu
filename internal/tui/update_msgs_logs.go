@@ -26,15 +26,11 @@ type logGroupBy int
 
 const (
 	logGroupByCategory logGroupBy = iota
-	logGroupBySeverity
 	logGroupByNone
 )
 
 func (g logGroupBy) label() string {
-	switch g {
-	case logGroupBySeverity:
-		return "by severity"
-	case logGroupByNone:
+	if g == logGroupByNone {
 		return "flat"
 	}
 	return "by category"
@@ -50,7 +46,7 @@ type logSection struct {
 
 // logScreen builds the levelLogs screen for one source, with the default view
 // state: grouped by category, every category shown (v hides the spam ones),
-// no severity floor, default window.
+// default window.
 func (m *Model) logScreen(src pg.LogSource) *screen {
 	return &screen{
 		level: levelLogs, title: "log", tool: toolLogs, db: m.client.DefaultDB(),
@@ -225,20 +221,14 @@ func (m *Model) skipLogHeader(s *screen, dir int) {
 	}
 }
 
-// logGroupVisible applies the view filters (spam, severity floor) to a group.
+// logGroupVisible applies the spam filter to a group.
 func (s *screen) logGroupVisible(g *pg.LogGroup) bool {
-	if !s.logShowSpam && g.Category.IsSpam() {
-		return false
-	}
-	return g.Severity >= s.logMinSev
+	return s.logShowSpam || !g.Category.IsSpam()
 }
 
 // logEntryVisible is the per-entry counterpart for the timeline.
 func (s *screen) logEntryVisible(e *pg.LogEntry) bool {
-	if !s.logShowSpam && e.Category.IsSpam() {
-		return false
-	}
-	return e.Severity >= s.logMinSev
+	return s.logShowSpam || !e.Category.IsSpam()
 }
 
 // rebuildLogItems regenerates the levelLogs rows for the current pane and
@@ -266,7 +256,8 @@ func (m *Model) rebuildLogItems(s *screen) {
 
 // buildLogGroupItems orders the visible groups into sections. Within a
 // section rows follow s.sort (count / last seen / title); sections follow
-// pg.LogCategories (signal first, spam last) or severity high→low.
+// pg.LogCategories (signal first, spam last), or there is a single unnamed
+// one in flat mode.
 func (m *Model) buildLogGroupItems(s *screen) []item {
 	r := s.logReport
 	type section struct {
@@ -293,8 +284,6 @@ func (m *Model) buildLogGroupItems(s *screen) []item {
 			continue
 		}
 		switch s.logGroupBy {
-		case logGroupBySeverity:
-			add(int(pg.SevPanic-g.Severity), g.Severity.String(), g)
 		case logGroupByNone:
 			add(0, "", g)
 		default:

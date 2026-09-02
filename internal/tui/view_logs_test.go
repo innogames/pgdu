@@ -108,35 +108,13 @@ func TestLogGroupItemsSectionsAndSpam(t *testing.T) {
 		t.Errorf("sections with spam = %v", sections)
 	}
 
-	// Severity floor ≥ ERROR hides the warning.
-	s.logMinSev = pg.SevError
-	m.rebuildLogItems(s)
-	for _, it := range s.items {
-		if g, ok := it.data.(*pg.LogGroup); ok && g.Severity < pg.SevError {
-			t.Errorf("group %q below the floor shown", g.Title)
-		}
-	}
-
 	// Flat mode: no headers at all.
-	s.logMinSev = 0
 	s.logGroupBy = logGroupByNone
 	m.rebuildLogItems(s)
 	for _, it := range s.items {
 		if _, ok := it.data.(logSection); ok {
 			t.Error("flat mode emitted a section header")
 		}
-	}
-	// Severity mode: FATAL before ERROR before WARNING before LOG.
-	s.logGroupBy = logGroupBySeverity
-	m.rebuildLogItems(s)
-	sections = sections[:0]
-	for _, it := range s.items {
-		if v, ok := it.data.(logSection); ok {
-			sections = append(sections, v.title)
-		}
-	}
-	if strings.Join(sections, ",") != "FATAL,ERROR,WARNING,LOG" {
-		t.Errorf("severity sections = %v", sections)
 	}
 }
 
@@ -302,5 +280,31 @@ func TestLogHelpers(t *testing.T) {
 	}
 	if got := collapseWS("a  b\n\tc", 100); got != "a b c" {
 		t.Errorf("collapseWS = %q", got)
+	}
+}
+
+func TestJumpToLogEntry(t *testing.T) {
+	m, s := newLogTestModel(t)
+	var target *pg.LogEntry
+	for i := range s.logReport.Entries {
+		if s.logReport.Entries[i].Category == pg.CatSlowQuery {
+			target = &s.logReport.Entries[i]
+		}
+	}
+	gs := m.logGroupScreen(s, &s.logReport.Groups[0])
+	es := m.logEntryScreen(gs, target)
+	m.stack = append(m.stack, gs, es)
+	s.filter = "pgbouncer"
+
+	m.jumpToLogEntry(s, target)
+	if m.top() != s || s.logView != logViewTimeline {
+		t.Fatalf("top=%v view=%v", m.top().level, s.logView)
+	}
+	if !s.logShowSpam || s.filter != "" {
+		t.Errorf("filters not lifted: spam=%v filter=%q", s.logShowSpam, s.filter)
+	}
+	vis := s.visibleIndexes()
+	if got := s.logEntryOf(s.items[vis[s.cursor]]); got == nil || got.Off != target.Off {
+		t.Errorf("cursor not on the target entry: %+v", got)
 	}
 }

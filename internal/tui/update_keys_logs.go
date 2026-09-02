@@ -46,6 +46,22 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 		return m.loadCurrent(), true
 	}
 
+	if key.Matches(msg, m.keys.LogJump) && logs != nil {
+		var e *pg.LogEntry
+		switch s.level {
+		case levelLogEntry:
+			e = s.logEntry
+		case levelLogGroup:
+			if vis := s.visibleIndexes(); s.cursor >= 0 && s.cursor < len(vis) {
+				e = s.logEntryOf(s.items[vis[s.cursor]])
+			}
+		}
+		if e == nil {
+			return nil, true
+		}
+		return m.jumpToLogEntry(logs, e), true
+	}
+
 	if s.level != levelLogs {
 		return nil, false
 	}
@@ -57,22 +73,12 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 		m.skipLogHeader(s, 1)
 		return nil, true
 
-	case key.Matches(msg, m.keys.ActivityFilter):
-		// Severity floor: all → ≥ WARNING → ≥ ERROR → all.
-		switch s.logMinSev {
-		case pg.SevWarning:
-			s.logMinSev = pg.SevError
-		case pg.SevError:
-			s.logMinSev = 0
-		default:
-			s.logMinSev = pg.SevWarning
-		}
-		m.rebuildLogItems(s)
-		m.skipLogHeader(s, 1)
-		return nil, true
-
 	case key.Matches(msg, m.keys.LogGroupMode):
-		s.logGroupBy = (s.logGroupBy + 1) % 3
+		if s.logGroupBy == logGroupByCategory {
+			s.logGroupBy = logGroupByNone
+		} else {
+			s.logGroupBy = logGroupByCategory
+		}
 		if s.logView == logViewGroups {
 			m.rebuildLogItems(s)
 			m.skipLogHeader(s, 1)
@@ -139,4 +145,31 @@ func (m *Model) handleLogColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 			m.saveColPrefs(colPrefsLogs, colVisToStrings(m.logColsVisible))
 		},
 	})
+}
+
+// jumpToLogEntry pops back to the levelLogs screen, switches it to the
+// timeline and puts the cursor on e, so the user sees what happened around
+// that line. The spam filter and any / filter are lifted when they would hide
+// the target row.
+func (m *Model) jumpToLogEntry(logs *screen, e *pg.LogEntry) tea.Cmd {
+	for i := len(m.stack) - 1; i >= 0; i-- {
+		if m.stack[i] == logs {
+			m.stack = m.stack[:i+1]
+			break
+		}
+	}
+	if !logs.logShowSpam && e.Category.IsSpam() {
+		logs.logShowSpam = true
+	}
+	logs.filter = ""
+	logs.filterFocused = false
+	logs.logView = logViewTimeline
+	m.rebuildLogItems(logs)
+	for vi, idx := range logs.visibleIndexes() {
+		if t := logs.logEntryOf(logs.items[idx]); t != nil && t.Off == e.Off {
+			logs.cursor = vi
+			break
+		}
+	}
+	return nil
 }

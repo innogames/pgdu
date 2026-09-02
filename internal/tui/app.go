@@ -602,12 +602,11 @@ type screen struct {
 	logReport *pg.LogReport
 	logErr    error
 	// View state, all client-side over logReport: which pane (groups or
-	// timeline), how groups are sectioned, whether spam categories show, the
-	// severity floor, and the requested tail window (0 = whole file).
+	// timeline), whether groups are sectioned by category, whether spam
+	// categories show, and the requested tail window (0 = whole file).
 	logView     logView
 	logGroupBy  logGroupBy
 	logShowSpam bool
-	logMinSev   pg.LogSeverity
 	logWindow   int64
 	// logGroup/logEntry are what levelLogGroup and levelLogEntry show; logCols
 	// is the projected timeline column set (parallel to diagCols).
