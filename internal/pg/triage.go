@@ -265,7 +265,7 @@ func wraparoundGrade(info *MaintenanceInfo) (Severity, string, error) {
 	}
 	sev := wraparoundSeverity(info.XidAge, info.FreezeMaxAge)
 	pct := 100 * float64(info.XidAge) / float64(info.FreezeMaxAge)
-	return sev, fmt.Sprintf("oldest datfrozenxid at %.0f%% of autovacuum_freeze_max_age", pct), nil
+	return sev, fmt.Sprintf("oldest datfrozenxid %.0f%% of the way to a forced anti-wraparound autovacuum", pct), nil
 }
 
 // archiverGrade flags a stalled WAL archiver: pg_wal fills up silently when

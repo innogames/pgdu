@@ -466,24 +466,10 @@ var Diagnostics = []Diagnostic{
 			database.`,
 	},
 	// ── vacuum ────────────────────────────────────────────────────────────
-	{
-		Key:         "autovacuum_progress",
-		Title:       "Autovacuum progress",
-		Category:    "vacuum",
-		Description: "currently running autovacuum workers with scan and vacuum progress",
-		SQL:         sqlDiagAutovacuumProgress,
-		Bar:         "scanned_pct",
-		Kinds:       map[string]DiagColumnKind{"dead_pct": DiagPercentBad},
-		Help: `Every vacuum currently running (autovacuum and manual), with phase
-			and progress. scanned_pct tracks the heap scan; vacuumed_pct lags
-			behind while index vacuuming runs in between. dead_pct is the
-			dead-item store filling up — at 100% another index-vacuum round
-			starts (index_vacuum_count counts the rounds; more than 1 means
-			raising autovacuum_work_mem would save whole index passes). waiting
-			names the event a stalled worker is blocked on. mode "wraparound" is
-			the aggressive anti-wraparound run: let it finish — cancelling it
-			only defers a forced rerun.`,
-	},
+	// "Autovacuum progress" was dropped: the running autovacuum workers themselves
+	// are in the Activity tool (they are ordinary pg_stat_activity backends), and
+	// their per-phase progress is covered by "Running vacuums" (heap scan detail)
+	// and "Running operations (progress)" (every pg_stat_progress_* view).
 	{
 		Key:         "progress_all",
 		Title:       "Running operations (progress)",

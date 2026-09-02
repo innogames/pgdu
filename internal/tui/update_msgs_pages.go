@@ -68,7 +68,7 @@ func (m *Model) applyAMPages(s *screen, err error, totalPages int32, keyCols []p
 	s.pageBufs = bufs
 	pageTempHint(s, bufsErr)
 	s.items = s.items[:0]
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s.items = append(s.items, toItem(i))
 	}
 	m.applySort(s)
@@ -82,7 +82,7 @@ func (m *Model) applyAMItems(s *screen, err error, n int, toItem func(i int) ite
 		return cmd
 	}
 	s.items = s.items[:0]
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s.items = append(s.items, toItem(i))
 	}
 	m.applySort(s)

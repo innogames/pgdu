@@ -540,7 +540,7 @@ func scanHeapTuple(extra heapTupleExtra) func(pgx.CollectableRow) (HeapTuple, er
 // primaryKeyColumns returns the relation's primary-key column names in key
 // order, or nil when it has no primary key.
 func primaryKeyColumns(ctx context.Context, pool *pgxpool.Pool, regclass string) ([]string, error) {
-	return collect(ctx, pool, fmt.Sprintf("primary key columns of %s", regclass), sqlPrimaryKeyColumns, []any{regclass},
+	return collect(ctx, pool, "primary key columns of "+regclass, sqlPrimaryKeyColumns, []any{regclass},
 		func(row pgx.CollectableRow) (string, error) {
 			var name string
 			err := row.Scan(&name)
