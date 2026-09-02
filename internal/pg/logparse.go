@@ -444,14 +444,13 @@ func (p *LogParser) feedJSON(buf []byte, base int64) {
 
 // DetectLogFormat sniffs the first complete line of a window.
 func DetectLogFormat(buf []byte) LogFormat {
-	for _, ln := range sampleLines(buf, 5) {
-		if ln[0] == '{' {
+	if lines := sampleLines(buf, 1); len(lines) > 0 {
+		switch ln := lines[0]; {
+		case ln[0] == '{':
 			return LogFormatJSON
-		}
-		if csvHeadRe.Match(ln) {
+		case csvHeadRe.Match(ln):
 			return LogFormatCSV
 		}
-		return LogFormatStderr
 	}
 	return LogFormatStderr
 }

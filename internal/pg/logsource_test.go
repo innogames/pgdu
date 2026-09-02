@@ -54,8 +54,12 @@ func TestGzipTailWindow(t *testing.T) {
 	data := numberedLog(30000) // ~3 MiB
 	var z bytes.Buffer
 	zw := gzip.NewWriter(&z)
-	zw.Write(data)
-	zw.Close()
+	if _, err := zw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, z.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +95,7 @@ func TestTailKeeperBoundaries(t *testing.T) {
 	for _, total := range []int{0, 5, 10, 15, 20, 21, 99} {
 		tk := &tailKeeper{n: 10}
 		for i := 0; i < total; i++ {
-			tk.Write([]byte{byte('a' + i%26)})
+			_, _ = tk.Write([]byte{byte('a' + i%26)})
 		}
 		got := tk.Bytes()
 		want := make([]byte, 0, total)
@@ -131,10 +135,17 @@ func TestRefreshLogIncremental(t *testing.T) {
 	}
 
 	// Append a DETAIL to the last entry plus a new one.
-	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-	f.WriteString("2026-09-02 00:00:02 UTC [2-2] u@h DETAIL:  more\n" +
-		"2026-09-02 00:00:03 UTC [3-1] u@h WARNING:  careful\n")
-	f.Close()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("2026-09-02 00:00:02 UTC [2-2] u@h DETAIL:  more\n" +
+		"2026-09-02 00:00:03 UTC [3-1] u@h WARNING:  careful\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 	r2, err := RefreshLog(t.Context(), r, src, time.UTC, AggOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -147,8 +158,12 @@ func TestRefreshLogIncremental(t *testing.T) {
 	}
 
 	// Rotation: a new, shorter file under the same name → full reload.
-	os.Rename(path, path+".1")
-	os.WriteFile(path, []byte("2026-09-02 01:00:00 UTC [9-1] u@h LOG:  fresh\n"), 0o644)
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("2026-09-02 01:00:00 UTC [9-1] u@h LOG:  fresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	r3, err := RefreshLog(t.Context(), r2, src, time.UTC, AggOptions{})
 	if err != nil {
 		t.Fatal(err)

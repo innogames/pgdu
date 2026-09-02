@@ -438,7 +438,7 @@ func logSourceLabel(info pg.LogSourceInfo) string {
 func logWindowLabel(w pg.LogWindow) string {
 	switch {
 	case w.FileSize < 0:
-		return fmt.Sprintf("last %s", humanize.Bytes(w.Bytes))
+		return "last " + humanize.Bytes(w.Bytes)
 	case !w.Truncated:
 		return fmt.Sprintf("whole file (%s)", humanize.Bytes(w.FileSize))
 	default:

@@ -58,7 +58,7 @@ func (s *localFileSource) ReadTail(_ context.Context, n int64) ([]byte, LogWindo
 	if err != nil {
 		return nil, LogWindow{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, LogWindow{}, err
@@ -93,7 +93,7 @@ func (s *localFileSource) ReadFrom(_ context.Context, off int64) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := f.Seek(off, io.SeekStart); err != nil {
 		return nil, err
 	}
@@ -121,12 +121,12 @@ func (s *gzFileSource) ReadTail(ctx context.Context, n int64) ([]byte, LogWindow
 	if err != nil {
 		return nil, LogWindow{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	zr, err := gzip.NewReader(f)
 	if err != nil {
 		return nil, LogWindow{}, fmt.Errorf("gunzip %s: %w", s.info.Path, err)
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 	return tailOfStream(ctx, zr, n)
 }
 

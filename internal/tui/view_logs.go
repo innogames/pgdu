@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,7 +84,7 @@ func fmtCount(n int) string {
 	case n >= 1_000:
 		return fmt.Sprintf("%.1fk", float64(n)/1e3)
 	}
-	return fmt.Sprintf("%d", n)
+	return strconv.Itoa(n)
 }
 
 // fmtSpan renders a first→last pair: clock times inside one day, dates beyond.
@@ -542,7 +543,7 @@ func (m *Model) renderLogEntry(s *screen, height int) string {
 	field("time", ts)
 	field("severity", logSevStyle(e.Severity).Render(e.Severity.String())+mu("  ·  "+e.Category.Label()))
 	if e.PID != 0 {
-		pid := fmt.Sprintf("%d", e.PID)
+		pid := strconv.Itoa(int(e.PID))
 		if e.Line > 0 {
 			pid += fmt.Sprintf("  (session line %d)", e.Line)
 		}
@@ -690,7 +691,10 @@ func (m *Model) renderLogsInfo(height int) string {
 	b.WriteString("  " + mu("(pg_ls_logdir needs pg_monitor; reading any server file needs pg_read_server_files or superuser).") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" categories ") + "\n")
-	cats := []struct{ c pg.LogCategory; d string }{
+	cats := []struct {
+		c pg.LogCategory
+		d string
+	}{
 		{pg.CatError, "ERROR / FATAL / PANIC, grouped by normalized message (identifiers kept, literals and numbers folded)"},
 		{pg.CatWarning, "WARNING lines"},
 		{pg.CatLock, "lock waits (log_lock_waits) and deadlocks"},
@@ -739,7 +743,7 @@ func sortedAutovacTables(av map[string]int) []string {
 		k string
 		v int
 	}
-	var kvs []kv
+	kvs := make([]kv, 0, len(av))
 	for k, v := range av {
 		kvs = append(kvs, kv{k, v})
 	}
