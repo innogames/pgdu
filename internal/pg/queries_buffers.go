@@ -102,6 +102,14 @@ WHERE  relfilenode = pg_relation_filenode($1::oid::regclass)
 // so system relations a user owns aren't double-counted oddly, though for
 // user schemas the join via relfilenode usually filters those out.
 //
+// The filenode set is computed first and pg_buffercache is filtered by it
+// BEFORE the GROUP BY: pg_buffercache_pages() always walks (and materialises)
+// the whole pool — that part is inherent and, on a large shared_buffers, spills
+// a tuplestore to a temp file — but aggregating every buffer by relfilenode
+// only to join a handful of them away afterwards doubled the CPU work for the
+// single-table variant. Filtering first keeps the aggregate to the rows that
+// actually belong to the selected tables.
+//
 // sqlBufferStatsTmpl is the shared body of the two variants below, which
 // differ only in how rows are picked: by schema (needs the extra pg_namespace
 // join in the filenodes arms, %[1]s, and an nspname predicate) or by a single
@@ -109,16 +117,7 @@ WHERE  relfilenode = pg_relation_filenode($1::oid::regclass)
 // (pointless for the single-row variant). The fragments are the fixed strings
 // in the var block below — nothing user-supplied is ever spliced in.
 const sqlBufferStatsTmpl = `
-WITH bc AS (
-  SELECT relfilenode,
-         COUNT(*)                        AS bufs,
-         COUNT(*) FILTER (WHERE isdirty)  AS dirty_bufs,
-         SUM(usagecount)::bigint          AS usage_sum
-  FROM   pg_buffercache
-  WHERE  reldatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
-  GROUP  BY relfilenode
-),
-filenodes AS (
+WITH filenodes AS (
   SELECT c.oid AS tab_oid, pg_relation_filenode(c.oid) AS fn
   FROM   pg_class c%[1]s
   WHERE  %[2]s AND c.relkind IN ('r','m','p')
@@ -131,6 +130,16 @@ filenodes AS (
   FROM   pg_class c%[1]s
   JOIN   pg_index i ON i.indrelid = c.oid
   WHERE  %[2]s AND c.relkind IN ('r','m','p')
+),
+bc AS (
+  SELECT relfilenode,
+         COUNT(*)                        AS bufs,
+         COUNT(*) FILTER (WHERE isdirty)  AS dirty_bufs,
+         SUM(usagecount)::bigint          AS usage_sum
+  FROM   pg_buffercache
+  WHERE  relfilenode IN (SELECT fn FROM filenodes WHERE fn IS NOT NULL)
+    AND  reldatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
+  GROUP  BY relfilenode
 ),
 buffered AS (
   SELECT f.tab_oid,

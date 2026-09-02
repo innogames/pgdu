@@ -611,7 +611,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelDescribe {
 			s.descDetail = !s.descDetail
 			if s.descDetail && s.describe != nil && s.describe.Kind == pg.DescribeTable &&
-				s.describe.OID != 0 && s.descBuf == nil && s.descBufErr == nil && s.extPrompt == nil {
+				s.describe.OID != 0 && s.descBuf == nil && s.descBufErr == nil && s.extPrompt == nil &&
+				!s.descBufLoading {
+				s.descBufLoading = true
 				return m, m.loadDescribeBuffersCmd(s.db, s.describe.OID)
 			}
 			break

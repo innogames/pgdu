@@ -374,8 +374,12 @@ type screen struct {
 	// shared-buffers section, loaded asynchronously and independently of
 	// describe (nil until loaded; descBufErr non-nil on a non-extension error).
 	// A missing pg_buffercache is carried by extPrompt instead.
-	descBuf    *pg.TableBufferStat
-	descBufErr error
+	// descBufLoading is set while a load is in flight so `d` toggles and
+	// refreshes don't stack concurrent full-pool scans (each one is a
+	// multi-second pg_buffercache walk on a big shared_buffers).
+	descBuf        *pg.TableBufferStat
+	descBufErr     error
+	descBufLoading bool
 
 	// WAL-inspector state. walSummary is the header snapshot rendered above
 	// the rmgr list on levelWAL (nil until loaded; walSummaryErr non-nil when
