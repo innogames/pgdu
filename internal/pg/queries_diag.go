@@ -936,41 +936,95 @@ WHERE datname IS NOT NULL
 ORDER BY xact_commit + xact_rollback DESC
 `
 
-// sqlDiagSequences reports how much of each sequence's range has been consumed,
-// restricted to sequences already past 30% so the list surfaces only the ones
-// worth watching for exhaustion. last_value is null without SELECT/USAGE on the
-// sequence; those rows have an unknown consumed_pct and so fall below the filter
-// (NULL > 30 is not true) and are excluded along with the low-usage sequences.
+// sqlDiagSequences reports how close each sequence is to running out of values,
+// restricted to the ones already more than 30% through their range. last_value
+// is null without SELECT/USAGE on the sequence; those rows have an unknown
+// consumed_pct and so fall below the filter (NULL > 30 is not true) and are
+// excluded along with the low-usage sequences. Cycling sequences are excluded
+// outright — they wrap instead of failing, so they have no exhaustion risk to
+// report no matter how far along they are.
 //
-// owned_by_table resolves the table each sequence backs via pg_depend — the
-// auto/internal dependency SERIAL, GENERATED … AS IDENTITY and explicit OWNED BY
-// all create from the sequence to its owning column. A standalone sequence has
-// no such dependency and shows "—". The lookup is a LEFT JOIN LATERAL so those
-// unowned sequences still appear.
+// consumed_pct measures progress through the sequence's *own* range, from
+// start_value rather than from zero. A sequence deliberately parked high in the
+// type's range (say start_value 2000000000 on an int4 to reserve a band for
+// synthetic ids) is at 93% of max_value the moment it is created and stays there
+// forever; measuring from start_value reports what it has actually handed out.
+// remaining is the raw number of values left, which is the figure to act on —
+// pair it with how fast the sequence moves to decide whether the ceiling
+// matters. Both are computed in the sequence's direction of travel, so a
+// descending sequence counts down toward min_value; limit_value names whichever
+// bound it is heading for. The arithmetic is in numeric because the span of a
+// full-range int8 sequence overflows int8.
+//
+// used_by names the column the sequence feeds, resolved through pg_depend in two
+// passes because ownership and use are separate things in the catalog:
+//
+//   - SERIAL, GENERATED … AS IDENTITY and an explicit OWNED BY record an
+//     auto/internal dependency from the sequence to the owning column. That is
+//     the authoritative answer, so it is preferred.
+//   - A sequence created standalone and wired up by hand
+//     (DEFAULT nextval('…')) has no such dependency — only a normal dependency
+//     from the column's pg_attrdef entry to the sequence, pointing the other
+//     way. Without this second pass such a sequence reads as unowned even
+//     though inserts are consuming it, which is exactly the case worth
+//     alerting on. Several columns may reference one sequence, so they are
+//     aggregated.
+//
+// Both are best-effort: a sequence consumed only from application code, a
+// function body or a trigger leaves no catalog trace at all and still shows
+// "—". The lookup is a LEFT JOIN LATERAL so those sequences stay in the list.
 const sqlDiagSequences = `
 SELECT
     s.schemaname AS schema,
     s.sequencename AS sequence,
-    dep.table_name AS owned_by_table,
+    dep.used_by,
     s.last_value,
-    s.max_value,
-    round(100.0 * s.last_value / NULLIF(s.max_value, 0), 2) AS consumed_pct
+    CASE WHEN s.increment_by > 0 THEN s.max_value ELSE s.min_value END AS limit_value,
+    u.remaining,
+    round(100.0 * u.consumed / NULLIF(u.span, 0), 2) AS consumed_pct
 FROM pg_sequences s
+CROSS JOIN LATERAL (
+    SELECT
+        CASE WHEN s.increment_by > 0
+             THEN s.last_value::numeric - s.start_value
+             ELSE s.start_value::numeric - s.last_value END AS consumed,
+        CASE WHEN s.increment_by > 0
+             THEN s.max_value::numeric - s.start_value
+             ELSE s.start_value::numeric - s.min_value END AS span,
+        CASE WHEN s.increment_by > 0
+             THEN s.max_value::numeric - s.last_value
+             ELSE s.last_value::numeric - s.min_value END AS remaining
+) u
 LEFT JOIN LATERAL (
-    SELECT refc.relname AS table_name
-    FROM pg_class seqc
-    JOIN pg_namespace seqn ON seqn.oid = seqc.relnamespace
-    JOIN pg_depend d ON d.objid = seqc.oid
-        AND d.classid = 'pg_class'::regclass
-        AND d.refclassid = 'pg_class'::regclass
-        AND d.deptype IN ('a', 'i')
-    JOIN pg_class refc ON refc.oid = d.refobjid
-    WHERE seqc.relkind = 'S'
-      AND seqc.relname = s.sequencename
-      AND seqn.nspname = s.schemaname
-    LIMIT 1
+    SELECT coalesce(owned.col, dflt.cols) AS used_by
+    FROM (
+        SELECT to_regclass(quote_ident(s.schemaname) || '.' || quote_ident(s.sequencename)) AS oid
+    ) sq
+    LEFT JOIN LATERAL (
+        SELECT refc.relname || '.' || a.attname AS col
+        FROM pg_depend d
+        JOIN pg_class refc ON refc.oid = d.refobjid
+        JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+        WHERE d.classid = 'pg_class'::regclass
+          AND d.objid = sq.oid
+          AND d.refclassid = 'pg_class'::regclass
+          AND d.deptype IN ('a', 'i')
+        LIMIT 1
+    ) owned ON true
+    LEFT JOIN LATERAL (
+        SELECT string_agg(DISTINCT c.relname || '.' || a.attname, ', ') AS cols
+        FROM pg_depend d
+        JOIN pg_attrdef ad ON ad.oid = d.objid
+        JOIN pg_class c ON c.oid = ad.adrelid
+        JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+        WHERE d.classid = 'pg_attrdef'::regclass
+          AND d.refclassid = 'pg_class'::regclass
+          AND d.refobjid = sq.oid
+          AND d.deptype = 'n'
+    ) dflt ON true
 ) dep ON true
-WHERE 100.0 * s.last_value / NULLIF(s.max_value, 0) > 30
+WHERE NOT s.cycle
+  AND 100.0 * u.consumed / NULLIF(u.span, 0) > 30
 ORDER BY consumed_pct DESC NULLS LAST
 `
 

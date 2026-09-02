@@ -737,17 +737,35 @@ var Diagnostics = []Diagnostic{
 		PerDB:       true,
 		Title:       "Sequence usage",
 		Category:    "server",
-		Description: "sequences more than 30% through their range, with the table each backs (last_value needs SELECT/USAGE)",
+		Description: "sequences more than 30% through their own range, with the column each feeds (last_value needs SELECT/USAGE)",
 		SQL:         sqlDiagSequences,
 		Bar:         "consumed_pct",
-		Kinds:       map[string]DiagColumnKind{"consumed_pct": DiagPercentBad},
-		Help: `Sequences past 30% of their range, with the table each one backs
-			(owned_by_table). consumed_pct reaching 100 means nextval() starts
+		Kinds: map[string]DiagColumnKind{
+			"consumed_pct": DiagPercentBad,
+			"remaining":    DiagCount,
+		},
+		Help: `Sequences past 30% of their range, with the table.column each one
+			feeds (used_by). consumed_pct reaching 100 means nextval() starts
 			failing inserts on that table. The usual culprit is an int4 serial
 			key: migrate the column to bigint (a table rewrite — plan the
-			maintenance window well before the ceiling). Sequences whose
-			last_value the current role can't read (no SELECT/USAGE) are absent,
-			so an empty list only vouches for the readable ones.`,
+			maintenance window well before the ceiling).
+
+			consumed_pct is measured from the sequence's start_value, not from
+			zero, so a sequence deliberately parked high in its type's range
+			(reserving a band for synthetic ids) is not reported as nearly
+			exhausted on the day it is created. remaining is the raw count of
+			values left before limit_value; weigh it against how fast the
+			sequence actually moves. Cycling sequences wrap rather than fail and
+			are left out entirely.
+
+			used_by prefers the owning column (SERIAL, IDENTITY, OWNED BY) and
+			otherwise lists every column whose DEFAULT calls nextval() on the
+			sequence; it stays "—" for a sequence driven straight from
+			application code, a function or a trigger, which the catalog does
+			not track — such a sequence is unowned but not necessarily unused.
+			Sequences whose last_value the current role can't read (no
+			SELECT/USAGE) are absent, so an empty list only vouches for the
+			readable ones.`,
 	},
 	{
 		Key:         "settings_show_pending",

@@ -80,8 +80,9 @@ type MaintenanceInfo struct {
 	TableStatsReset time.Time
 
 	// Autovacuum / wraparound
-	XidAge       int64 // max(age(datfrozenxid)) over pg_database
-	FreezeMaxAge int64 // autovacuum_freeze_max_age from settings
+	XidAge       int64  // max(age(datfrozenxid)) over pg_database
+	XidAgeDB     string // database holding that oldest datfrozenxid
+	FreezeMaxAge int64  // autovacuum_freeze_max_age from settings
 
 	// Checkpoint health (pg_stat_checkpointer, PG 15+)
 	CheckpointsTimed int64
