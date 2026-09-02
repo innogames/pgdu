@@ -306,6 +306,8 @@ type DescribeIndexDef struct {
 	IsUnique  bool
 	Clustered bool // pg_index.indisclustered: table is CLUSTERed on this index
 
+	Predicate string // pg_get_expr(indpred): partial-index WHERE, "" when total
+
 	// Size + usage counters for the detail mode (pg_stat/pg_statio_all_indexes).
 	SizeBytes int64
 	Scans     int64
@@ -314,6 +316,10 @@ type DescribeIndexDef struct {
 	TupFetch  int64
 	BlksHit   int64
 	BlksRead  int64
+
+	// EstEntries is the index's own pg_class.reltuples — for a partial index
+	// the estimated row count matching Predicate. -1 = never analyzed/vacuumed.
+	EstEntries int64
 }
 
 // HitPct is the index's buffer-cache hit percentage; ok is false when no
@@ -324,6 +330,24 @@ func (i DescribeIndexDef) HitPct() (float64, bool) {
 		return 0, false
 	}
 	return float64(i.BlksHit) / float64(total) * 100, true
+}
+
+// CoveredPct estimates the share of the table's rows a partial index holds,
+// from the index's and the table's reltuples. tableRows is the parent's
+// estimate. ok is false when either estimate is missing (-1: never vacuumed or
+// analyzed) or the table is estimated empty.
+func (i DescribeIndexDef) CoveredPct(tableRows int64) (float64, bool) {
+	return coveredPct(i.EstEntries, tableRows)
+}
+
+// coveredPct is the shared partial-index coverage ratio. Both inputs are
+// planner estimates that drift apart between maintenance runs, so the result is
+// clamped to 100 rather than reported as an impossible share.
+func coveredPct(idxRows, tableRows int64) (float64, bool) {
+	if idxRows < 0 || tableRows <= 0 {
+		return 0, false
+	}
+	return min(float64(idxRows)/float64(tableRows)*100, 100), true
 }
 
 // DescribeStats carries the per-table counters behind the describe panel's
@@ -434,6 +458,11 @@ type Description struct {
 	IdxTupFetch  int64
 	IdxBlksHit   int64
 	IdxBlksRead  int64
+
+	// Row estimates behind a partial index's covered share: the index's own
+	// reltuples and its parent table's. -1 = never analyzed/vacuumed.
+	IdxEstEntries int64
+	IdxParentRows int64
 }
 
 // IdxHitPct is the described index's buffer-cache hit percentage; ok is false
@@ -444,4 +473,10 @@ func (d *Description) IdxHitPct() (float64, bool) {
 		return 0, false
 	}
 	return float64(d.IdxBlksHit) / float64(total) * 100, true
+}
+
+// IdxCoveredPct estimates the share of the parent table's rows the described
+// partial index holds. Same estimates and caveats as DescribeIndexDef.CoveredPct.
+func (d *Description) IdxCoveredPct() (float64, bool) {
+	return coveredPct(d.IdxEstEntries, d.IdxParentRows)
 }

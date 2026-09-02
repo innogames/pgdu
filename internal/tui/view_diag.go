@@ -266,7 +266,7 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 				}
 				line := "    " + idx.Name + badges + "  " + mu(humanize.Bytes(idx.SizeBytes))
 				if s.descDetail {
-					line += mu(" · ") + describeIndexUsage(idx, d.LoadedAt)
+					line += mu(" · ") + describeIndexUsage(idx, d.EstRows, d.LoadedAt)
 				}
 				b.WriteString(line + "\n")
 				b.WriteString("      " + mu(truncLine(idx.Def)) + "\n")
@@ -311,7 +311,8 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 		if s.descDetail {
 			hint = " to hide details"
 		}
-		b.WriteString("\n    " + mu("press ") + styleBadge.Render("d") + mu(hint) + "\n")
+		b.WriteString("\n    " + mu("press ") + styleBadge.Render("d") + mu(hint) +
+			mu("  ·  ") + styleBadge.Render("?") + mu(" what the numbers mean") + "\n")
 
 	case pg.DescribeIndex:
 		b.WriteString("  " + styleSelected.Render(d.Title) + "\n\n")
@@ -332,6 +333,15 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 		if d.Predicate != "" {
 			b.WriteString("\n  " + styleHeader.Render(" partial predicate ") + "\n")
 			b.WriteString("    " + mu(truncLine(d.Predicate)) + "\n")
+			pct, ok := d.IdxCoveredPct()
+			line := "    " + describeIndexCoverage(pct, ok) + mu(" of the table's rows")
+			if ok {
+				line += mu(fmt.Sprintf("  (~%s of ~%s, estimates)",
+					formatRows(d.IdxEstEntries), formatRows(d.IdxParentRows)))
+			} else {
+				line += mu("  (needs a VACUUM or ANALYZE to estimate)")
+			}
+			b.WriteString(line + "\n")
 		}
 
 		// --- usage (always: the index panel is small, no detail mode needed) ---
@@ -352,9 +362,120 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 			{"tuples", formatRows(d.IdxTupRead) + mu(" read · ") + formatRows(d.IdxTupFetch) + mu(" fetched")},
 			{"hit ratio", hitVal},
 		}))
+		b.WriteString("\n    " + mu("press ") + styleBadge.Render("?") + mu(" what the numbers mean") + "\n")
 	}
 
 	return scrollWindow(b.String(), &s.offset, height)
+}
+
+// renderDescribeInfo is the ? reference overlay for the describe panel. It
+// spells out where every figure comes from — the two different "hit" ratios in
+// particular (per-index vs. whole-table, both shared_buffers only) — and which
+// are cumulative counters versus point-in-time or planner estimates. The table
+// and index variants share the index-line glossary; the table variant adds the
+// detail-mode sections.
+func (m *Model) renderDescribeInfo(s *screen, height int) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+	sec := func(title, tail string) {
+		b.WriteString("  " + styleHeader.Render(" "+title+" "))
+		if tail != "" {
+			b.WriteString("  " + mu(tail))
+		}
+		b.WriteString("\n")
+	}
+	row := func(name, desc string) {
+		b.WriteString("    " + padRight(name, 13) + mu(desc) + "\n")
+	}
+	isIndex := s.describe != nil && s.describe.Kind == pg.DescribeIndex
+
+	if isIndex {
+		infoHeader(&b, "Describe index reference")
+	} else {
+		infoHeader(&b, "Describe table reference")
+	}
+	b.WriteString("  " + mu("Counters (scans, tuples, hit ratios, writes) are cumulative since the last stats reset;") + "\n")
+	b.WriteString("  " + mu("sizes are on-disk as of now; row counts and covered shares are planner estimates,") + "\n")
+	b.WriteString("  " + mu("refreshed by VACUUM / ANALYZE.") + "\n\n")
+
+	if !isIndex {
+		sec("columns", "declaration order")
+		row("type", "format_type — the type as \\d prints it")
+		row("not null", "column has a NOT NULL constraint")
+		row("indexed", "some index covers the column (key, expression or partial predicate) — updating it defeats HOT")
+		row("default", "the default expression")
+		b.WriteString("\n")
+	}
+
+	sec("indexes", "one line per index; the second line is the full CREATE INDEX")
+	if !isIndex {
+		row("primary", "backs the primary key")
+		row("unique", "enforces a UNIQUE constraint")
+		row("clustered", "the table was last CLUSTERed on this index (not maintained afterwards)")
+		row("size", "pg_relation_size of the index — on disk, including bloat")
+	}
+	row("covers", "partial indexes only — estimated share of the table's rows the predicate keeps: the index's")
+	row("", "reltuples ÷ the table's reltuples. ‘?’ until the first VACUUM/ANALYZE. A share ≥ 90% is tinted:")
+	row("", "the predicate barely filters, so the index costs nearly as much as an unrestricted one.")
+	row("scans", "idx_scan — index scans that used this index; ‘last’ is the age of the most recent one")
+	row("unused", "0 scans on an index that isn't backing a PK/UNIQUE constraint — a candidate to drop")
+	row("hit", "shared_buffers hit ratio for this index's own blocks: idx_blks_hit ÷ (idx_blks_hit + idx_blks_read).")
+	row("", "‘read’ means not in shared_buffers — the OS page cache may still have served it, so this is")
+	row("", "not a disk-read ratio. Green from 99.5%, blue from 95%, yellow from 80%, red below.")
+	if isIndex {
+		row("tuples", "idx_tup_read: index entries returned by scans · idx_tup_fetch: live heap rows fetched by")
+		row("", "simple index scans (bitmap and index-only scans don't count here)")
+	}
+	b.WriteString("\n")
+
+	if !isIndex {
+		sec("foreign keys / referenced by", "outgoing FKs this table declares · incoming FKs pointing at it")
+		row("on delete/", "referential action other than the NO ACTION default (cascade, set null, …)")
+		row("on update", "")
+		b.WriteString("\n")
+
+		sec("options", "reloptions (fillfactor, autovacuum_*), TOAST ones prefixed toast.")
+		b.WriteString("\n")
+
+		sec("summary", "pg_total_relation_size (heap + indexes + TOAST) · ~rows is reltuples")
+		b.WriteString("\n")
+
+		sec("detail mode", "press d — loads the cache footprint on first use (a full shared_buffers scan)")
+		row("cache footprint", "point-in-time from pg_buffercache: how much of this table (heap + TOAST + indexes) sits")
+		row("", "in shared_buffers right now")
+		row("  buffered", "bytes of this relation's pages in shared_buffers")
+		row("  cached", "buffered ÷ table size — how much of the table fits in cache")
+		row("  hit ratio", "whole-table shared_buffers hit ratio: heap + index blks hit ÷ (hit + read) — cumulative,")
+		row("", "the same definition as the per-index ‘hit’ but summed across heap, TOAST and all indexes")
+		row("  dirty", "buffered pages modified but not yet written back")
+		row("  avg usage", "mean clock-sweep usagecount of the cached pages (0 cold … 5 hot)")
+		row("size breakdown", "heap (main fork) · indexes (pg_indexes_size) · toast (TOAST heap + its index)")
+		row("live / dead", "n_live_tup / n_dead_tup — estimates maintained by the stats collector; dead % is tinted")
+		row("", "past 20% (the default autovacuum scale factor) and red past 40%")
+		row("writes", "n_tup_ins / n_tup_upd / n_tup_del")
+		row("HOT updates", "share of updates that were HOT (new version on the same page, no index entries written) —")
+		row("", "higher is cheaper; updating an ‘indexed’ column rules HOT out")
+		row("seq / index", "seq_scan / idx_scan on the table, each with the age of its last occurrence")
+		row("index share", "idx_scan ÷ (seq_scan + idx_scan) — how often the planner chose an index at all")
+		row("vacuum", "most recent manual or auto VACUUM, total runs, inserts since (n_ins_since_vacuum)")
+		row("analyze", "most recent manual or auto ANALYZE, total runs, rows modified since (n_mod_since_analyze)")
+		row("xid age", "age(relfrozenxid) — transactions since the table was last frozen; wraparound risk as it")
+		row("", "approaches autovacuum_freeze_max_age")
+		b.WriteString("\n")
+	} else {
+		sec("partial predicate", "the WHERE clause; the line beneath is the covered share explained above")
+		b.WriteString("\n")
+	}
+
+	sec("keys", "")
+	kb := func(k, desc string) string { return styleBadge.Render(k) + mu(" "+desc) }
+	if isIndex {
+		b.WriteString("    " + kb("↑/↓ pgup/pgdn", "scroll") + mu("  ·  ") + kb("esc", "back") + "\n")
+	} else {
+		b.WriteString("    " + kb("d", "toggle detail mode") + mu("  ·  ") +
+			kb("↑/↓ pgup/pgdn", "scroll") + mu("  ·  ") + kb("esc", "back") + "\n")
+	}
+	return padInfo(&b, height)
 }
 
 // renderDescribeBufferRows renders the body of the describe-table cache-footprint
@@ -428,14 +549,18 @@ func renderKVRows(rows [][2]string) string {
 }
 
 // describeIndexUsage is the detail-mode usage fragment appended to an index
-// line: scan count with last-use age and cache-hit grade. A never-scanned
-// index that isn't enforcing a constraint gets a red "unused" flag instead —
-// the same bar the unused-indexes diagnostic applies (primary/unique indexes
-// earn their keep without scans). asOf is the description's load time, so the
-// age stays put until the next refresh.
-func describeIndexUsage(idx pg.DescribeIndexDef, asOf time.Time) string {
+// line: the covered share of a partial index, then scan count with last-use age
+// and cache-hit grade. A never-scanned index that isn't enforcing a constraint
+// gets a red "unused" flag instead — the same bar the unused-indexes diagnostic
+// applies (primary/unique indexes earn their keep without scans). tableRows is
+// the parent's row estimate (for the covered share) and asOf the description's
+// load time, so the age stays put until the next refresh.
+func describeIndexUsage(idx pg.DescribeIndexDef, tableRows int64, asOf time.Time) string {
 	mu := styleMuted.Render
 	var parts []string
+	if idx.Predicate != "" {
+		parts = append(parts, describeIndexCoverage(idx.CoveredPct(tableRows)))
+	}
 	if idx.Scans == 0 && !idx.IsPrimary && !idx.IsUnique {
 		parts = append(parts, styleErr.Render("unused"))
 	} else {
@@ -448,6 +573,23 @@ func describeIndexUsage(idx pg.DescribeIndexDef, asOf time.Time) string {
 		parts = append(parts, mu("hit ")+gradedPercentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct)))
 	}
 	return strings.Join(parts, mu(" · "))
+}
+
+// describeIndexCoverage renders a partial index's covered share of the table,
+// taking a CoveredPct result. A share close to the whole table means the
+// predicate barely filters — the index costs nearly as much as an unrestricted
+// one — so those are tinted rather than left muted. "?" is the honest answer
+// before the first VACUUM/ANALYZE fills the two reltuples estimates in.
+func describeIndexCoverage(pct float64, ok bool) string {
+	mu := styleMuted.Render
+	if !ok {
+		return mu("covers ?")
+	}
+	val := fmt.Sprintf("~%.1f%%", pct)
+	if pct >= 90 {
+		return mu("covers ") + styleBarAlt.Render(val)
+	}
+	return mu("covers " + val)
 }
 
 // renderDescribeStats renders the describe detail mode's table-metric sections

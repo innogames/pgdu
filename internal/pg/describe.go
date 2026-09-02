@@ -95,7 +95,8 @@ func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, erro
 		func(row pgx.CollectableRow) (DescribeIndexDef, error) {
 			var idx DescribeIndexDef
 			err := row.Scan(&idx.Name, &idx.Def, &idx.IsPrimary, &idx.IsUnique, &idx.Clustered,
-				&idx.SizeBytes, &idx.Scans, &idx.LastScan, &idx.TupRead, &idx.TupFetch,
+				&idx.SizeBytes, &idx.Predicate, &idx.EstEntries,
+				&idx.Scans, &idx.LastScan, &idx.TupRead, &idx.TupFetch,
 				&idx.BlksHit, &idx.BlksRead)
 			return idx, err
 		})
@@ -192,6 +193,8 @@ func (c *Client) DescribeIndex(ctx context.Context, db string, oid uint32, name 
 		&d.Predicate,
 		&d.ParentTable,
 		&d.IdxSizeBytes,
+		&d.IdxEstEntries,
+		&d.IdxParentRows,
 		&d.IdxScans,
 		&d.IdxLastScan,
 		&d.IdxTupRead,

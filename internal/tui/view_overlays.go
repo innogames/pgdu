@@ -19,7 +19,8 @@ func (m *Model) hasInfoOverlay(s *screen) bool {
 		levelStatements, levelStatementDetail, levelStatementSamples, levelStatementResult, levelSnapshots,
 		levelMaintenance, levelSettings,
 		levelActivity, levelTableStats, levelWaitProfile,
-		levelDiagnostics, levelDiagnosticResult:
+		levelDiagnostics, levelDiagnosticResult,
+		levelDescribe:
 		return true
 	}
 	return false
@@ -80,6 +81,8 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 		return m.renderWaitProfileInfo(height)
 	case levelDiagnostics, levelDiagnosticResult:
 		return m.renderDiagnosticInfo(s, height)
+	case levelDescribe:
+		return m.renderDescribeInfo(s, height)
 	}
 	return ""
 }

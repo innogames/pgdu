@@ -68,7 +68,14 @@ ORDER  BY a.attnum
 // definitions, size, and usage counters for the detail mode. The stat joins are
 // LEFT JOINs: pg_stat_all_indexes has no rows for indexes on partitioned
 // parents, and statio rows can lag a fresh index. last_idx_scan needs PG 16+
-// (we support 17+). $1 = table oid.
+// (we support 17+).
+//
+// est_entries is the index's own pg_class.reltuples — for a partial index the
+// estimated number of rows matching its predicate, which both VACUUM and
+// ANALYZE maintain (ANALYZE derives it from the sampled fraction passing
+// indpred). Paired with the table's reltuples it gives the covered share
+// without scanning anything; -1 means "never vacuumed or analyzed".
+// $1 = table oid.
 const sqlDescribeIndexes = `
 SELECT i.relname,
        pg_get_indexdef(idx.indexrelid) AS def,
@@ -76,6 +83,8 @@ SELECT i.relname,
        idx.indisunique,
        idx.indisclustered,
        pg_relation_size(idx.indexrelid)  AS size_bytes,
+       COALESCE(pg_get_expr(idx.indpred, idx.indrelid), '') AS predicate,
+       i.reltuples::bigint               AS est_entries,
        COALESCE(st.idx_scan, 0),
        st.last_idx_scan,
        COALESCE(st.idx_tup_read, 0),
@@ -92,8 +101,11 @@ ORDER  BY idx.indisprimary DESC, i.relname
 
 // sqlDescribeIndex returns the definition, metadata, size and usage counters
 // for a single index. indpred is COALESCE'd to ” so it's never NULL; the stat
-// joins are LEFT JOINs for the same reasons as sqlDescribeIndexes. $1 = index
-// oid. PG 16+ (last_idx_scan).
+// joins are LEFT JOINs for the same reasons as sqlDescribeIndexes. The two
+// reltuples estimates are the pair behind a partial index's covered share (see
+// sqlDescribeIndexes); the parent's comes from pg_class, not the caller, so the
+// ratio holds however the panel was opened. $1 = index oid. PG 16+
+// (last_idx_scan).
 const sqlDescribeIndex = `
 SELECT pg_get_indexdef(c.oid)                                AS def,
        am.amname                                             AS access_method,
@@ -102,6 +114,8 @@ SELECT pg_get_indexdef(c.oid)                                AS def,
        COALESCE(pg_get_expr(idx.indpred, idx.indrelid), '')  AS predicate,
        idx.indrelid::regclass::text                          AS parent_table,
        pg_relation_size(c.oid)                               AS size_bytes,
+       c.reltuples::bigint                                   AS est_entries,
+       t.reltuples::bigint                                   AS parent_est_rows,
        COALESCE(st.idx_scan, 0),
        st.last_idx_scan,
        COALESCE(st.idx_tup_read, 0),
@@ -110,6 +124,7 @@ SELECT pg_get_indexdef(c.oid)                                AS def,
        COALESCE(io.idx_blks_read, 0)
 FROM   pg_index idx
 JOIN   pg_class c  ON c.oid = idx.indexrelid
+JOIN   pg_class t  ON t.oid = idx.indrelid
 JOIN   pg_am am    ON am.oid = c.relam
 LEFT   JOIN pg_stat_all_indexes   st ON st.indexrelid = idx.indexrelid
 LEFT   JOIN pg_statio_all_indexes io ON io.indexrelid = idx.indexrelid

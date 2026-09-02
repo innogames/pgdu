@@ -220,7 +220,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.level == levelStatements || s.level == levelStatementDetail || s.level == levelSnapshots ||
 			s.level == levelMaintenance || s.level == levelSettings ||
 			s.level == levelActivity || s.level == levelTableStats || s.level == levelWaitProfile ||
-			s.level == levelDiagnostics || s.level == levelDiagnosticResult {
+			s.level == levelDiagnostics || s.level == levelDiagnosticResult ||
+			s.level == levelDescribe {
 			m.showInfo = !m.showInfo
 			if m.showInfo {
 				m.infoOffset = 0 // always open scrolled to the top
