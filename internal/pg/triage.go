@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,7 @@ const (
 	TriageTargetDiagnostic  TriageTarget = iota // push the diagnostic named by DiagKey
 	TriageTargetLockTree                        // push the live lock tree
 	TriageTargetMaintenance                     // push the maintenance/system overview
+	TriageTargetActivity                        // push the live pg_stat_activity list
 )
 
 // TriageResult is one line of the health-triage report.
@@ -35,6 +37,7 @@ type TriageResult struct {
 	Severity Severity
 	Detail   string
 	DiagKey  string // diagnostic to drill into when Target == TriageTargetDiagnostic
+	DB       string // database that diagnostic runs against; empty = the default
 	Target   TriageTarget
 }
 
@@ -46,8 +49,8 @@ const (
 	// wraparound: autovacuum starts aggressive freezing at
 	// autovacuum_freeze_max_age; being most of the way there means autovacuum
 	// is not keeping up.
-	wraparoundCritFrac = 0.80
-	wraparoundWarnFrac = 0.50
+	wraparoundCritFrac = 0.95
+	wraparoundWarnFrac = 0.80
 
 	// blocked backends: a lock wait measured in tens of seconds is past
 	// "normal contention" and worth a look. XactAgeMs is the transaction age,
@@ -73,9 +76,10 @@ const (
 	slruCritReadsFloor = 10_000
 	slruWarnReadsFloor = 1_000
 
-	// sequences: consumed_pct is fraction of max_value handed out. Below 80%
-	// there is nothing to do, so that is the warn floor; at 95% exhaustion is
-	// close enough (inserts fail at 100%) that a type/cycle decision is overdue.
+	// sequences: consumed_pct is the fraction of the sequence's own range
+	// (start_value → the bound it moves toward) handed out. Below 80% there is
+	// nothing to do, so that is the warn floor; at 95% exhaustion is close
+	// enough (inserts fail at 100%) that a type/cycle decision is overdue.
 	seqCritPct = 95
 	seqWarnPct = 80
 
@@ -120,6 +124,42 @@ const (
 	rollbackCritFrac = 0.50
 	rollbackMinXacts = 1000
 
+	// stats extensions: at .max the extension evicts entries (pg_stat_statements
+	// deallocates ~5% at a time), so the counters the top-queries tool reads
+	// silently stop being cumulative. The notice level only colours the system
+	// overview's bar; triage warns at the warn level. Exported so the overview's
+	// colouring and this check agree.
+	ExtCapacityNoticeFrac = 0.70
+	ExtCapacityWarnFrac   = 0.90
+
+	// index bloat: any bloat_index row is already >50% bloated and >10 MB, but
+	// REINDEX CONCURRENTLY fixes it online, so it stays a warning until the
+	// wasted total is large enough to hurt cache and disk.
+	indexBloatCritBytes = 1 << 30
+
+	// replication: replay_lag reads NULL (→0) while a replica is idle and caught
+	// up, so bytes-behind is the second signal for one that stopped reporting
+	// lag. A non-streaming state (catchup, backup) is transient and only warns.
+	replLagWarnSecs      = 60
+	replLagCritSecs      = 300
+	replByteLagCritBytes = 1 << 30
+	// standby side: the primary sends keepalives every wal_sender_timeout/2 even
+	// when idle, so a receiver that has heard nothing for a minute is stalled.
+	// No receiver at all only warns — log-shipping standbys legitimately have none.
+	walReceiverStaleWarnSecs = 60
+	walReceiverStaleCritSecs = 300
+
+	// long-running transaction: any open client xact pins the xmin horizon
+	// (blocks vacuum, invites bloat, drags wraparound). Half an hour is past any
+	// OLTP request; three hours is a forgotten job or a stuck client.
+	longXactWarnSecs = 1800
+	longXactCritSecs = 3 * 3600
+
+	// pgbouncer: brief queueing is how transaction pooling works; a client
+	// waiting a full second means the pool is undersized or its servers are stuck.
+	pgbWaitWarnSecs = 1
+	pgbWaitCritSecs = 10
+
 	// fan-out: enough parallelism to finish fast without stampeding a server
 	// that is already unwell; each check also gets its own sub-budget so one
 	// hung catalog query degrades to "could not evaluate" instead of eating
@@ -132,15 +172,16 @@ const (
 // check, sorted most-severe first. A failed or slow check degrades to a
 // SevWarn "could not evaluate" line; Triage itself never fails.
 //
-// Per-database checks (sequences, bloat, invalid indexes) run against the
-// default database only — sweeping every database would multiply the fan-out
-// by the cluster's database count and blow the budget. Their detail lines name
-// the database they looked at.
+// Per-database checks (sequences, stale statistics, FK indexes, table/index
+// bloat, invalid indexes) run against the default database only — sweeping
+// every database would multiply the fan-out by the cluster's database count and
+// blow the budget. Their detail lines name the database they looked at.
 func (c *Client) Triage(ctx context.Context) []TriageResult {
 	type check struct {
 		name    string
 		target  TriageTarget
 		diagKey string
+		db      string
 		run     func(ctx context.Context) (Severity, string, error)
 	}
 
@@ -196,33 +237,48 @@ func (c *Client) Triage(ctx context.Context) []TriageResult {
 		}
 	}
 
+	// The wraparound figure is cluster-wide but its drill-down (per-table freeze
+	// ages) is per-database, so it opens in whichever database holds the oldest
+	// datfrozenxid rather than in the default one.
+	wraparoundDB := ""
+	if infoErr == nil {
+		wraparoundDB = info.XidAgeDB
+	}
+
 	checks := []check{
-		{"wraparound", TriageTargetMaintenance, "", mgrade(wraparoundGrade)},
-		{"WAL archiver", TriageTargetMaintenance, "", mgrade(archiverGrade)},
-		{"connection saturation", TriageTargetMaintenance, "", mgrade(connSaturationGrade)},
-		{"checkpoint pressure", TriageTargetMaintenance, "", mgrade(checkpointGrade)},
-		{"prepared transactions", TriageTargetMaintenance, "", mgrade(preparedXactGrade)},
-		{"blocked backends", TriageTargetLockTree, "", c.triageBlocked},
-		{"idle-in-xact", TriageTargetDiagnostic, "idle_in_xact_holders", c.triageIdleInXact},
-		{"replication slots", TriageTargetDiagnostic, "replication_slots", c.triageReplicationSlots},
-		{"cache hit ratio", TriageTargetDiagnostic, "database_stats", dgrade(cacheHitGrade)},
-		{"SLRU pressure", TriageTargetDiagnostic, "slru_stats", c.triageSLRU},
-		{"deadlocks", TriageTargetDiagnostic, "database_stats", dgrade(deadlockGrade)},
-		{"temp files", TriageTargetDiagnostic, "database_stats", dgrade(tempFilesGrade)},
-		{"rollback ratio", TriageTargetDiagnostic, "database_stats", dgrade(rollbackGrade)},
-		{"sequence exhaustion", TriageTargetDiagnostic, "sequences", func(ctx context.Context) (Severity, string, error) {
+		{"wraparound", TriageTargetDiagnostic, "wraparound_tables", wraparoundDB, mgrade(wraparoundGrade)},
+		{"WAL archiver", TriageTargetMaintenance, "", "", mgrade(archiverGrade)},
+		{"replication lag", TriageTargetMaintenance, "", "", mgrade(replicationGrade)},
+		{"connection saturation", TriageTargetMaintenance, "", "", mgrade(connSaturationGrade)},
+		{"pgbouncer waits", TriageTargetMaintenance, "", "", mgrade(pgbouncerGrade)},
+		{"checkpoint pressure", TriageTargetMaintenance, "", "", mgrade(checkpointGrade)},
+		{"prepared transactions", TriageTargetMaintenance, "", "", mgrade(preparedXactGrade)},
+		{"extension capacity", TriageTargetMaintenance, "", "", mgrade(extCapacityGrade)},
+		{"blocked backends", TriageTargetLockTree, "", "", c.triageBlocked},
+		{"long-running transaction", TriageTargetActivity, "", "", mgrade(longXactGrade)},
+		{"idle-in-xact", TriageTargetDiagnostic, "idle_in_xact_holders", "", c.triageIdleInXact},
+		{"replication slots", TriageTargetDiagnostic, "replication_slots", "", c.triageReplicationSlots},
+		{"cache hit ratio", TriageTargetDiagnostic, "database_stats", "", dgrade(cacheHitGrade)},
+		{"SLRU pressure", TriageTargetDiagnostic, "slru_stats", "", c.triageSLRU},
+		{"deadlocks", TriageTargetDiagnostic, "database_stats", "", dgrade(deadlockGrade)},
+		{"temp files", TriageTargetDiagnostic, "database_stats", "", dgrade(tempFilesGrade)},
+		{"rollback ratio", TriageTargetDiagnostic, "database_stats", "", dgrade(rollbackGrade)},
+		{"sequence exhaustion", TriageTargetDiagnostic, "sequences", db, func(ctx context.Context) (Severity, string, error) {
 			return c.triageSequences(ctx, db)
 		}},
-		{"stale statistics", TriageTargetDiagnostic, "stale_statistics", func(ctx context.Context) (Severity, string, error) {
+		{"stale statistics", TriageTargetDiagnostic, "stale_statistics", db, func(ctx context.Context) (Severity, string, error) {
 			return c.triageStaleStats(ctx, db)
 		}},
-		{"FK missing index", TriageTargetDiagnostic, "fk_missing_index", func(ctx context.Context) (Severity, string, error) {
+		{"FK missing index", TriageTargetDiagnostic, "fk_missing_index", db, func(ctx context.Context) (Severity, string, error) {
 			return c.triageFKMissingIndex(ctx, db)
 		}},
-		{"bloat", TriageTargetDiagnostic, "bloat_table", func(ctx context.Context) (Severity, string, error) {
-			return c.triageBloat(ctx, db)
+		{"table bloat", TriageTargetDiagnostic, "bloat_table", db, func(ctx context.Context) (Severity, string, error) {
+			return c.triageTableBloat(ctx, db)
 		}},
-		{"invalid indexes", TriageTargetDiagnostic, "index_invalid", func(ctx context.Context) (Severity, string, error) {
+		{"index bloat", TriageTargetDiagnostic, "bloat_index", db, func(ctx context.Context) (Severity, string, error) {
+			return c.triageIndexBloat(ctx, db)
+		}},
+		{"invalid indexes", TriageTargetDiagnostic, "index_invalid", db, func(ctx context.Context) (Severity, string, error) {
 			return c.triageInvalidIndexes(ctx, db)
 		}},
 	}
@@ -245,6 +301,7 @@ func (c *Client) Triage(ctx context.Context) []TriageResult {
 				Severity: sev,
 				Detail:   detail,
 				DiagKey:  chk.diagKey,
+				DB:       chk.db,
 				Target:   chk.target,
 			}
 		})
@@ -265,7 +322,11 @@ func wraparoundGrade(info *MaintenanceInfo) (Severity, string, error) {
 	}
 	sev := wraparoundSeverity(info.XidAge, info.FreezeMaxAge)
 	pct := 100 * float64(info.XidAge) / float64(info.FreezeMaxAge)
-	return sev, fmt.Sprintf("oldest datfrozenxid %.0f%% of the way to a forced anti-wraparound autovacuum", pct), nil
+	detail := fmt.Sprintf("oldest datfrozenxid %.0f%% of the way to a forced anti-wraparound autovacuum", pct)
+	if info.XidAgeDB != "" {
+		detail += " (in " + info.XidAgeDB + ")"
+	}
+	return sev, detail, nil
 }
 
 // archiverGrade flags a stalled WAL archiver: pg_wal fills up silently when
@@ -361,6 +422,163 @@ func preparedXactSeverity(oldestSecs float64) Severity {
 		return SevCrit
 	}
 	return SevWarn
+}
+
+// extCapacityGrade warns when a shared-memory stats extension is close to its
+// .max. Extensions that aren't installed, or aren't preloaded (Max unknown),
+// have nothing to grade.
+func extCapacityGrade(info *MaintenanceInfo) (Severity, string, error) {
+	graded := make([]ExtCapacity, 0, 2)
+	for _, e := range []ExtCapacity{info.Statements, info.Qualstats} {
+		if e.Installed && e.Max > 0 {
+			graded = append(graded, e)
+		}
+	}
+	if len(graded) == 0 {
+		return SevOK, "no stats extension installed", nil
+	}
+	sort.SliceStable(graded, func(a, b int) bool { return graded[a].FillRatio() > graded[b].FillRatio() })
+	worst := SevOK
+	parts := make([]string, 0, len(graded))
+	for _, e := range graded {
+		if sev := extCapacitySeverity(e.FillRatio()); sev > worst {
+			worst = sev
+		}
+		parts = append(parts, fmt.Sprintf("%s %.0f%% full (%d/%d)", e.Name, 100*e.FillRatio(), e.Used, e.Max))
+	}
+	return worst, strings.Join(parts, ", "), nil
+}
+
+// extCapacitySeverity has no critical level: a full extension degrades its
+// statistics, it does not endanger the server.
+func extCapacitySeverity(ratio float64) Severity {
+	if ratio >= ExtCapacityWarnFrac {
+		return SevWarn
+	}
+	return SevOK
+}
+
+// replicationGrade grades streaming replication from whichever side this server
+// is on: on a primary the worst replica (state, replay lag, bytes behind), on a
+// standby the WAL receiver's liveness.
+func replicationGrade(info *MaintenanceInfo) (Severity, string, error) {
+	if info.InRecovery {
+		wr := info.WalReceiver
+		if wr == nil {
+			return walReceiverSeverity(false, "", 0), "standby: no WAL receiver running", nil
+		}
+		age := wr.LastMsgAge.Seconds()
+		sev := walReceiverSeverity(true, wr.Status, age)
+		return sev, "standby: WAL receiver " + wr.Status + ", last message from primary " +
+			triageDuration(age) + " ago", nil
+	}
+	if len(info.Replicas) == 0 {
+		return SevOK, "no streaming replicas", nil
+	}
+	worst := SevOK
+	var worstRep ReplicaStat
+	var maxLag float64
+	for _, r := range info.Replicas {
+		lag := r.ReplayLag.Seconds()
+		if lag > maxLag {
+			maxLag = lag
+		}
+		if sev := replicaSeverity(r.State, lag, r.ByteLag); sev > worst {
+			worst, worstRep = sev, r
+		}
+	}
+	if worst == SevOK {
+		return worst, fmt.Sprintf("%d replica(s) streaming, max replay lag %s",
+			len(info.Replicas), triageDuration(maxLag)), nil
+	}
+	name := worstRep.AppName
+	if name == "" {
+		name = worstRep.ClientAddr
+	}
+	return worst, fmt.Sprintf("%d replica(s), worst %s: %s, replay lag %s, %s behind",
+		len(info.Replicas), name, worstRep.State,
+		triageDuration(worstRep.ReplayLag.Seconds()), humanize.Bytes(worstRep.ByteLag)), nil
+}
+
+func replicaSeverity(state string, replayLagSecs float64, byteLag int64) Severity {
+	switch {
+	case replayLagSecs >= replLagCritSecs || byteLag >= replByteLagCritBytes:
+		return SevCrit
+	case replayLagSecs >= replLagWarnSecs || state != "streaming":
+		return SevWarn
+	}
+	return SevOK
+}
+
+func walReceiverSeverity(present bool, status string, lastMsgSecs float64) Severity {
+	switch {
+	case !present:
+		return SevWarn
+	case lastMsgSecs >= walReceiverStaleCritSecs:
+		return SevCrit
+	case lastMsgSecs >= walReceiverStaleWarnSecs || status != "streaming":
+		return SevWarn
+	}
+	return SevOK
+}
+
+// longXactGrade flags the oldest open client transaction: whatever it is doing,
+// it pins the xmin horizon, so vacuum cannot reclaim anything newer than its
+// snapshot for as long as it stays open. Idle-in-transaction holders have their
+// own check; this one also catches transactions that are actively working.
+func longXactGrade(info *MaintenanceInfo) (Severity, string, error) {
+	secs := info.LongestXactSec
+	sev := longXactSeverity(secs)
+	if sev == SevOK {
+		return sev, "longest open transaction " + triageDuration(secs), nil
+	}
+	return sev, "a transaction has been open for " + triageDuration(secs) + " (pins the xmin horizon)", nil
+}
+
+func longXactSeverity(secs float64) Severity {
+	switch {
+	case secs >= longXactCritSecs:
+		return SevCrit
+	case secs >= longXactWarnSecs:
+		return SevWarn
+	}
+	return SevOK
+}
+
+// pgbouncerGrade flags clients queued in PgBouncer for a server connection.
+func pgbouncerGrade(info *MaintenanceInfo) (Severity, string, error) {
+	pb := info.PgBouncer
+	if pb == nil {
+		return SevOK, "no pgbouncer admin console reachable", nil
+	}
+	sev := pgbouncerSeverity(pb.ClWaiting, pb.MaxWaitSec)
+	if pb.ClWaiting == 0 {
+		return sev, "no clients waiting in pgbouncer", nil
+	}
+	detail := fmt.Sprintf("%d client(s) waiting for a server connection, longest %s",
+		pb.ClWaiting, triageDuration(pb.MaxWaitSec))
+	var worst *PgbPool
+	for i := range pb.Pools {
+		if worst == nil || pb.Pools[i].MaxWaitSec > worst.MaxWaitSec {
+			worst = &pb.Pools[i]
+		}
+	}
+	if worst != nil && worst.MaxWaitSec > 0 {
+		detail += " (" + worst.Database + "/" + worst.User + ")"
+	}
+	return sev, detail, nil
+}
+
+func pgbouncerSeverity(waiting int, maxWaitSecs float64) Severity {
+	switch {
+	case waiting == 0:
+		return SevOK
+	case maxWaitSecs >= pgbWaitCritSecs:
+		return SevCrit
+	case maxWaitSecs >= pgbWaitWarnSecs:
+		return SevWarn
+	}
+	return SevOK
 }
 
 func wraparoundSeverity(xidAge, freezeMaxAge int64) Severity {
@@ -692,22 +910,48 @@ func sequenceSeverity(maxConsumedPct float64) Severity {
 	return SevOK
 }
 
-// triageBloat leans on the bloat queries' own server-side filters: any row they
-// return is already past "50% bloated and large", so row count is the signal.
-func (c *Client) triageBloat(ctx context.Context, db string) (Severity, string, error) {
-	tables, err := c.runTriageDiag(ctx, db, "bloat_table")
+// triageTableBloat leans on the bloat_table diagnostic's own server-side filter:
+// any row it returns is already past "heavily bloated and large", so row count
+// is the signal. Reclaiming table bloat needs VACUUM FULL / pg_repack (a rewrite),
+// so it grades critical outright.
+func (c *Client) triageTableBloat(ctx context.Context, db string) (Severity, string, error) {
+	res, err := c.runTriageDiag(ctx, db, "bloat_table")
 	if err != nil {
 		return 0, "", err
 	}
-	indexes, err := c.runTriageDiag(ctx, db, "bloat_index")
+	n := len(res.Rows)
+	if n == 0 {
+		return SevOK, fmt.Sprintf("no heavily bloated tables (in %s)", db), nil
+	}
+	return SevCrit, fmt.Sprintf("%d table(s) heavily bloated, ~%s wasted (in %s)",
+		n, humanize.Bytes(int64(diagSum(res, "bloat_bytes"))), db), nil
+}
+
+// triageIndexBloat is the index sibling; see indexBloatCritBytes for why it
+// grades by wasted bytes rather than by presence.
+func (c *Client) triageIndexBloat(ctx context.Context, db string) (Severity, string, error) {
+	res, err := c.runTriageDiag(ctx, db, "bloat_index")
 	if err != nil {
 		return 0, "", err
 	}
-	nt, ni := len(tables.Rows), len(indexes.Rows)
-	if nt == 0 && ni == 0 {
-		return SevOK, fmt.Sprintf("no heavily bloated tables or indexes (in %s)", db), nil
+	n := len(res.Rows)
+	wasted := diagSum(res, "bloat_bytes")
+	sev := indexBloatSeverity(n, wasted)
+	if n == 0 {
+		return sev, fmt.Sprintf("no heavily bloated indexes (in %s)", db), nil
 	}
-	return SevCrit, fmt.Sprintf("%d table(s), %d index(es) heavily bloated (in %s)", nt, ni, db), nil
+	return sev, fmt.Sprintf("%d index(es) heavily bloated, ~%s wasted (in %s)",
+		n, humanize.Bytes(int64(wasted)), db), nil
+}
+
+func indexBloatSeverity(n int, wastedBytes float64) Severity {
+	switch {
+	case n == 0:
+		return SevOK
+	case wastedBytes >= indexBloatCritBytes:
+		return SevCrit
+	}
+	return SevWarn
 }
 
 func (c *Client) triageInvalidIndexes(ctx context.Context, db string) (Severity, string, error) {

@@ -26,6 +26,19 @@ func TestWraparoundSeverity(t *testing.T) {
 	}
 }
 
+// The wraparound drill-down is per-database, so the line must name the
+// database holding the oldest datfrozenxid and carry it for the drill.
+func TestWraparoundGradeNamesDatabase(t *testing.T) {
+	info := &MaintenanceInfo{XidAge: 190_000_000, FreezeMaxAge: 200_000_000, XidAgeDB: "un1_game"}
+	sev, detail, err := wraparoundGrade(info)
+	if err != nil || sev != SevCrit {
+		t.Fatalf("grade = %v, %v, want SevCrit", sev, err)
+	}
+	if !strings.HasSuffix(detail, "(in un1_game)") {
+		t.Errorf("detail should name the database, got %q", detail)
+	}
+}
+
 func TestBlockedSeverity(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -200,6 +213,112 @@ func TestRollbackSeverity(t *testing.T) {
 	}
 }
 
+func TestExtCapacitySeverity(t *testing.T) {
+	if got := extCapacitySeverity(0.75); got != SevOK {
+		t.Errorf("75%% = %v, want SevOK", got)
+	}
+	if got := extCapacitySeverity(0.90); got != SevWarn {
+		t.Errorf("90%% = %v, want SevWarn", got)
+	}
+	if got := extCapacitySeverity(1); got != SevWarn {
+		t.Errorf("full = %v, want SevWarn (no crit level)", got)
+	}
+}
+
+func TestExtCapacityGrade(t *testing.T) {
+	info := &MaintenanceInfo{
+		Statements: ExtCapacity{Name: "pg_stat_statements", Installed: true, Used: 3765, Max: 5000},
+		Qualstats:  ExtCapacity{Name: "pg_qualstats", Installed: true, Used: 952, Max: 1000},
+	}
+	sev, detail, err := extCapacityGrade(info)
+	if err != nil || sev != SevWarn {
+		t.Fatalf("grade = %v, %v, want SevWarn", sev, err)
+	}
+	if !strings.HasPrefix(detail, "pg_qualstats 95% full (952/1000)") {
+		t.Errorf("fullest extension should lead the detail, got %q", detail)
+	}
+	// Installed but not preloaded (Max unknown) has nothing to grade.
+	none := &MaintenanceInfo{Statements: ExtCapacity{Name: "pg_stat_statements", Installed: true, Used: 10}}
+	if sev, _, _ := extCapacityGrade(none); sev != SevOK {
+		t.Errorf("unknown max = %v, want SevOK", sev)
+	}
+}
+
+func TestIndexBloatSeverity(t *testing.T) {
+	if got := indexBloatSeverity(0, 0); got != SevOK {
+		t.Errorf("none = %v, want SevOK", got)
+	}
+	if got := indexBloatSeverity(3, 200<<20); got != SevWarn {
+		t.Errorf("200MB wasted = %v, want SevWarn", got)
+	}
+	if got := indexBloatSeverity(85, 4<<30); got != SevCrit {
+		t.Errorf("4GB wasted = %v, want SevCrit", got)
+	}
+}
+
+func TestReplicaSeverity(t *testing.T) {
+	if got := replicaSeverity("streaming", 0.5, 1<<20); got != SevOK {
+		t.Errorf("healthy = %v, want SevOK", got)
+	}
+	if got := replicaSeverity("catchup", 0, 0); got != SevWarn {
+		t.Errorf("catchup = %v, want SevWarn", got)
+	}
+	if got := replicaSeverity("streaming", 90, 0); got != SevWarn {
+		t.Errorf("90s lag = %v, want SevWarn", got)
+	}
+	if got := replicaSeverity("streaming", 600, 0); got != SevCrit {
+		t.Errorf("10m lag = %v, want SevCrit", got)
+	}
+	if got := replicaSeverity("streaming", 0, 2<<30); got != SevCrit {
+		t.Errorf("2GB behind, no lag reported = %v, want SevCrit", got)
+	}
+}
+
+func TestWalReceiverSeverity(t *testing.T) {
+	if got := walReceiverSeverity(true, "streaming", 5); got != SevOK {
+		t.Errorf("streaming = %v, want SevOK", got)
+	}
+	if got := walReceiverSeverity(false, "", 0); got != SevWarn {
+		t.Errorf("no receiver = %v, want SevWarn", got)
+	}
+	if got := walReceiverSeverity(true, "waiting", 5); got != SevWarn {
+		t.Errorf("waiting = %v, want SevWarn", got)
+	}
+	if got := walReceiverSeverity(true, "streaming", 120); got != SevWarn {
+		t.Errorf("2m silence = %v, want SevWarn", got)
+	}
+	if got := walReceiverSeverity(true, "streaming", 900); got != SevCrit {
+		t.Errorf("15m silence = %v, want SevCrit", got)
+	}
+}
+
+func TestLongXactSeverity(t *testing.T) {
+	if got := longXactSeverity(120); got != SevOK {
+		t.Errorf("2m = %v, want SevOK", got)
+	}
+	if got := longXactSeverity(3600); got != SevWarn {
+		t.Errorf("1h = %v, want SevWarn", got)
+	}
+	if got := longXactSeverity(5 * 3600); got != SevCrit {
+		t.Errorf("5h = %v, want SevCrit", got)
+	}
+}
+
+func TestPgbouncerSeverity(t *testing.T) {
+	if got := pgbouncerSeverity(0, 0); got != SevOK {
+		t.Errorf("nobody waiting = %v, want SevOK", got)
+	}
+	if got := pgbouncerSeverity(3, 0.2); got != SevOK {
+		t.Errorf("brief queueing = %v, want SevOK", got)
+	}
+	if got := pgbouncerSeverity(3, 2.5); got != SevWarn {
+		t.Errorf("2.5s wait = %v, want SevWarn", got)
+	}
+	if got := pgbouncerSeverity(1, 30); got != SevCrit {
+		t.Errorf("30s wait = %v, want SevCrit", got)
+	}
+}
+
 func TestTriageDuration(t *testing.T) {
 	tests := []struct {
 		secs float64
@@ -244,8 +363,8 @@ func TestTriageDegradesOnFailure(t *testing.T) {
 	cancel()
 
 	results := c.Triage(ctx)
-	if len(results) != 18 {
-		t.Fatalf("Triage returned %d results, want 18", len(results))
+	if len(results) != 23 {
+		t.Fatalf("Triage returned %d results, want 23", len(results))
 	}
 	for _, r := range results {
 		if r.Check == "" {

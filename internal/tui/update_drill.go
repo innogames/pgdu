@@ -435,10 +435,13 @@ func (m *Model) drillIn() tea.Cmd {
 		case pg.TriageTargetMaintenance:
 			m.stack = append(m.stack, m.toolEntryScreen(toolMaintenance))
 			return m.loadCurrent()
+		case pg.TriageTargetActivity:
+			m.stack = append(m.stack, m.toolEntryScreen(toolActivity))
+			return m.loadCurrent()
 		default:
 			for i := range pg.Diagnostics {
 				if pg.Diagnostics[i].Key == r.DiagKey {
-					m.stack = append(m.stack, diagnosticResultScreen(&pg.Diagnostics[i], "", false))
+					m.stack = append(m.stack, diagnosticResultScreen(&pg.Diagnostics[i], r.DB, false))
 					return m.loadCurrent()
 				}
 			}

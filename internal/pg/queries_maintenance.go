@@ -70,11 +70,15 @@ SELECT version(),
 
 	// sqlMaintActivity counts connections by state (active/idle/idle in transaction/…)
 	// and finds the longest-running transaction age in seconds.
-	// NULL states (autovacuum workers) map to 'other'.
+	// NULL states (autovacuum workers) map to 'other'. The longest-xact figure
+	// counts client backends only: autovacuum workers run inside a transaction
+	// too, but VACUUM's snapshot is ignored by other vacuums' horizon computation,
+	// so a long anti-wraparound vacuum would be a false alarm.
 	sqlMaintActivity = `
 SELECT COALESCE(state, 'other') AS state,
        count(*)                  AS cnt,
-       COALESCE(max(EXTRACT(epoch FROM now() - xact_start)) FILTER (WHERE state <> 'idle'), 0) AS longest_xact_secs
+       COALESCE(max(EXTRACT(epoch FROM now() - xact_start))
+                FILTER (WHERE state <> 'idle' AND backend_type = 'client backend'), 0) AS longest_xact_secs
 FROM   pg_stat_activity
 WHERE  pid <> pg_backend_pid()
 GROUP  BY state`
@@ -94,10 +98,14 @@ WHERE  datname NOT IN ('template0', 'template1')`
 	// non-template databases. A high age approaching autovacuum_freeze_max_age
 	// (typically 200 M) means wraparound is imminent and the autovacuum "emergency
 	// brake" will fire, degrading all write throughput.
+	// The database holding that oldest datfrozenxid rides along so the triage
+	// drill can open the per-table freeze-age diagnostic in the right place.
 	sqlMaintWraparound = `
-SELECT max(age(datfrozenxid))
+SELECT datname, age(datfrozenxid)
 FROM   pg_database
-WHERE  datname NOT IN ('template0', 'template1')`
+WHERE  datname NOT IN ('template0', 'template1')
+ORDER  BY 2 DESC
+LIMIT  1`
 
 	// sqlMaintCheckpointer fetches the cumulative checkpoint counters from
 	// pg_stat_checkpointer (introduced in PG 15; earlier clusters get zeros

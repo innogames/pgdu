@@ -29,6 +29,8 @@ func triageTargetLabel(r pg.TriageResult) string {
 		return "lock tree"
 	case pg.TriageTargetMaintenance:
 		return "system overview"
+	case pg.TriageTargetActivity:
+		return "activity"
 	}
 	if d, ok := pg.DiagnosticByKey(r.DiagKey); ok {
 		return d.Title

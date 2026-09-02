@@ -53,7 +53,7 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	info.CacheHitRatio *= 100 // store as percent
 
 	// --- XID age ---
-	_ = pool.QueryRow(ctx, sqlMaintWraparound).Scan(&info.XidAge)
+	_ = pool.QueryRow(ctx, sqlMaintWraparound).Scan(&info.XidAgeDB, &info.XidAge)
 
 	// autovacuum_freeze_max_age from settings (already fetched above)
 	if v, ok := info.Settings["autovacuum_freeze_max_age"]; ok {

@@ -79,6 +79,9 @@ func TestTriageTargetLabel(t *testing.T) {
 	if got := triageTargetLabel(pg.TriageResult{Target: pg.TriageTargetMaintenance}); got != "system overview" {
 		t.Errorf("maintenance label = %q", got)
 	}
+	if got := triageTargetLabel(pg.TriageResult{Target: pg.TriageTargetActivity}); got != "activity" {
+		t.Errorf("activity label = %q", got)
+	}
 	if got := triageTargetLabel(pg.TriageResult{DiagKey: "nope"}); got != "diagnostic" {
 		t.Errorf("unknown key fallback = %q", got)
 	}

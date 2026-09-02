@@ -141,12 +141,13 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 	ratio := cap.FillRatio()
 	barW := 20
 
-	// Colour: ≥90% red, ≥70% yellow, else bar-cyan.
+	// Colour follows the triage thresholds so the bar and the "extension
+	// capacity" health check never disagree: warn red, notice yellow, else bar-cyan.
 	var barStyle lipgloss.Style
 	switch {
-	case ratio >= 0.90:
+	case ratio >= pg.ExtCapacityWarnFrac:
 		barStyle = styleErr
-	case ratio >= 0.70:
+	case ratio >= pg.ExtCapacityNoticeFrac:
 		barStyle = lipgloss.NewStyle().Foreground(colorAccent)
 	default:
 		barStyle = styleBar
@@ -163,9 +164,9 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 	pctStr := ""
 	if cap.Max > 0 {
 		pctStr = fmt1(ratio*100) + "%"
-		if ratio >= 0.90 {
+		if ratio >= pg.ExtCapacityWarnFrac {
 			pctStr = barStyle.Render(pctStr + "!")
-		} else if ratio >= 0.70 {
+		} else if ratio >= pg.ExtCapacityNoticeFrac {
 			pctStr = barStyle.Render(pctStr)
 		}
 	}
