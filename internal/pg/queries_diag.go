@@ -710,38 +710,6 @@ FROM pg_stat_progress_vacuum p
 JOIN pg_stat_activity a ON p.pid = a.pid
 `
 
-const sqlDiagAutovacuumProgress = `
-SELECT
-    p.pid,
-    now() - a.xact_start AS duration,
-    coalesce(wait_event_type || '.' || wait_event, 'f') AS waiting,
-    CASE
-        WHEN a.query ~* '^autovacuum.*to prevent wraparound' THEN 'wraparound'
-        WHEN a.query ~* '^vacuum' THEN 'user'
-        ELSE 'regular'
-    END AS mode,
-    p.datname AS database,
-    p.relid::regclass AS table_name,
-    p.phase,
-    pg_size_pretty(p.heap_blks_total * current_setting('block_size')::int) AS table_size,
-    pg_size_pretty(pg_total_relation_size(relid)) AS total_size,
-    pg_size_pretty(p.heap_blks_scanned * current_setting('block_size')::int) AS scanned,
-    pg_size_pretty(p.heap_blks_vacuumed * current_setting('block_size')::int) AS vacuumed,
-    round(100.0 * p.heap_blks_scanned / NULLIF(p.heap_blks_total, 0), 1) AS scanned_pct,
-    round(100.0 * p.heap_blks_vacuumed / NULLIF(p.heap_blks_total, 0), 1) AS vacuumed_pct,
-    p.index_vacuum_count,
-    -- The dead-item-id counters were renamed in PostgreSQL 17
-    -- (num/max_dead_tuples → num/max_dead_item_ids). Read them through jsonb so
-    -- a missing key yields NULL instead of erroring on older servers.
-    round(100.0
-          * COALESCE((jp.j ->> 'num_dead_item_ids')::numeric, (jp.j ->> 'num_dead_tuples')::numeric)
-          / NULLIF(COALESCE((jp.j ->> 'max_dead_item_ids')::numeric, (jp.j ->> 'max_dead_tuples')::numeric), 0), 1) AS dead_pct
-FROM pg_stat_progress_vacuum p
-JOIN pg_stat_activity a USING (pid)
-CROSS JOIN LATERAL (SELECT to_jsonb(p) AS j) jp
-ORDER BY now() - a.xact_start DESC
-`
-
 const sqlDiagReplicationSlots = `
 SELECT
     s.slot_name,

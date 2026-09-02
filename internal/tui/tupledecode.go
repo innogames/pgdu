@@ -126,6 +126,8 @@ func describeToastPointer(v []byte) string {
 			pct = 100 * float64(extSize) / float64(rawSize)
 		}
 		s += fmt.Sprintf(" (%s compressed · %.0f%%)", humanize.Bytes(extSize), pct)
+	} else {
+		s += " (uncompressed)"
 	}
 	// The TOAST table stores what's on disk (extSize — compressed if the
 	// pointer is), sliced into TOAST_MAX_CHUNK_SIZE rows.

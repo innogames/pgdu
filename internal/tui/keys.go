@@ -238,7 +238,7 @@ func (k *keyMap) applyContext(s *screen) {
 	// overlay where the diagnostic defines one, and is disabled (like progress)
 	// where none does, so the footer never advertises a dead key.
 	diagFix := diagResult && s.diag != nil && s.diag.Fix != nil
-	k.Enter.SetEnabled(!progress && !(diagResult && !diagFix))
+	k.Enter.SetEnabled(!progress && (!diagResult || diagFix))
 	if diagFix {
 		k.Enter.SetHelp("↵", "fix sql")
 	} else {

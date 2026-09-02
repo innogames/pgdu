@@ -50,7 +50,7 @@ var (
 var sqlKeywords = map[string]struct{}{}
 
 func init() {
-	for _, w := range strings.Fields(
+	for w := range strings.FieldsSeq(
 		"SELECT INSERT UPDATE DELETE MERGE FROM WHERE JOIN LEFT RIGHT INNER " +
 			"OUTER CROSS FULL LATERAL ON AS AND OR NOT IN IS NULL TRUE FALSE " +
 			"LIKE ILIKE SIMILAR BETWEEN EXISTS ANY SOME ALL CASE WHEN THEN " +
@@ -451,8 +451,8 @@ func scanDollar(r []rune, i int) (sqlTokenKind, int, bool) {
 	}
 	tag := string(r[i : k+1])
 	rest := string(r[k+1:])
-	if idx := strings.Index(rest, tag); idx >= 0 {
-		return tokString, k + 1 + len([]rune(rest[:idx])) + len([]rune(tag)), true
+	if before, _, ok := strings.Cut(rest, tag); ok {
+		return tokString, k + 1 + len([]rune(before)) + len([]rune(tag)), true
 	}
 	return tokString, len(r), true
 }
