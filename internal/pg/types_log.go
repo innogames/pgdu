@@ -64,8 +64,7 @@ func (s LogSeverity) String() string {
 }
 
 // LogCategory is the analyzer's own classification of a primary entry. Every
-// entry gets exactly one; it drives grouping, the section headers and the
-// spam filter.
+// entry gets exactly one; it drives grouping and the section headers.
 type LogCategory int
 
 const (
@@ -76,16 +75,17 @@ const (
 	CatReplication                    // recovery / streaming / archiving
 	CatOther                          // anything unclassified
 	CatSlowQuery                      // duration: N ms  statement/execute …
+	CatStatement                      // log_statement: "statement: …" / "execute <name>: …"
 	CatCheckpoint                     // checkpoint/restartpoint starting/complete
 	CatAutovacuum                     // automatic vacuum/analyze of table
 	CatConnection                     // connection received/authorized/disconnection
 	numLogCategories
 )
 
-// LogCategories lists categories in display order: signal first, spam last.
+// LogCategories lists categories in display order: signal first, chatter last.
 var LogCategories = []LogCategory{
 	CatError, CatWarning, CatLock, CatTempFile, CatReplication, CatOther,
-	CatSlowQuery, CatCheckpoint, CatAutovacuum, CatConnection,
+	CatSlowQuery, CatStatement, CatCheckpoint, CatAutovacuum, CatConnection,
 }
 
 func (c LogCategory) Label() string {
@@ -104,6 +104,8 @@ func (c LogCategory) Label() string {
 		return "other"
 	case CatSlowQuery:
 		return "slow queries"
+	case CatStatement:
+		return "statements"
 	case CatCheckpoint:
 		return "checkpoints"
 	case CatAutovacuum:
@@ -131,6 +133,8 @@ func (c LogCategory) Short() string {
 		return "other"
 	case CatSlowQuery:
 		return "slow"
+	case CatStatement:
+		return "stmt"
 	case CatCheckpoint:
 		return "ckpt"
 	case CatAutovacuum:
@@ -139,17 +143,6 @@ func (c LogCategory) Short() string {
 		return "conn"
 	}
 	return "?"
-}
-
-// IsSpam reports whether c is high-volume operational chatter the v key hides
-// as a block. Hiding is a view concern; the aggregator always produces every
-// group.
-func (c LogCategory) IsSpam() bool {
-	switch c {
-	case CatSlowQuery, CatCheckpoint, CatAutovacuum, CatConnection:
-		return true
-	}
-	return false
 }
 
 // CheckpointFields is the parsed body of a "checkpoint complete" (or
@@ -204,7 +197,7 @@ type LogEntry struct {
 	// Plan is the auto_explain output for this statement: the body of a
 	// "duration: … plan:" line, moved onto the matching "statement:" entry by
 	// MergePlans when both were logged for the same execution.
-	Plan []byte
+	Plan       []byte
 	Checkpoint *CheckpointFields
 	TempBytes  int64  // CatTempFile
 	AVTable    []byte // CatAutovacuum: "db.schema.table"
@@ -237,6 +230,9 @@ type LogSourceInfo struct {
 	ModTime time.Time
 	Rotated bool // .1 / .2.gz …
 	Current bool // pg_current_logfile() / the active log
+	// Lines is an estimate of the file's line count (see EstimateLines); -1
+	// when unknown (server-side files).
+	Lines int64
 }
 
 // LogSource abstracts local, gzip and server-side files so the parser only
@@ -368,15 +364,4 @@ type LogReport struct {
 
 	// parser is retained so an incremental refresh can resume mid-entry.
 	parser *LogParser
-}
-
-// SpamCount is the number of entries in spam categories.
-func (r *LogReport) SpamCount() int {
-	n := 0
-	for _, c := range LogCategories {
-		if c.IsSpam() {
-			n += r.ByCategory[c]
-		}
-	}
-	return n
 }

@@ -39,10 +39,11 @@ type localFileSource struct {
 
 // OpenLocalLog opens a log on this host, picking the gzip reader by suffix.
 func OpenLocalLog(path string) LogSource {
-	info := LogSourceInfo{Kind: "local", Path: path, Size: -1, Rotated: isRotatedName(path)}
+	info := LogSourceInfo{Kind: "local", Path: path, Size: -1, Lines: -1, Rotated: isRotatedName(path)}
 	if fi, err := os.Stat(path); err == nil {
 		info.Size = fi.Size()
 		info.ModTime = fi.ModTime()
+		info.Lines = EstimateLines(path, fi.Size())
 	}
 	if strings.HasSuffix(path, ".gz") {
 		info.Kind = "gz"
@@ -108,6 +109,64 @@ func (s *localFileSource) Cursor(_ context.Context) *LogCursor {
 	return &LogCursor{Inode: fileInode(fi), Size: fi.Size()}
 }
 
+// lineSample is how much of a file's head is read to measure the average line
+// length for EstimateLines.
+const lineSample = 64 << 10
+
+// EstimateLines approximates a log's line count without reading it all: the
+// average line length over the first 64 KiB scaled to the uncompressed size.
+// For a .gz the uncompressed size comes from the gzip trailer (ISIZE, exact
+// below 4 GiB) and the sample from decompressing the head. -1 when the file
+// cannot be read.
+func EstimateLines(path string, size int64) int64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return -1
+	}
+	defer func() { _ = f.Close() }()
+	var r io.Reader = f
+	total := size
+	if strings.HasSuffix(path, ".gz") {
+		if size < 8 {
+			return -1
+		}
+		var trailer [4]byte
+		if _, err := f.ReadAt(trailer[:], size-4); err != nil {
+			return -1
+		}
+		total = int64(uint32(trailer[0]) | uint32(trailer[1])<<8 | uint32(trailer[2])<<16 | uint32(trailer[3])<<24)
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return -1
+		}
+		zr, err := gzip.NewReader(f)
+		if err != nil {
+			return -1
+		}
+		defer func() { _ = zr.Close() }()
+		r = zr
+	}
+	head := make([]byte, lineSample)
+	n, err := io.ReadFull(r, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return -1
+	}
+	head = head[:n]
+	if n == 0 {
+		return 0
+	}
+	lines := int64(bytes.Count(head, []byte{'\n'}))
+	if int64(n) >= total {
+		if n > 0 && head[n-1] != '\n' {
+			lines++
+		}
+		return lines
+	}
+	if lines == 0 {
+		return 1
+	}
+	return total * lines / int64(n)
+}
+
 // ── local gzip file ──────────────────────────────────────────────────────────
 
 type gzFileSource struct {
@@ -130,8 +189,10 @@ func (s *gzFileSource) ReadTail(ctx context.Context, n int64) ([]byte, LogWindow
 	return tailOfStream(ctx, zr, n)
 }
 
-func (s *gzFileSource) ReadFrom(context.Context, int64) ([]byte, error) { return nil, ErrNotIncremental }
-func (s *gzFileSource) Cursor(context.Context) *LogCursor              { return nil }
+func (s *gzFileSource) ReadFrom(context.Context, int64) ([]byte, error) {
+	return nil, ErrNotIncremental
+}
+func (s *gzFileSource) Cursor(context.Context) *LogCursor { return nil }
 
 // tailOfStream drains r keeping only its last n bytes (n <= 0: everything up
 // to maxWholeFile), using two buffers of n so peak memory stays under 2n.
@@ -185,10 +246,7 @@ func (t *tailKeeper) Bytes() []byte {
 	if len(t.prev) == 0 {
 		return t.cur
 	}
-	need := int(t.n) - len(t.cur)
-	if need > len(t.prev) {
-		need = len(t.prev)
-	}
+	need := min(int(t.n)-len(t.cur), len(t.prev))
 	out := make([]byte, 0, need+len(t.cur))
 	out = append(out, t.prev[len(t.prev)-need:]...)
 	out = append(out, t.cur...)
@@ -480,7 +538,7 @@ func scanServerFile(rows pgx.Rows) (serverFile, bool) {
 }
 
 func (c *Client) serverCandidate(pool *pgxpool.Pool, path string, size int64, mod time.Time, reason string, current bool) LogCandidate {
-	info := LogSourceInfo{Kind: "server", Path: path, Size: size, ModTime: mod, Rotated: isRotatedName(path), Current: current}
+	info := LogSourceInfo{Kind: "server", Path: path, Size: size, Lines: -1, ModTime: mod, Rotated: isRotatedName(path), Current: current}
 	return LogCandidate{Info: info, Reason: reason, Open: func() LogSource {
 		return &serverFileSource{pool: pool, info: info}
 	}}

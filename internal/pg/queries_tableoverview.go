@@ -61,17 +61,10 @@ ORDER  BY total_bytes DESC
 // without the sizing/statio columns the overview already has. It is a separate
 // best-effort query rather than a join in sqlTableStats because pg_buffercache
 // is an extension needing pg_monitor: its absence must not take down the whole
-// overview, only blank the two buffer columns.
+// overview, only blank the two buffer columns. As in sqlBufferStats, the
+// filenode set filters pg_buffercache before the GROUP BY.
 const sqlTableStatsBuffers = `
-WITH bc AS (
-  SELECT relfilenode,
-         COUNT(*)                         AS bufs,
-         COUNT(*) FILTER (WHERE isdirty)  AS dirty_bufs
-  FROM   pg_buffercache
-  WHERE  reldatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
-  GROUP  BY relfilenode
-),
-filenodes AS (
+WITH filenodes AS (
   SELECT c.oid AS tab_oid, pg_relation_filenode(c.oid) AS fn
   FROM   pg_class c
   JOIN   pg_namespace n ON n.oid = c.relnamespace
@@ -87,6 +80,15 @@ filenodes AS (
   JOIN   pg_namespace n ON n.oid = c.relnamespace
   JOIN   pg_index i ON i.indrelid = c.oid
   WHERE  n.nspname = $1 AND c.relkind IN ('r','m','p')
+),
+bc AS (
+  SELECT relfilenode,
+         COUNT(*)                         AS bufs,
+         COUNT(*) FILTER (WHERE isdirty)  AS dirty_bufs
+  FROM   pg_buffercache
+  WHERE  relfilenode IN (SELECT fn FROM filenodes WHERE fn IS NOT NULL)
+    AND  reldatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
+  GROUP  BY relfilenode
 )
 SELECT f.tab_oid,
        (COALESCE(SUM(bc.bufs), 0)       * current_setting('block_size')::int)::bigint AS buffered_bytes,

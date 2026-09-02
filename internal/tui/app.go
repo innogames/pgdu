@@ -168,7 +168,8 @@ type item struct {
 
 	// logIdx is 1 + the row's index into the log report's Entries on the log
 	// timeline (whose .data is []pg.DiagCell for the generic renderer) and the
-	// group-entries level; 0 = not a log entry row.
+	// group-entries level, or into screen.logCands on the log-file picker;
+	// 0 = not a log row.
 	logIdx int
 
 	// snapPath is the file path of the snapshot a levelSnapshots row represents,
@@ -373,8 +374,12 @@ type screen struct {
 	// shared-buffers section, loaded asynchronously and independently of
 	// describe (nil until loaded; descBufErr non-nil on a non-extension error).
 	// A missing pg_buffercache is carried by extPrompt instead.
-	descBuf    *pg.TableBufferStat
-	descBufErr error
+	// descBufLoading is set while a load is in flight so `d` toggles and
+	// refreshes don't stack concurrent full-pool scans (each one is a
+	// multi-second pg_buffercache walk on a big shared_buffers).
+	descBuf        *pg.TableBufferStat
+	descBufErr     error
+	descBufLoading bool
 
 	// WAL-inspector state. walSummary is the header snapshot rendered above
 	// the rmgr list on levelWAL (nil until loaded; walSummaryErr non-nil when
@@ -601,13 +606,12 @@ type screen struct {
 	logSrc    pg.LogSource
 	logReport *pg.LogReport
 	logErr    error
-	// View state, all client-side over logReport: which pane (groups or
-	// timeline), whether groups are sectioned by category, whether spam
-	// categories show, and the requested tail window (0 = whole file).
-	logView     logView
-	logGroupBy  logGroupBy
-	logShowSpam bool
-	logWindow   int64
+	// View state, all client-side over logReport: which pane (groups,
+	// timeline or slow), whether groups are sectioned by category, and the requested
+	// tail window (0 = whole file).
+	logView    logView
+	logGroupBy logGroupBy
+	logWindow  int64
 	// logGroup/logEntry are what levelLogGroup and levelLogEntry show; logCols
 	// is the projected timeline column set (parallel to diagCols).
 	logGroup *pg.LogGroup
@@ -804,7 +808,8 @@ type Model struct {
 	// Timeline column picker state (C on the log timeline), mirroring the
 	// activity picker.
 	logColsVisible      map[logColID]bool
-	logSortColID        logColID
+	logSortColID        logColID // timeline pane
+	logSlowSortColID    logColID // slow-queries pane
 	showLogColumnConfig bool
 	logColCfgCursor     int
 
@@ -947,7 +952,7 @@ func toolItems() []item {
 		{name: "Table overview", detail: "per-table stats for a schema: size, write/scan activity, cache hit ratios, bloat, vacuum age, storage options — sortable, customizable columns", hasChildren: true, data: toolTableStats},
 		{name: "System overview", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
 		{name: "Health triage", detail: "one-key red/yellow/green health report: runs the whole diagnostic battery concurrently; Enter drills into the check that fired", hasChildren: true, data: toolTriage},
-		{name: "Log analyzer", detail: "parse the server log (current, rotated, .gz): errors, slow statements, checkpoints, temp files, locks — grouped and searchable, spam hidden by default, live tail", hasChildren: true, data: toolLogs},
+		{name: "Log analyzer", detail: "parse the server log (current, rotated, .gz): errors, slow statements, checkpoints, temp files, locks — grouped and searchable, live tail", hasChildren: true, data: toolLogs},
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},

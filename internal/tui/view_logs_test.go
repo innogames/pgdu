@@ -57,7 +57,7 @@ func newLogTestModel(t *testing.T) (*Model, *screen) {
 	s := &screen{
 		level: levelLogs, title: "log", tool: toolLogs,
 		logSrc: &memLogSource{}, logWindow: logDefaultWindow, loaded: true,
-		sort: sortByCount, sortDesc: true, // logShowSpam left false: the tests below start from the filtered view
+		sort: sortByCount, sortDesc: true,
 	}
 	s.logReport = sampleLogReport(t)
 	m.stack = []*screen{{level: levelTools}, s}
@@ -65,11 +65,11 @@ func newLogTestModel(t *testing.T) (*Model, *screen) {
 	return m, s
 }
 
-func TestLogGroupItemsSectionsAndSpam(t *testing.T) {
+func TestLogGroupItemsSections(t *testing.T) {
 	m, s := newLogTestModel(t)
 
-	// Spam hidden: only errors + warnings + temp files remain, each under its
-	// section header, errors first.
+	// Signal sections first (errors, warnings, temp files), chatter last
+	// (slow queries, checkpoints); the biggest group leads its section.
 	var sections []string
 	var titles []string
 	for _, it := range s.items {
@@ -78,15 +78,12 @@ func TestLogGroupItemsSectionsAndSpam(t *testing.T) {
 			sections = append(sections, v.title)
 		case *pg.LogGroup:
 			titles = append(titles, v.Title)
-			if v.Category.IsSpam() {
-				t.Errorf("spam group %q shown with spam hidden", v.Title)
-			}
 		}
 	}
-	if strings.Join(sections, ",") != "errors,warnings,temp files" {
+	if strings.Join(sections, ",") != "errors,warnings,temp files,slow queries,checkpoints" {
 		t.Errorf("sections = %v", sections)
 	}
-	if len(titles) != 4 || titles[0] != `duplicate key value violates unique constraint "channel_name_plugin_idx"` {
+	if len(titles) != 6 || titles[0] != `duplicate key value violates unique constraint "channel_name_plugin_idx"` {
 		t.Errorf("titles = %v", titles)
 	}
 	// The cursor never rests on a header row.
@@ -94,20 +91,6 @@ func TestLogGroupItemsSectionsAndSpam(t *testing.T) {
 	m.skipLogHeader(s, 1)
 	if _, hdr := s.items[s.visibleIndexes()[s.cursor]].data.(logSection); hdr {
 		t.Error("cursor rests on a section header")
-	}
-
-	// Spam shown: slow queries and checkpoints appear, and their sections
-	// trail the signal ones.
-	s.logShowSpam = true
-	m.rebuildLogItems(s)
-	sections = sections[:0]
-	for _, it := range s.items {
-		if v, ok := it.data.(logSection); ok {
-			sections = append(sections, v.title)
-		}
-	}
-	if strings.Join(sections, ",") != "errors,warnings,temp files,slow queries,checkpoints" {
-		t.Errorf("sections with spam = %v", sections)
 	}
 
 	// Flat mode: no headers at all.
@@ -134,15 +117,15 @@ func TestRenderLogGroupsAndHeader(t *testing.T) {
 			t.Errorf("groups pane missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "DELETE FROM event_log") {
-		t.Error("slow query shown with spam hidden")
+	if !strings.Contains(out, "DELETE FROM event_log") || !strings.Contains(out, "checkpoint complete") {
+		t.Error("slow-query / checkpoint groups missing")
 	}
 
 	hdr := stripANSI(m.renderLogHeader(s))
 	for _, want := range []string{
 		"postgresql-17-main.log", "whole file", "prefix %t [%p-%l] %q%u@%h", "detected",
 		"8 entries", "2 errors", "1 fatal", "1 warnings", "2 slow", "1 ckpt",
-		"spam hidden (3)", "by category", "⟳ off",
+		"by category", "⟳ off",
 		"errors", "all", "per cell",
 	} {
 		if !strings.Contains(hdr, want) {
@@ -153,7 +136,7 @@ func TestRenderLogGroupsAndHeader(t *testing.T) {
 	// Timeline pane: generic table with the default columns, newest first.
 	s.logView = logViewTimeline
 	m.rebuildLogItems(s)
-	if s.diagCols == nil || len(s.items) != 5 {
+	if s.diagCols == nil || len(s.items) != 8 {
 		t.Fatalf("timeline: cols=%v items=%d", s.diagCols, len(s.items))
 	}
 	if s.diagCols[s.diagSortCol].Name != "time" || !s.sortDesc {
@@ -169,6 +152,36 @@ func TestRenderLogGroupsAndHeader(t *testing.T) {
 	table := stripANSI(m.renderDiagResult(s, 20))
 	if !strings.Contains(table, "WARNING") || !strings.Contains(table, "pgbouncer") {
 		t.Errorf("timeline table:\n%s", table)
+	}
+
+	// Slow pane: the same table restricted to duration: entries, slowest first,
+	// with its own remembered sort so tabbing back to the timeline keeps time↓.
+	s.logView = s.logView.next()
+	if s.logView != logViewSlow {
+		t.Fatalf("tab after timeline = %v", s.logView)
+	}
+	m.rebuildLogItems(s)
+	if len(s.items) != 2 {
+		t.Fatalf("slow pane rows = %d", len(s.items))
+	}
+	if s.diagCols[s.diagSortCol].Name != "dur" || !s.sortDesc {
+		t.Errorf("slow default sort = %s desc=%v", s.diagCols[s.diagSortCol].Name, s.sortDesc)
+	}
+	var prev float64 = -1
+	for i, it := range s.items {
+		e := s.logEntryOf(it)
+		if e == nil || e.Category != pg.CatSlowQuery {
+			t.Fatalf("slow row %d: %+v", i, e)
+		}
+		if prev >= 0 && e.DurationMs > prev {
+			t.Errorf("slow rows not duration-desc: %v after %v", e.DurationMs, prev)
+		}
+		prev = e.DurationMs
+	}
+	s.logView = s.logView.next().next() // groups → timeline
+	m.rebuildLogItems(s)
+	if s.diagCols[s.diagSortCol].Name != "time" || len(s.items) != 8 {
+		t.Errorf("timeline after slow: sort=%s items=%d", s.diagCols[s.diagSortCol].Name, len(s.items))
 	}
 }
 
@@ -206,7 +219,7 @@ func TestLogGroupAndEntryScreens(t *testing.T) {
 	es := m.logEntryScreen(gs, gs.logEntryOf(gs.items[1]))
 	es.loaded = true
 	body := stripANSI(m.renderLogEntry(es, 40))
-	for _, want := range []string{"severity", "ERROR", "pid", "872628", "MESSAGE", "duplicate key", "DETAIL", "Key (name, plugin)", "STATEMENT", "INSERT INTO channel"} {
+	for _, want := range []string{"severity", "ERROR", "pid", "872628", "table", "channel  ·  d describes it", "MESSAGE", "duplicate key", "DETAIL", "Key (name, plugin)", "STATEMENT", "INSERT INTO channel"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("entry body missing %q:\n%s", want, body)
 		}
@@ -245,24 +258,34 @@ func TestLogColumnRegistry(t *testing.T) {
 }
 
 func TestLogFileItems(t *testing.T) {
-	items := logFileItems([]pg.LogCandidate{
-		{Info: pg.LogSourceInfo{Kind: "local", Path: "/var/log/postgresql/postgresql-17-main.log", Size: 1 << 20, Current: true}, Reason: "/var/log/postgresql"},
-		{Info: pg.LogSourceInfo{Kind: "gz", Path: "/var/log/postgresql/postgresql-17-main.log.2.gz", Size: 4096, Rotated: true}, Reason: "/var/log/postgresql"},
-	})
-	if len(items) != 2 || !items[0].hasChildren {
+	cands := []pg.LogCandidate{
+		{Info: pg.LogSourceInfo{Kind: "local", Path: "/var/log/postgresql/postgresql-17-main.log", Size: 1 << 20, Lines: 12345, Current: true, ModTime: time.Now()}, Reason: "/var/log/postgresql"},
+		{Info: pg.LogSourceInfo{Kind: "gz", Path: "/var/log/postgresql/postgresql-17-main.log.2.gz", Size: 4096, Lines: -1, Rotated: true}, Reason: "/var/log/postgresql"},
+	}
+	items := logFileItems(cands)
+	cols := logFileColumns()
+	if len(items) != 2 || !items[0].hasChildren || items[0].logIdx != 1 || items[1].logIdx != 2 {
 		t.Fatalf("items = %+v", items)
 	}
-	if !strings.Contains(items[0].detail, "current") || !strings.Contains(items[0].detail, "1.00 MB") {
-		t.Errorf("detail = %q", items[0].detail)
+	cells := items[0].data.([]pg.DiagCell)
+	if len(cells) != len(cols) {
+		t.Fatalf("cells %d vs cols %d", len(cells), len(cols))
 	}
-	if !strings.Contains(items[1].detail, "gz") || strings.Contains(items[1].detail, "current") {
-		t.Errorf("gz detail = %q", items[1].detail)
+	if cells[2].Display != "1.00 MB" || cells[5].Display != "~12k" || cells[7].Display != "●" {
+		t.Errorf("row 0 cells = %+v", cells)
 	}
-	m := &Model{width: 120}
-	s := &screen{level: levelLogFiles, loaded: true, items: items}
-	out := stripANSI(m.renderLogFiles(s, 5))
-	if !strings.Contains(out, "postgresql-17-main.log.2.gz") || !strings.Contains(out, "via /var/log/postgresql") {
+	if c := items[1].data.([]pg.DiagCell); c[1].Display != "gz" || c[5].Display != "—" || c[7].Display != "" {
+		t.Errorf("gz cells = %+v", c)
+	}
+	m := &Model{width: 200}
+	s := &screen{level: levelLogFiles, loaded: true, items: items, logCands: cands, diagCols: cols, diagBarCol: -1, diagSortCol: 3, sortDesc: true}
+	m.applySort(s)
+	out := stripANSI(m.renderDiagResult(s, 5))
+	if !strings.Contains(out, "postgresql-17-main.log.2.gz") || !strings.Contains(out, "/var/log/postgresql") || !strings.Contains(out, "~lines") {
 		t.Errorf("picker:\n%s", out)
+	}
+	if out2 := stripANSI(m.renderLogFiles(&screen{level: levelLogFiles}, 5)); !strings.Contains(out2, "no readable log found") {
+		t.Errorf("empty state:\n%s", out2)
 	}
 }
 
@@ -302,8 +325,8 @@ func TestJumpToLogEntry(t *testing.T) {
 	if m.top() != s || s.logView != logViewTimeline {
 		t.Fatalf("top=%v view=%v", m.top().level, s.logView)
 	}
-	if !s.logShowSpam || s.filter != "" {
-		t.Errorf("filters not lifted: spam=%v filter=%q", s.logShowSpam, s.filter)
+	if s.filter != "" {
+		t.Errorf("filter not lifted: %q", s.filter)
 	}
 	vis := s.visibleIndexes()
 	if got := s.logEntryOf(s.items[vis[s.cursor]]); got == nil || got.Off != target.Off {
@@ -315,11 +338,9 @@ func TestLogHostnameColumn(t *testing.T) {
 	m, s := newLogTestModel(t)
 	s.logView = logViewTimeline
 	m.rebuildLogItems(s)
-	if idx := indexOfLogCol(s.logCols, logColHostname); idx >= 0 {
-		t.Fatal("hostname column must be opt-in")
+	if indexOfLogCol(s.logCols, logColHostname) < 0 || indexOfLogCol(s.logCols, logColHost) >= 0 {
+		t.Fatal("hostname must be on and the raw host column off by default")
 	}
-	m.ensureLogColsInit()
-	m.logColsVisible[logColHostname] = true
 	s.logHosts = map[string]string{"2a00:1f78:fffd:4301::1221": "app-01.example"}
 	m.rebuildLogItems(s)
 	col := indexOfLogCol(s.logCols, logColHostname)
@@ -337,5 +358,70 @@ func TestLogHostnameColumn(t *testing.T) {
 	}
 	if !resolved || !raw {
 		t.Errorf("resolved=%v raw-fallback=%v", resolved, raw)
+	}
+}
+
+func TestLogDescribeTarget(t *testing.T) {
+	m, s := newLogTestModel(t)
+	s.db = "shop"
+	var dup *pg.LogGroup
+	for _, it := range s.items {
+		if g, ok := it.data.(*pg.LogGroup); ok && strings.HasPrefix(g.Title, "duplicate key") {
+			dup = g
+		}
+	}
+	gs := m.logGroupScreen(s, dup)
+	m.stack = append(m.stack, gs)
+	m.rebuildLogChild(gs)
+	// Only the older duplicate-key error carries STATEMENT: INSERT INTO channel(...) …
+	gs.cursor = len(gs.items) - 1
+	tgt, ok := describeTarget(gs)
+	if !ok || !tgt.byName || tgt.tableName != "channel" || tgt.db != "shop" {
+		t.Errorf("group row target = %+v ok=%v", tgt, ok)
+	}
+	// On the overview a group row falls back to its newest sample with a statement.
+	for vi, idx := range s.visibleIndexes() {
+		if g, ok := s.items[idx].data.(*pg.LogGroup); ok && g == dup {
+			s.cursor = vi
+		}
+	}
+	tgt, ok = describeTarget(s)
+	if !ok || !tgt.byName || tgt.tableName != "channel" || tgt.db != "shop" {
+		t.Errorf("group row target = %+v ok=%v", tgt, ok)
+	}
+	// A slow-query entry resolves through its SQL.
+	for i := range s.logReport.Entries {
+		if e := &s.logReport.Entries[i]; e.Category == pg.CatSlowQuery {
+			es := m.logEntryScreen(gs, e)
+			if tgt, ok := describeTarget(es); !ok || tgt.tableName != "event_log" {
+				t.Errorf("slow entry target = %+v ok=%v", tgt, ok)
+			}
+			break
+		}
+	}
+	// A checkpoint line has no statement to describe.
+	for i := range s.logReport.Entries {
+		if e := &s.logReport.Entries[i]; e.Category == pg.CatCheckpoint {
+			if _, ok := describeTarget(m.logEntryScreen(gs, e)); ok {
+				t.Error("checkpoint entry should not be describable")
+			}
+		}
+	}
+}
+
+func TestLogDurationColumnCheckpoint(t *testing.T) {
+	m, s := newLogTestModel(t)
+	s.logView = logViewTimeline
+	m.rebuildLogItems(s)
+	col := indexOfLogCol(s.logCols, logColDuration)
+	for _, it := range s.items {
+		e := s.logEntryOf(it)
+		if e == nil || e.Category != pg.CatCheckpoint {
+			continue
+		}
+		c := it.data.([]pg.DiagCell)[col]
+		if !c.HasNum || c.Num != 959437 || c.Display != "16.0m" {
+			t.Errorf("checkpoint dur cell = %+v", c)
+		}
 	}
 }

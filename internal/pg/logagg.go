@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"math/rand/v2"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -155,7 +156,7 @@ func percentile(res []float64, q float64) float64 {
 	}
 	s := make([]float64, len(res))
 	copy(s, res)
-	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	slices.Sort(s)
 	idx := int(q*float64(len(s)-1) + 0.5)
 	return s[min(idx, len(s)-1)]
 }
@@ -205,6 +206,9 @@ func Fingerprint(e *LogEntry) (key, title string) {
 		}
 		norm := NormalizeSQL(string(e.SQL))
 		return boundedKey("slow|", norm), clipTitle(norm)
+	case CatStatement:
+		norm := NormalizeSQL(string(e.SQL))
+		return boundedKey("stmt|", norm), clipTitle(norm)
 	case CatCheckpoint:
 		msg := e.FirstLine()
 		kind := "checkpoint"
@@ -240,8 +244,8 @@ func Fingerprint(e *LogEntry) (key, title string) {
 	case CatConnection:
 		msg := e.FirstLine()
 		kind := msg
-		if i := strings.IndexByte(msg, ':'); i >= 0 {
-			kind = msg[:i]
+		if before, _, ok := strings.Cut(msg, ":"); ok {
+			kind = before
 		}
 		return "conn|" + kind, kind
 	}

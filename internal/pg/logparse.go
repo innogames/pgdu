@@ -489,6 +489,15 @@ func classify(e *LogEntry) {
 	case bytes.HasPrefix(msg, []byte("duration: ")):
 		e.Category = CatSlowQuery
 		parseDuration(e)
+	case bytes.HasPrefix(msg, []byte("statement: ")), bytes.HasPrefix(msg, []byte("execute ")):
+		// log_statement output — the same shapes as after "duration: N ms",
+		// just without the timing.
+		if sql, ok := statementSQL(e.Message); ok {
+			e.Category = CatStatement
+			e.SQL = sql
+		} else {
+			e.Category = CatOther
+		}
 	case bytes.HasPrefix(msg, []byte("checkpoint ")) || bytes.HasPrefix(msg, []byte("restartpoint ")):
 		e.Category = CatCheckpoint
 		parseCheckpoint(e, msg)
@@ -538,21 +547,28 @@ func parseDuration(e *LogEntry) {
 		e.SQL, e.Plan = splitAutoExplain(rest[len("plan:"):])
 		return
 	}
-	// "statement: …" / "execute <name>: …" / "parse <name>: …" / "bind <name>: …"
+	e.SQL, _ = statementSQL(rest)
+}
+
+// statementSQL strips the "statement: " / "execute <name>: " / "parse <name>: "
+// / "bind <name>: " lead-in and returns the SQL that follows; ok is false when
+// b doesn't start with one of those kinds.
+func statementSQL(b []byte) (sql []byte, ok bool) {
 	for _, kind := range [][]byte{[]byte("statement: "), []byte("execute "), []byte("parse "), []byte("bind ")} {
-		if bytes.HasPrefix(rest, kind) {
-			if string(kind) == "statement: " {
-				e.SQL = rest[len(kind):]
-				return
-			}
-			if j := bytes.Index(rest, []byte(": ")); j >= 0 {
-				e.SQL = rest[j+2:]
-			} else if j := bytes.IndexByte(rest, ':'); j >= 0 {
-				e.SQL = bytes.TrimLeft(rest[j+1:], " ")
-			}
-			return
+		if !bytes.HasPrefix(b, kind) {
+			continue
 		}
+		if string(kind) == "statement: " {
+			return b[len(kind):], true
+		}
+		if _, after, ok := bytes.Cut(b, []byte(": ")); ok {
+			return after, true
+		} else if _, after, ok := bytes.Cut(b, []byte{':'}); ok {
+			return bytes.TrimLeft(after, " "), true
+		}
+		return nil, true
 	}
+	return nil, false
 }
 
 // splitAutoExplain separates auto_explain's "Query Text: …" (possibly
@@ -561,11 +577,11 @@ func parseDuration(e *LogEntry) {
 // the whole remainder counts as plan and the query text is its first line.
 func splitAutoExplain(body []byte) (sql, plan []byte) {
 	const marker = "Query Text: "
-	i := bytes.Index(body, []byte(marker))
-	if i < 0 {
+	_, after, ok := bytes.Cut(body, []byte(marker))
+	if !ok {
 		return nil, bytes.TrimSpace(body)
 	}
-	rest := body[i+len(marker):]
+	rest := after
 	off := 0
 	first := true
 	for off < len(rest) {
@@ -664,9 +680,9 @@ func parseCheckpoint(e *LogEntry, msg []byte) {
 	cf := &CheckpointFields{}
 	e.Checkpoint = cf
 	s := string(msg)
-	if i := strings.Index(s, " starting: "); i >= 0 {
+	if _, after, ok := strings.Cut(s, " starting: "); ok {
 		cf.Starting = true
-		cf.Reason = s[i+len(" starting: "):]
+		cf.Reason = after
 		return
 	}
 	m := checkpointCompleteRe.FindStringSubmatch(s)
@@ -718,8 +734,8 @@ func firstQuoted(b []byte) []byte {
 }
 
 func firstLineBytes(b []byte) []byte {
-	if i := bytes.IndexByte(b, '\n'); i >= 0 {
-		return b[:i]
+	if before, _, ok := bytes.Cut(b, []byte{'\n'}); ok {
+		return before
 	}
 	return b
 }

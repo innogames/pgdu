@@ -611,7 +611,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelDescribe {
 			s.descDetail = !s.descDetail
 			if s.descDetail && s.describe != nil && s.describe.Kind == pg.DescribeTable &&
-				s.describe.OID != 0 && s.descBuf == nil && s.descBufErr == nil && s.extPrompt == nil {
+				s.describe.OID != 0 && s.descBuf == nil && s.descBufErr == nil && s.extPrompt == nil &&
+				!s.descBufLoading {
+				s.descBufLoading = true
 				return m, m.loadDescribeBuffersCmd(s.db, s.describe.OID)
 			}
 			break
@@ -788,6 +790,9 @@ func describeTarget(s *screen) (descTarget, bool) {
 	}
 
 	switch s.level {
+	case levelLogs, levelLogGroup, levelLogEntry:
+		return logDescribeTarget(s)
+
 	case levelStatements:
 		// item.name is the flattened statement text; parse out its main table and
 		// describe it by name (resolved server-side, since we have no OID here).

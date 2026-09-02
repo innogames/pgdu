@@ -292,9 +292,13 @@ func (m *Model) View() string {
 		case levelWaitProfile:
 			b.WriteString(m.renderWaitProfile(s, contentHeight))
 		case levelLogFiles:
-			b.WriteString(m.renderLogFiles(s, contentHeight))
+			if s.diagCols != nil && len(s.items) > 0 {
+				b.WriteString(m.renderDiagResult(s, contentHeight))
+			} else {
+				b.WriteString(m.renderLogFiles(s, contentHeight))
+			}
 		case levelLogs:
-			if s.logView == logViewTimeline && s.logErr == nil && s.logReport != nil {
+			if s.logView.table() && s.logErr == nil && s.logReport != nil {
 				b.WriteString(m.renderDiagResult(s, contentHeight))
 			} else {
 				b.WriteString(m.renderLogGroups(s, contentHeight))

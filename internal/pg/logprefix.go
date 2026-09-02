@@ -19,25 +19,25 @@ const logTagPattern = `(LOG|ERROR|FATAL|PANIC|WARNING|NOTICE|INFO|DEBUG[1-5]?|DE
 // no session) are allowed to match the empty string; %q handling makes the
 // whole tail optional anyway.
 var prefixEscapes = map[byte]string{
-	'a': `[^ \[\]@,]*`,                                                   // application name
-	'u': `[^ \[\]@,]*`,                                                   // user
-	'd': `[^ \[\]@,]*`,                                                   // database
+	'a': `[^ \[\]@,]*`,                                                  // application name
+	'u': `[^ \[\]@,]*`,                                                  // user
+	'd': `[^ \[\]@,]*`,                                                  // database
 	'r': `(?:\[local\]|[0-9a-fA-F:.]+(?:\(\d+\))?|[^ ,]+(?:\(\d+\))?)?`, // host(port)
-	'h': `(?:\[local\]|[0-9a-fA-F:.]+|[^ ,]+)?`,                          // host
-	'b': `[^ ,]*`,                                                        // backend type
-	'p': `\d+`,                                                           // pid
-	'P': `\d*`,                                                           // leader pid (empty for non-workers)
-	't': `\d{4}-\d\d-\d\d \d\d:\d\d:\d\d [A-Z0-9+\-]{1,6}`,               // timestamp
-	'm': `\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} [A-Z0-9+\-]{1,6}`,        // timestamp with ms
-	'n': `\d+\.\d{3}`,                                                    // epoch
-	'i': `[^ ,]*`,                                                        // command tag
-	'e': `[0-9A-Z]{5}`,                                                   // SQLSTATE
-	'c': `[0-9a-f]+\.[0-9a-f]+`,                                          // session id
-	'l': `\d+`,                                                           // session line number
-	's': `\d{4}-\d\d-\d\d \d\d:\d\d:\d\d [A-Z0-9+\-]{1,6}`,               // session start
-	'v': `[0-9/]*`,                                                       // virtual xid
-	'x': `\d*`,                                                           // xid
-	'Q': `-?\d*`,                                                         // query id
+	'h': `(?:\[local\]|[0-9a-fA-F:.]+|[^ ,]+)?`,                         // host
+	'b': `[^ ,]*`,                                                       // backend type
+	'p': `\d+`,                                                          // pid
+	'P': `\d*`,                                                          // leader pid (empty for non-workers)
+	't': `\d{4}-\d\d-\d\d \d\d:\d\d:\d\d [A-Z0-9+\-]{1,6}`,              // timestamp
+	'm': `\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} [A-Z0-9+\-]{1,6}`,       // timestamp with ms
+	'n': `\d+\.\d{3}`,                                                   // epoch
+	'i': `[^ ,]*`,                                                       // command tag
+	'e': `[0-9A-Z]{5}`,                                                  // SQLSTATE
+	'c': `[0-9a-f]+\.[0-9a-f]+`,                                         // session id
+	'l': `\d+`,                                                          // session line number
+	's': `\d{4}-\d\d-\d\d \d\d:\d\d:\d\d [A-Z0-9+\-]{1,6}`,              // session start
+	'v': `[0-9/]*`,                                                      // virtual xid
+	'x': `\d*`,                                                          // xid
+	'Q': `-?\d*`,                                                        // query id
 }
 
 // prefixMatcher is a compiled log_line_prefix: one anchored regexp whose named
@@ -241,9 +241,9 @@ func (m *prefixMatcher) HasLine() bool { _, ok := m.idx['l']; return ok || m.loo
 // unavailable or does not match the file (a rotated log written under an older
 // configuration, a copied file analysed offline).
 var commonPrefixes = []string{
-	"%t [%p-%l] %q%u@%h ",       // Debian/Ubuntu postgresql-common default
-	"%m [%p] %q%u@%d ",          // postgresql.conf.sample default (PG10+)
-	"%m [%p] ",                  // pre-PG10 sample default
+	"%t [%p-%l] %q%u@%h ", // Debian/Ubuntu postgresql-common default
+	"%m [%p] %q%u@%d ",    // postgresql.conf.sample default (PG10+)
+	"%m [%p] ",            // pre-PG10 sample default
 	"%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h ", // pgBadger recommendation
 	"%t [%p]: ",
 	"%m [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h ",
@@ -323,8 +323,8 @@ func sampleLines(buf []byte, n int) [][]byte {
 
 // firstLineOf returns b up to its first newline as a string.
 func firstLineOf(b []byte) string {
-	if i := bytes.IndexByte(b, '\n'); i >= 0 {
-		return string(b[:i])
+	if before, _, ok := bytes.Cut(b, []byte{'\n'}); ok {
+		return string(before)
 	}
 	return string(b)
 }

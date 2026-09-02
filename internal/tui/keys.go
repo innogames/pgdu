@@ -58,9 +58,8 @@ type keyMap struct {
 
 	// Log-analyzer bindings (levelLogs).
 	LogGroupMode key.Binding // m: cycle section mode (category / severity / flat)
-	LogPane      key.Binding // tab: groups ⇄ timeline
+	LogPane      key.Binding // tab: groups → timeline → slow → groups
 	LogWindow    key.Binding // w: widen the tail window
-	LogFiles     key.Binding // o: back to the file picker
 	LogJump      key.Binding // j: jump to this line in the chronological timeline
 
 	// logJumpInFooter advertises j on the entry and group-rows levels.
@@ -159,9 +158,8 @@ func defaultKeys() keyMap {
 		WaitProfile: key.NewBinding(key.WithKeys("W"), key.WithHelp("W", "wait profile")),
 
 		LogGroupMode: key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "section mode")),
-		LogPane:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "groups/timeline")),
+		LogPane:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "groups/timeline/slow")),
 		LogWindow:    key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "widen window")),
-		LogFiles:     key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "log files")),
 		LogJump:      key.NewBinding(key.WithKeys("j"), key.WithHelp("j", "jump to timeline")),
 	}
 }
@@ -197,8 +195,8 @@ func (k *keyMap) applyContext(s *screen) {
 	// activity table, the table overview and diagnostic results. The picker is
 	// hard to find without a header hint, so surface it in the footer everywhere
 	// but the top-queries table, whose header already advertises it.
-	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult || (logs && s.logView == logViewTimeline))
-	k.columnsInFooter = activity || tableStats || diagResult || (logs && s.logView == logViewTimeline)
+	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult || (logs && s.logView.table()))
+	k.columnsInFooter = activity || tableStats || diagResult || (logs && s.logView.table())
 	// t (ToggleRefresh) cycles the auto-refresh cadence on top-queries levels and
 	// on the live activity/progress levels. Surface it in the footer on the pure
 	// live monitors, whose header shows the cadence but not the key that changes
@@ -211,14 +209,7 @@ func (k *keyMap) applyContext(s *screen) {
 	k.Execute.SetEnabled(stmtDetail)
 	// v is the verbose toggle on statement detail, the VACUUM trigger on parts,
 	// and the auxiliary-backend visibility toggle on the activity table.
-	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity || logs)
-	// The same physical key reads differently on the log analyzer: v shows/hides
-	// the spam categories.
-	if logs {
-		k.Verbose.SetHelp("v", "spam")
-	} else {
-		k.Verbose.SetHelp("v", "verbose")
-	}
+	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity)
 	k.DeleteSnapshot.SetEnabled(snapshots)
 	// Install is only actionable when the screen offers an installable extension
 	// (the prompt renders its own `i` hint); keep it out of the footer otherwise.
@@ -243,11 +234,11 @@ func (k *keyMap) applyContext(s *screen) {
 	k.LogGroupMode.SetEnabled(logs)
 	k.LogPane.SetEnabled(logs)
 	k.LogWindow.SetEnabled(logs)
-	k.LogFiles.SetEnabled(logAny)
 	k.logInFooter = logs
 	logRow := s.level == levelLogGroup || s.level == levelLogEntry
 	k.LogJump.SetEnabled(logRow)
 	k.logJumpInFooter = logRow
+
 
 	// m opens the shared-memory map from the buffer-tables list; surface it in
 	// the footer there since nothing else advertises it.
@@ -286,7 +277,10 @@ func (k *keyMap) applyContext(s *screen) {
 	k.SortPrev.SetEnabled(!progress)
 	k.SortNext.SetEnabled(!progress)
 	k.ReverseSort.SetEnabled(!progress)
-	k.describeInFooter = progress
+	// … and on the log entry / group-rows levels, where d describes the main
+	// table of the statement behind the row — the only path from a slow query
+	// to its relation.
+	k.describeInFooter = progress || logRow
 
 	// W opens the wait-event profile over the activity table's sample stream.
 	k.WaitProfile.SetEnabled(activity)
@@ -303,7 +297,7 @@ func (k *keyMap) applyContext(s *screen) {
 func (k keyMap) ShortHelp() []key.Binding {
 	b := []key.Binding{k.Up, k.Down, k.Enter, k.Back, k.Filter, k.SortPrev, k.SortNext, k.ReverseSort, k.Refresh}
 	if k.logInFooter {
-		b = append(b, k.LogPane, k.Verbose, k.LogGroupMode, k.LogWindow, k.LogFiles)
+		b = append(b, k.LogPane, k.LogGroupMode, k.LogWindow)
 	}
 	if k.logJumpInFooter {
 		b = append(b, k.LogJump)
@@ -344,7 +338,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
 		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation, k.ShmemMap},
-		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogFiles, k.LogJump},
+		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump},
 		{k.Help, k.Quit},
 	}
 }

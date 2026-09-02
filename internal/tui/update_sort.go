@@ -15,17 +15,12 @@ func (m *Model) applySort(s *screen) {
 	// cache must rebuild. applySort runs after every load/rebuild too, so this
 	// one bump covers the common item-mutation paths.
 	s.itemsRev++
-	// The log groups pane orders itself (sections, then s.sort within each) and
-	// the file picker keeps discovery order (current log first).
+	// The log groups pane orders itself (sections, then s.sort within each).
 	if s.level == levelLogs && s.diagCols == nil {
 		if s.logReport != nil {
 			s.items = m.buildLogGroupItems(s)
 			s.itemsRev++
 		}
-		s.clampCursor()
-		return
-	}
-	if s.level == levelLogFiles {
 		s.clampCursor()
 		return
 	}
@@ -355,6 +350,9 @@ func (m *Model) cycleSort(s *screen, dir int) {
 		}
 		if s.tblCols != nil && s.diagSortCol < len(s.tblCols) {
 			m.tblSortColID = s.tblCols[s.diagSortCol].id
+		}
+		if s.level == levelLogs && s.logCols != nil && s.diagSortCol < len(s.logCols) {
+			*m.logSortCol(s.logView) = s.logCols[s.diagSortCol].id
 		}
 		// Diagnostic results track the sort column by name (no stable ids), so a
 		// later column hide/show can re-pin it (see rebuildDiagItems).

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"slices"
+
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -8,8 +10,8 @@ import (
 )
 
 // handleLogKey dispatches the log-analyzer-only bindings (m group mode, tab
-// pane, w window, o file picker) plus the shared v/f/t/C keys when they land
-// on a log level. Returns handled=false when the key is not ours so handleKey
+// pane, w window, j jump) plus the shared t/C keys when they land on a log
+// level. Esc/q walk back through the stack to the file picker. Returns handled=false when the key is not ours so handleKey
 // continues with its generic cases.
 func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bool) {
 	switch s.level {
@@ -32,18 +34,6 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 			}
 		}
 		return nil, true
-
-	case key.Matches(msg, m.keys.LogFiles):
-		// Back to (or open) the picker. When the picker is below us on the
-		// stack, pop to it; otherwise push a fresh one.
-		for i := len(m.stack) - 1; i >= 0; i-- {
-			if m.stack[i].level == levelLogFiles {
-				m.stack = m.stack[:i+1]
-				return nil, true
-			}
-		}
-		m.stack = append(m.stack, &screen{level: levelLogFiles, title: "log files", tool: toolLogs, db: m.client.DefaultDB(), loading: true})
-		return m.loadCurrent(), true
 	}
 
 	if key.Matches(msg, m.keys.LogJump) && logs != nil {
@@ -67,12 +57,6 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 	}
 
 	switch {
-	case key.Matches(msg, m.keys.Verbose):
-		s.logShowSpam = !s.logShowSpam
-		m.rebuildLogItems(s)
-		m.skipLogHeader(s, 1)
-		return nil, true
-
 	case key.Matches(msg, m.keys.LogGroupMode):
 		if s.logGroupBy == logGroupByCategory {
 			s.logGroupBy = logGroupByNone
@@ -86,10 +70,8 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 		return nil, true
 
 	case key.Matches(msg, m.keys.LogPane):
+		s.logView = s.logView.next()
 		if s.logView == logViewGroups {
-			s.logView = logViewTimeline
-		} else {
-			s.logView = logViewGroups
 			s.sort, s.sortDesc = sortByCount, true
 		}
 		m.rebuildLogItems(s)
@@ -110,7 +92,7 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 		return m.loadCurrent(), true
 
 	case key.Matches(msg, m.keys.Columns):
-		if s.logView == logViewTimeline {
+		if s.logView.table() {
 			m.ensureLogColsInit()
 			m.showInfo = false
 			m.showLogColumnConfig = true
@@ -151,17 +133,13 @@ func (m *Model) handleLogColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 
 // jumpToLogEntry pops back to the levelLogs screen, switches it to the
 // timeline and puts the cursor on e, so the user sees what happened around
-// that line. The spam filter and any / filter are lifted when they would hide
-// the target row.
+// that line. Any / filter is lifted so the target row is visible.
 func (m *Model) jumpToLogEntry(logs *screen, e *pg.LogEntry) tea.Cmd {
-	for i := len(m.stack) - 1; i >= 0; i-- {
-		if m.stack[i] == logs {
+	for i, v := range slices.Backward(m.stack) {
+		if v == logs {
 			m.stack = m.stack[:i+1]
 			break
 		}
-	}
-	if !logs.logShowSpam && e.Category.IsSpam() {
-		logs.logShowSpam = true
 	}
 	logs.filter = ""
 	logs.filterFocused = false
@@ -174,4 +152,60 @@ func (m *Model) jumpToLogEntry(logs *screen, e *pg.LogEntry) tea.Cmd {
 		}
 	}
 	return m.logHostsCmd(logs)
+}
+
+// logDescribeTarget resolves `d` on the log levels: the main table of the
+// statement behind the entry under the cursor (a slow query or log_statement SQL, or the
+// STATEMENT attached to an error), described in the entry's database when the
+// prefix carries %d and in the default database otherwise. On the groups pane
+// the group's newest sample stands in for the row.
+func logDescribeTarget(s *screen) (descTarget, bool) {
+	var e *pg.LogEntry
+	switch s.level {
+	case levelLogEntry:
+		e = s.logEntry
+	default:
+		vis := s.visibleIndexes()
+		if s.cursor < 0 || s.cursor >= len(vis) {
+			return descTarget{}, false
+		}
+		it := s.items[vis[s.cursor]]
+		e = s.logEntryOf(it)
+		if g, ok := it.data.(*pg.LogGroup); ok && e == nil && s.logReport != nil {
+			// Newest sample that carries a statement (an error's STATEMENT line
+			// is only logged with log_min_error_statement, so not every row has one).
+			for _, idx := range slices.Backward(g.Samples) {
+				if idx < len(s.logReport.Entries) {
+					c := &s.logReport.Entries[idx]
+					if len(c.SQL) > 0 || len(c.Statement) > 0 {
+						e = c
+						break
+					}
+				}
+			}
+		}
+	}
+	if e == nil {
+		return descTarget{}, false
+	}
+	sql := e.SQL
+	if len(sql) == 0 {
+		sql = e.Statement
+	}
+	if len(sql) == 0 {
+		return descTarget{}, false
+	}
+	db := s.db
+	if len(e.DB) > 0 {
+		db = string(e.DB)
+	}
+	if name := pg.MainTable(string(sql)); name != "" {
+		return descTarget{byName: true, db: db, tableName: name}, true
+	}
+	// DDL on an index (DROP/ALTER/REINDEX INDEX) has no table to point at, but
+	// the index itself can be described.
+	if name := pg.MainIndex(string(sql)); name != "" {
+		return descTarget{indexByName: true, db: db, indexName: name}, true
+	}
+	return descTarget{}, false
 }

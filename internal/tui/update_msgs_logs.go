@@ -20,7 +20,33 @@ type logView int
 const (
 	logViewGroups   logView = iota // aggregated messages under section headers
 	logViewTimeline                // every entry chronologically, generic table
+	logViewSlow                    // only the duration: entries, slowest first
 )
+
+// table reports whether the pane is one of the generic-table views (timeline,
+// slow), as opposed to the self-ordering groups pane.
+func (v logView) table() bool { return v != logViewGroups }
+
+// next cycles the panes on tab: groups → timeline → slow → groups.
+func (v logView) next() logView {
+	switch v {
+	case logViewGroups:
+		return logViewTimeline
+	case logViewTimeline:
+		return logViewSlow
+	}
+	return logViewGroups
+}
+
+func (v logView) label() string {
+	switch v {
+	case logViewTimeline:
+		return "timeline"
+	case logViewSlow:
+		return "slow queries"
+	}
+	return ""
+}
 
 // logGroupBy is how the groups pane is sectioned.
 type logGroupBy int
@@ -46,12 +72,11 @@ type logSection struct {
 }
 
 // logScreen builds the levelLogs screen for one source, with the default view
-// state: grouped by category, every category shown (v hides the spam ones),
-// default window.
+// state: grouped by category, default window.
 func (m *Model) logScreen(src pg.LogSource) *screen {
 	return &screen{
 		level: levelLogs, title: "log", tool: toolLogs, db: m.client.DefaultDB(),
-		logSrc: src, logWindow: logDefaultWindow, loading: true, logShowSpam: true,
+		logSrc: src, logWindow: logDefaultWindow, loading: true,
 		sort: sortByCount, sortDesc: true,
 	}
 }
@@ -82,8 +107,13 @@ func (m *Model) onLogFilesLoaded(msg logFilesLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	s.logCands = msg.cands
+	s.diagCols = logFileColumns()
+	s.diagBarCol = -1
+	// Newest first: the live log leads, then the rotations in age order.
+	s.diagSortCol, s.sortDesc = 3, true
 	s.items = logFileItems(msg.cands)
-	s.itemsRev++
+	s.diagMetricsDirty = true
+	m.applySort(s)
 	s.resetCursor()
 	// One readable candidate: skip the picker (it stays on the stack for o/Esc).
 	if len(msg.cands) == 1 && m.top() == s {
@@ -93,29 +123,52 @@ func (m *Model) onLogFilesLoaded(msg logFilesLoadedMsg) tea.Cmd {
 	return nil
 }
 
-// logFileItems renders the candidates as picker rows.
+// logFileColumns is the picker's schema; logFileItems keeps its cells parallel.
+func logFileColumns() []pg.DiagColumn {
+	return []pg.DiagColumn{
+		{Name: "file", Kind: pg.DiagText},
+		{Name: "kind", Kind: pg.DiagText},
+		{Name: "size", Kind: pg.DiagBytes},
+		{Name: "modified", Kind: pg.DiagText},
+		{Name: "age", Kind: pg.DiagDuration},
+		{Name: "~lines", Kind: pg.DiagCount},
+		{Name: "via", Kind: pg.DiagText},
+		{Name: "current", Kind: pg.DiagText},
+	}
+}
+
+// logFileItems renders the candidates as generic-table rows (sortable by any
+// column); logIdx points back at the candidate for Enter.
 func logFileItems(cands []pg.LogCandidate) []item {
 	items := make([]item, 0, len(cands))
-	for _, c := range cands {
-		var parts []string
-		parts = append(parts, c.Info.Kind)
-		if c.Info.Size >= 0 {
-			parts = append(parts, humanize.Bytes(c.Info.Size))
+	for i, c := range cands {
+		in := c.Info
+		size := pg.DiagCell{Display: "—"}
+		if in.Size >= 0 {
+			size = pg.DiagCell{Display: humanize.Bytes(in.Size), Num: float64(in.Size), HasNum: true}
 		}
-		if !c.Info.ModTime.IsZero() {
-			parts = append(parts, c.Info.ModTime.Local().Format("2006-01-02 15:04")+" ("+relativeAge(time.Since(c.Info.ModTime))+")")
+		mod, age := pg.DiagCell{Display: "—"}, pg.DiagCell{Display: "—"}
+		if !in.ModTime.IsZero() {
+			mod = pg.DiagCell{Display: in.ModTime.Local().Format("2006-01-02 15:04")}
+			ms := float64(time.Since(in.ModTime).Milliseconds())
+			age = pg.DiagCell{Display: relativeAge(time.Since(in.ModTime)), Num: ms, HasNum: true}
 		}
-		parts = append(parts, "via "+c.Reason)
-		if c.Info.Current {
-			parts = append(parts, "current")
+		lines := pg.DiagCell{Display: "—"}
+		if in.Lines >= 0 {
+			lines = pg.DiagCell{Display: "~" + fmtCount(int(in.Lines)), Num: float64(in.Lines), HasNum: true}
 		}
-		items = append(items, item{
-			name:        c.Info.Path,
-			detail:      strings.Join(parts, "  ·  "),
-			hasChildren: true,
-			size:        max(c.Info.Size, 0),
-			data:        c,
-		})
+		current := pg.DiagCell{}
+		if in.Current {
+			current = pg.DiagCell{Display: "●"}
+		}
+		cells := []pg.DiagCell{
+			{Display: in.Path}, {Display: in.Kind}, size, mod, age, lines, {Display: c.Reason}, current,
+		}
+		parts := make([]string, len(cells))
+		for j, cell := range cells {
+			parts[j] = cell.Display
+		}
+		items = append(items, item{name: strings.Join(parts, " "), hasChildren: true, data: cells, logIdx: i + 1})
 	}
 	return items
 }
@@ -182,7 +235,7 @@ func (m *Model) onLogHosts(msg logHostsMsg) tea.Cmd {
 		s.logHosts = make(map[string]string)
 	}
 	maps.Copy(s.logHosts, msg.hosts)
-	if s.logView == logViewTimeline && s.logReport != nil {
+	if s.logView.table() && s.logReport != nil {
 		m.rebuildLogItems(s)
 	}
 	return nil
@@ -237,20 +290,10 @@ func (m *Model) skipLogHeader(s *screen, dir int) {
 	}
 }
 
-// logGroupVisible applies the spam filter to a group.
-func (s *screen) logGroupVisible(g *pg.LogGroup) bool {
-	return s.logShowSpam || !g.Category.IsSpam()
-}
-
-// logEntryVisible is the per-entry counterpart for the timeline.
-func (s *screen) logEntryVisible(e *pg.LogEntry) bool {
-	return s.logShowSpam || !e.Category.IsSpam()
-}
-
-// rebuildLogItems regenerates the levelLogs rows for the current pane and
-// filters. The groups pane is ordered here (sections + per-section sort), so
-// applySort leaves it alone; the timeline goes through the generic
-// diagnostic-table path (diagCols + []pg.DiagCell rows) and its sort.
+// rebuildLogItems regenerates the levelLogs rows for the current pane. The groups pane is ordered here (sections + per-section sort), so
+// applySort leaves it alone; the timeline and slow panes go through the generic
+// diagnostic-table path (diagCols + []pg.DiagCell rows) and its sort — the
+// slow pane is the timeline restricted to CatSlowQuery rows.
 func (m *Model) rebuildLogItems(s *screen) {
 	r := s.logReport
 	if r == nil {
@@ -259,7 +302,7 @@ func (m *Model) rebuildLogItems(s *screen) {
 		s.itemsRev++
 		return
 	}
-	if s.logView == logViewTimeline {
+	if s.logView.table() {
 		m.rebuildLogTimeline(s)
 		return
 	}
@@ -270,9 +313,9 @@ func (m *Model) rebuildLogItems(s *screen) {
 	s.clampCursor()
 }
 
-// buildLogGroupItems orders the visible groups into sections. Within a
+// buildLogGroupItems orders the groups into sections. Within a
 // section rows follow s.sort (count / last seen / title); sections follow
-// pg.LogCategories (signal first, spam last), or there is a single unnamed
+// pg.LogCategories (signal first, chatter last), or there is a single unnamed
 // one in flat mode.
 func (m *Model) buildLogGroupItems(s *screen) []item {
 	r := s.logReport
@@ -296,9 +339,6 @@ func (m *Model) buildLogGroupItems(s *screen) []item {
 	}
 	for i := range r.Groups {
 		g := &r.Groups[i]
-		if !s.logGroupVisible(g) {
-			continue
-		}
 		switch s.logGroupBy {
 		case logGroupByNone:
 			add(0, "", g)
@@ -355,7 +395,7 @@ func (m *Model) buildLogGroupItems(s *screen) []item {
 	return items
 }
 
-// rebuildLogTimeline projects the visible entries onto the generic table.
+// rebuildLogTimeline projects every entry onto the generic table.
 func (m *Model) rebuildLogTimeline(s *screen) {
 	r := s.logReport
 	descs := m.visibleLogCols()
@@ -363,7 +403,7 @@ func (m *Model) rebuildLogTimeline(s *screen) {
 	items := make([]item, 0, len(r.Entries))
 	for i := range r.Entries {
 		e := &r.Entries[i]
-		if !s.logEntryVisible(e) {
+		if s.logView == logViewSlow && e.Category != pg.CatSlowQuery {
 			continue
 		}
 		cells := make([]pg.DiagCell, len(descs))

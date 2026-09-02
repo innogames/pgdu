@@ -418,14 +418,13 @@ func (m *Model) drillIn() tea.Cmd {
 		m.stack = append(m.stack, next)
 		return m.loadActivityStatementCmd(db, backendPID, cur.statQueryID, queryText)
 	case levelLogFiles:
-		cand, ok := cur.data.(pg.LogCandidate)
-		if !ok {
+		if cur.logIdx <= 0 || cur.logIdx > len(s.logCands) {
 			return nil
 		}
-		m.stack = append(m.stack, m.logScreen(cand.Open()))
+		m.stack = append(m.stack, m.logScreen(s.logCands[cur.logIdx-1].Open()))
 		return m.loadCurrent()
 	case levelLogs:
-		if s.logView == logViewTimeline {
+		if s.logView.table() {
 			if e := s.logEntryOf(cur); e != nil {
 				m.stack = append(m.stack, m.logEntryScreen(s, e))
 				return m.loadCurrent()

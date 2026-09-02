@@ -174,6 +174,9 @@ func TestClassifyCanonicalLines(t *testing.T) {
 		{`WARNING:  there is no transaction in progress`, CatWarning},
 		{`FATAL:  terminating connection due to administrator command`, CatError},
 		{`LOG:  duration: 12.000 ms`, CatSlowQuery},
+		{`LOG:  statement: SELECT 1`, CatStatement},
+		{`LOG:  execute <unnamed>: CREATE SEQUENCE IF NOT EXISTS s AS integer`, CatStatement},
+		{`LOG:  execute S_1/C_2: UPDATE t SET a = $1`, CatStatement},
 		{`LOG:  something entirely different`, CatOther},
 	}
 	for _, c := range cases {
@@ -196,6 +199,16 @@ func TestClassifyCanonicalLines(t *testing.T) {
 	es = parseStderr(t, "2026-09-02 00:00:00 UTC [1-1] app@h LOG:  duration: 12.000 ms\n")
 	if es[0].DurationMs != 12 || len(es[0].SQL) != 0 {
 		t.Errorf("bare duration: %v %q", es[0].DurationMs, es[0].SQL)
+	}
+	for line, want := range map[string]string{
+		"statement: ALTER SEQUENCE s AS bigint;": "ALTER SEQUENCE s AS bigint;",
+		"execute <unnamed>: SELECT nextval('s')": "SELECT nextval('s')",
+		"execute S_1/C_2: UPDATE t SET a = $1":   "UPDATE t SET a = $1",
+	} {
+		es = parseStderr(t, "2026-09-02 00:00:00 UTC [1-1] app@h LOG:  "+line+"\n")
+		if string(es[0].SQL) != want || es[0].DurationMs != 0 {
+			t.Errorf("%q: SQL %q dur %v", line, es[0].SQL, es[0].DurationMs)
+		}
 	}
 }
 
