@@ -64,27 +64,106 @@ func (m *Model) renderDiagQuery(s *screen, height int) string {
 	return b.String()
 }
 
-// renderDiagFix prints the suggested-fix statement built for the row Enter was
-// pressed on (screen.diagFixSQL), so it can be selected and copied out of the
-// terminal — pgdu never executes it. Modal like the s SQL viewer: any key
-// dismisses; padded to `height` so the help row stays pinned to the bottom.
+// renderDiagFix draws the suggested-fix overlay for the row Enter was pressed
+// on (screen.diagFix): the script, syntax-coloured one source line at a time so
+// the builders' "--" advice lines stay on their own lines (highlightSQL's
+// clause splitting would re-flow them); a status line for the confirm/run
+// lifecycle; and, once a run has started, its streamed output in a
+// tail-following pane. Modal — handleDiagFixKey owns the keys. Padded to
+// `height` so the help row stays pinned to the bottom.
 func (m *Model) renderDiagFix(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString("\n")
+	f := s.diagFix
+	if f == nil {
+		// Guarded by the View switch, but stay defensive rather than panic.
+		for range height {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
 	title := "suggested fix"
 	if s.diag != nil {
 		title = s.diag.Title + " — suggested fix"
 	}
-	b.WriteString("  " + styleSelected.Render(title) + mu("  ·  copy & review — not executed  ·  press any key to dismiss") + "\n\n")
+	b.WriteString("\n  " + styleSelected.Render(title) + mu("  ·  db "+f.db) + "\n\n")
+	used := 3
 
-	used := 2
-	for line := range strings.SplitSeq(strings.Trim(s.diagFixSQL, "\n"), "\n") {
-		b.WriteString("  " + line + "\n")
-		used++
+	width := max(m.width-2, 8)
+	for line := range strings.SplitSeq(strings.Trim(f.sql, "\n"), "\n") {
+		toks := tokenizeSQL(line)
+		if len(toks) == 0 {
+			b.WriteString("\n")
+			used++
+			continue
+		}
+		for _, l := range wrapSQLTokens(toks, width, "") {
+			b.WriteString("  " + l + "\n")
+			used++
+		}
 	}
-	for i := used; i < height; i++ {
-		b.WriteString("\n")
+	b.WriteString("\n")
+	used++
+
+	// While running the clock ticks live (the spinner tick re-renders); once
+	// finished it freezes at the completion time, like the VACUUM pane.
+	elapsed := time.Since(f.started)
+	if !f.running && !f.finished.IsZero() {
+		elapsed = f.finished.Sub(f.started)
+	}
+	elapsed = elapsed.Round(time.Second)
+	var status string
+	switch {
+	case f.running:
+		status = "  " + m.spinner.View() + " " + styleSelected.Render("running") +
+			mu(fmt.Sprintf("  %s", elapsed))
+	case f.pending:
+		status = confirmBanner("run this fix in " + f.db)
+	case f.err != nil:
+		status = "  " + styleErr.Render("failed: "+shortErr(f.err)) +
+			mu(fmt.Sprintf("  (after %s) · press any key to dismiss", elapsed))
+	case !f.finished.IsZero():
+		status = "  " + styleBadge.Render("done") +
+			mu(fmt.Sprintf(" in %s · press any key to dismiss and refresh the result", elapsed))
+	default:
+		status = "  " + mu("press ") + styleBadge.Render("enter") + mu(" to run, any other key to dismiss")
+	}
+	b.WriteString(status + "\n")
+	used++
+
+	bodyH := height - used
+	if bodyH <= 0 {
+		return b.String()
+	}
+	if !f.running && f.finished.IsZero() {
+		for range bodyH {
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+
+	// Output pane: RunFix's "▶ statement" markers and the server's notices.
+	// Lines are clipped to the terminal width (VACUUM VERBOSE gets wide) so a
+	// long one can't wrap and push the help row off-screen.
+	lines := make([]string, len(f.buf))
+	for i, ln := range f.buf {
+		ln = clipCells(ln, max(m.width-2, 1))
+		switch {
+		case strings.HasPrefix(ln, "▶ "):
+			ln = styleSelected.Render(ln)
+		case strings.HasPrefix(ln, "WARNING: "), strings.HasPrefix(ln, "ERROR: "):
+			ln = styleErr.Render(ln)
+		}
+		lines[i] = "  " + ln
+	}
+	if f.follow {
+		f.offset = len(lines)
+	}
+	body := strings.Join(lines, "\n")
+	b.WriteString(scrollWindow(body, &f.offset, bodyH))
+	// Re-evaluate follow: a manual scroll back to the bottom resumes tailing.
+	if f.offset >= len(lines)-bodyH {
+		f.follow = true
 	}
 	return b.String()
 }
@@ -127,7 +206,7 @@ func (m *Model) renderDiagnosticInfo(s *screen, height int) string {
 			kb("←/→", "sort column") + mu("  ·  ") + kb("r", "reverse") + "\n")
 		b.WriteString("    " + kb("/", "filter rows") + mu("  ·  ") + kb("e", "export csv"))
 		if d.Fix != nil {
-			b.WriteString(mu("  ·  ") + kb("enter", "suggested fix SQL"))
+			b.WriteString(mu("  ·  ") + kb("enter", "suggested fix (↵ again + y runs it)"))
 		}
 		b.WriteString("\n")
 	} else {
@@ -743,7 +822,7 @@ func (m *Model) renderDiagnosticList(s *screen, height int) string {
 	}
 	b.WriteString("  " + styleMuted.Render("category: ") + diagCatStyle(label).Render(label) +
 		styleMuted.Render("  ·  ") + styleBadge.Render("f") + styleMuted.Render(" cycles") +
-		styleMuted.Render("  ·  ") + styleBadge.Render("⚑ fix") + styleMuted.Render(" = suggests a fix statement (↵ on a result row)") + "\n")
+		styleMuted.Render("  ·  ") + styleBadge.Render("⚑ fix") + styleMuted.Render(" = offers a fix statement (↵ on a result row; ↵ + y runs it)") + "\n")
 	height--
 
 	catW := 0

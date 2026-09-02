@@ -551,6 +551,47 @@ func (m *Model) onVacuumDone(msg vacuumDoneMsg) tea.Cmd {
 	return m.loadTableStatsCmd(s.table)
 }
 
+// onFixLine appends one streamed line of a running suggested-fix to its
+// screen's output buffer. The overlay is modal while the run is in flight, so
+// the diagnostic-result screen is still on the stack; if the run somehow
+// outlived it (or was reset), the line is dropped and the wait not re-armed.
+func (m *Model) onFixLine(msg fixLineMsg) tea.Cmd {
+	f := m.runningDiagFix()
+	if f == nil {
+		return nil
+	}
+	f.buf = append(f.buf, msg.line)
+	if f.follow {
+		f.offset = len(f.buf)
+	}
+	return waitFixLineCmd(msg.lineCh, msg.doneCh)
+}
+
+// onFixDone closes out a suggested-fix run. The result table is not reloaded
+// here — the overlay stays up so the output can be read — but on dismiss
+// (handleDiagFixKey) a successful run refreshes it, since its rows are stale
+// by definition.
+func (m *Model) onFixDone(msg fixDoneMsg) tea.Cmd {
+	f := m.runningDiagFix()
+	if f == nil {
+		return nil
+	}
+	f.running = false
+	f.finished = time.Now()
+	f.err = msg.err
+	return nil
+}
+
+// runningDiagFix returns the in-flight fix run of the nearest diagnostic-result
+// screen, or nil when none is running.
+func (m *Model) runningDiagFix() *diagFixRun {
+	s := m.findLevel(levelDiagnosticResult)
+	if s == nil || s.diagFix == nil || !s.diagFix.running {
+		return nil
+	}
+	return s.diagFix
+}
+
 // ── Activity handlers ─────────────────────────────────────────────────────────
 
 func (m *Model) onActivityLoaded(msg activityLoadedMsg) tea.Cmd {

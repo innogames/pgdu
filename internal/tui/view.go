@@ -152,7 +152,7 @@ func (m *Model) View() string {
 		b.WriteString(m.renderTupleLayout(s, contentHeight))
 	case m.showDiagQuery && s.diagForShowQuery() != nil:
 		b.WriteString(m.renderDiagQuery(s, contentHeight))
-	case m.showDiagFix && s.level == levelDiagnosticResult && s.diagFixSQL != "":
+	case m.showDiagFix && s.level == levelDiagnosticResult && s.diagFix != nil:
 		b.WriteString(m.renderDiagFix(s, contentHeight))
 	case m.showInfo && m.hasInfoOverlay(s):
 		// The ? reference overlays scroll through scrollWindow — some (e.g. the

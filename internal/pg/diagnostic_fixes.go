@@ -3,12 +3,13 @@ package pg
 import "strings"
 
 // This file holds the Diagnostic.Fix builders: per-row remediation SQL the
-// TUI shows (never executes) when Enter is pressed on a diagnostic result.
-// Statements stay lock-safe — REINDEX/DROP INDEX CONCURRENTLY, ANALYZE, plain
-// VACUUM; anything that takes a long exclusive lock (VACUUM FULL, CLUSTER) is
-// only ever suggested inside a SQL comment. The one exception is the
-// fillfactor ALTER, whose brief ACCESS EXCLUSIVE lock is defused with an
-// explicit lock_timeout line.
+// TUI shows when Enter is pressed on a diagnostic result and runs (via
+// Client.RunFix) only after an explicit y confirm. Statements stay lock-safe —
+// REINDEX/DROP INDEX CONCURRENTLY, ANALYZE, plain VACUUM; anything that takes a
+// long exclusive lock (VACUUM FULL, CLUSTER) is only ever suggested inside a
+// SQL comment. The exceptions are the fillfactor and CLUSTER ON ALTERs, whose
+// brief ACCESS EXCLUSIVE lock is defused with an explicit lock_timeout line so
+// a run behind a long transaction fails fast instead of queueing every writer.
 
 // DiagRowGetter returns a by-name accessor over one full (unprojected) result
 // row: column names match case-insensitively, and a missing or blank cell
@@ -28,11 +29,12 @@ func DiagRowGetter(cols []DiagColumn, row []DiagCell) func(string) (string, bool
 	}
 }
 
-// fixQualify builds the quoted relation reference for a fix statement. A value
+// fixQualify builds the relation reference for a fix statement. A value
 // already containing a dot came from a ::regclass cast — the server quoted it
 // as needed — and passes through verbatim. Otherwise schema.name (or the bare
-// name, left to search_path, when the schema column is absent) is quoted via
-// quoteIdent, same as every other DDL site.
+// name, left to search_path, when the schema column is absent) goes through
+// fixIdent, so the common all-lowercase case reads public.orders rather than
+// "public"."orders".
 func fixQualify(get func(string) (string, bool), schemaCol, nameCol string) (string, bool) {
 	name, ok := get(nameCol)
 	if !ok {
@@ -42,10 +44,74 @@ func fixQualify(get func(string) (string, bool), schemaCol, nameCol string) (str
 		return name, true
 	}
 	if schema, ok := get(schemaCol); ok {
-		return qualifiedIdent(schema, name), true
+		return fixIdent(schema) + "." + fixIdent(name), true
 	}
-	return quoteIdent(name), true
+	return fixIdent(name), true
 }
+
+// fixIdent quotes an identifier only when the server would need it to — the
+// same rule as quote_ident(): anything but [a-z_][a-z0-9_]* is quoted, and so
+// is any keyword outside the unreserved class (those can't stand bare where a
+// relation name goes). Fix statements are meant to be read and pasted, so the
+// noise of quoting every name is worth avoiding; the generated DDL elsewhere
+// keeps quoteIdent's always-quote rule.
+func fixIdent(s string) string {
+	if !fixIdentSafe(s) || sqlQuotedKeywords[strings.ToUpper(s)] {
+		return quoteIdent(s)
+	}
+	return s
+}
+
+func fixIdentSafe(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c == '_':
+		case c >= '0' && c <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// sqlQuotedKeywords is every PostgreSQL keyword quote_ident() quotes: the
+// reserved, type/function-name and column-name classes (src/include/parser/
+// kwlist.h). Unreserved keywords are omitted — they're legal bare identifiers.
+var sqlQuotedKeywords = func() map[string]bool {
+	m := map[string]bool{}
+	for w := range strings.FieldsSeq(`
+		ALL ANALYSE ANALYZE AND ANY ARRAY AS ASC ASYMMETRIC AUTHORIZATION BETWEEN
+		BIGINT BINARY BIT BOOLEAN BOTH CASE CAST CHAR CHARACTER CHECK COALESCE
+		COLLATE COLLATION COLUMN CONCURRENTLY CONSTRAINT CREATE CROSS
+		CURRENT_CATALOG CURRENT_DATE CURRENT_ROLE CURRENT_SCHEMA CURRENT_TIME
+		CURRENT_TIMESTAMP CURRENT_USER DEC DECIMAL DEFAULT DEFERRABLE DESC
+		DISTINCT DO ELSE END EXCEPT EXISTS EXTRACT FALSE FETCH FLOAT FOR FOREIGN
+		FREEZE FROM FULL GRANT GREATEST GROUP GROUPING HAVING ILIKE IN INITIALLY
+		INNER INOUT INT INTEGER INTERSECT INTERVAL INTO IS ISNULL JOIN JSON
+		JSON_ARRAY JSON_ARRAYAGG JSON_EXISTS JSON_OBJECT JSON_OBJECTAGG JSON_QUERY
+		JSON_SCALAR JSON_SERIALIZE JSON_TABLE JSON_VALUE LATERAL LEADING LEAST
+		LEFT LIKE LIMIT LOCALTIME LOCALTIMESTAMP MERGE_ACTION NATIONAL NATURAL
+		NCHAR NONE NORMALIZE NOT NOTNULL NULL NULLIF NUMERIC OFFSET ON ONLY OR
+		ORDER OUT OUTER OVERLAPS OVERLAY PLACING POSITION PRECISION PRIMARY REAL
+		REFERENCES RETURNING RIGHT ROW SELECT SESSION_USER SETOF SIMILAR SMALLINT
+		SOME SUBSTRING SYMMETRIC SYSTEM_USER TABLE TABLESAMPLE THEN TIME
+		TIMESTAMP TO TRAILING TREAT TRIM TRUE UNION UNIQUE USER USING VALUES
+		VARCHAR VARIADIC VERBOSE WHEN WHERE WINDOW WITH XMLATTRIBUTES XMLCONCAT
+		XMLELEMENT XMLEXISTS XMLFOREST XMLNAMESPACES XMLPARSE XMLPI XMLROOT
+		XMLSERIALIZE XMLTABLE`) {
+		m[w] = true
+	}
+	return m
+}()
+
+// fixLockTimeout precedes the ALTER TABLE fixes: their ACCESS EXCLUSIVE lock
+// is held only for a catalog update, but merely waiting for it blocks every
+// later query on the table, so give up quickly rather than queue behind a
+// long-running transaction.
+const fixLockTimeout = "SET lock_timeout = '3s';"
 
 // fixReindex builds a REINDEX INDEX CONCURRENTLY fix for diagnostics that name
 // an index in indexCol (schema in schemaCol); extra lines are appended verbatim.
@@ -108,6 +174,7 @@ func fixTableFillfactor(get func(string) (string, bool)) (string, bool) {
 	}
 	return strings.Join([]string{
 		head,
+		fixLockTimeout,
 		"ALTER TABLE " + tbl + " SET (fillfactor = " + sugg + ");",
 		"-- affects only newly written pages; VACUUM FULL or pg_repack rewrites now",
 	}, "\n"), true
@@ -131,7 +198,8 @@ func fixClusterOn(get func(string) (string, bool)) (string, bool) {
 		return "", false
 	}
 	return strings.Join([]string{
-		"ALTER TABLE " + tbl + " CLUSTER ON " + quoteIdent(idx) + ";",
+		fixLockTimeout,
+		"ALTER TABLE " + tbl + " CLUSTER ON " + fixIdent(idx) + ";",
 		"-- marks the index for CLUSTER (catalog-only; brief ACCESS EXCLUSIVE lock).",
 		"-- the rewrite itself still has to run: CLUSTER " + tbl + "; locks the table",
 		"-- exclusively for the duration — run off-peak, or use pg_repack instead.",

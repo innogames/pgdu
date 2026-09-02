@@ -150,6 +150,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onVacuumLine(msg)
 	case vacuumDoneMsg:
 		return m, m.onVacuumDone(msg)
+	case fixLineMsg:
+		return m, m.onFixLine(msg)
+	case fixDoneMsg:
+		return m, m.onFixDone(msg)
 
 	case activityLoadedMsg:
 		return m, m.onActivityLoaded(msg)

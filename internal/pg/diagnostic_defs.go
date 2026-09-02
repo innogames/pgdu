@@ -27,7 +27,8 @@ type Diagnostic struct {
 	DefaultHidden []string
 
 	// Fix builds a copy-pasteable remediation statement for one result row —
-	// shown by the TUI on Enter, never executed. get returns a column's
+	// shown by the TUI on Enter and run (Client.RunFix) only after an explicit
+	// y confirm. get returns a column's
 	// Display value by (case-insensitive) name from the full, unprojected row;
 	// ok=false when the row can't produce a fix. Builders live in
 	// diagnostic_fixes.go and must stay lock-safe (CONCURRENTLY, ANALYZE,

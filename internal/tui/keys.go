@@ -240,7 +240,7 @@ func (k *keyMap) applyContext(s *screen) {
 	diagFix := diagResult && s.diag != nil && s.diag.Fix != nil
 	k.Enter.SetEnabled(!progress && (!diagResult || diagFix))
 	if diagFix {
-		k.Enter.SetHelp("↵", "fix sql")
+		k.Enter.SetHelp("↵", "fix")
 	} else {
 		k.Enter.SetHelp("↵", "drill in")
 	}

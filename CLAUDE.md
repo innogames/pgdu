@@ -112,9 +112,17 @@ empty prefs). The TUI seeds the per-table `*ColsVisible` maps from it in
   drills into the redirect target. A missing projection is therefore *not* a dead-entry
   signal — only `IndexTuple.Dead` (bt_page_items' own LP_DEAD bit) earns the `dead` tag.
 - **Two-step confirm is a shared pattern**: reindex, snapshot delete (`pendingDeleteSnap`),
-  backend cancel/terminate (`pendingBackend*`), streaming VACUUM (`pendingVacuum`), and
-  extension reset all use the same flow — Enter arms a `pending*` field, any next key
-  cancels, `y`/`Y` executes (in the relevant key handler).
+  backend cancel/terminate (`pendingBackend*`), streaming VACUUM (`pendingVacuum`),
+  extension reset, and the diagnostic suggested-fix (`diagFixRun.pending`) all use the
+  same flow — Enter arms a `pending*` field, any next key cancels, `y`/`Y` executes (in
+  the relevant key handler).
+- **Diagnostic fixes** (`levelDiagnosticResult`, `Diagnostic.Fix` builders in
+  `pg/diagnostic_fixes.go`): Enter on a row builds the script into `screen.diagFix` and
+  opens the overlay (`renderDiagFix`); Enter again arms, `y` runs it via
+  `pg.RunFix` (statement-by-statement over a dedicated connection, notices streamed
+  like the VACUUM pane), any key after completion dismisses and — on success — reloads
+  the result. Identifiers use `fixIdent` (quote only when quote_ident would), not
+  `quoteIdent`.
 - **Activity** (`toolActivity`, `view_activity.go`): live `pg_stat_activity` browser with a
   `C` column picker (mirrors top-queries), filter/verbose/auto-refresh cycling, and backend
   cancel/terminate. Linux derives CPU%/IO from `/proc` (`activity_proc_linux.go`).

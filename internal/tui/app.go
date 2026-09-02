@@ -406,10 +406,11 @@ type screen struct {
 	diagResult   *pg.DiagResult
 	diagSortName string
 
-	// diagFixSQL holds the suggested-fix statement built for the row Enter was
-	// pressed on (Diagnostic.Fix); Model.showDiagFix displays it. Display-only —
-	// pgdu never executes it.
-	diagFixSQL string
+	// diagFix is the suggested-fix overlay's state: the script built for the row
+	// Enter was pressed on (Diagnostic.Fix), the database it targets, and the
+	// confirm/run/output lifecycle once the user chooses to execute it.
+	// Model.showDiagFix toggles the overlay itself.
+	diagFix *diagFixRun
 
 	// diagCatFilter restricts the levelDiagnostics list to one category
 	// (f cycles all → index → table → …); "" shows every diagnostic.
@@ -666,8 +667,10 @@ type Model struct {
 	showDiagQuery bool
 
 	// showDiagFix toggles the suggested-fix overlay (Enter on a diagnostic
-	// result row with a Fix builder); the text lives on screen.diagFixSQL.
-	// Modal like showDiagQuery: any key dismisses it.
+	// result row with a Fix builder); its state lives on screen.diagFix. Modal
+	// like showDiagQuery, but with its own key handling (handleDiagFixKey):
+	// Enter arms a y/n confirm that runs the script, and while it runs or after
+	// it finished the overlay stays up to show the output.
 	showDiagFix bool
 
 	// Top-queries column configuration (C key on levelStatements). stmtColsVisible
@@ -775,6 +778,22 @@ type Model struct {
 	// It is a value type so the pane's scrollWindow can update its offset in
 	// place; vacuumPaneVisible(s) gates whether the pane is rendered at all.
 	vacuum vacuumState
+}
+
+// diagFixRun is one suggested-fix script and its execution on a diagnostic
+// result screen. pending is the armed y/n confirm; running/finished/err track
+// the RunFix call, whose streamed lines land in buf. Like vacuumState, the
+// output pane scrolls through scrollWindow with tail-follow.
+type diagFixRun struct {
+	sql, db  string
+	pending  bool
+	running  bool
+	started  time.Time
+	finished time.Time
+	err      error
+	buf      []string
+	offset   int
+	follow   bool
 }
 
 // vacuumState holds the live and completed output of a streaming VACUUM run.

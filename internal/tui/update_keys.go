@@ -4,6 +4,7 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -190,13 +191,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// The suggested-fix overlay (Enter on a diagnostic-result row) is modal the
-	// same way: any key dismisses it. Quit still quits.
+	// same way, but owns a confirm/run lifecycle (handleDiagFixKey).
 	if m.showDiagFix {
-		if key.Matches(msg, m.keys.Quit) {
-			return m, tea.Quit
-		}
-		m.showDiagFix = false
-		return m, nil
+		return m, m.handleDiagFixKey(s, msg)
 	}
 	// The ? reference overlay is modal: while it's up, scroll keys move it and
 	// the close keys dismiss it; nothing else fires, so the list hidden beneath
@@ -728,9 +725,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if s.level == levelDiagnosticResult {
 			// Diagnostic rows don't drill; Enter opens the suggested-fix overlay
-			// for diagnostics that define one (display-only, never executed).
-			if fix, ok := m.diagFixForCursor(s); ok {
-				s.diagFixSQL = fix
+			// for diagnostics that define one. A fresh run state per open: the
+			// previous row's output must not show under a different script.
+			if fix, db, ok := m.diagFixForCursor(s); ok {
+				s.diagFix = &diagFixRun{sql: fix, db: db}
 				m.showDiagFix = true
 			} else if s.diag != nil && s.diag.Fix != nil {
 				m.notice = "no suggested fix for this row"
@@ -1064,33 +1062,108 @@ func quoteDiagIdent(s string) string {
 }
 
 // diagFixForCursor builds the suggested-fix SQL for the highlighted diagnostic
-// row via the diagnostic's Fix builder. It reads the full, unprojected result
-// row (item.diagRow) so columns hidden via the C picker stay available, and in
-// all-databases mode — where s.db doesn't identify the row — prepends the
-// row's database as a comment.
-func (m *Model) diagFixForCursor(s *screen) (string, bool) {
+// row via the diagnostic's Fix builder, plus the database it must run in. It
+// reads the full, unprojected result row (item.diagRow) so columns hidden via
+// the C picker stay available. In all-databases mode — where s.db doesn't
+// identify the row — the row's database column is the target, and is also
+// prepended as a comment so a pasted copy carries it.
+func (m *Model) diagFixForCursor(s *screen) (sql, db string, ok bool) {
 	if s.diag == nil || s.diag.Fix == nil || s.diagResult == nil {
-		return "", false
+		return "", "", false
 	}
 	vis := s.visibleIndexes()
 	if s.cursor < 0 || s.cursor >= len(vis) {
-		return "", false
+		return "", "", false
 	}
 	it := s.items[vis[s.cursor]]
 	if it.diagRow <= 0 || it.diagRow > len(s.diagResult.Rows) {
-		return "", false
+		return "", "", false
 	}
 	get := pg.DiagRowGetter(s.diagResult.Columns, s.diagResult.Rows[it.diagRow-1])
 	fix, ok := s.diag.Fix(get)
 	if !ok {
-		return "", false
+		return "", "", false
 	}
+	db = s.db
 	if s.diagAllDBs {
-		if db, ok := get("database"); ok {
-			fix = "-- database: " + db + "\n" + fix
+		if rowDB, ok := get("database"); ok {
+			db = rowDB
+			fix = "-- database: " + rowDB + "\n" + fix
 		}
 	}
-	return fix, true
+	return fix, db, true
+}
+
+// handleDiagFixKey drives the suggested-fix overlay. Idle: Enter arms the
+// confirm, any other key dismisses. Armed: y runs (the same confirmGate as
+// reindex/vacuum), any other key disarms but keeps the script up. Running:
+// only the output scrolls — the run can't be abandoned from the UI, so the
+// overlay stays until it completes. Finished: scroll keys page the output,
+// anything else dismisses, and a successful run reloads the result table
+// (its rows describe the state the fix just changed). Quit always quits.
+func (m *Model) handleDiagFixKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+	if key.Matches(msg, m.keys.Quit) {
+		return tea.Quit
+	}
+	f := s.diagFix
+	if f == nil || s.level != levelDiagnosticResult {
+		m.showDiagFix = false
+		return nil
+	}
+	switch {
+	case f.running:
+		m.scrollDiagFix(f, msg)
+		return nil
+	case f.pending:
+		f.pending = false
+		if !confirmGate(msg) {
+			return nil
+		}
+		*f = diagFixRun{sql: f.sql, db: f.db, running: true, started: time.Now(), follow: true}
+		return m.runDiagFixCmd(f.db, f.sql)
+	case !f.finished.IsZero():
+		if m.scrollDiagFix(f, msg) {
+			return nil
+		}
+		m.showDiagFix = false
+		if f.err == nil {
+			return m.loadCurrent()
+		}
+		return nil
+	default:
+		if msg.Type == tea.KeyEnter {
+			f.pending = true
+			return nil
+		}
+		m.showDiagFix = false
+		return nil
+	}
+}
+
+// scrollDiagFix applies the list navigation keys to the fix output pane and
+// reports whether msg was one of them. Any manual scroll turns tail-follow
+// off; the renderer turns it back on when the window reaches the bottom.
+func (m *Model) scrollDiagFix(f *diagFixRun, msg tea.KeyMsg) bool {
+	step := m.pageStep()
+	switch {
+	case key.Matches(msg, m.keys.Up):
+		f.offset--
+	case key.Matches(msg, m.keys.Down):
+		f.offset++
+	case key.Matches(msg, m.keys.PageUp):
+		f.offset -= step
+	case key.Matches(msg, m.keys.PageDown):
+		f.offset += step
+	case key.Matches(msg, m.keys.Top):
+		f.offset = 0
+	case key.Matches(msg, m.keys.Bottom):
+		f.offset = len(f.buf)
+	default:
+		return false
+	}
+	f.follow = false
+	f.offset = max(f.offset, 0)
+	return true
 }
 
 // triggerInstall is a no-op unless the current screen has an extPrompt
