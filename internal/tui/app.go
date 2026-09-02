@@ -613,6 +613,9 @@ type screen struct {
 	logGroup *pg.LogGroup
 	logEntry *pg.LogEntry
 	logCols  []logColDesc
+	// logHosts caches reverse-DNS results (IP → hostname) for the timeline's
+	// opt-in hostname column, filled asynchronously like actHosts.
+	logHosts map[string]string
 
 	// ── Progress monitor (levelProgress) ──────────────────────────────────────
 	// progressRows is the last fetched set of running operations from the

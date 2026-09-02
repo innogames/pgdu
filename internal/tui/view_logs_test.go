@@ -308,3 +308,32 @@ func TestJumpToLogEntry(t *testing.T) {
 		t.Errorf("cursor not on the target entry: %+v", got)
 	}
 }
+
+func TestLogHostnameColumn(t *testing.T) {
+	m, s := newLogTestModel(t)
+	s.logView = logViewTimeline
+	m.rebuildLogItems(s)
+	if idx := indexOfLogCol(s.logCols, logColHostname); idx >= 0 {
+		t.Fatal("hostname column must be opt-in")
+	}
+	m.ensureLogColsInit()
+	m.logColsVisible[logColHostname] = true
+	s.logHosts = map[string]string{"2a00:1f78:fffd:4301::1221": "app-01.example"}
+	m.rebuildLogItems(s)
+	col := indexOfLogCol(s.logCols, logColHostname)
+	if col < 0 {
+		t.Fatal("hostname column not projected")
+	}
+	var resolved, raw bool
+	for _, it := range s.items {
+		switch it.data.([]pg.DiagCell)[col].Display {
+		case "app-01.example":
+			resolved = true
+		case "2a00:1f78:fffd:4301::1212":
+			raw = true
+		}
+	}
+	if !resolved || !raw {
+		t.Errorf("resolved=%v raw-fallback=%v", resolved, raw)
+	}
+}

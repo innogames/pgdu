@@ -28,6 +28,56 @@ type logLoadedMsg struct {
 
 type logTickMsg struct{}
 
+// logHostsMsg delivers reverse-DNS results for the timeline's hostname column.
+type logHostsMsg struct {
+	hosts map[string]string
+}
+
+// logMaxHostLookups bounds one resolve batch so a log full of distinct client
+// addresses cannot queue thousands of DNS round-trips at once; the next
+// rebuild picks up the rest.
+const logMaxHostLookups = 200
+
+// logHostsCmd resolves the client addresses the visible timeline needs and the
+// cache does not have yet. nil when the hostname column is hidden, the pane is
+// not the timeline, or everything is already known.
+func (m *Model) logHostsCmd(s *screen) tea.Cmd {
+	if s.logView != logViewTimeline || s.logReport == nil || indexOfLogCol(s.logCols, logColHostname) < 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var ips []string
+	for i := range s.logReport.Entries {
+		e := &s.logReport.Entries[i]
+		if !s.logEntryVisible(e) || len(e.Host) == 0 {
+			continue
+		}
+		h := string(e.Host)
+		if h == "[local]" || seen[h] {
+			continue
+		}
+		if _, ok := s.logHosts[h]; ok {
+			continue
+		}
+		seen[h] = true
+		ips = append(ips, h)
+		if len(ips) >= logMaxHostLookups {
+			break
+		}
+	}
+	if len(ips) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		resolved := make(map[string]string, len(ips))
+		for _, ip := range ips {
+			h, _ := m.client.ResolveAddr(ip)
+			resolved[ip] = h
+		}
+		return logHostsMsg{hosts: resolved}
+	}
+}
+
 // logDefaultWindow is the tail read on first open: big enough for a day of a
 // busy server's log, small enough to parse in well under a second.
 const logDefaultWindow = 32 << 20

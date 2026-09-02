@@ -19,6 +19,7 @@ const (
 	logColUser     logColID = "user"
 	logColDB       logColID = "db"
 	logColHost     logColID = "host"
+	logColHostname logColID = "hostname"
 	logColApp      logColID = "app"
 	logColSQLState logColID = "sqlstate"
 	logColDuration logColID = "dur"
@@ -26,9 +27,11 @@ const (
 )
 
 // logCtx carries per-build inputs: whether the window spans more than a day
-// (then the time column carries the date).
+// (then the time column carries the date) and the reverse-DNS cache for the
+// hostname column (nil until the first lookups return).
 type logCtx struct {
 	multiDay bool
+	hosts    map[string]string
 }
 
 type logColDesc struct {
@@ -83,6 +86,15 @@ func logColumnRegistry() []logColDesc {
 		{id: logColHost, name: "host", kind: pg.DiagText, defaultOn: true,
 			desc: "client host (%h / %r)",
 			cell: func(e *pg.LogEntry, _ logCtx) pg.DiagCell { return text(e.Host) }},
+		{id: logColHostname, name: "hostname", kind: pg.DiagText,
+			desc: "client host resolved via reverse DNS (falls back to the raw address; cached per session)",
+			cell: func(e *pg.LogEntry, ctx logCtx) pg.DiagCell {
+				h := string(e.Host)
+				if r, ok := ctx.hosts[h]; ok && r != "" {
+					return pg.DiagCell{Display: r}
+				}
+				return pg.DiagCell{Display: h}
+			}},
 		{id: logColApp, name: "app", kind: pg.DiagText,
 			desc: "application_name (%a)",
 			cell: func(e *pg.LogEntry, _ logCtx) pg.DiagCell { return text(e.App) }},

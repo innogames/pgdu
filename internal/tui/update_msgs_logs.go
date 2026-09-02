@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -168,6 +169,21 @@ func (m *Model) onLogLoaded(msg logLoadedMsg) tea.Cmd {
 	}
 	if top := m.top(); top != s && (top.level == levelLogGroup || top.level == levelLogEntry) {
 		m.rebuildLogChild(top)
+	}
+	return m.logHostsCmd(s)
+}
+
+func (m *Model) onLogHosts(msg logHostsMsg) tea.Cmd {
+	s := m.findLevel(levelLogs)
+	if s == nil {
+		return nil
+	}
+	if s.logHosts == nil {
+		s.logHosts = make(map[string]string)
+	}
+	maps.Copy(s.logHosts, msg.hosts)
+	if s.logView == logViewTimeline && s.logReport != nil {
+		m.rebuildLogItems(s)
 	}
 	return nil
 }
@@ -343,7 +359,7 @@ func (m *Model) buildLogGroupItems(s *screen) []item {
 func (m *Model) rebuildLogTimeline(s *screen) {
 	r := s.logReport
 	descs := m.visibleLogCols()
-	ctx := logCtx{multiDay: !r.Window.From.IsZero() && r.Window.To.Sub(r.Window.From) > 24*time.Hour}
+	ctx := logCtx{multiDay: !r.Window.From.IsZero() && r.Window.To.Sub(r.Window.From) > 24*time.Hour, hosts: s.logHosts}
 	items := make([]item, 0, len(r.Entries))
 	for i := range r.Entries {
 		e := &r.Entries[i]

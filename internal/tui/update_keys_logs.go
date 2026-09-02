@@ -95,7 +95,7 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 		m.rebuildLogItems(s)
 		s.resetCursor()
 		m.skipLogHeader(s, 1)
-		return nil, true
+		return m.logHostsCmd(s), true
 
 	case key.Matches(msg, m.keys.LogWindow):
 		// Widen the tail window: 32 → 64 → 128 → 256 → 512 MiB → whole → 32.
@@ -122,9 +122,10 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 }
 
 // handleLogColumnConfigKey drives the C picker over the timeline columns.
+// Enabling the hostname column kicks off the reverse-DNS lookups.
 func (m *Model) handleLogColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	reg := logColumnRegistry()
-	return m.handleColCfgKey(msg, colCfgSpec{
+	cmd := m.handleColCfgKey(msg, colCfgSpec{
 		n:      len(reg),
 		cursor: &m.logColCfgCursor,
 		close:  func() { m.showLogColumnConfig = false },
@@ -145,6 +146,7 @@ func (m *Model) handleLogColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 			m.saveColPrefs(colPrefsLogs, colVisToStrings(m.logColsVisible))
 		},
 	})
+	return tea.Batch(cmd, m.logHostsCmd(s))
 }
 
 // jumpToLogEntry pops back to the levelLogs screen, switches it to the
@@ -171,5 +173,5 @@ func (m *Model) jumpToLogEntry(logs *screen, e *pg.LogEntry) tea.Cmd {
 			break
 		}
 	}
-	return nil
+	return m.logHostsCmd(logs)
 }

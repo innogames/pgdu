@@ -184,6 +184,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onLogLoaded(msg)
 	case logTickMsg:
 		return m, m.onLogTick()
+	case logHostsMsg:
+		return m, m.onLogHosts(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
