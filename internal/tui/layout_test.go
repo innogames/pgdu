@@ -33,8 +33,7 @@ func TestBarWidth(t *testing.T) {
 // sums (those live next to their renderers).
 func TestBarReserveSane(t *testing.T) {
 	ams := []string{"btree", "gist", "brin", "gin"}
-	// levelProgress is the last enum value; extend here if a level is added after it.
-	for l := levelTools; l <= levelProgress; l++ {
+	for l := levelTools; l <= levelLast; l++ {
 		for _, tl := range []tool{toolDisk, toolPageInspect} {
 			for _, am := range ams {
 				s := &screen{level: l, tool: tl}

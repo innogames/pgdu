@@ -118,6 +118,40 @@ func (m *Model) screenCSV(s *screen) ([]string, [][]string, bool) {
 // together per case so the column order can't drift from the values.
 func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 	switch l {
+	case levelLogs:
+		return []string{"category", "severity", "count", "first", "last", "title"},
+			func(it item) []string {
+				g, ok := it.data.(*pg.LogGroup)
+				if !ok {
+					return nil // section headers
+				}
+				return []string{g.Category.Short(), g.Severity.String(), csvInt(g.Count),
+					g.First.Format(time.RFC3339), g.Last.Format(time.RFC3339), g.Title}
+			}, true
+
+	case levelLogGroup:
+		return []string{"time", "severity", "pid", "user", "database", "host", "duration_ms", "message", "detail", "statement"},
+			func(it item) []string {
+				e, ok := it.data.(*pg.LogEntry)
+				if !ok {
+					return nil
+				}
+				ts := ""
+				if !e.Time.IsZero() {
+					ts = e.Time.Format(time.RFC3339)
+				}
+				dur := ""
+				if e.Category == pg.CatSlowQuery {
+					dur = numStr(e.DurationMs)
+				}
+				stmt := string(e.Statement)
+				if len(e.SQL) > 0 {
+					stmt = string(e.SQL)
+				}
+				return []string{ts, e.Severity.String(), csvInt(e.PID), string(e.User), string(e.DB), string(e.Host),
+					dur, string(e.Message), string(e.Detail), stmt}
+			}, true
+
 	case levelDatabases:
 		return []string{"name", "size_bytes"},
 			func(it item) []string {

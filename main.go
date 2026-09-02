@@ -43,7 +43,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	model := tui.NewModel(client, cfg.QueriesRefresh, cfg.SnapshotDir, prefs.Load(), cfg.Tool)
+	model := tui.NewModel(client, cfg.QueriesRefresh, cfg.SnapshotDir, prefs.Load(), cfg.Tool, cfg.LogFile)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "pgdu:", err)

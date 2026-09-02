@@ -73,6 +73,19 @@ down to a red/yellow/green report; Enter drills into the check that fired. The
 individual diagnostics (index sizes/bloat, table health, vacuum, locks, …) are
 also browsable under **Other tools**.
 
+### Log analyzer
+
+Reads the server log — the current file, a rotated `.1` / `.2.gz`, or any
+`--log-file` — parses it with the server's `log_line_prefix` (auto-detected when
+it doesn't fit the file; csvlog and jsonlog work too) and aggregates it: errors
+grouped by normalized message, slow statements grouped by normalized SQL with
+avg/p95/max, checkpoints, temp-file spills, lock waits, autovacuum. `v` hides
+the chatter (slow-query lines, checkpoints, autovacuum, connections) to leave
+only errors, warnings, locks and temp files; `f` sets a severity floor, `Tab` flips to a sortable chronological
+timeline, `/` searches, `w` widens the tail window, `t` turns on a live tail.
+Enter drills group → entries → the full record with DETAIL / STATEMENT
+highlighted.
+
 ### Shared buffers
 
 Inspect what's actually living in `shared_buffers` right now — one bar per

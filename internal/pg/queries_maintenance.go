@@ -182,13 +182,17 @@ FROM   pg_control_checkpoint()`
 	// space — a persistent non-zero value means wal_buffers is too small.
 	sqlMaintWALStats = `SELECT wal_bytes, wal_buffers_full FROM pg_stat_wal`
 
-	// sqlMaintBgwriter reads background-writer pressure. buffers_backend is the
-	// count of buffers written directly by backends (bypassing the bgwriter/
-	// checkpointer), which stalls the writing query. A high ratio vs buffers_alloc
-	// signals that max_wal_size or bgwriter_lru_maxpages needs tuning.
+	// sqlMaintBgwriter reads background-writer pressure: buffers written directly
+	// by client backends (bypassing the bgwriter/checkpointer, which stalls the
+	// writing query) against total buffer allocations. PG17 removed
+	// buffers_backend from pg_stat_bgwriter — the count now lives in pg_stat_io
+	// as client-backend relation writes — while buffers_alloc stayed. A high
+	// ratio signals that max_wal_size or bgwriter_lru_maxpages needs tuning.
 	sqlMaintBgwriter = `
-SELECT COALESCE(buffers_backend, 0),
-       COALESCE(buffers_alloc,   0)
+SELECT COALESCE((SELECT SUM(writes)::bigint
+                 FROM   pg_stat_io
+                 WHERE  backend_type = 'client backend' AND object = 'relation'), 0),
+       COALESCE(buffers_alloc, 0)
 FROM   pg_stat_bgwriter`
 
 	// sqlMaintArchiver reads WAL-archiver health. failed_count > 0 means pg_wal

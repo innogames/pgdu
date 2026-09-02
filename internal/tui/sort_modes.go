@@ -30,6 +30,7 @@ const (
 	sortByRedirectLP // heap pages: REDIRECT (HOT-hop) line-pointer count
 	sortByDeadLP     // heap pages: DEAD line-pointer count
 	sortByGroup      // shmem: subsystem category (buffer pool/WAL/locks/…)
+	sortByLast       // logs: last-seen time of a group / time of an entry
 )
 
 // defaultDesc is the natural direction for each sort column: bigger-first for
@@ -37,7 +38,7 @@ const (
 // ratio so the worst-cached tables bubble to the top.
 func (sm sortMode) defaultDesc() bool {
 	switch sm {
-	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty, sortByTemp, sortByBloat, sortByHeap, sortByIndex, sortByToast, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByLevel:
+	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty, sortByTemp, sortByBloat, sortByHeap, sortByIndex, sortByToast, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByLevel, sortByLast:
 		// sortByLevel is descending so the B-tree page view opens root-first
 		// (highest btpo_level at the top), reading the tree top-down.
 		return true
@@ -102,6 +103,8 @@ func (sm sortMode) name() string {
 		return "dead"
 	case sortByGroup:
 		return "group"
+	case sortByLast:
+		return "last seen"
 	default:
 		return "name"
 	}
@@ -177,6 +180,8 @@ func (sm sortMode) less(a, b item) bool {
 		return lessByExtractor(a, b, itemDeadLP)
 	case sortByGroup:
 		return lessByExtractor(a, b, itemShmemGroup)
+	case sortByLast:
+		return lessByExtractor(a, b, itemLogTime)
 	}
 	return false
 }

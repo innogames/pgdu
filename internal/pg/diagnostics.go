@@ -31,6 +31,7 @@ const (
 	DiagBackendState                        // pg_stat_activity state: coloured per value (active→green, idle-in-xact→yellow, aborted→red, idle→muted)
 	DiagPercentBad                          // 0–100 % where higher is worse: cell text graded green→red on an absolute scale (e.g. dead-tuple %, seq-scan %)
 	DiagCount                               // large cumulative counter: rendered humanized (1.2k/3.4M/5.1G) from Num; sorts and sums on the raw value
+	DiagLogSeverity                         // server-log severity tag: coloured per value (ERROR/FATAL red, WARNING yellow, LOG muted); Num carries the ordinal for sorting
 )
 
 // DiagColumn describes one column of a diagnostic result set.

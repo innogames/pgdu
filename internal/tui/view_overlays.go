@@ -20,7 +20,8 @@ func (m *Model) hasInfoOverlay(s *screen) bool {
 		levelMaintenance, levelSettings,
 		levelActivity, levelTableStats, levelWaitProfile,
 		levelDiagnostics, levelDiagnosticResult,
-		levelDescribe:
+		levelDescribe,
+		levelLogFiles, levelLogs, levelLogGroup, levelLogEntry:
 		return true
 	}
 	return false
@@ -83,6 +84,8 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 		return m.renderDiagnosticInfo(s, height)
 	case levelDescribe:
 		return m.renderDescribeInfo(s, height)
+	case levelLogFiles, levelLogs, levelLogGroup, levelLogEntry:
+		return m.renderLogsInfo(height)
 	}
 	return ""
 }

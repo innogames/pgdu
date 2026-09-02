@@ -178,6 +178,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case triageLoadedMsg:
 		return m, m.onTriageLoaded(msg)
 
+	case logFilesLoadedMsg:
+		return m, m.onLogFilesLoaded(msg)
+	case logLoadedMsg:
+		return m, m.onLogLoaded(msg)
+	case logTickMsg:
+		return m, m.onLogTick()
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}

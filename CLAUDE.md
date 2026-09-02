@@ -70,6 +70,7 @@ make test        # go test ./...   (internal/pg has an integration test that
 make lint        # golangci-lint --fix + go fix
 make deb         # Debian package (debian-pkg/, pgdu_<ver>_<arch>.deb)
 ./pgdu -U user   # libpq-style flags: -h host -p port -U user -d dbname --dsn URL
+./pgdu --logs --log-file /var/log/postgresql/postgresql-17-main.log   # log analyzer on a file
 ```
 
 `pgdu` defaults match `psql`: no `-h` → Unix socket + peer auth. `PGPASSWORD`
@@ -96,7 +97,8 @@ empty prefs). The TUI seeds the per-table `*ColsVisible` maps from it in
 - **Tools & levels**: `levelTools` is the root menu; from it you pick one of the `tool`
   values (`toolDisk`, `toolBuffers`, `toolPageInspect`, `toolTools` (diagnostics), `toolWAL`,
   `toolQueries` (top queries), `toolMaintenance`, `toolActivity`, `toolTableStats`,
-  `toolTriage`) and drill through that tool's own `level*` chain. Both enums live in `app.go`.
+  `toolTriage`, `toolLogs` (log analyzer)) and drill through that tool's own `level*` chain.
+  Both enums live in `app.go`.
 - **Tuple `pk` column** (`levelHeapTuples`): `ListHeapTuples` looks up the table's
   primary key and joins it back per line pointer by ctid (`sqlHeapTuplesPK`), so a
   slot shows the row it holds, not just its physical address. The join runs under the
@@ -134,6 +136,24 @@ empty prefs). The TUI seeds the per-table `*ColsVisible` maps from it in
   muted tail. The view is built-in (no extension) but needs `pg_read_all_stats`/superuser;
   a lesser role surfaces the permission error. The two NULL-name rows are classified in
   `pg.ShmemAllocations` (off NULL → anonymous, off set → free).
+- **Log analyzer** (`toolLogs`, `internal/pg/log*.go`, `internal/tui/*logs*.go`): the
+  engine is pure Go — `LoadLog(src, prefix, …)` reads a tail window through a `LogSource`
+  (local file, local `.gz`, server-side `pg_read_binary_file`), picks the `log_line_prefix`
+  (`DetectPrefix`: server value first, then common Debian/PG defaults, then a loose
+  "split on `TAG:  `" fallback), parses stderr/csvlog/jsonlog into `LogEntry`s whose text
+  fields are zero-copy sub-slices of the window buffer, attaches DETAIL/HINT/STATEMENT/
+  CONTEXT lines to their primary by pid (+ `%l` ordering), classifies each entry into one
+  `LogCategory`, and `Aggregate` builds count-sorted `LogGroup`s (fingerprint =
+  `normalizeMessage` for errors, `NormalizeSQL` — comments kept — for slow queries) plus
+  a per-severity histogram. Spam (`LogCategory.IsSpam`, hidden by `v`) is a *view* filter;
+  the report always holds everything. `RefreshLog` is incremental for seekable sources: it re-reads
+  from the last entry's offset (`LogCursor`), re-feeds the retained `LogParser`, and falls
+  back to a full load on inode change / shrink / gz. In the TUI the levelLogs screen owns
+  `logReport`; group/entry children read it via `findLevel(levelLogs)` and are re-pointed
+  on every refresh. The groups pane orders itself (`buildLogGroupItems`: sections + sort
+  within), so `applySort` special-cases `levelLogs` with `diagCols == nil`; the timeline
+  pane is the generic diag table over `logColumnRegistry()`. Section header rows carry
+  `logSection` as data and are inert; `skipLogHeader` keeps the cursor off them.
 - **Streaming VACUUM** (on `levelParts`): live `NOTICE` output streamed into a scrollable
   pane held in `vacuumState`.
 - **Maintenance / system overview** (`toolMaintenance`, `view_maintenance*.go`): extension

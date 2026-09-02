@@ -1,0 +1,692 @@
+package pg
+
+import (
+	"bytes"
+	"encoding/csv"
+	"encoding/json"
+	"io"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// logField names the LogEntry text field a prefixed line (or its continuation
+// lines) is written to.
+type logField int
+
+const (
+	fieldMessage logField = iota
+	fieldDetail
+	fieldHint
+	fieldStatement
+	fieldContext
+	fieldQuery
+	fieldLocation
+)
+
+func (e *LogEntry) fieldPtr(f logField) *[]byte {
+	switch f {
+	case fieldDetail:
+		return &e.Detail
+	case fieldHint:
+		return &e.Hint
+	case fieldStatement:
+		return &e.Statement
+	case fieldContext:
+		return &e.Context
+	case fieldQuery:
+		return &e.Query
+	case fieldLocation:
+		return &e.Location
+	}
+	return &e.Message
+}
+
+// LogParser turns raw log bytes into LogEntries. It is resumable: a second
+// Feed continues the entry left open by the first, which is how an incremental
+// refresh re-parses from the start of the last (possibly unfinished) entry
+// rather than re-reading the whole window.
+type LogParser struct {
+	m      *prefixMatcher
+	format LogFormat
+	loc    *time.Location
+
+	entries []LogEntry
+	// open is the entry receiving continuation lines, -1 when none; openField
+	// is the field they extend and openBuf/openStart locate that field's start
+	// so the extension stays a re-slice of the same buffer (zero-copy).
+	open      int
+	openField logField
+	openBuf   []byte
+	openStart int
+
+	// lastPrimary maps a backend (pid, or %c when the prefix has it) to the
+	// index of its most recent primary entry — where DETAIL/HINT/… attach.
+	lastPrimary map[string]int
+
+	lines    int
+	unparsed int
+}
+
+// NewLogParser builds a parser for one file. m may be nil for csv/json.
+func NewLogParser(format LogFormat, m *prefixMatcher, loc *time.Location) *LogParser {
+	if loc == nil {
+		loc = time.UTC
+	}
+	return &LogParser{m: m, format: format, loc: loc, open: -1, lastPrimary: make(map[string]int)}
+}
+
+// Entries returns everything parsed so far.
+func (p *LogParser) Entries() []LogEntry { return p.entries }
+
+// Lines is the number of physical lines fed.
+func (p *LogParser) Lines() int { return p.lines }
+
+// Unparsed counts continuation-looking lines that had no entry to extend.
+func (p *LogParser) Unparsed() int { return p.unparsed }
+
+// LastEntryOff returns the window offset of the last primary entry, or -1.
+// An incremental refresh re-reads from here so a still-growing entry (its
+// STATEMENT lines may not be flushed yet) is parsed whole.
+func (p *LogParser) LastEntryOff() int64 {
+	if len(p.entries) == 0 {
+		return -1
+	}
+	return p.entries[len(p.entries)-1].Off
+}
+
+// TruncateLast drops the last entry so the caller can re-feed it. Attachment
+// bookkeeping pointing at it is cleared.
+func (p *LogParser) TruncateLast() {
+	if len(p.entries) == 0 {
+		return
+	}
+	last := len(p.entries) - 1
+	for k, i := range p.lastPrimary {
+		if i == last {
+			delete(p.lastPrimary, k)
+		}
+	}
+	p.entries = p.entries[:last]
+	p.open = -1
+}
+
+// Feed parses buf, whose first byte sits at window offset base.
+func (p *LogParser) Feed(buf []byte, base int64) {
+	switch p.format {
+	case LogFormatCSV:
+		p.feedCSV(buf, base)
+	case LogFormatJSON:
+		p.feedJSON(buf, base)
+	default:
+		p.feedStderr(buf, base)
+	}
+}
+
+func (p *LogParser) feedStderr(buf []byte, base int64) {
+	off := 0
+	for off < len(buf) {
+		end := bytes.IndexByte(buf[off:], '\n')
+		lineEnd := len(buf)
+		next := len(buf)
+		if end >= 0 {
+			lineEnd = off + end
+			next = lineEnd + 1
+		}
+		line := buf[off:lineEnd]
+		p.lines++
+
+		f, ok := p.m.Match(line)
+		if !ok {
+			// Continuation: extend the open field to the end of this line.
+			if p.open >= 0 && sameBacking(p.openBuf, buf) {
+				e := &p.entries[p.open]
+				*e.fieldPtr(p.openField) = buf[p.openStart:lineEnd]
+			} else if p.open >= 0 {
+				// Continuation across a buffer seam (incremental refresh): copy.
+				e := &p.entries[p.open]
+				fp := e.fieldPtr(p.openField)
+				joined := make([]byte, 0, len(*fp)+1+len(line))
+				joined = append(joined, *fp...)
+				joined = append(joined, '\n')
+				joined = append(joined, line...)
+				*fp = joined
+				p.openBuf, p.openStart = nil, 0
+			} else {
+				p.unparsed++
+			}
+			off = next
+			continue
+		}
+
+		restStart := lineEnd - len(f.rest)
+		if fld, isAttach := attachmentField(f.tag); isAttach {
+			idx := p.primaryFor(f)
+			e := &p.entries[idx]
+			*e.fieldPtr(fld) = f.rest
+			p.open, p.openField, p.openBuf, p.openStart = idx, fld, buf, restStart
+			off = next
+			continue
+		}
+
+		e := LogEntry{
+			Off:      base + int64(off),
+			Time:     f.time,
+			PID:      f.pid,
+			Line:     f.line,
+			Session:  f.session,
+			User:     f.user,
+			DB:       f.db,
+			Host:     f.host,
+			App:      f.app,
+			SQLState: f.sqlstate,
+			Severity: severityOf(f.tag),
+			Message:  f.rest,
+		}
+		p.entries = append(p.entries, e)
+		idx := len(p.entries) - 1
+		if key := p.sessionKey(f); key != "" {
+			p.lastPrimary[key] = idx
+		}
+		p.open, p.openField, p.openBuf, p.openStart = idx, fieldMessage, buf, restStart
+		off = next
+	}
+}
+
+// sameBacking reports whether a and b are the same buffer — i.e. the open
+// field can be extended by re-slicing b. Feed always records the whole chunk
+// as openBuf, so comparing the first element is exact.
+func sameBacking(a, b []byte) bool {
+	return len(a) > 0 && len(b) > 0 && &a[0] == &b[0]
+}
+
+func (p *LogParser) sessionKey(f prefixFields) string {
+	if len(f.session) > 0 {
+		return string(f.session)
+	}
+	if f.pid > 0 {
+		return strconv.Itoa(int(f.pid))
+	}
+	return ""
+}
+
+// primaryFor finds the entry an attachment line belongs to: the backend's
+// last primary, provided the session line number (when present) is later. A
+// missing primary — cut off by the window head — gets a synthetic orphan so the
+// detail is not lost.
+func (p *LogParser) primaryFor(f prefixFields) int {
+	key := p.sessionKey(f)
+	if key != "" {
+		if idx, ok := p.lastPrimary[key]; ok {
+			e := &p.entries[idx]
+			if f.line == 0 || e.Line == 0 || f.line > e.Line {
+				return idx
+			}
+		}
+	} else if p.open >= 0 {
+		// No pid in the prefix: PostgreSQL emits DETAIL right after its
+		// primary, so the open entry is the best available guess.
+		return p.open
+	}
+	p.entries = append(p.entries, LogEntry{
+		Time: f.time, PID: f.pid, Line: f.line, Session: f.session,
+		User: f.user, DB: f.db, Host: f.host, App: f.app,
+		Severity: SevLog, Category: CatOther, Orphan: true,
+	})
+	idx := len(p.entries) - 1
+	if key != "" {
+		p.lastPrimary[key] = idx
+	}
+	return idx
+}
+
+func attachmentField(tag []byte) (logField, bool) {
+	switch string(tag) {
+	case "DETAIL":
+		return fieldDetail, true
+	case "HINT":
+		return fieldHint, true
+	case "STATEMENT":
+		return fieldStatement, true
+	case "CONTEXT":
+		return fieldContext, true
+	case "QUERY":
+		return fieldQuery, true
+	case "LOCATION":
+		return fieldLocation, true
+	}
+	return fieldMessage, false
+}
+
+func severityOf(tag []byte) LogSeverity {
+	switch string(tag) {
+	case "ERROR":
+		return SevError
+	case "FATAL":
+		return SevFatal
+	case "PANIC":
+		return SevPanic
+	case "WARNING":
+		return SevWarning
+	case "NOTICE":
+		return SevNotice
+	case "INFO":
+		return SevInfo
+	case "LOG":
+		return SevLog
+	}
+	if bytes.HasPrefix(tag, []byte("DEBUG")) {
+		return SevDebug
+	}
+	return SevLog
+}
+
+// ── csvlog / jsonlog ─────────────────────────────────────────────────────────
+
+// csvlog column positions (PG13+ appended backend_type; PG14+ leader_pid and
+// query_id). Older files are shorter; the reader tolerates that.
+const (
+	csvLogTime = iota
+	csvUser
+	csvDB
+	csvPID
+	csvConnFrom
+	csvSession
+	csvLineNum
+	csvCmdTag
+	csvSessStart
+	csvVXID
+	csvXID
+	csvSeverity
+	csvSQLState
+	csvMessage
+	csvDetail
+	csvHint
+	csvInternalQuery
+	csvInternalPos
+	csvContext
+	csvQuery
+	csvQueryPos
+	csvLocation
+	csvAppName
+	csvMinFields = csvLocation + 1
+)
+
+const csvTimeLayout = "2006-01-02 15:04:05.000 MST"
+
+func (p *LogParser) feedCSV(buf []byte, base int64) {
+	r := csv.NewReader(bytes.NewReader(buf))
+	r.FieldsPerRecord = -1
+	r.LazyQuotes = true
+	r.ReuseRecord = false
+	for {
+		off := r.InputOffset()
+		rec, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		p.lines++
+		if err != nil || len(rec) < csvMinFields {
+			// A window that starts inside a quoted multi-line field yields a
+			// garbage record or two before the first clean one.
+			p.unparsed++
+			if err != nil && !isCSVParseErr(err) {
+				break
+			}
+			continue
+		}
+		ts, terr := time.ParseInLocation(csvTimeLayout, rec[csvLogTime], p.loc)
+		if terr != nil {
+			p.unparsed++
+			continue
+		}
+		e := LogEntry{
+			Off:       base + off,
+			Time:      ts,
+			User:      []byte(rec[csvUser]),
+			DB:        []byte(rec[csvDB]),
+			Host:      []byte(rec[csvConnFrom]),
+			Session:   []byte(rec[csvSession]),
+			Severity:  severityOf([]byte(rec[csvSeverity])),
+			SQLState:  []byte(rec[csvSQLState]),
+			Message:   []byte(rec[csvMessage]),
+			Detail:    []byte(rec[csvDetail]),
+			Hint:      []byte(rec[csvHint]),
+			Context:   []byte(rec[csvContext]),
+			Statement: []byte(rec[csvQuery]),
+			Location:  []byte(rec[csvLocation]),
+		}
+		if len(rec) > csvAppName {
+			e.App = []byte(rec[csvAppName])
+		}
+		if v, err := strconv.Atoi(rec[csvPID]); err == nil {
+			e.PID = int32(v)
+		}
+		if v, err := strconv.Atoi(rec[csvLineNum]); err == nil {
+			e.Line = int32(v)
+		}
+		p.entries = append(p.entries, e)
+	}
+}
+
+func isCSVParseErr(err error) bool {
+	_, ok := err.(*csv.ParseError)
+	return ok
+}
+
+// jsonLogLine mirrors the jsonlog record (PG15+). Only the fields the
+// analyzer uses are declared; the rest is ignored by encoding/json.
+type jsonLogLine struct {
+	Timestamp string `json:"timestamp"`
+	User      string `json:"user"`
+	DBName    string `json:"dbname"`
+	PID       int32  `json:"pid"`
+	Host      string `json:"remote_host"`
+	Session   string `json:"session_id"`
+	LineNum   int32  `json:"line_num"`
+	Severity  string `json:"error_severity"`
+	SQLState  string `json:"state_code"`
+	Message   string `json:"message"`
+	Detail    string `json:"detail"`
+	Hint      string `json:"hint"`
+	Context   string `json:"context"`
+	Statement string `json:"statement"`
+	AppName   string `json:"application_name"`
+	FuncName  string `json:"func_name"`
+}
+
+func (p *LogParser) feedJSON(buf []byte, base int64) {
+	off := 0
+	for off < len(buf) {
+		end := bytes.IndexByte(buf[off:], '\n')
+		lineEnd := len(buf)
+		next := len(buf)
+		if end >= 0 {
+			lineEnd = off + end
+			next = lineEnd + 1
+		}
+		line := bytes.TrimSpace(buf[off:lineEnd])
+		p.lines++
+		if len(line) == 0 {
+			off = next
+			continue
+		}
+		var j jsonLogLine
+		if err := json.Unmarshal(line, &j); err != nil {
+			p.unparsed++
+			off = next
+			continue
+		}
+		ts, _ := time.ParseInLocation(csvTimeLayout, j.Timestamp, p.loc)
+		p.entries = append(p.entries, LogEntry{
+			Off:       base + int64(off),
+			Time:      ts,
+			User:      []byte(j.User),
+			DB:        []byte(j.DBName),
+			PID:       j.PID,
+			Host:      []byte(j.Host),
+			Session:   []byte(j.Session),
+			Line:      j.LineNum,
+			Severity:  severityOf([]byte(j.Severity)),
+			SQLState:  []byte(j.SQLState),
+			Message:   []byte(j.Message),
+			Detail:    []byte(j.Detail),
+			Hint:      []byte(j.Hint),
+			Context:   []byte(j.Context),
+			Statement: []byte(j.Statement),
+			Location:  []byte(j.FuncName),
+			App:       []byte(j.AppName),
+		})
+		off = next
+	}
+}
+
+// DetectLogFormat sniffs the first complete line of a window.
+func DetectLogFormat(buf []byte) LogFormat {
+	for _, ln := range sampleLines(buf, 5) {
+		if ln[0] == '{' {
+			return LogFormatJSON
+		}
+		if csvHeadRe.Match(ln) {
+			return LogFormatCSV
+		}
+		return LogFormatStderr
+	}
+	return LogFormatStderr
+}
+
+var csvHeadRe = regexp.MustCompile(`^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} [A-Z0-9+\-]{1,6},`)
+
+// ── classification ───────────────────────────────────────────────────────────
+
+var (
+	checkpointCompleteRe = regexp.MustCompile(`wrote (\d+) buffers \(([\d.]+)%\); (\d+) WAL file\(s\) added, (\d+) removed, (\d+) recycled; write=([\d.]+) s, sync=([\d.]+) s, total=([\d.]+) s(?:.*?distance=(\d+) kB, estimate=(\d+) kB)?`)
+	tempFileRe           = regexp.MustCompile(`size (\d+)\s*$`)
+	lockWaitRe           = regexp.MustCompile(`^process \d+ (?:still waiting for|acquired) .* after ([\d.]+) ms`)
+)
+
+// Classify assigns every entry a category and extracts the per-category
+// fields. It runs once per entry after parsing and is safe to re-run.
+func Classify(entries []LogEntry) {
+	for i := range entries {
+		classify(&entries[i])
+	}
+}
+
+func classify(e *LogEntry) {
+	if e.Orphan {
+		e.Category = CatOther
+		return
+	}
+	msg := firstLineBytes(e.Message)
+	switch {
+	case bytes.HasPrefix(msg, []byte("deadlock detected")):
+		e.Category = CatLock
+	case e.Severity >= SevError:
+		e.Category = CatError
+	case e.Severity == SevWarning:
+		e.Category = CatWarning
+	case bytes.HasPrefix(msg, []byte("duration: ")):
+		e.Category = CatSlowQuery
+		parseDuration(e)
+	case bytes.HasPrefix(msg, []byte("checkpoint ")) || bytes.HasPrefix(msg, []byte("restartpoint ")):
+		e.Category = CatCheckpoint
+		parseCheckpoint(e, msg)
+	case bytes.HasPrefix(msg, []byte("temporary file: path ")):
+		e.Category = CatTempFile
+		if m := tempFileRe.FindSubmatch(msg); m != nil {
+			e.TempBytes, _ = strconv.ParseInt(string(m[1]), 10, 64)
+		}
+	case bytes.HasPrefix(msg, []byte("automatic vacuum of table ")),
+		bytes.HasPrefix(msg, []byte("automatic analyze of table ")),
+		bytes.HasPrefix(msg, []byte("automatic aggressive vacuum of table ")),
+		bytes.HasPrefix(msg, []byte("automatic aggressive vacuum to prevent wraparound of table ")),
+		bytes.HasPrefix(msg, []byte("automatic vacuum to prevent wraparound of table ")):
+		e.Category = CatAutovacuum
+		e.AVTable = firstQuoted(msg)
+	case bytes.HasPrefix(msg, []byte("connection received: ")),
+		bytes.HasPrefix(msg, []byte("connection authorized: ")),
+		bytes.HasPrefix(msg, []byte("connection authenticated: ")),
+		bytes.HasPrefix(msg, []byte("disconnection: ")):
+		e.Category = CatConnection
+	case bytes.HasPrefix(msg, []byte("process ")) && lockWaitRe.Match(msg):
+		e.Category = CatLock
+		if m := lockWaitRe.FindSubmatch(msg); m != nil {
+			e.LockWaitMs, _ = strconv.ParseFloat(string(m[1]), 64)
+		}
+	case isReplicationMsg(msg):
+		e.Category = CatReplication
+	default:
+		e.Category = CatOther
+	}
+}
+
+// parseDuration handles "duration: 248.569 ms  execute <unnamed>/C_15: SQL",
+// "duration: 1.2 ms  statement: SQL" and the bare log_duration form.
+func parseDuration(e *LogEntry) {
+	rest := e.Message[len("duration: "):]
+	i := bytes.Index(rest, []byte(" ms"))
+	if i < 0 {
+		return
+	}
+	e.DurationMs, _ = strconv.ParseFloat(string(rest[:i]), 64)
+	rest = rest[i+len(" ms"):]
+	rest = bytes.TrimLeft(rest, " ")
+	// auto_explain: "duration: N ms  plan:" followed by an indented "Query
+	// Text: …" line and the plan tree.
+	if bytes.HasPrefix(rest, []byte("plan:")) {
+		e.SQL, e.Plan = splitAutoExplain(rest[len("plan:"):])
+		return
+	}
+	// "statement: …" / "execute <name>: …" / "parse <name>: …" / "bind <name>: …"
+	for _, kind := range [][]byte{[]byte("statement: "), []byte("execute "), []byte("parse "), []byte("bind ")} {
+		if bytes.HasPrefix(rest, kind) {
+			if string(kind) == "statement: " {
+				e.SQL = rest[len(kind):]
+				return
+			}
+			if j := bytes.Index(rest, []byte(": ")); j >= 0 {
+				e.SQL = rest[j+2:]
+			} else if j := bytes.IndexByte(rest, ':'); j >= 0 {
+				e.SQL = bytes.TrimLeft(rest[j+1:], " ")
+			}
+			return
+		}
+	}
+}
+
+// splitAutoExplain separates auto_explain's "Query Text: …" (possibly
+// multi-line) from the plan tree that follows it. The plan's root node is the
+// first line carrying a cost or actual-rows annotation; with both switched off
+// the whole remainder counts as plan and the query text is its first line.
+func splitAutoExplain(body []byte) (sql, plan []byte) {
+	const marker = "Query Text: "
+	i := bytes.Index(body, []byte(marker))
+	if i < 0 {
+		return nil, bytes.TrimSpace(body)
+	}
+	rest := body[i+len(marker):]
+	off := 0
+	first := true
+	for off < len(rest) {
+		end := bytes.IndexByte(rest[off:], '\n')
+		lineEnd := len(rest)
+		if end >= 0 {
+			lineEnd = off + end
+		}
+		line := rest[off:lineEnd]
+		if !first && (bytes.Contains(line, []byte("(cost=")) || bytes.Contains(line, []byte("(actual "))) {
+			return bytes.TrimSpace(rest[:off]), bytes.TrimRight(rest[off:], "\n\t ")
+		}
+		first = false
+		if end < 0 {
+			break
+		}
+		off = lineEnd + 1
+	}
+	return bytes.TrimSpace(rest), nil
+}
+
+// MergePlans folds each auto_explain "plan:" entry into the "statement:" entry
+// PostgreSQL logs right after it for the same execution (same backend, same
+// query text, logged within moments), so one slow statement is counted once
+// and carries its plan. A plan with no matching statement line — auto_explain
+// on, log_min_duration_statement off — stays a slow-query entry of its own,
+// grouped by its query text.
+func MergePlans(entries []LogEntry) []LogEntry {
+	const lookahead = 8
+	drop := make([]bool, len(entries))
+	for i := range entries {
+		e := &entries[i]
+		if e.Category != CatSlowQuery || len(e.Plan) == 0 || len(e.SQL) == 0 {
+			continue
+		}
+		want := NormalizeSQL(string(e.SQL))
+		for j := i + 1; j < len(entries) && j <= i+lookahead; j++ {
+			c := &entries[j]
+			if c.PID != e.PID || c.Category != CatSlowQuery || len(c.Plan) > 0 || len(c.SQL) == 0 {
+				continue
+			}
+			if !c.Time.IsZero() && c.Time.Sub(e.Time) > 5*time.Second {
+				break
+			}
+			if NormalizeSQL(string(c.SQL)) == want {
+				c.Plan = e.Plan
+				drop[i] = true
+				break
+			}
+		}
+	}
+	out := make([]LogEntry, 0, len(entries))
+	for i := range entries {
+		if !drop[i] {
+			out = append(out, entries[i])
+		}
+	}
+	return out
+}
+
+func parseCheckpoint(e *LogEntry, msg []byte) {
+	cf := &CheckpointFields{}
+	e.Checkpoint = cf
+	s := string(msg)
+	if i := strings.Index(s, " starting: "); i >= 0 {
+		cf.Starting = true
+		cf.Reason = s[i+len(" starting: "):]
+		return
+	}
+	m := checkpointCompleteRe.FindStringSubmatch(s)
+	if m == nil {
+		return
+	}
+	cf.Buffers, _ = strconv.ParseInt(m[1], 10, 64)
+	cf.BuffersPct, _ = strconv.ParseFloat(m[2], 64)
+	cf.WALAdded, _ = strconv.ParseInt(m[3], 10, 64)
+	cf.WALRemoved, _ = strconv.ParseInt(m[4], 10, 64)
+	cf.WALRecycle, _ = strconv.ParseInt(m[5], 10, 64)
+	cf.WriteSec, _ = strconv.ParseFloat(m[6], 64)
+	cf.SyncSec, _ = strconv.ParseFloat(m[7], 64)
+	cf.TotalSec, _ = strconv.ParseFloat(m[8], 64)
+	if m[9] != "" {
+		cf.DistanceKB, _ = strconv.ParseInt(m[9], 10, 64)
+		cf.EstimateKB, _ = strconv.ParseInt(m[10], 10, 64)
+	}
+}
+
+var replicationMarkers = []string{
+	"started streaming WAL", "redo ", "recovery ", "standby ", "consistent recovery state",
+	"database system is ready", "database system was", "database system is shut",
+	"replication", "wal receiver", "walreceiver", "archive ", "restored log file",
+	"entering standby mode", "invalid record length", "starting PostgreSQL",
+	"received ", "shutting down", "checkpointer process", "background writer",
+}
+
+func isReplicationMsg(msg []byte) bool {
+	s := string(msg)
+	for _, m := range replicationMarkers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
+func firstQuoted(b []byte) []byte {
+	i := bytes.IndexByte(b, '"')
+	if i < 0 {
+		return nil
+	}
+	j := bytes.IndexByte(b[i+1:], '"')
+	if j < 0 {
+		return nil
+	}
+	return b[i+1 : i+1+j]
+}
+
+func firstLineBytes(b []byte) []byte {
+	if i := bytes.IndexByte(b, '\n'); i >= 0 {
+		return b[:i]
+	}
+	return b
+}

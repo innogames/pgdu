@@ -56,6 +56,16 @@ type keyMap struct {
 	// Wait-event profiler over the Activity tool's sample stream.
 	WaitProfile key.Binding // W: open the wait-event profile
 
+	// Log-analyzer bindings (levelLogs).
+	LogGroupMode key.Binding // m: cycle section mode (category / severity / flat)
+	LogPane      key.Binding // tab: groups ⇄ timeline
+	LogWindow    key.Binding // w: widen the tail window
+	LogFiles     key.Binding // o: back to the file picker
+
+	// logInFooter adds the log analyzer's cluster (tab/v/f/m/w/o) to the footer;
+	// nothing else advertises those keys.
+	logInFooter bool
+
 	// waitProfileInFooter adds the W hint to the footer on the activity table.
 	waitProfileInFooter bool
 
@@ -143,6 +153,11 @@ func defaultKeys() keyMap {
 		Progress:        key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "progress")),
 
 		WaitProfile: key.NewBinding(key.WithKeys("W"), key.WithHelp("W", "wait profile")),
+
+		LogGroupMode: key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "section mode")),
+		LogPane:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "groups/timeline")),
+		LogWindow:    key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "widen window")),
+		LogFiles:     key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "log files")),
 	}
 }
 
@@ -160,6 +175,8 @@ func (k *keyMap) applyContext(s *screen) {
 	diagResult := s.level == levelDiagnosticResult
 	activity := s.level == levelActivity
 	tableStats := s.level == levelTableStats
+	logs := s.level == levelLogs
+	logAny := logs || s.level == levelLogGroup || s.level == levelLogEntry || s.level == levelLogFiles
 
 	// `s` shows the SQL (to copy out) on a diagnostic result and previews the
 	// highlighted query's SQL on the diagnostics list. Sort cycling moved to the
@@ -175,21 +192,30 @@ func (k *keyMap) applyContext(s *screen) {
 	// activity table, the table overview and diagnostic results. The picker is
 	// hard to find without a header hint, so surface it in the footer everywhere
 	// but the top-queries table, whose header already advertises it.
-	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult)
-	k.columnsInFooter = activity || tableStats || diagResult
+	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult || (logs && s.logView == logViewTimeline))
+	k.columnsInFooter = activity || tableStats || diagResult || (logs && s.logView == logViewTimeline)
 	// t (ToggleRefresh) cycles the auto-refresh cadence on top-queries levels and
 	// on the live activity/progress levels. Surface it in the footer on the pure
 	// live monitors, whose header shows the cadence but not the key that changes
 	// it; the top-queries levels keep it to the ? help to avoid a crowded footer.
-	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity || s.level == levelProgress)
-	k.toggleRefreshInFooter = activity || s.level == levelProgress
+	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity || s.level == levelProgress || logAny)
+	k.toggleRefreshInFooter = activity || s.level == levelProgress || logs
 	k.SaveSnapshot.SetEnabled(stmtTable || stmtDetail)
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
 	k.Params.SetEnabled(stmtDetail)
 	k.Execute.SetEnabled(stmtDetail)
 	// v is the verbose toggle on statement detail, the VACUUM trigger on parts,
 	// and the auxiliary-backend visibility toggle on the activity table.
-	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity)
+	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity || logs)
+	// The same physical keys read differently on the log analyzer: v shows/hides
+	// spam categories, f cycles the severity floor.
+	if logs {
+		k.Verbose.SetHelp("v", "spam")
+		k.ActivityFilter.SetHelp("f", "severity floor")
+	} else {
+		k.Verbose.SetHelp("v", "verbose")
+		k.ActivityFilter.SetHelp("f", "cycle filter")
+	}
 	k.DeleteSnapshot.SetEnabled(snapshots)
 	// Install is only actionable when the screen offers an installable extension
 	// (the prompt renders its own `i` hint); keep it out of the footer otherwise.
@@ -197,7 +223,7 @@ func (k *keyMap) applyContext(s *screen) {
 
 	// f cycles the backend filter on the activity table and the category filter
 	// on the diagnostics list.
-	k.ActivityFilter.SetEnabled(activity || s.level == levelDiagnostics)
+	k.ActivityFilter.SetEnabled(activity || s.level == levelDiagnostics || logs)
 	// Cancel/terminate act on the selected backend from both the activity table
 	// and its lock-tree child.
 	k.CancelBackend.SetEnabled(activity || s.level == levelLockTree)
@@ -209,6 +235,13 @@ func (k *keyMap) applyContext(s *screen) {
 	// w opens the by-relation WAL breakdown — only from the rmgr overview, so
 	// the physical key stays free for reuse on every other level.
 	k.WALByRelation.SetEnabled(s.level == levelWAL)
+
+	// Log analyzer cluster: m/tab/w only on the overview, o from every log level.
+	k.LogGroupMode.SetEnabled(logs)
+	k.LogPane.SetEnabled(logs)
+	k.LogWindow.SetEnabled(logs)
+	k.LogFiles.SetEnabled(logAny)
+	k.logInFooter = logs
 
 	// m opens the shared-memory map from the buffer-tables list; surface it in
 	// the footer there since nothing else advertises it.
@@ -263,6 +296,9 @@ func (k *keyMap) applyContext(s *screen) {
 
 func (k keyMap) ShortHelp() []key.Binding {
 	b := []key.Binding{k.Up, k.Down, k.Enter, k.Back, k.Filter, k.SortPrev, k.SortNext, k.ReverseSort, k.Refresh}
+	if k.logInFooter {
+		b = append(b, k.LogPane, k.Verbose, k.ActivityFilter, k.LogGroupMode, k.LogWindow, k.LogFiles)
+	}
 	if k.toggleRefreshInFooter {
 		b = append(b, k.ToggleRefresh)
 	}
@@ -299,6 +335,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
 		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation, k.ShmemMap},
+		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogFiles},
 		{k.Help, k.Quit},
 	}
 }

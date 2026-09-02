@@ -52,7 +52,14 @@ const (
 	levelProgress         // live pg_stat_progress_* monitor (child of levelMaintenance)
 	levelTriage           // one-key health-triage report (toolTriage)
 	levelWaitProfile      // wait-event sampling profile ('W' on levelActivity)
+	levelLogFiles         // log-analyzer file picker (toolLogs)
+	levelLogs             // log-analyzer overview: aggregated groups ⇄ chronological timeline
+	levelLogGroup         // the entries behind one aggregated log group
+	levelLogEntry         // one full log record (message + DETAIL/HINT/STATEMENT/CONTEXT)
 )
+
+// levelLast is the highest level value; tests iterate levelTools..levelLast.
+const levelLast = levelLogEntry
 
 // tool identifies which top-level statistic the user is exploring.
 // Propagated down the stack so each level knows which leaf to render.
@@ -69,6 +76,7 @@ const (
 	toolActivity    // live server activity (pg_stat_activity)
 	toolTableStats  // per-table statistics overview (pg_stat_all_tables + sizes)
 	toolTriage      // one-key health-triage report (levelTriage)
+	toolLogs        // server-log analyzer (levelLogFiles → levelLogs)
 )
 
 func (t tool) Name() string {
@@ -93,6 +101,8 @@ func (t tool) Name() string {
 		return "tables"
 	case toolTriage:
 		return "triage"
+	case toolLogs:
+		return "logs"
 	}
 	return "?"
 }
@@ -155,6 +165,11 @@ type item struct {
 	// and lets actions read the full, unprojected row — item.data only holds
 	// the C-picker's visible column subset.
 	diagRow int
+
+	// logIdx is 1 + the row's index into the log report's Entries on the log
+	// timeline (whose .data is []pg.DiagCell for the generic renderer) and the
+	// group-entries level; 0 = not a log entry row.
+	logIdx int
 
 	// snapPath is the file path of the snapshot a levelSnapshots row represents,
 	// so the load/delete actions can act on the highlighted file. The row's
@@ -577,6 +592,29 @@ type screen struct {
 	// derived from it with green checks collapsed (see triageItems).
 	triageResults []pg.TriageResult
 
+	// ── Log analyzer (levelLogFiles / levelLogs / levelLogGroup / levelLogEntry) ──
+	// logCands is the picker's candidate list; logSrc the opened file and
+	// logReport the parsed window (both live on the levelLogs screen — the
+	// child levels read them from that parent via findLevel). logErr replaces
+	// s.err so the header block still renders around a failed reload.
+	logCands  []pg.LogCandidate
+	logSrc    pg.LogSource
+	logReport *pg.LogReport
+	logErr    error
+	// View state, all client-side over logReport: which pane (groups or
+	// timeline), how groups are sectioned, whether spam categories show, the
+	// severity floor, and the requested tail window (0 = whole file).
+	logView     logView
+	logGroupBy  logGroupBy
+	logShowSpam bool
+	logMinSev   pg.LogSeverity
+	logWindow   int64
+	// logGroup/logEntry are what levelLogGroup and levelLogEntry show; logCols
+	// is the projected timeline column set (parallel to diagCols).
+	logGroup *pg.LogGroup
+	logEntry *pg.LogEntry
+	logCols  []logColDesc
+
 	// ── Progress monitor (levelProgress) ──────────────────────────────────────
 	// progressRows is the last fetched set of running operations from the
 	// pg_stat_progress_* views; progressErr is non-nil when the load failed.
@@ -752,6 +790,22 @@ type Model struct {
 	// second tick loop.
 	statTicking bool
 
+	// logTicking/logRefresh are the log analyzer's live-tail loop: off by
+	// default (a log is usually read after the fact), t cycles 5s → 15s → 60s → off.
+	logTicking bool
+	logRefresh time.Duration
+
+	// logFile is the --log-file override: when set the analyzer skips the picker
+	// and opens it directly.
+	logFile string
+
+	// Timeline column picker state (C on the log timeline), mirroring the
+	// activity picker.
+	logColsVisible      map[logColID]bool
+	logSortColID        logColID
+	showLogColumnConfig bool
+	logColCfgCursor     int
+
 	// statRefresh is the top-queries re-sample cadence (from --queries-refresh /
 	// PGDU_QUERIES_REFRESH). Zero disables auto-refresh entirely. The t key cycles
 	// it through the 2s default, a calmer 60s, then off (see cycleStatRefresh).
@@ -823,7 +877,7 @@ func (m *Model) vacuumPaneVisible(s *screen) bool {
 // by the --<tool> CLI flags) back to the tool enum. The bool is false for an
 // unknown/empty name so the caller can fall back to the tool picker.
 func toolByName(name string) (tool, bool) {
-	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity, toolTableStats, toolTriage} {
+	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity, toolTableStats, toolTriage, toolLogs} {
 		if t.Name() == name {
 			return t, true
 		}
@@ -831,7 +885,7 @@ func toolByName(name string) (tool, bool) {
 	return 0, false
 }
 
-func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir string, colPrefs *prefs.Prefs, initialTool string) *Model {
+func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir string, colPrefs *prefs.Prefs, initialTool, logFile string) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	m := &Model{
@@ -845,6 +899,7 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 		snapshotDir:     snapshotDir,
 		colPrefs:        colPrefs,
 		target:          client.Target(),
+		logFile:         logFile,
 	}
 	// Seed in-memory column visibility from persisted selections. A partial map
 	// is fine: actColEnabled/stmtColEnabled fall back to registry defaults for any
@@ -858,6 +913,9 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 		}
 		if v := colPrefs.Columns(colPrefsTableStats); len(v) > 0 {
 			m.tblColsVisible = colVisFromStrings[tblColID](v)
+		}
+		if v := colPrefs.Columns(colPrefsLogs); len(v) > 0 {
+			m.logColsVisible = colVisFromStrings[logColID](v)
 		}
 	}
 	root := &screen{
@@ -887,6 +945,7 @@ func toolItems() []item {
 		{name: "Table overview", detail: "per-table stats for a schema: size, write/scan activity, cache hit ratios, bloat, vacuum age, storage options — sortable, customizable columns", hasChildren: true, data: toolTableStats},
 		{name: "System overview", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
 		{name: "Health triage", detail: "one-key red/yellow/green health report: runs the whole diagnostic battery concurrently; Enter drills into the check that fired", hasChildren: true, data: toolTriage},
+		{name: "Log analyzer", detail: "parse the server log (current, rotated, .gz): errors, slow statements, checkpoints, temp files, locks — grouped and searchable, spam hidden by default, live tail", hasChildren: true, data: toolLogs},
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},
