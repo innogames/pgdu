@@ -49,12 +49,22 @@ type Config struct {
 
 	// Tool, when non-empty, names the top-level tool to open directly, skipping
 	// the tool-picker screen. One of the canonical tool names ("disk",
-	// "buffers", "queries", "activity", "logs"); empty means start on the picker.
+	// "buffers", "queries", "activity", "logs", "pgbouncer"); empty means start on the picker.
 	Tool string
 
 	// LogFile is an explicit server log to analyze (--log-file / PGDU_LOG_FILE).
 	// Empty means auto-detect: pg_current_logfile(), then /var/log/postgresql.
 	LogFile string
+
+	// PgBouncerTargets are explicit pgbouncer instances for the pgbouncer tool
+	// (--pgbouncer-target, repeatable; PGDU_PGBOUNCER_TARGET comma-separated):
+	// an ini path, a unix socket directory, or host[:port]. Discovery via /proc
+	// and /etc/pgbouncer runs regardless; these are added to it.
+	PgBouncerTargets []string
+
+	// PgBouncerUser is the console login for the pgbouncer tool
+	// (--pgbouncer-user / PGDU_PGBOUNCER_USER). Empty means pgdu's own User.
+	PgBouncerUser string
 }
 
 func Parse(args []string) (Config, error) {
@@ -74,6 +84,9 @@ func Parse(args []string) (Config, error) {
 		QueriesRefresh: envDurationOr("PGDU_QUERIES_REFRESH", defaultQueriesRefresh),
 		SnapshotDir:    envOr("PGDU_SNAPSHOT_DIR", defaultSnapshotDir()),
 		LogFile:        os.Getenv("PGDU_LOG_FILE"),
+
+		PgBouncerTargets: envListOr("PGDU_PGBOUNCER_TARGET"),
+		PgBouncerUser:    os.Getenv("PGDU_PGBOUNCER_USER"),
 	}
 
 	fs.StringVarP(&cfg.Host, "host", "h", cfg.Host, "database server host or socket path (empty = libpq default)")
@@ -85,18 +98,21 @@ func Parse(args []string) (Config, error) {
 	fs.DurationVar(&cfg.QueriesRefresh, "queries-refresh", cfg.QueriesRefresh, "top-queries auto-refresh interval (e.g. 5s, 1m; 0 disables)")
 	fs.StringVar(&cfg.SnapshotDir, "snapshot-dir", cfg.SnapshotDir, "directory for top-queries snapshots (S saves, L loads)")
 	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "server log to analyze (plain or .gz; default: auto-detect via pg_current_logfile / /var/log/postgresql)")
+	fs.StringArrayVar(&cfg.PgBouncerTargets, "pgbouncer-target", cfg.PgBouncerTargets, "pgbouncer instance to add to auto-discovery: ini file, unix socket dir, or host[:port] (repeatable)")
+	fs.StringVar(&cfg.PgBouncerUser, "pgbouncer-user", cfg.PgBouncerUser, "login for the pgbouncer console (default: same as -U)")
 
 	var showVersion bool
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
 	// Tool shortcuts: each opens a top-level tool directly, skipping the picker.
 	// They are mutually exclusive — pick at most one.
-	var diskUsage, sharedBuffers, activity, topQueries, logs bool
+	var diskUsage, sharedBuffers, activity, topQueries, logs, pgbouncer bool
 	fs.BoolVar(&diskUsage, "disk-usage", false, "start directly in the disk-usage browser")
 	fs.BoolVar(&sharedBuffers, "shared-buffers", false, "start directly in the shared-buffers browser")
 	fs.BoolVar(&activity, "activity", false, "start directly in the activity tool (pg_stat_activity)")
 	fs.BoolVar(&topQueries, "top-queries", false, "start directly in the top-queries tool (pg_stat_statements)")
 	fs.BoolVar(&logs, "logs", false, "start directly in the log analyzer")
+	fs.BoolVar(&pgbouncer, "pgbouncer", false, "start directly in the pgbouncer tool")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "pgdu - PostgreSQL disk usage explorer (ncdu-style TUI)\n\n")
@@ -116,18 +132,19 @@ func Parse(args []string) (Config, error) {
 
 	// Map the tool shortcut flags onto cfg.Tool, rejecting more than one.
 	tools := map[string]bool{
-		"disk":     diskUsage,
-		"buffers":  sharedBuffers,
-		"activity": activity,
-		"queries":  topQueries,
-		"logs":     logs,
+		"disk":      diskUsage,
+		"buffers":   sharedBuffers,
+		"activity":  activity,
+		"queries":   topQueries,
+		"logs":      logs,
+		"pgbouncer": pgbouncer,
 	}
 	for name, set := range tools {
 		if !set {
 			continue
 		}
 		if cfg.Tool != "" {
-			return Config{}, errors.New("only one of --disk-usage/--shared-buffers/--activity/--top-queries/--logs may be given")
+			return Config{}, errors.New("only one of --disk-usage/--shared-buffers/--activity/--top-queries/--logs/--pgbouncer may be given")
 		}
 		cfg.Tool = name
 	}
@@ -243,6 +260,18 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envListOr splits a comma-separated environment value, dropping blanks; nil
+// when unset.
+func envListOr(key string) []string {
+	var out []string
+	for _, s := range strings.Split(os.Getenv(key), ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func envIntOr(key string, def int) int {

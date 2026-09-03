@@ -29,6 +29,7 @@ const (
 	TriageTargetLockTree                        // push the live lock tree
 	TriageTargetMaintenance                     // push the maintenance/system overview
 	TriageTargetActivity                        // push the live pg_stat_activity list
+	TriageTargetPgBouncer                       // push the pgbouncer tool (instance list)
 )
 
 // TriageResult is one line of the health-triage report.
@@ -250,7 +251,7 @@ func (c *Client) Triage(ctx context.Context) []TriageResult {
 		{"WAL archiver", TriageTargetMaintenance, "", "", mgrade(archiverGrade)},
 		{"replication lag", TriageTargetMaintenance, "", "", mgrade(replicationGrade)},
 		{"connection saturation", TriageTargetMaintenance, "", "", mgrade(connSaturationGrade)},
-		{"pgbouncer waits", TriageTargetMaintenance, "", "", mgrade(pgbouncerGrade)},
+		{"pgbouncer waits", TriageTargetPgBouncer, "", "", c.triagePgBouncer},
 		{"checkpoint pressure", TriageTargetMaintenance, "", "", mgrade(checkpointGrade)},
 		{"prepared transactions", TriageTargetMaintenance, "", "", mgrade(preparedXactGrade)},
 		{"extension capacity", TriageTargetMaintenance, "", "", mgrade(extCapacityGrade)},
@@ -545,26 +546,66 @@ func longXactSeverity(secs float64) Severity {
 	return SevOK
 }
 
-// pgbouncerGrade flags clients queued in PgBouncer for a server connection.
-func pgbouncerGrade(info *MaintenanceInfo) (Severity, string, error) {
-	pb := info.PgBouncer
-	if pb == nil {
-		return SevOK, "no pgbouncer admin console reachable", nil
+// triagePgBouncer flags clients queued in any discovered pgbouncer instance
+// for a server connection. Instances are probed concurrently and the worst
+// one is reported; a fleet where every console is unreachable degrades to
+// "could not evaluate" carrying the first error (with the login hint when
+// that error is an auth rejection), not to a false green.
+func (c *Client) triagePgBouncer(ctx context.Context) (Severity, string, error) {
+	// Discovery itself is filesystem work that ignores ctx; honour the budget
+	// explicitly so a cancelled report degrades this check like every other.
+	if err := ctx.Err(); err != nil {
+		return 0, "", err
 	}
-	sev := pgbouncerSeverity(pb.ClWaiting, pb.MaxWaitSec)
-	if pb.ClWaiting == 0 {
-		return sev, "no clients waiting in pgbouncer", nil
+	insts := c.DiscoverPgBouncers(ctx)
+	if len(insts) == 0 {
+		return SevOK, "no pgbouncer instance found", nil
 	}
-	detail := fmt.Sprintf("%d client(s) waiting for a server connection, longest %s",
-		pb.ClWaiting, triageDuration(pb.MaxWaitSec))
-	var worst *PgbPool
-	for i := range pb.Pools {
-		if worst == nil || pb.Pools[i].MaxWaitSec > worst.MaxWaitSec {
-			worst = &pb.Pools[i]
+	probes := make([]PgBouncerProbe, len(insts))
+	var wg sync.WaitGroup
+	for i := range insts {
+		wg.Go(func() {
+			pctx, cancel := context.WithTimeout(ctx, pgbDialTimeout)
+			defer cancel()
+			probes[i] = c.PgBouncerProbe(pctx, insts[i])
+		})
+	}
+	wg.Wait()
+	return worstPgBouncerProbe(insts, probes)
+}
+
+func worstPgBouncerProbe(insts []PgBouncerInstance, probes []PgBouncerProbe) (Severity, string, error) {
+	sev := SevOK
+	detail := ""
+	reachable := 0
+	var firstErr error
+	for i, pr := range probes {
+		if pr.Err != nil {
+			if firstErr == nil {
+				firstErr = pr.Err
+				if pr.AuthErr {
+					firstErr = fmt.Errorf("%w — %s", pr.Err, PgBouncerAuthHint(insts[i], pr.User))
+				}
+			}
+			continue
+		}
+		reachable++
+		s := pgbouncerSeverity(pr.Totals.ClWaiting, pr.Totals.MaxWaitSec)
+		if s > sev || detail == "" {
+			sev = s
+			if pr.Totals.ClWaiting == 0 {
+				detail = "no clients waiting"
+			} else {
+				detail = fmt.Sprintf("%s: %d client(s) waiting for a server connection, longest %s",
+					insts[i].Name, pr.Totals.ClWaiting, triageDuration(pr.Totals.MaxWaitSec))
+			}
 		}
 	}
-	if worst != nil && worst.MaxWaitSec > 0 {
-		detail += " (" + worst.Database + "/" + worst.User + ")"
+	if reachable == 0 {
+		return 0, "", fmt.Errorf("%d instance(s) found, console unreachable: %w", len(insts), firstErr)
+	}
+	if sev == SevOK {
+		detail = fmt.Sprintf("no clients waiting in %d instance(s)", reachable)
 	}
 	return sev, detail, nil
 }

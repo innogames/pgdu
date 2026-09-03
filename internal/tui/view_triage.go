@@ -31,6 +31,8 @@ func triageTargetLabel(r pg.TriageResult) string {
 		return "system overview"
 	case pg.TriageTargetActivity:
 		return "activity"
+	case pg.TriageTargetPgBouncer:
+		return "pgbouncer"
 	}
 	if d, ok := pg.DiagnosticByKey(r.DiagKey); ok {
 		return d.Title

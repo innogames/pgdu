@@ -44,7 +44,7 @@ func logSevStyleByName(name string) (lipgloss.Style, bool) {
 		return lipgloss.NewStyle().Foreground(colorAccent), true
 	case "LOG":
 		return lipgloss.NewStyle().Foreground(colorMuted), true
-	case "NOTICE", "INFO", "DEBUG":
+	case "NOTICE", "INFO", "DEBUG", "NOISE":
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("240")), true
 	}
 	return lipgloss.Style{}, false
@@ -152,20 +152,26 @@ func (m *Model) renderLogHeader(s *screen) string {
 	if fatal > 0 {
 		parts = append(parts, count(fatal, "fatal", logSevStyle(pg.SevFatal)))
 	}
-	parts = append(parts,
-		count(r.BySeverity[pg.SevWarning], "warnings", logSevStyle(pg.SevWarning)),
-		count(r.ByCategory[pg.CatLock], "locks", logCatStyle(pg.CatLock)),
-		count(r.ByCategory[pg.CatTempFile], "temp files", logCatStyle(pg.CatTempFile)),
-		count(r.ByCategory[pg.CatSlowQuery], "slow", logCatStyle(pg.CatSlowQuery)),
-		mu(fmt.Sprintf("%d ckpt", r.ByCategory[pg.CatCheckpoint])),
-	)
+	parts = append(parts, count(r.BySeverity[pg.SevWarning], "warnings", logSevStyle(pg.SevWarning)))
+	if r.Format == pg.LogFormatPgBouncer {
+		// A pooler log has no locks/temp files/checkpoints; its volume is
+		// connection churn.
+		parts = append(parts, mu(fmt.Sprintf("%d conn", r.ByCategory[pg.CatConnection])))
+	} else {
+		parts = append(parts,
+			count(r.ByCategory[pg.CatLock], "locks", logCatStyle(pg.CatLock)),
+			count(r.ByCategory[pg.CatTempFile], "temp files", logCatStyle(pg.CatTempFile)),
+			count(r.ByCategory[pg.CatSlowQuery], "slow", logCatStyle(pg.CatSlowQuery)),
+			mu(fmt.Sprintf("%d ckpt", r.ByCategory[pg.CatCheckpoint])),
+		)
+	}
 	if n := r.ByCategory[pg.CatStatement]; n > 0 {
 		parts = append(parts, count(n, "stmts", logCatStyle(pg.CatStatement)))
 	}
 	if n := r.ByCategory[pg.CatAutovacuum]; n > 0 {
 		parts = append(parts, mu(fmt.Sprintf("%d autovac", n)))
 	}
-	if n := r.ByCategory[pg.CatConnection]; n > 0 {
+	if n := r.ByCategory[pg.CatConnection]; n > 0 && r.Format != pg.LogFormatPgBouncer {
 		parts = append(parts, mu(fmt.Sprintf("%d conn", n)))
 	}
 	if r.Unparsed > 0 {
@@ -660,12 +666,14 @@ func (m *Model) renderLogsInfo(height int) string {
 	b.WriteString("  " + styleHeader.Render(" what it reads ") + "\n")
 	b.WriteString("  " + mu("The server log, parsed with log_line_prefix (taken from the server, or detected from the file when that") + "\n")
 	b.WriteString("  " + mu("does not match — rotated logs written under an older prefix, files copied from elsewhere). csvlog and jsonlog") + "\n")
-	b.WriteString("  " + mu("are recognised too. Only the tail window is read (w widens it); the header shows the covered time range.") + "\n")
+	b.WriteString("  " + mu("are recognised too, as is pgbouncer's own log (\"%m [%p] LOG message\": socket events group under conn, the") + "\n")
+	b.WriteString("  " + mu("periodic stats line under other). Only the tail window is read (w widens it); the header shows the covered range.") + "\n")
 	b.WriteString("  " + mu("DETAIL / HINT / STATEMENT / CONTEXT lines are attached to their primary line, so a group's entry shows all of them.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" where the file comes from ") + "\n")
 	b.WriteString("  " + mu("--log-file PATH (or PGDU_LOG_FILE) · pg_current_logfile() when logging_collector is on · the Debian/Ubuntu") + "\n")
-	b.WriteString("  " + mu("/var/log/postgresql/postgresql-*.log* files incl. rotated .1 / .2.gz · the server's log directory over the connection") + "\n")
+	b.WriteString("  " + mu("/var/log/postgresql/postgresql-*.log* files incl. rotated .1 / .2.gz · pgbouncer*.log* and /var/log/pgbouncer ·") + "\n")
+	b.WriteString("  " + mu("the server's log directory over the connection") + "\n")
 	b.WriteString("  " + mu("(pg_ls_logdir needs pg_monitor; reading any server file needs pg_read_server_files or superuser).") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" categories ") + "\n")

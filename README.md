@@ -46,7 +46,13 @@ web server.
   ANALYZE` uses the parameters `pg_qualstats` captured, or inferred ones.
 - **Log analyzer** — errors, slow queries, lock waits, checkpoints, temp files and
   autovacuum grouped by fingerprint, sectioned by category; live tail, rotated
-  `.gz` files, and server-side reading over the connection.
+  `.gz` files, and server-side reading over the connection. Reads pgbouncer's
+  own log too.
+- **PgBouncer console browser** — every instance on the host is found from
+  `/proc` and `/etc/pgbouncer`, addressed by its own unix socket (several
+  instances usually share one TCP port), and browsed read-only: pools with
+  waiting clients in red, per-second stats, clients, servers, databases, users,
+  config; `l` opens the instance's log.
 - **Every table exports to CSV** (`e`) — whatever view you are on, filtered and
   sorted as shown, ready for a spreadsheet or an LLM.
 - PostgreSQL 17 and newer; extensions are optional and installable from inside
@@ -147,7 +153,8 @@ file `pg_current_logfile()` points at, the Debian/Ubuntu
 directory read over the connection via `pg_read_binary_file`, with a file picker
 built from `pg_ls_logdir()`. Plain stderr logs are parsed with the server's
 `log_line_prefix` (auto-detected when it doesn't fit the file); csvlog and jsonlog
-work too. DETAIL / HINT / STATEMENT / CONTEXT lines are attached to their primary
+work too, as does pgbouncer's own log (`/var/log/postgresql/pgbouncer*.log` is
+listed in the picker). DETAIL / HINT / STATEMENT / CONTEXT lines are attached to their primary
 entry and `auto_explain` plans fold into their statement.
 
 ![Log analyzer](docs/logs_1.png)
@@ -165,6 +172,41 @@ the full record, `j` jumps from an entry to its line in the timeline, `d`
 describes the table behind a statement or error, and `C` picks timeline columns
 (including a reverse-DNS `hostname` for the client).
 
+### PgBouncer
+
+Finds every pgbouncer on the host without configuration: running processes in
+`/proc` (their ini is parsed for `unix_socket_dir`, `listen_port`, `logfile`,
+`pool_mode`, `admin_users` / `stats_users`), `/etc/pgbouncer/*.ini` for
+configured-but-stopped instances, and pgdu's own connection when it evidently
+ends at a pooler. `--pgbouncer-target INI|SOCKETDIR|HOST[:PORT]` (repeatable, or
+`PGDU_PGBOUNCER_TARGET`) adds one by hand. Each instance is reached over its own
+unix socket whenever it exists — several instances commonly share a TCP port via
+`so_reuseport`, and a TCP connection then lands on a random one — with TCP on
+`listen_addr` as the fallback.
+
+The instance list shows state, version, pid, target, pool mode, client/server
+totals with the longest queue wait, pool count, logfile and where the instance
+was found; a single instance opens directly. `↵` gives the overview — version,
+active/paused/suspended, `SHOW LISTS` counters, pool totals — and a menu of
+`SHOW` tables: pools (sorted by `cl_waiting`), stats (pgbouncer's own per-second
+`avg_*` rates; cumulative `total_*` via `C`), clients, servers, databases, users,
+config, memory, sockets, file descriptors. Columns come from the console
+itself, so any pgbouncer version works; microsecond and byte columns are
+humanized, clients / servers / sockets gain a reverse-DNS `hostname` next to
+`addr`, the `scram_*` key columns are never shown, `t` cycles the refresh (1s → 10s → off), `C` picks columns per
+table, `e` exports. `l` opens the instance's logfile in the log analyzer, which
+understands pgbouncer's line format (socket events under *conn*, the periodic
+`stats:` line under *other*).
+
+The tool is read-only: it never issues RELOAD, PAUSE, RESUME or KILL. The console
+login is `-U` (or `--pgbouncer-user`) and must be in `stats_users` (read-only
+suffices) or `admin_users`, with a password in `auth_file`; pgdu reads it from
+`PGDU_PGBOUNCER_PASSWORD`, `PGPASSWORD`, or `~/.pgpass` keyed by the socket
+directory (`/var/run/pgbouncer_1:6432:pgbouncer:postgres:…`, the libpq
+convention) or `localhost`. A refused login shows exactly that hint next to the
+instance. The triage check *pgbouncer waits* probes every discovered instance
+and drills into this tool.
+
 ### Health triage & diagnostics
 
 **Health triage** runs 23 checks concurrently — wraparound age, WAL archiver,
@@ -174,7 +216,8 @@ replication slots, cache hit ratio, SLRU pressure, deadlocks, temp files,
 rollback ratio, sequence exhaustion, stale statistics, missing FK indexes, table
 and index bloat, invalid indexes — and boils them down to a red / yellow / green
 board sorted most-severe first. `↵` on a row drills into whatever explains it:
-the diagnostic query, the lock tree, the activity list, or the system overview.
+the diagnostic query, the lock tree, the activity list, the system overview, or
+the pgbouncer tool.
 
 **Diagnostics** (under *Other tools*) are 38 saved queries in six categories —
 index, table, vacuum, activity, WAL, server — with `f` to filter by category, `s`
@@ -194,8 +237,7 @@ success the diagnostic reloads so you see the effect immediately.
 
 A server dashboard on one screen: version, role, uptime, connection usage split by
 state, longest transaction; commit / rollback ratio, deadlocks and conflicts;
-tuple-level write and scan activity; replication and slots; PgBouncer pools;
-memory GUCs; autovacuum settings and transaction-ID age against
+tuple-level write and scan activity; replication and slots; memory GUCs; autovacuum settings and transaction-ID age against
 `autovacuum_freeze_max_age`; WAL and checkpoint statistics; `pg_stat_io`; and
 pending configuration changes, including settings that still need a restart. The
 top block shows **extension capacity** — how full `pg_stat_statements` /
@@ -328,9 +370,12 @@ pgdu --shared-buffers
 pgdu --activity
 pgdu --top-queries --queries-refresh 5s --snapshot-dir /var/lib/pgdu/snapshots
 pgdu --logs --log-file /var/log/postgresql/postgresql-17-main.log.2.gz
+pgdu --pgbouncer
+pgdu --pgbouncer --pgbouncer-target /var/run/pgbouncer_2 --pgbouncer-user nagios
 ```
 
-`PGDU_LOG_FILE` and `PGDU_SNAPSHOT_DIR` set the same defaults from the
+`PGDU_LOG_FILE`, `PGDU_SNAPSHOT_DIR`, `PGDU_PGBOUNCER_TARGET` and
+`PGDU_PGBOUNCER_USER` set the same defaults from the
 environment; `PGDU_CONFIG_DIR` relocates the per-user preferences (column
 choices) from `~/.config/pgdu`.
 
@@ -367,7 +412,8 @@ Frequently used view-specific keys:
 | `d`        | queries, logs    | describe the statement's main table               |
 | `m`        | buffers / logs   | shared-memory map / toggle log sections           |
 | `Tab`      | logs             | groups → timeline → slow queries                  |
-| `t`        | activity, queries, logs | cycle auto-refresh / live tail             |
+| `t`        | activity, queries, logs, pgbouncer | cycle auto-refresh / live tail  |
+| `l`        | pgbouncer        | open the instance's log in the log analyzer       |
 | `s`        | diagnostics / index tuples / overview | show SQL / seek to a key / settings browser |
 
 `e` writes the current view — filtered and sorted as displayed — to
@@ -400,6 +446,9 @@ safe to re-run — each table is dropped and rebuilt.
 - Some views need server roles rather than extensions: the shared-memory map
   needs `pg_read_all_stats`, reading logs over the connection needs
   `pg_read_server_files` (and `pg_monitor` for the file picker).
+- The PgBouncer tool needs its login in `stats_users` or `admin_users` with a
+  password in `auth_file` (see above); process discovery via `/proc` is
+  Linux-only and needs pgdu on the pgbouncer host.
 - The per-backend RSS / CPU / IO columns in the activity view and the host
   memory bar in the shared-buffers header are Linux-only and require pgdu to run
   on the database host; IO rates additionally need the same UID as the postgres

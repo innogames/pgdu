@@ -56,10 +56,13 @@ const (
 	levelLogs             // log-analyzer overview: aggregated groups ⇄ chronological timeline
 	levelLogGroup         // the entries behind one aggregated log group
 	levelLogEntry         // one full log record (message + DETAIL/HINT/STATEMENT/CONTEXT)
+	levelPgBouncers       // pgbouncer instance list (toolPgBouncer)
+	levelPgBouncer        // one instance: version/state/lists header + SHOW menu
+	levelPgBouncerShow    // one SHOW table of an instance, parameterized by screen.pgbShow
 )
 
 // levelLast is the highest level value; tests iterate levelTools..levelLast.
-const levelLast = levelLogEntry
+const levelLast = levelPgBouncerShow
 
 // tool identifies which top-level statistic the user is exploring.
 // Propagated down the stack so each level knows which leaf to render.
@@ -77,6 +80,7 @@ const (
 	toolTableStats  // per-table statistics overview (pg_stat_all_tables + sizes)
 	toolTriage      // one-key health-triage report (levelTriage)
 	toolLogs        // server-log analyzer (levelLogFiles → levelLogs)
+	toolPgBouncer   // pgbouncer console browser (levelPgBouncers → levelPgBouncer → levelPgBouncerShow)
 )
 
 func (t tool) Name() string {
@@ -103,6 +107,8 @@ func (t tool) Name() string {
 		return "triage"
 	case toolLogs:
 		return "logs"
+	case toolPgBouncer:
+		return "pgbouncer"
 	}
 	return "?"
 }
@@ -171,6 +177,10 @@ type item struct {
 	// group-entries level, or into screen.logCands on the log-file picker;
 	// 0 = not a log row.
 	logIdx int
+
+	// pgbIdx is 1 + the row's index into screen.pgbInsts on the pgbouncer
+	// instance list; 0 = not an instance row.
+	pgbIdx int
 
 	// snapPath is the file path of the snapshot a levelSnapshots row represents,
 	// so the load/delete actions can act on the highlighted file. The row's
@@ -431,6 +441,20 @@ type screen struct {
 	// confirm/run/output lifecycle once the user chooses to execute it.
 	// Model.showDiagFix toggles the overlay itself.
 	diagFix *diagFixRun
+
+	// PgBouncer tool state. pgbInsts/pgbProbes are the instance list (parallel
+	// slices, levelPgBouncers); pgbInst is the instance an overview or SHOW
+	// screen belongs to; pgbShow selects the SHOW at levelPgBouncerShow, whose
+	// result rides in diagResult like a diagnostic's. pgbErr is the last load
+	// error, rendered in the header instead of failing the screen so a paused
+	// or restarting pooler keeps its place on the stack.
+	pgbInsts       []pg.PgBouncerInstance
+	pgbProbes      []pg.PgBouncerProbe
+	pgbInst        *pg.PgBouncerInstance
+	pgbOverview    *pg.PgBouncerOverview
+	pgbShow        pgbShow
+	pgbErr         error
+	pgbAutoDrilled bool // the single-instance auto-drill already happened once
 
 	// diagCatFilter restricts the levelDiagnostics list to one category
 	// (f cycles all → index → table → …); "" shows every diagnostic.
@@ -801,6 +825,12 @@ type Model struct {
 	logTicking bool
 	logRefresh time.Duration
 
+	// pgbTicking/pgbRefresh are the pgbouncer tool's live-refresh loop (t cycles
+	// 1s → 2s → 5s → 10s → off), shared by the instance list, overview and
+	// SHOW tables.
+	pgbTicking bool
+	pgbRefresh time.Duration
+
 	// logFile is the --log-file override: when set the analyzer skips the picker
 	// and opens it directly.
 	logFile string
@@ -884,7 +914,7 @@ func (m *Model) vacuumPaneVisible(s *screen) bool {
 // by the --<tool> CLI flags) back to the tool enum. The bool is false for an
 // unknown/empty name so the caller can fall back to the tool picker.
 func toolByName(name string) (tool, bool) {
-	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity, toolTableStats, toolTriage, toolLogs} {
+	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity, toolTableStats, toolTriage, toolLogs, toolPgBouncer} {
 		if t.Name() == name {
 			return t, true
 		}
@@ -903,6 +933,7 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 		fetchBloat:      true,
 		statRefresh:     queriesRefresh,
 		activityRefresh: 2 * time.Second,
+		pgbRefresh:      2 * time.Second,
 		snapshotDir:     snapshotDir,
 		colPrefs:        colPrefs,
 		target:          client.Target(),
@@ -950,9 +981,10 @@ func toolItems() []item {
 		{name: "Top queries", detail: "powa-style top queries from pg_stat_statements — calls, time, I/O; EXPLAIN and sample params on Enter", hasChildren: true, data: toolQueries},
 		{name: "Current Activity", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
 		{name: "Table overview", detail: "per-table stats for a schema: size, write/scan activity, cache hit ratios, bloat, vacuum age, storage options — sortable, customizable columns", hasChildren: true, data: toolTableStats},
-		{name: "System overview", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL, PgBouncer", hasChildren: true, data: toolMaintenance},
+		{name: "System overview", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL", hasChildren: true, data: toolMaintenance},
 		{name: "Health triage", detail: "one-key red/yellow/green health report: runs the whole diagnostic battery concurrently; Enter drills into the check that fired", hasChildren: true, data: toolTriage},
 		{name: "Log analyzer", detail: "parse the server log (current, rotated, .gz): errors, slow statements, checkpoints, temp files, locks — grouped and searchable, live tail", hasChildren: true, data: toolLogs},
+		{name: "PgBouncer", detail: "pgbouncer console browser: auto-discovered instances (/proc, /etc/pgbouncer), pools, per-second stats, clients, servers, databases, config", hasChildren: true, data: toolPgBouncer},
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},

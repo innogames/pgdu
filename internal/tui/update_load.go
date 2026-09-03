@@ -245,6 +245,18 @@ func (m *Model) loadCurrent() tea.Cmd {
 		return m.loadTableOverviewCmd(s.db, s.schema)
 	case levelTriage:
 		return m.loadTriageCmd()
+	case levelPgBouncers:
+		return tea.Batch(m.armPgbTick([]tea.Cmd{m.discoverPgBouncersCmd()})...)
+	case levelPgBouncer:
+		if s.pgbInst == nil {
+			return nil
+		}
+		return tea.Batch(m.armPgbTick([]tea.Cmd{m.loadPgbOverviewCmd(*s.pgbInst)})...)
+	case levelPgBouncerShow:
+		if s.pgbInst == nil {
+			return nil
+		}
+		return tea.Batch(m.armPgbTick([]tea.Cmd{m.loadPgbShowCmd(*s.pgbInst, s.pgbShow)})...)
 	case levelLogFiles:
 		return m.discoverLogsCmd()
 	case levelLogs:

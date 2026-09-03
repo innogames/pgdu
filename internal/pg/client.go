@@ -53,10 +53,11 @@ type Client struct {
 	statStatementsVer      map[string][2]int
 	statStatementsVerKnown map[string]bool
 
-	// pgbouncer probe state: once we've confirmed pgbouncer is absent we skip
-	// the dial on every subsequent refresh. pgbAbsent is only set, never cleared.
-	pgbProbed bool
-	pgbAbsent bool
+	// pgbConns holds one console connection per pgbouncer instance (keyed by
+	// PgBouncerInstance.Key). Its own mutex: a console dial can block for
+	// pgbDialTimeout and must never stall PoolFor.
+	pgbMu    sync.Mutex
+	pgbConns map[string]*pgbConn
 
 	// dnsCache is a session-scoped reverse-DNS lookup cache for client_addr
 	// values from pg_stat_activity. It uses its own mutex so net.LookupAddr
@@ -98,6 +99,7 @@ func New(cfg cli.Config) *Client {
 		statStatementsVerKnown: map[string]bool{},
 		dnsCache:               map[string]string{},
 		toastCache:             map[string]string{},
+		pgbConns:               map[string]*pgbConn{},
 	}
 }
 
@@ -184,6 +186,7 @@ func (c *Client) Ping(ctx context.Context) error {
 }
 
 func (c *Client) Close() {
+	c.closePgBouncerConns()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, p := range c.pools {

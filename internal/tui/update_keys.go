@@ -181,7 +181,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	// Diagnostic-result column-config overlay — same modal pattern, but over the
 	// result's dynamic column set instead of a static registry.
-	if m.showDiagColumnConfig && s.level == levelDiagnosticResult {
+	if m.showDiagColumnConfig && (s.level == levelDiagnosticResult || s.level == levelPgBouncerShow) {
 		return m, m.handleDiagColumnConfigKey(s, msg)
 	}
 	// The SQL overlay (s on a diagnostic result) is modal: any key dismisses it
@@ -209,6 +209,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if cmd, ok := m.handleLogKey(s, msg); ok {
 		return m, cmd
 	}
+	if cmd, ok := m.handlePgbKey(s, msg); ok {
+		return m, cmd
+	}
 
 	switch {
 	case key.Matches(msg, m.keys.Quit):
@@ -228,7 +231,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.level == levelActivity || s.level == levelTableStats || s.level == levelWaitProfile ||
 			s.level == levelDiagnostics || s.level == levelDiagnosticResult ||
 			s.level == levelDescribe ||
-			s.level == levelLogFiles || s.level == levelLogs || s.level == levelLogGroup || s.level == levelLogEntry {
+			s.level == levelLogFiles || s.level == levelLogs || s.level == levelLogGroup || s.level == levelLogEntry ||
+			s.level == levelPgBouncers || s.level == levelPgBouncer || s.level == levelPgBouncerShow {
 			m.showInfo = !m.showInfo
 			if m.showInfo {
 				m.infoOffset = 0 // always open scrolled to the top
@@ -525,7 +529,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showTblColumnConfig = true
 			m.tblColCfgCursor = 0
 		}
-		if s.level == levelDiagnosticResult && s.diagResult != nil {
+		if (s.level == levelDiagnosticResult || s.level == levelPgBouncerShow) && s.diagResult != nil {
 			m.showInfo = false
 			m.showDiagColumnConfig = true
 			m.diagColCfgCursor = 0

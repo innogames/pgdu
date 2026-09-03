@@ -17,6 +17,7 @@ internal/pg/         # pgx wrapper: one *pgxpool.Pool per database, lazy
   queries_{domain}.go#   per-domain SQL (queries_diag/pages/statements/wal/…)
   types_{domain}.go  #   per-domain row structs (types_statements/pages/wal/…)
   {entity}.go        #   one file per entity's List*/Fill*/Probe* operations
+  pgbouncer_*.go     #   pgbouncer console: ini parser, /proc discovery, simple-protocol conns
 internal/tui/        # Bubble Tea Model/Update/View
   app.go             #   Model, screen, item, level/tool/sortMode + methods
   update.go          #   top-level Update() dispatcher
@@ -97,7 +98,7 @@ empty prefs). The TUI seeds the per-table `*ColsVisible` maps from it in
 - **Tools & levels**: `levelTools` is the root menu; from it you pick one of the `tool`
   values (`toolDisk`, `toolBuffers`, `toolPageInspect`, `toolTools` (diagnostics), `toolWAL`,
   `toolQueries` (top queries), `toolMaintenance`, `toolActivity`, `toolTableStats`,
-  `toolTriage`, `toolLogs` (log analyzer)) and drill through that tool's own `level*` chain.
+  `toolTriage`, `toolLogs` (log analyzer), `toolPgBouncer`) and drill through that tool's own `level*` chain.
   Both enums live in `app.go`.
 - **Tuple `pk` column** (`levelHeapTuples`): `ListHeapTuples` looks up the table's
   primary key and joins it back per line pointer by ctid (`sqlHeapTuplesPK`), so a
@@ -153,6 +154,27 @@ empty prefs). The TUI seeds the per-table `*ColsVisible` maps from it in
   within), so `applySort` special-cases `levelLogs` with `diagCols == nil`; the timeline
   pane is the generic diag table over `logColumnRegistry()`. Section header rows carry
   `logSection` as data and are inert; `skipLogHeader` keeps the cursor off them.
+- **PgBouncer** (`toolPgBouncer`, `internal/pg/pgbouncer_*.go`, `internal/tui/*pgbouncer*.go`):
+  `DiscoverPgBouncers` merges (by `Key()`) explicit `--pgbouncer-target`s, running processes from
+  `/proc` (ini path from argv, parsed by the hand-rolled `parsePgBouncerIni`), `/etc/pgbouncer/*.ini`,
+  and pgdu's own connection when `behindProxy` says a pooler is in between. An instance is reached
+  over `unix_socket_dir/.s.PGSQL.<port>` whenever the socket exists — several instances on one host
+  share a TCP port via so_reuseport, so TCP addresses a *random* one — else TCP on listen_addr.
+  The console only speaks the simple protocol and rejects the pool's AfterConnect `SET`, so
+  `pgbouncer_conn.go` keeps one raw `pgx.Conn` per instance (`Client.pgbConns`, own mutex, closed
+  in `Close`, redialed once on error), never `PoolFor`. It is kept open on purpose: pgbouncer logs
+  every console login/logout. Passwords are resolved by `pgbPassword` the libpq way (pgx would look
+  a unix socket up as `localhost`; libpq and real `.pgpass` files key by the socket dir). Read-only:
+  `PgBouncerShow` allowlists the SHOW commands. Levels: `levelPgBouncers` (instance table,
+  auto-drills when exactly one), `levelPgBouncer` (overview header + SHOW menu), and one
+  parameterized `levelPgBouncerShow` whose `screen.pgbShow` picks the `pgbShowSpec` (registry in
+  `pgbouncer_columns.go`); the result lands in `screen.diagResult` and rides the diagnostic-result
+  machinery — `rebuildDiagItems`, the `C` picker and `cycleSort` key on `screen.diagVisKey()`
+  ("pgbouncer/<what>"), with `applyPgbKinds` rescaling µs/bytes columns by name. Triage's
+  "pgbouncer waits" probes every discovered instance (`triagePgBouncer`) and drills via
+  `TriageTargetPgBouncer`. The log analyzer parses pgbouncer's log (`LogFormatPgBouncer`:
+  `compilePgBouncer`, colon-less `pgbTagPattern`, socket-tagged lines → `CatConnection` before the
+  replication markers); `l` opens an instance's logfile.
 - **Streaming VACUUM** (on `levelParts`): live `NOTICE` output streamed into a scrollable
   pane held in `vacuumState`.
 - **Maintenance / system overview** (`toolMaintenance`, `view_maintenance*.go`): extension

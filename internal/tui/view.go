@@ -74,6 +74,26 @@ func (m *Model) View() string {
 		contentHeight -= strings.Count(hdr, "\n") + 1
 	}
 
+	if s.level == levelPgBouncers && s.loaded && len(s.items) > 0 {
+		if hint := m.renderPgbListHint(s); hint != "" {
+			b.WriteString(hint)
+			b.WriteString("\n")
+			contentHeight--
+		}
+	}
+	if s.level == levelPgBouncer && s.loaded {
+		hdr := m.renderPgBouncerHeader(s)
+		b.WriteString(hdr)
+		b.WriteString("\n")
+		contentHeight -= strings.Count(hdr, "\n") + 1
+	}
+	if s.level == levelPgBouncerShow && s.loaded {
+		hdr := m.renderPgbShowHeader(s)
+		b.WriteString(hdr)
+		b.WriteString("\n")
+		contentHeight -= strings.Count(hdr, "\n") + 1
+	}
+
 	if (s.level == levelLogs || s.level == levelLogGroup || s.level == levelLogEntry) && s.loaded {
 		if hdr := m.renderLogHeader(s); hdr != "" {
 			b.WriteString(hdr)
@@ -157,7 +177,7 @@ func (m *Model) View() string {
 		b.WriteString(m.renderColumnConfig(s, contentHeight))
 	case m.showTblColumnConfig && s.level == levelTableStats:
 		b.WriteString(m.renderTblColumnConfig(s, contentHeight))
-	case m.showDiagColumnConfig && s.level == levelDiagnosticResult:
+	case m.showDiagColumnConfig && (s.level == levelDiagnosticResult || s.level == levelPgBouncerShow):
 		b.WriteString(m.renderDiagColumnConfig(s, contentHeight))
 	case m.showTupleLayout && s.level == levelHeapTuples:
 		b.WriteString(m.renderTupleLayout(s, contentHeight))
@@ -188,7 +208,8 @@ func (m *Model) View() string {
 		s.level != levelBufferDetail && s.level != levelMaintenance && s.level != levelSettings &&
 		s.level != levelActivity && s.level != levelLockTree && s.level != levelTableStats &&
 		s.level != levelProgress && s.level != levelWaitProfile &&
-		s.level != levelLogs && s.level != levelLogFiles && s.level != levelLogGroup && s.level != levelLogEntry:
+		s.level != levelLogs && s.level != levelLogFiles && s.level != levelLogGroup && s.level != levelLogEntry &&
+		s.level != levelPgBouncers && s.level != levelPgBouncer && s.level != levelPgBouncerShow:
 		// levelDescribe never populates items — it renders from s.describe.
 		// levelDiagnosticResult and levelStatementResult with 0 items mean the
 		// query returned no rows, which is valid; fall through to the renderer
@@ -297,6 +318,16 @@ func (m *Model) View() string {
 			} else {
 				b.WriteString(m.renderLogFiles(s, contentHeight))
 			}
+		case levelPgBouncers:
+			if s.diagCols != nil && len(s.items) > 0 {
+				b.WriteString(m.renderDiagResult(s, contentHeight))
+			} else {
+				b.WriteString(m.renderPgBouncers(s, contentHeight))
+			}
+		case levelPgBouncer:
+			b.WriteString(m.renderPgBouncerMenu(s, contentHeight))
+		case levelPgBouncerShow:
+			b.WriteString(m.renderDiagResult(s, contentHeight))
 		case levelLogs:
 			if s.logView.table() && s.logErr == nil && s.logReport != nil {
 				b.WriteString(m.renderDiagResult(s, contentHeight))
@@ -503,6 +534,14 @@ func (m *Model) breadcrumb() string {
 			}
 		case levelLogEntry:
 			parts = append(parts, "entry")
+		case levelPgBouncers:
+			parts = append(parts, "pgbouncer")
+		case levelPgBouncer:
+			if sc.pgbInst != nil {
+				parts = append(parts, sc.pgbInst.Name)
+			}
+		case levelPgBouncerShow:
+			parts = append(parts, sc.pgbShow.spec().title)
 		}
 	}
 	out := make([]string, len(parts))
