@@ -266,7 +266,7 @@ func envOr(key, def string) string {
 // when unset.
 func envListOr(key string) []string {
 	var out []string
-	for _, s := range strings.Split(os.Getenv(key), ",") {
+	for s := range strings.SplitSeq(os.Getenv(key), ",") {
 		if s = strings.TrimSpace(s); s != "" {
 			out = append(out, s)
 		}

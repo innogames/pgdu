@@ -48,8 +48,8 @@ func (ini pgbIni) load(path string, depth int) error {
 		if line == "" || line[0] == ';' || line[0] == '#' {
 			continue
 		}
-		if strings.HasPrefix(line, "%include") {
-			inc := strings.TrimSpace(strings.TrimPrefix(line, "%include"))
+		if after, ok := strings.CutPrefix(line, "%include"); ok {
+			inc := strings.TrimSpace(after)
 			inc = unquoteIni(inc)
 			if inc == "" {
 				continue
@@ -95,7 +95,7 @@ func unquoteIni(v string) string {
 // list splits a comma-separated user list, dropping blanks.
 func (ini pgbIni) list(key string) []string {
 	var out []string
-	for _, s := range strings.Split(ini[key], ",") {
+	for s := range strings.SplitSeq(ini[key], ",") {
 		if s = strings.TrimSpace(s); s != "" {
 			out = append(out, s)
 		}

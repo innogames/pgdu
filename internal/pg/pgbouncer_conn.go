@@ -185,7 +185,7 @@ func (c *Client) pgbAcquire(ctx context.Context, inst PgBouncerInstance) (*pgbCo
 // pgbouncer restart between two refresh ticks is the common case.
 func (c *Client) pgbQuery(ctx context.Context, inst PgBouncerInstance, sql string) (*DiagResult, error) {
 	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
 		pc, err := c.pgbAcquire(ctx, inst)
 		if err != nil {
 			return nil, fmt.Errorf("pgbouncer %s: %w", inst.Name, err)
@@ -198,8 +198,7 @@ func (c *Client) pgbQuery(ctx context.Context, inst PgBouncerInstance, sql strin
 		lastErr = err
 		// A server-side error (e.g. "admin access needed", unknown SHOW on an
 		// older version) leaves the conn healthy: no point in redialing.
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) {
+		if _, ok := errors.AsType[*pgconn.PgError](err); ok {
 			pc.mu.Unlock()
 			break
 		}
@@ -330,8 +329,7 @@ func PgBouncerAuthHintApplies(err error) bool { return err != nil && isPgbAuthEr
 // reports both password and "user not in admin_users/stats_users" failures as
 // SQLSTATE 28000/28P01 (older versions use plain text).
 func isPgbAuthErr(err error) bool {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		if pgErr.Code == "28P01" || pgErr.Code == "28000" {
 			return true
 		}

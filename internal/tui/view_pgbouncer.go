@@ -136,7 +136,7 @@ func (m *Model) renderPgBouncerHeader(s *screen) string {
 // own indented line) so it fits a header row.
 func oneLineErr(err error) string {
 	var parts []string
-	for _, ln := range strings.Split(err.Error(), "\n") {
+	for ln := range strings.SplitSeq(err.Error(), "\n") {
 		if ln = strings.TrimSpace(ln); ln != "" {
 			parts = append(parts, ln)
 		}
@@ -192,7 +192,7 @@ func (m *Model) renderPgbShowHeader(s *screen) string {
 func (m *Model) renderPgBouncerMenu(s *screen, height int) string {
 	if s.pgbErr != nil && len(s.items) == 0 {
 		var b strings.Builder
-		for i := 0; i < height; i++ {
+		for range height {
 			b.WriteString("\n")
 		}
 		return b.String()
