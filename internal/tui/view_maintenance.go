@@ -92,7 +92,8 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	if hintLine != "" {
 		full.WriteString(hintLine + "\n")
 	}
-	full.WriteString("  " + mu("↑↓ select capacity row  ·  ↵ settings  ·  ") +
+	full.WriteString("  " + mu("↑↓ select capacity row  ·  ↵ reset  ·  ") +
+		styleBadge.Render("s") + mu(" settings  ·  ") +
 		styleBadge.Render("a") + mu(" activity  ·  ") +
 		styleBadge.Render("w") + mu(" wal  ·  ") +
 		styleBadge.Render("r") + mu(" replication  ·  ") +

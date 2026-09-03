@@ -379,11 +379,6 @@ func (m *Model) drillIn() tea.Cmd {
 		return m.loadCurrent()
 	case levelSnapshots:
 		return m.loadSelectedSnapshot(s, cur)
-	case levelMaintenance:
-		// Enter on the maintenance dashboard opens the pg_settings browser.
-		next := &screen{level: levelSettings, title: "settings", tool: toolMaintenance, db: s.db}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
 	case levelActivity:
 		// Enter drills into the top-queries detail view for the highlighted
 		// backend's query (requires pg_stat_statements; a soft hint is shown

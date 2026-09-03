@@ -504,7 +504,7 @@ func renderMaintHealth(info *pg.MaintenanceInfo) string {
 			}
 		}
 		b.WriteString("  " + padRight(mu("pending config"), 24) + restartStr + "\n")
-		b.WriteString("  " + padRight("", 24) + reloadStr + "\n")
+		b.WriteString("  " + padRight("", 24) + reloadStr + mu("  ·  s browses pg_settings") + "\n")
 
 		lockStr := mu("0 waiting")
 		if info.LockWaits > 0 {

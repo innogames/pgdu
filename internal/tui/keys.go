@@ -52,6 +52,7 @@ type keyMap struct {
 	JumpWAL         key.Binding // w: open the WAL inspector
 	JumpReplication key.Binding // r: open the replication-slots diagnostic
 	Progress        key.Binding // p: open the live progress monitor
+	Settings        key.Binding // s: open the pg_settings browser
 
 	// Wait-event profiler over the Activity tool's sample stream.
 	WaitProfile key.Binding // W: open the wait-event profile
@@ -154,6 +155,7 @@ func defaultKeys() keyMap {
 		JumpWAL:         key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wal")),
 		JumpReplication: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "replication")),
 		Progress:        key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "progress")),
+		Settings:        key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "settings")),
 
 		WaitProfile: key.NewBinding(key.WithKeys("W"), key.WithHelp("W", "wait profile")),
 
@@ -239,7 +241,6 @@ func (k *keyMap) applyContext(s *screen) {
 	k.LogJump.SetEnabled(logRow)
 	k.logJumpInFooter = logRow
 
-
 	// m opens the shared-memory map from the buffer-tables list; surface it in
 	// the footer there since nothing else advertises it.
 	k.ShmemMap.SetEnabled(s.level == levelBufferTables)
@@ -251,6 +252,10 @@ func (k *keyMap) applyContext(s *screen) {
 	k.JumpActivity.SetEnabled(maint)
 	k.JumpWAL.SetEnabled(maint)
 	k.JumpReplication.SetEnabled(maint)
+	// s opens the pg_settings browser. Enter can't: on the dashboard it arms the
+	// extension-capacity reset for the cursor row. The physical key is ShowQuery
+	// (diagnostics) and Seek (index tuples) elsewhere, both off here.
+	k.Settings.SetEnabled(maint)
 	// p opens the live progress monitor, from the dashboard and the activity table
 	// (running operations are backends, so it's a natural cross-link from activity);
 	// gated off elsewhere so the physical key stays free for Params (captured
@@ -338,6 +343,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
 		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation, k.ShmemMap},
+		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.Progress, k.Settings},
 		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump},
 		{k.Help, k.Quit},
 	}

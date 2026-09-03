@@ -365,6 +365,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.diagForShowQuery() != nil {
 			m.showDiagQuery = true
 		}
+	case key.Matches(msg, m.keys.Settings):
+		// System-overview cross-link: the pg_settings browser, for the GUCs the
+		// dashboard summarises and the pending-restart/reload names it lists.
+		next := &screen{level: levelSettings, title: "settings", tool: toolMaintenance, db: s.db}
+		m.stack = append(m.stack, next)
+		return m, m.loadCurrent()
 	case key.Matches(msg, m.keys.JumpActivity):
 		// System-overview cross-link: open the live Activity tool for the detail
 		// behind the dashboard's connection/blocked/long-xact figures.
