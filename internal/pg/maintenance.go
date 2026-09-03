@@ -180,7 +180,7 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	info.Qualstats = c.qualstatsCapacity(ctx, db)
 
 	// --- pgbouncer stats (best-effort; nil when absent or unreachable) ---
-	info.PgBouncer = c.pgBouncerInfo(ctx)
+	info.PgBouncer = c.pgBouncerInfo(ctx, pool)
 
 	return info, nil
 }

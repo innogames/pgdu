@@ -2,12 +2,14 @@ package pg
 
 import (
 	"context"
+	"net"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // pgBouncerInfo attempts a best-effort connection to the pgbouncer admin
@@ -19,7 +21,12 @@ import (
 // pgbouncer's admin console requires the simple query protocol and rejects the
 // "SET pg_stat_statements.track = 'none'" sent by the normal pool AfterConnect
 // hook — so we open a raw pgx.Conn instead of using PoolFor.
-func (c *Client) pgBouncerInfo(ctx context.Context) *PgBouncerInfo {
+//
+// The dial itself is only attempted when pool looks like it reaches Postgres
+// through a proxy: a connect to a real server with dbname=pgbouncer is
+// rejected with `FATAL: database "pgbouncer" does not exist`, and Postgres
+// logs that on every pgdu start — noise in exactly the log this tool analyzes.
+func (c *Client) pgBouncerInfo(ctx context.Context, pool *pgxpool.Pool) *PgBouncerInfo {
 	c.mu.Lock()
 	if c.pgbProbed && c.pgbAbsent {
 		c.mu.Unlock()
@@ -27,7 +34,10 @@ func (c *Client) pgBouncerInfo(ctx context.Context) *PgBouncerInfo {
 	}
 	c.mu.Unlock()
 
-	info := c.tryPgBouncer(ctx)
+	var info *PgBouncerInfo
+	if behindProxy(ctx, pool) {
+		info = c.tryPgBouncer(ctx)
+	}
 
 	c.mu.Lock()
 	c.pgbProbed = true
@@ -36,6 +46,39 @@ func (c *Client) pgBouncerInfo(ctx context.Context) *PgBouncerInfo {
 	}
 	c.mu.Unlock()
 	return info
+}
+
+// behindProxy reports whether the connections in pool terminate somewhere
+// other than the Postgres backend — i.e. a pooler sits in between. It compares
+// the peer address of our own socket with the address the backend sees itself
+// on (inet_server_addr/port): a direct connection has both equal (TCP) or both
+// unix (NULL server side). Any mismatch means a proxy; the pgbouncer admin
+// console is then worth a dial. Errors are treated as "direct" so the probe
+// stays silent when in doubt.
+func behindProxy(ctx context.Context, pool *pgxpool.Pool) bool {
+	pc, err := pool.Acquire(ctx)
+	if err != nil {
+		return false
+	}
+	defer pc.Release()
+
+	var srvAddr, srvPort *string
+	if err := pc.QueryRow(ctx,
+		"SELECT host(inet_server_addr()), inet_server_port()::text").Scan(&srvAddr, &srvPort); err != nil {
+		return false
+	}
+	remote := pc.Conn().PgConn().Conn().RemoteAddr()
+	tcp, isTCP := remote.(*net.TCPAddr)
+	if srvAddr == nil || srvPort == nil {
+		// Backend accepted us on a unix socket. Direct if we opened one too;
+		// a TCP client socket ending on a unix backend socket is a proxy.
+		return isTCP
+	}
+	if !isTCP {
+		return true
+	}
+	srvIP := net.ParseIP(*srvAddr)
+	return srvIP == nil || !srvIP.Equal(tcp.IP) || *srvPort != strconv.Itoa(tcp.Port)
 }
 
 func (c *Client) tryPgBouncer(ctx context.Context) *PgBouncerInfo {

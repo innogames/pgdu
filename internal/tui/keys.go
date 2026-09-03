@@ -44,6 +44,10 @@ type keyMap struct {
 	// Shared-buffers-tool binding.
 	ShmemMap key.Binding // m: open the shared-memory map (pg_shmem_allocations)
 
+	// Disk-tool binding: jump from a heap/index/toast row on the parts level
+	// straight into that object's page-inspector view.
+	PageInspect key.Binding // p: open the page inspector for the selected part
+
 	// System-overview cross-links: jump from the maintenance dashboard into the
 	// live tools that show the detail behind a summary row. Enabled only on
 	// levelMaintenance (so they don't clash with r/reverse-sort and w/by-relation
@@ -76,6 +80,10 @@ type keyMap struct {
 	// shmemInFooter adds the m (memory map) hint to the footer's short help on
 	// the buffer-tables level, where it's the only advertisement for the view.
 	shmemInFooter bool
+
+	// pageInspectInFooter adds the p (pages) hint on the parts level, the only
+	// place that advertises the cross-tool jump.
+	pageInspectInFooter bool
 
 	// columnsInFooter adds the C (configure columns) hint to the footer's short
 	// help. Set per-screen by applyContext: the activity table has no other
@@ -150,6 +158,7 @@ func defaultKeys() keyMap {
 
 		WALByRelation: key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "by relation")),
 		ShmemMap:      key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "memory map")),
+		PageInspect:   key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "inspect pages")),
 
 		JumpActivity:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "activity")),
 		JumpWAL:         key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wal")),
@@ -246,6 +255,12 @@ func (k *keyMap) applyContext(s *screen) {
 	k.ShmemMap.SetEnabled(s.level == levelBufferTables)
 	k.shmemInFooter = s.level == levelBufferTables
 
+	// p jumps from a parts row into the page inspector for that object. The
+	// physical key is Params (statement detail) and Progress (dashboard/activity)
+	// elsewhere; none of those levels is levelParts, so no dispatch collision.
+	k.PageInspect.SetEnabled(s.level == levelParts)
+	k.pageInspectInFooter = s.level == levelParts
+
 	// System-overview cross-links only exist on the maintenance dashboard; gating
 	// them here keeps r/w free for reverse-sort and WAL-by-relation everywhere else.
 	maint := s.level == levelMaintenance
@@ -316,6 +331,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	if k.shmemInFooter {
 		b = append(b, k.ShmemMap)
 	}
+	if k.pageInspectInFooter {
+		b = append(b, k.PageInspect)
+	}
 	if k.lockTreeInFooter {
 		b = append(b, k.LockTree)
 	}
@@ -342,7 +360,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Refresh, k.ToggleBloat, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
-		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation, k.ShmemMap},
+		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation, k.ShmemMap, k.PageInspect},
 		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.Progress, k.Settings},
 		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump},
 		{k.Help, k.Quit},

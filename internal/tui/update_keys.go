@@ -399,6 +399,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.stack = append(m.stack, next)
 			return m, nil
 		}
+	case key.Matches(msg, m.keys.PageInspect):
+		return m, m.jumpToPageInspector(s)
 	case key.Matches(msg, m.keys.Progress):
 		// Open the live progress monitor over the pg_stat_progress_* views.
 		// Enabled on levelMaintenance and levelActivity only, so it never shadows
