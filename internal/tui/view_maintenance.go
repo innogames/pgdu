@@ -70,7 +70,6 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 		body.WriteString(renderColumns(left, right, leftW, rightW))
 		body.WriteString("\n")
 		body.WriteString(renderMaintReplication(info))
-		body.WriteString(renderMaintPgBouncer(info))
 		body.WriteString(renderMaintWAL(info))
 		body.WriteString(renderMaintHealth(info))
 	} else {
@@ -78,7 +77,6 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 		body.WriteString(renderMaintTransactions(info))
 		body.WriteString(renderMaintTableActivity(info))
 		body.WriteString(renderMaintReplication(info))
-		body.WriteString(renderMaintPgBouncer(info))
 		body.WriteString(renderMaintMemory(info))
 		body.WriteString(renderMaintAutovacuum(info))
 		body.WriteString(renderMaintWAL(info))
@@ -421,11 +419,6 @@ func (m *Model) renderMaintenanceInfo(height int) string {
 	b.WriteString("    " + mu("BackendFsyncs > 0 means client backends are calling fsync themselves — this happens when") + "\n")
 	b.WriteString("    " + mu("the checkpointer cannot keep up with dirty-buffer flushing. It stalls the writing query.") + "\n")
 	b.WriteString("    " + mu("Tune checkpoint_completion_target (raise toward 0.9) and/or max_wal_size.") + "\n\n")
-
-	b.WriteString("  " + styleHeader.Render(" pgbouncer ") + "\n")
-	b.WriteString("    " + mu("cl_active/cl_waiting: client connections actively querying / waiting for a server slot.") + "\n")
-	b.WriteString("    " + mu("sv_active/sv_idle: server connections in use / pooled and waiting for a client.") + "\n")
-	b.WriteString("    " + mu("max wait > 0 means clients are queuing — consider raising pool_size or switching mode.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" pending config ") + "\n")
 	b.WriteString("    " + mu("need restart  — the setting was changed in postgresql.conf but requires a full server") + "\n")

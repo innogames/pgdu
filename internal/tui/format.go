@@ -127,6 +127,12 @@ func levelLabel(l level) string {
 		return "diagnostics"
 	case levelDiagnosticResult:
 		return "diag-result"
+	case levelPgBouncers:
+		return "pgbouncers"
+	case levelPgBouncer:
+		return "pgbouncer"
+	case levelPgBouncerShow:
+		return "pgbouncer-show"
 	case levelWAL:
 		return "wal"
 	case levelWALRecords:

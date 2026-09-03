@@ -47,11 +47,28 @@ func (m *Model) diagVis(key string) map[string]bool {
 	return vis
 }
 
+// diagVisKey names the column-visibility set of a dynamic-column table: the
+// diagnostic key on a diagnostic result, the SHOW name on a pgbouncer table,
+// "" for screens without one. Every consumer of the shared machinery
+// (rebuildDiagItems, the C picker, cycleSort) keys on it.
+func (s *screen) diagVisKey() string {
+	if s.diag != nil {
+		return s.diag.Key
+	}
+	if s.level == levelPgBouncerShow {
+		return pgbVisKey(s.pgbShow)
+	}
+	return ""
+}
+
 // defaultDiagVis builds the seed visibility map from a diagnostic's
 // DefaultHidden list: named columns start hidden, everything else stays visible
 // (absent → visible, per diagColOn). Returns nil — read as "all visible" — when
-// the diagnostic hides nothing.
+// the diagnostic hides nothing. pgbouncer SHOW keys seed from their spec instead.
 func defaultDiagVis(key string) map[string]bool {
+	if strings.HasPrefix(key, pgbVisPrefix) {
+		return pgbDefaultVis(key)
+	}
 	d, ok := pg.DiagnosticByKey(key)
 	if !ok || len(d.DefaultHidden) == 0 {
 		return nil
@@ -69,10 +86,11 @@ func defaultDiagVis(key string) map[string]bool {
 // construction. Call it after a fresh load or any column toggle.
 func (m *Model) rebuildDiagItems(s *screen) {
 	res := s.diagResult
-	if res == nil || s.diag == nil {
+	key := s.diagVisKey()
+	if res == nil || key == "" {
 		return
 	}
-	vis := m.diagVis(s.diag.Key)
+	vis := m.diagVis(key)
 	idxs := make([]int, 0, len(res.Columns))
 	for i := range res.Columns {
 		if diagColOn(vis, res.Columns[i].Name) {

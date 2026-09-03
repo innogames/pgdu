@@ -143,7 +143,8 @@ func barReserve(s *screen) int {
 		// cursor + offset + len + nulls/vars flags + ctid + key preview
 		const idxTupleReserve = 2 + 6 + 8 + 8 + idxTupleCtidColW + 4
 		return idxTupleReserve
-	case levelDescribe, levelTriage, levelLogFiles, levelLogGroup, levelLogEntry:
+	case levelDescribe, levelTriage, levelLogFiles, levelLogGroup, levelLogEntry,
+		levelPgBouncers, levelPgBouncer, levelPgBouncerShow:
 		// Plain-text panels — no bar drawn, so no space needs reserving.
 		return 0
 	case levelLogs:

@@ -406,6 +406,12 @@ func (s *serverFileSource) Cursor(ctx context.Context) *LogCursor {
 // when logging_collector is off — the case pg_current_logfile() cannot see.
 const localLogGlob = "/var/log/postgresql/postgresql-*.log*"
 
+// pgbLogGlobs are where pgbouncer's logfile usually lands (Debian puts it next
+// to the server logs; the upstream sample uses its own directory). The
+// pgbouncer tool opens an instance's configured logfile directly, so this only
+// matters for the picker.
+var pgbLogGlobs = []string{"/var/log/postgresql/pgbouncer*.log*", "/var/log/pgbouncer/*.log*"}
+
 var rotatedRe = regexp.MustCompile(`\.log\.(\d+)(\.gz)?$`)
 
 func isRotatedName(path string) bool { return rotatedRe.MatchString(path) }
@@ -480,6 +486,12 @@ func (c *Client) DiscoverLogs(ctx context.Context, explicit string) []LogCandida
 		for _, p := range matches {
 			current := p == currentPath || (currentPath == "" && !isRotatedName(p) && len(live) == 1)
 			local(p, "/var/log/postgresql", current)
+		}
+	}
+	for _, g := range pgbLogGlobs {
+		matches, _ := filepath.Glob(g)
+		for _, p := range matches {
+			local(p, "pgbouncer", false)
 		}
 	}
 

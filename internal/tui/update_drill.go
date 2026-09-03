@@ -412,6 +412,25 @@ func (m *Model) drillIn() tea.Cmd {
 		next := &screen{level: levelStatementDetail, title: "query", tool: s.tool, db: db, loading: true}
 		m.stack = append(m.stack, next)
 		return m.loadActivityStatementCmd(db, backendPID, cur.statQueryID, queryText)
+	case levelPgBouncers:
+		if cur.pgbIdx <= 0 || cur.pgbIdx > len(s.pgbInsts) {
+			return nil
+		}
+		m.stack = append(m.stack, m.pgbOverviewScreen(s.pgbInsts[cur.pgbIdx-1]))
+		return m.loadCurrent()
+	case levelPgBouncer:
+		switch d := cur.data.(type) {
+		case pgbShow:
+			m.stack = append(m.stack, m.pgbShowScreen(s, d))
+			return m.loadCurrent()
+		case pgbLogRow:
+			if s.pgbInst == nil || s.pgbInst.Logfile == "" {
+				return nil
+			}
+			m.stack = append(m.stack, m.logScreen(pg.OpenLocalLog(s.pgbInst.Logfile)))
+			return m.loadCurrent()
+		}
+		return nil
 	case levelLogFiles:
 		if cur.logIdx <= 0 || cur.logIdx > len(s.logCands) {
 			return nil
@@ -459,6 +478,9 @@ func (m *Model) drillIn() tea.Cmd {
 			return m.loadCurrent()
 		case pg.TriageTargetActivity:
 			m.stack = append(m.stack, m.toolEntryScreen(toolActivity))
+			return m.loadCurrent()
+		case pg.TriageTargetPgBouncer:
+			m.stack = append(m.stack, m.toolEntryScreen(toolPgBouncer))
 			return m.loadCurrent()
 		default:
 			for i := range pg.Diagnostics {
@@ -687,6 +709,10 @@ func (m *Model) toolEntryScreen(t tool) *screen {
 			return m.logScreen(pg.OpenLocalLog(m.logFile))
 		}
 		return &screen{level: levelLogFiles, title: "log files", tool: toolLogs, db: m.client.DefaultDB(), loading: true}
+	case toolPgBouncer:
+		// Instances are discovered (not picked from a database), so the list
+		// loads asynchronously; a single instance auto-drills into its overview.
+		return &screen{level: levelPgBouncers, title: "pgbouncer", tool: toolPgBouncer, db: m.client.DefaultDB(), loading: true}
 	case toolActivity:
 		// Activity tool is cluster-wide: skip the database picker and go
 		// directly to the live pg_stat_activity list.

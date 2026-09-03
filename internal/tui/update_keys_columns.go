@@ -119,7 +119,8 @@ func (m *Model) handleActColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 // can't be hidden.
 func (m *Model) handleDiagColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	res := s.diagResult
-	if res == nil || s.diag == nil {
+	key := s.diagVisKey()
+	if res == nil || key == "" {
 		m.showDiagColumnConfig = false
 		return nil
 	}
@@ -132,13 +133,13 @@ func (m *Model) handleDiagColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 			// Reset restores the diagnostic's defaults (which may hide columns), not
 			// an all-visible view; persisting an empty map re-seeds from defaults on
 			// reload.
-			m.diagColsVisible[s.diag.Key] = defaultDiagVis(s.diag.Key)
+			m.diagColsVisible[key] = defaultDiagVis(key)
 			m.rebuildDiagItems(s)
-			m.saveColPrefs(diagPrefsKey(s.diag.Key), map[string]bool{})
+			m.saveColPrefs(diagPrefsKey(key), map[string]bool{})
 		},
 		toggle: func(i int) {
 			name := cols[i].Name
-			vis := m.diagVis(s.diag.Key)
+			vis := m.diagVis(key)
 			if vis == nil {
 				vis = make(map[string]bool, len(cols))
 				for _, c := range cols {
@@ -157,9 +158,9 @@ func (m *Model) handleDiagColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 				}
 			}
 			vis[name] = !diagColOn(vis, name)
-			m.diagColsVisible[s.diag.Key] = vis
+			m.diagColsVisible[key] = vis
 			m.rebuildDiagItems(s)
-			m.saveColPrefs(diagPrefsKey(s.diag.Key), vis)
+			m.saveColPrefs(diagPrefsKey(key), vis)
 		},
 	})
 }

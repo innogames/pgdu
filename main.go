@@ -39,8 +39,13 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "pgdu: connect:", err)
-		os.Exit(1)
+		// The pgbouncer tool only needs Postgres for one discovery heuristic, so
+		// a pooler-only host (or a down server) must not keep it from opening.
+		if cfg.Tool != "pgbouncer" {
+			fmt.Fprintln(os.Stderr, "pgdu: connect:", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, "pgdu: warning: postgres unreachable, continuing with the pgbouncer tool only:", err)
 	}
 
 	model := tui.NewModel(client, cfg.QueriesRefresh, cfg.SnapshotDir, prefs.Load(), cfg.Tool, cfg.LogFile)

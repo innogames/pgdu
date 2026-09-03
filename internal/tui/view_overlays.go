@@ -21,7 +21,8 @@ func (m *Model) hasInfoOverlay(s *screen) bool {
 		levelActivity, levelTableStats, levelWaitProfile,
 		levelDiagnostics, levelDiagnosticResult,
 		levelDescribe,
-		levelLogFiles, levelLogs, levelLogGroup, levelLogEntry:
+		levelLogFiles, levelLogs, levelLogGroup, levelLogEntry,
+		levelPgBouncers, levelPgBouncer, levelPgBouncerShow:
 		return true
 	}
 	return false
@@ -86,6 +87,8 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 		return m.renderDescribeInfo(s, height)
 	case levelLogFiles, levelLogs, levelLogGroup, levelLogEntry:
 		return m.renderLogsInfo(height)
+	case levelPgBouncers, levelPgBouncer, levelPgBouncerShow:
+		return m.renderPgBouncerInfo(height)
 	}
 	return ""
 }
@@ -94,9 +97,9 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 // appended to an unavailable row (e.g. "track_planning off"); desc may be
 // empty for pickers over dynamic column sets with no descriptions.
 type colCfgRow struct {
-	name, desc                string
+	name, desc                 string
 	on, mandatory, unavailable bool
-	note                      string
+	note                       string
 }
 
 // renderColCfgOverlay draws the htop-style column picker shared by the

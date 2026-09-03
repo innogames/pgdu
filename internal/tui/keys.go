@@ -67,6 +67,12 @@ type keyMap struct {
 	LogWindow    key.Binding // w: widen the tail window
 	LogJump      key.Binding // j: jump to this line in the chronological timeline
 
+	// PgBouncer-tool binding.
+	OpenLog key.Binding // l: open the instance's logfile in the log analyzer
+
+	// openLogInFooter advertises l on the pgbouncer list and overview.
+	openLogInFooter bool
+
 	// logJumpInFooter advertises j on the entry and group-rows levels.
 	logJumpInFooter bool
 
@@ -172,6 +178,8 @@ func defaultKeys() keyMap {
 		LogPane:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "groups/timeline/slow")),
 		LogWindow:    key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "widen window")),
 		LogJump:      key.NewBinding(key.WithKeys("j"), key.WithHelp("j", "jump to timeline")),
+
+		OpenLog: key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "open log")),
 	}
 }
 
@@ -191,6 +199,8 @@ func (k *keyMap) applyContext(s *screen) {
 	tableStats := s.level == levelTableStats
 	logs := s.level == levelLogs
 	logAny := logs || s.level == levelLogGroup || s.level == levelLogEntry || s.level == levelLogFiles
+	pgbShow := s.level == levelPgBouncerShow
+	pgbAny := pgbShow || s.level == levelPgBouncers || s.level == levelPgBouncer
 
 	// `s` shows the SQL (to copy out) on a diagnostic result and previews the
 	// highlighted query's SQL on the diagnostics list. Sort cycling moved to the
@@ -206,14 +216,18 @@ func (k *keyMap) applyContext(s *screen) {
 	// activity table, the table overview and diagnostic results. The picker is
 	// hard to find without a header hint, so surface it in the footer everywhere
 	// but the top-queries table, whose header already advertises it.
-	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult || (logs && s.logView.table()))
-	k.columnsInFooter = activity || tableStats || diagResult || (logs && s.logView.table())
+	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult || (logs && s.logView.table()) || pgbShow)
+	k.columnsInFooter = activity || tableStats || diagResult || (logs && s.logView.table()) || pgbShow
 	// t (ToggleRefresh) cycles the auto-refresh cadence on top-queries levels and
 	// on the live activity/progress levels. Surface it in the footer on the pure
 	// live monitors, whose header shows the cadence but not the key that changes
 	// it; the top-queries levels keep it to the ? help to avoid a crowded footer.
-	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity || s.level == levelProgress || logAny)
-	k.toggleRefreshInFooter = activity || s.level == levelProgress || logs
+	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity || s.level == levelProgress || logAny || pgbAny)
+	k.toggleRefreshInFooter = activity || s.level == levelProgress || logs || pgbAny
+	// l opens the highlighted instance's logfile from the pgbouncer list and its
+	// overview; the SHOW tables have no row-level log to open.
+	k.OpenLog.SetEnabled(pgbAny && !pgbShow)
+	k.openLogInFooter = pgbAny && !pgbShow
 	k.SaveSnapshot.SetEnabled(stmtTable || stmtDetail)
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
 	k.Params.SetEnabled(stmtDetail)
@@ -288,7 +302,8 @@ func (k *keyMap) applyContext(s *screen) {
 	// overlay where the diagnostic defines one, and is disabled (like progress)
 	// where none does, so the footer never advertises a dead key.
 	diagFix := diagResult && s.diag != nil && s.diag.Fix != nil
-	k.Enter.SetEnabled(!progress && (!diagResult || diagFix))
+	// pgbouncer SHOW rows are leaves too.
+	k.Enter.SetEnabled(!progress && !pgbShow && (!diagResult || diagFix))
 	if diagFix {
 		k.Enter.SetHelp("↵", "fix")
 	} else {
@@ -324,6 +339,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	}
 	if k.toggleRefreshInFooter {
 		b = append(b, k.ToggleRefresh)
+	}
+	if k.openLogInFooter {
+		b = append(b, k.OpenLog)
 	}
 	if k.columnsInFooter {
 		b = append(b, k.Columns)
@@ -362,7 +380,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
 		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation, k.ShmemMap, k.PageInspect},
 		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.Progress, k.Settings},
-		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump},
+		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump, k.OpenLog},
 		{k.Help, k.Quit},
 	}
 }

@@ -14,6 +14,12 @@ import (
 // The trailing text is captured lazily as the rest of the line.
 const logTagPattern = `(LOG|ERROR|FATAL|PANIC|WARNING|NOTICE|INFO|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION):  ?(.*)$`
 
+// pgbTagPattern is pgbouncer's severity tag: the same words minus the colon,
+// one space, and no attachment tags (pgbouncer never emits DETAIL/HINT). It is
+// deliberately separate from logTagPattern — relaxing the colon there would let
+// the loose Postgres splitter cut message bodies on any bare "LOG"/"ERROR".
+const pgbTagPattern = `(LOG|WARNING|ERROR|FATAL|DEBUG|NOISE) (.*)$`
+
 // prefixEscapes maps each log_line_prefix escape to the regexp fragment that
 // matches its rendering. Fields that may be empty (%u, %d, %a … when there is
 // no session) are allowed to match the empty string; %q handling makes the
@@ -66,6 +72,26 @@ var (
 	loosePIDRe  = regexp.MustCompile(`\[(\d+)(?:-(\d+))?\]`)
 	looseTimeRe = regexp.MustCompile(`\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d{3})? [A-Z0-9+\-]{1,6}`)
 )
+
+// pgbHeadRe recognises a pgbouncer log line from its head: "%m [%p] TAG ".
+var pgbHeadRe = regexp.MustCompile(`^` + prefixEscapes['m'] + ` \[\d+\] ` + pgbTagPattern)
+
+// compilePgBouncer builds the matcher for pgbouncer's fixed line shape, which
+// is "%m [%p] " followed by the colon-less tag. It reuses the %m/%p field
+// extraction so time bucketing and per-pid attachment work unchanged.
+func compilePgBouncer(loc *time.Location) *prefixMatcher {
+	if loc == nil {
+		loc = time.UTC
+	}
+	return &prefixMatcher{
+		prefix: "pgbouncer",
+		re:     regexp.MustCompile(`^(` + prefixEscapes['m'] + `) \[(\d+)\] ` + pgbTagPattern),
+		idx:    map[byte]int{'m': 1, 'p': 2},
+		tag:    3,
+		rest:   4,
+		loc:    loc,
+	}
+}
 
 // compileLoose builds the fallback matcher; see prefixMatcher.loose.
 func compileLoose(loc *time.Location) *prefixMatcher {

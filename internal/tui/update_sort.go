@@ -268,7 +268,7 @@ func itemLogTime(it item) (int64, bool) {
 // the default sort for a freshly opened screen.
 func validSorts(l level) []sortMode {
 	switch l {
-	case levelTools, levelDiagnostics:
+	case levelTools, levelDiagnostics, levelPgBouncer:
 		return []sortMode{sortByName}
 	case levelTables:
 		return []sortMode{sortBySize, sortByHeap, sortByIndex, sortByToast, sortByRows, sortByName}
@@ -356,7 +356,7 @@ func (m *Model) cycleSort(s *screen, dir int) {
 		}
 		// Diagnostic results track the sort column by name (no stable ids), so a
 		// later column hide/show can re-pin it (see rebuildDiagItems).
-		if s.diag != nil && s.diagSortCol < len(s.diagCols) {
+		if s.diagVisKey() != "" && s.diagSortCol < len(s.diagCols) {
 			s.diagSortName = s.diagCols[s.diagSortCol].Name
 		}
 		m.applySort(s)

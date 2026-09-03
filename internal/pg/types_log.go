@@ -9,9 +9,10 @@ import (
 type LogFormat int
 
 const (
-	LogFormatStderr LogFormat = iota // log_line_prefix + "SEVERITY:  message"
-	LogFormatCSV                     // csvlog
-	LogFormatJSON                    // jsonlog (PG15+)
+	LogFormatStderr    LogFormat = iota // log_line_prefix + "SEVERITY:  message"
+	LogFormatCSV                        // csvlog
+	LogFormatJSON                       // jsonlog (PG15+)
+	LogFormatPgBouncer                  // pgbouncer's own log: "%m [%p] SEVERITY message" (no colon, no %l)
 )
 
 func (f LogFormat) String() string {
@@ -20,6 +21,8 @@ func (f LogFormat) String() string {
 		return "csvlog"
 	case LogFormatJSON:
 		return "jsonlog"
+	case LogFormatPgBouncer:
+		return "pgbouncer"
 	}
 	return "stderr"
 }

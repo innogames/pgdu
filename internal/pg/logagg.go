@@ -243,6 +243,13 @@ func Fingerprint(e *LogEntry) (key, title string) {
 		return "av|vacuum", "automatic vacuum of table"
 	case CatConnection:
 		msg := e.FirstLine()
+		if side, tail, ok := pgBouncerSocketTail(msg); ok {
+			// pgbouncer: group by side + normalized event so "closing because:
+			// client close request (age=Ns)" and "login attempt: db=x user=y"
+			// collapse across sockets and addresses.
+			norm := normalizeMessage(tail)
+			return boundedKey("conn|"+side+"|", norm), side + " " + clipTitle(norm)
+		}
 		kind := msg
 		if before, _, ok := strings.Cut(msg, ":"); ok {
 			kind = before

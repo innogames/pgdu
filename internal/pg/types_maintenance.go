@@ -144,9 +144,6 @@ type MaintenanceInfo struct {
 	ReplSlots   []ReplSlotStat
 	WalReceiver *WalReceiverStat
 
-	// PgBouncer stats via a best-effort admin connection. Nil when absent.
-	PgBouncer *PgBouncerInfo
-
 	// Curated GUCs (name → raw setting string from pg_settings)
 	Settings map[string]string
 }
@@ -218,30 +215,6 @@ type BlockedStat struct {
 	BlockedBy []int32
 	WaitSec   float64
 	Query     string // truncated to 80 chars
-}
-
-// PgBouncerInfo holds the stats fetched from the pgbouncer admin console
-// via a best-effort connection to the virtual "pgbouncer" database.
-type PgBouncerInfo struct {
-	Version    string
-	ClActive   int
-	ClWaiting  int
-	SvActive   int
-	SvIdle     int
-	MaxWaitSec float64
-	Pools      []PgbPool
-}
-
-// PgbPool is one pool row from pgbouncer SHOW POOLS.
-type PgbPool struct {
-	Database   string
-	User       string
-	Mode       string // session / transaction / statement
-	ClActive   int
-	ClWaiting  int
-	SvActive   int
-	SvIdle     int
-	MaxWaitSec float64
 }
 
 // TableMaintStats is the full maintenance snapshot for one table, shown as a

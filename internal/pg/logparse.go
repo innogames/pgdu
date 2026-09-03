@@ -275,6 +275,8 @@ func severityOf(tag []byte) LogSeverity {
 		return SevInfo
 	case "LOG":
 		return SevLog
+	case "NOISE": // pgbouncer's below-debug level
+		return SevDebug
 	}
 	if bytes.HasPrefix(tag, []byte("DEBUG")) {
 		return SevDebug
@@ -450,6 +452,8 @@ func DetectLogFormat(buf []byte) LogFormat {
 			return LogFormatJSON
 		case csvHeadRe.Match(ln):
 			return LogFormatCSV
+		case pgbHeadRe.Match(ln):
+			return LogFormatPgBouncer
 		}
 	}
 	return LogFormatStderr
@@ -523,6 +527,12 @@ func classify(e *LogEntry) {
 		if m := lockWaitRe.FindSubmatch(msg); m != nil {
 			e.LockWaitMs, _ = strconv.ParseFloat(string(m[1]), 64)
 		}
+	case isPgBouncerSocketMsg(msg):
+		// pgbouncer's per-socket lines (login attempt, new connection to server,
+		// closing because: …) are connection lifecycle. Checked before the
+		// replication markers: "login attempt … replication=no" contains the
+		// bare word "replication".
+		e.Category = CatConnection
 	case isReplicationMsg(msg):
 		e.Category = CatReplication
 	default:
@@ -719,6 +729,34 @@ func isReplicationMsg(msg []byte) bool {
 		}
 	}
 	return false
+}
+
+// isPgBouncerSocketMsg recognises pgbouncer's "C-0x…: db/user@host:port …"
+// (client) and "S-0x…: …" (server) socket-tagged messages.
+func isPgBouncerSocketMsg(msg []byte) bool {
+	return (bytes.HasPrefix(msg, []byte("C-0x")) || bytes.HasPrefix(msg, []byte("S-0x"))) &&
+		bytes.Contains(msg, []byte(": "))
+}
+
+// pgBouncerSocketTail splits a socket-tagged pgbouncer message into its side
+// ("client"/"server") and the event text after the "db/user@host:port " head,
+// e.g. "closing because: client close request (age=12s)". ok is false for
+// anything else.
+func pgBouncerSocketTail(msg string) (side, tail string, ok bool) {
+	if !isPgBouncerSocketMsg([]byte(msg)) {
+		return "", "", false
+	}
+	side = "client"
+	if msg[0] == 'S' {
+		side = "server"
+	}
+	_, rest, _ := strings.Cut(msg, ": ")
+	// rest = "db/user@host:port event…"; the socket address never contains a
+	// space, the event always follows one.
+	if _, after, found := strings.Cut(rest, " "); found {
+		return side, after, true
+	}
+	return side, rest, true
 }
 
 func firstQuoted(b []byte) []byte {

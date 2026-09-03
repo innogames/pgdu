@@ -246,50 +246,6 @@ func renderMaintReplication(info *pg.MaintenanceInfo) string {
 	return b.String()
 }
 
-// renderMaintPgBouncer renders the "pgbouncer" section.
-// Returns "" when PgBouncer data is absent.
-func renderMaintPgBouncer(info *pg.MaintenanceInfo) string {
-	if info == nil || info.PgBouncer == nil {
-		return ""
-	}
-	mu := styleMuted.Render
-	pb := info.PgBouncer
-	var b strings.Builder
-	b.WriteString("  " + styleHeader.Render(" pgbouncer ") + "\n")
-	pbVer := pb.Version
-	if i := strings.Index(pbVer, " on "); i > 0 {
-		pbVer = pbVer[:i]
-	}
-	b.WriteString("  " + padRight(mu("version"), 22) + pbVer + "\n")
-	waitStr := mu("max wait 0s")
-	if pb.MaxWaitSec > 0 {
-		waitStr = styleErr.Render("max wait " + fmtSecsDuration(pb.MaxWaitSec))
-	}
-	poolsLine := fmt.Sprintf("cl %d active  %d waiting  sv %d active  %d idle  %s",
-		pb.ClActive, pb.ClWaiting, pb.SvActive, pb.SvIdle, waitStr)
-	b.WriteString("  " + padRight(mu("pools"), 22) + poolsLine + "\n")
-	shown := 0
-	for _, p := range pb.Pools {
-		if p.ClActive+p.ClWaiting+p.SvActive == 0 {
-			continue
-		}
-		waitMark := ""
-		if p.MaxWaitSec > 0 {
-			waitMark = "  " + styleErr.Render("wait "+fmtSecsDuration(p.MaxWaitSec))
-		}
-		pLine := mu(fmt.Sprintf("%s/%s %s", p.Database, p.User, p.Mode)) +
-			fmt.Sprintf("  cl %d/%d  sv %d/%d idle", p.ClActive, p.ClWaiting, p.SvActive, p.SvIdle) +
-			waitMark
-		b.WriteString("  " + padRight("", 22) + pLine + "\n")
-		shown++
-		if shown >= 5 {
-			break
-		}
-	}
-	b.WriteString("\n")
-	return b.String()
-}
-
 // renderMaintMemory renders the "memory & resources" section.
 func renderMaintMemory(info *pg.MaintenanceInfo) string {
 	mu := styleMuted.Render

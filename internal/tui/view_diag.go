@@ -884,16 +884,19 @@ func (m *Model) renderDiagnosticList(s *screen, height int) string {
 // registry-backed pickers, but the rows come from the result's dynamic column
 // set and the selection is remembered per diagnostic key.
 func (m *Model) renderDiagColumnConfig(s *screen, height int) string {
-	title := "this diagnostic"
+	title, remembered := "this diagnostic", "per diagnostic"
 	if s.diag != nil {
 		title = s.diag.Title
+	} else if s.level == levelPgBouncerShow {
+		title, remembered = "SHOW "+strings.ToUpper(s.pgbShow.spec().what), "per SHOW"
 	}
-	subtitle := "choose which columns " + title + " shows (remembered per diagnostic)"
+	subtitle := "choose which columns " + title + " shows (remembered " + remembered + ")"
 	res := s.diagResult
-	if res == nil || s.diag == nil {
+	key := s.diagVisKey()
+	if res == nil || key == "" {
 		return m.renderColCfgOverlay(subtitle, nil, m.diagColCfgCursor, height)
 	}
-	vis := m.diagVis(s.diag.Key)
+	vis := m.diagVis(key)
 	rows := make([]colCfgRow, len(res.Columns))
 	for i, c := range res.Columns {
 		rows[i] = colCfgRow{name: c.Name, on: diagColOn(vis, c.Name)}

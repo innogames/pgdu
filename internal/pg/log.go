@@ -38,8 +38,14 @@ func LoadLog(ctx context.Context, src LogSource, serverPrefix string, loc *time.
 	}
 	r := &LogReport{Source: src.Info(), Window: win, Format: DetectLogFormat(buf)}
 	var m *prefixMatcher
-	if r.Format == LogFormatStderr {
-		m, r.PrefixDetected = DetectPrefix(buf, serverPrefix, loc)
+	if r.Format == LogFormatStderr || r.Format == LogFormatPgBouncer {
+		if r.Format == LogFormatPgBouncer {
+			// pgbouncer's line shape is fixed; the server's log_line_prefix
+			// describes a different program's log and must not be tried.
+			m = compilePgBouncer(loc)
+		} else {
+			m, r.PrefixDetected = DetectPrefix(buf, serverPrefix, loc)
+		}
 		r.Prefix = m.prefix
 		var dropped int
 		buf, dropped = skipContinuation(buf, m)
