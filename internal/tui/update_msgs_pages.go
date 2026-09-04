@@ -154,6 +154,32 @@ func (m *Model) onHeapTuplesLoaded(msg heapTuplesLoadedMsg) tea.Cmd {
 		s.items = append(s.items, heapTupleToItem(t))
 	}
 	m.applySort(s)
+	if lp := s.pages.focusLP; lp != 0 {
+		s.pages.focusLP = 0
+		return m.focusHeapTuple(s, lp)
+	}
+	return nil
+}
+
+// focusHeapTuple lands the cursor on the line pointer an index entry pointed
+// at and opens its byte-layout overlay, as if the user had walked to the row
+// and pressed Enter. A REDIRECT is left selected without the overlay (the
+// index entry named the chain root; Enter hops to the live tuple), and a line
+// pointer that isn't on the page any more — vacuumed since the index page was
+// read — just leaves the cursor at the top with a notice.
+func (m *Model) focusHeapTuple(s *screen, lp int32) tea.Cmd {
+	for vi, idx := range s.visibleIndexes() {
+		ht, ok := s.items[idx].data.(pg.HeapTuple)
+		if !ok || ht.LP != lp {
+			continue
+		}
+		s.cursor = vi
+		if ht.LPFlags != pg.LPNormal || len(ht.Data) == 0 {
+			return nil
+		}
+		return m.openTupleLayout(s, lp)
+	}
+	m.notice = fmt.Sprintf("line pointer %d is no longer on this page", lp)
 	return nil
 }
 

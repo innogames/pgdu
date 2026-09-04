@@ -303,28 +303,41 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 		if len(d.Columns) == 0 {
 			b.WriteString("    " + mu("(none)") + "\n")
 		} else {
-			// Compute column-name width for alignment.
-			nameW := 4
+			// Every cell gets a fixed slot so the badges read as columns
+			// rather than trailing each row's type at a different offset. The
+			// badge slots are only reserved when some column uses them, so a
+			// table without constraints doesn't carry empty gutters.
+			nameW, typeW := 4, 4
+			anyNotNull, anyIndexed := false, false
 			for _, col := range d.Columns {
-				if n := lipgloss.Width(col.Name); n > nameW {
-					nameW = n
-				}
+				nameW = max(nameW, lipgloss.Width(col.Name))
+				typeW = max(typeW, lipgloss.Width(col.Type))
+				anyNotNull = anyNotNull || col.NotNull
+				anyIndexed = anyIndexed || col.Indexed
 			}
 			for _, col := range d.Columns {
-				line := padRight(col.Name, nameW) + "  " + col.Type
-				if col.NotNull {
-					line += "  " + styleBadge.Render("not null")
+				line := padRight(col.Name, nameW) + "  " + padRight(col.Type, typeW)
+				if anyNotNull {
+					badge := ""
+					if col.NotNull {
+						badge = styleBadge.Render("not null")
+					}
+					line += "  " + padRight(badge, len("not null"))
 				}
 				// Cyan matches the "index" hue used elsewhere. Any index
 				// counts — key, expression, or partial predicate — because
 				// updating such a column disqualifies HOT.
-				if col.Indexed {
-					line += "  " + styleBar.Render("indexed")
+				if anyIndexed {
+					badge := ""
+					if col.Indexed {
+						badge = styleBar.Render("indexed")
+					}
+					line += "  " + padRight(badge, len("indexed"))
 				}
 				if col.Default != "" {
 					line += "  " + mu("default "+col.Default)
 				}
-				b.WriteString("    " + line + "\n")
+				b.WriteString("    " + strings.TrimRight(line, " ") + "\n")
 			}
 		}
 

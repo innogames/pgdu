@@ -47,9 +47,15 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 	b.WriteString("    " + styleLPUnused.Render("●") + "  " + mu("UNUSED    line pointer is free for reuse") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" temp ") + "  " +
-		mu("shown when pg_buffercache is installed: the page's shared-buffers usagecount") + "\n")
-	b.WriteString("    " + mu("0 = cold (evictable) → 5 = hot (frequently reused)  ·  ") +
-		styleDirty.Render("•") + mu(" dirty (modified, awaiting flush)  ·  — not in shared_buffers") + "\n\n")
+		mu("buffer temperature — the page's clock-sweep usagecount in shared_buffers (needs pg_buffercache)") + "\n")
+	b.WriteString("    " + usageHeatStyle(0).Render("0") + "  " +
+		mu("cold           unused since it was loaded; first in line for eviction") + "\n")
+	b.WriteString("    " + usageHeatStyle(5).Render("5") + "  " +
+		mu("hot            touched repeatedly; the clock sweep has to pass it five times to evict") + "\n")
+	b.WriteString("    " + styleDirty.Render("•") + "  " +
+		mu("dirty          the buffered copy was modified and awaits checkpoint/bgwriter flush") + "\n")
+	b.WriteString("    " + mu("—  not cached     the page is not in shared_buffers right now (OS cache or disk)") + "\n")
+	b.WriteString("    " + mu("   the column only appears when pg_buffercache is installed; ←/→ cycles the sort onto it") + "\n\n")
 
 	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+strconv.Itoa(int(heapWindowDefault))+" pages per step).") + "\n")
 	b.WriteString("  " + mu("Within a window, j/k or arrows move the cursor; Enter drills into one page.") + "\n")

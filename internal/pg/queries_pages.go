@@ -455,16 +455,23 @@ ORDER  BY i.itemoffset, t.ord
 // %s 1 is the index expression list (sqlIndexExprList), %s 2 the parent
 // table's quoted regclass. $1 is the "(blk,off)" texts to resolve, $2 the
 // parent regclass as text, $3 the distinct blocks those ctids live on.
+//
+// $2 is spelled $2::text at both use sites on purpose. Postgres fixes an
+// untyped parameter's type at its first appearance, and the CTE is parsed
+// first: a bare $2::regclass there would make the later get_raw_page($2, …)
+// see a regclass, which has no implicit cast to the text that function wants.
+// The prepare then fails, collectBestEffort swallows the error, and every
+// HOT-updated entry silently renders as unresolved.
 const sqlHeapRedirectKeys = `
 WITH blk AS (
     SELECT DISTINCT b
     FROM   unnest($3::int[]) AS b
     WHERE  b >= 0
-      AND  b < pg_relation_size($2::regclass) / current_setting('block_size')::int
+      AND  b < pg_relation_size(($2::text)::regclass) / current_setting('block_size')::int
 ), red AS (
     SELECT '(' || blk.b || ',' || hpi.lp     || ')' AS root,
            '(' || blk.b || ',' || hpi.lp_off || ')' AS live
-    FROM   blk, LATERAL heap_page_items(get_raw_page($2, 'main', blk.b)) hpi
+    FROM   blk, LATERAL heap_page_items(get_raw_page($2::text, 'main', blk.b)) hpi
     WHERE  hpi.lp_flags = 2
 )
 SELECT red.root,

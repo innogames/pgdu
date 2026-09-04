@@ -99,7 +99,7 @@ func (m *Model) renderIndexTuplesInfo(height int) string {
 	b.WriteString("    " + styleLPNormal.Render("●") + " " + padRight("(blk,off)", 14) +
 		mu("regular leaf entry: ctid is a real heap pointer, key is decoded from the heap,") + "\n")
 	b.WriteString("    " + strings.Repeat(" ", 18) +
-		mu("and Enter drills into the per-column tuple-row view") + "\n")
+		mu("and Enter opens its heap page with the cursor on that tuple's byte layout") + "\n")
 	b.WriteString("    " + styleHeapToastTag.Render("pivot") + strings.Repeat(" ", 14-len("pivot")) + "  " +
 		mu("structural separator: item #1 of every non-rightmost leaf page (the high key).") + "\n")
 	b.WriteString("    " + strings.Repeat(" ", 18) +
@@ -127,7 +127,8 @@ func (m *Model) renderIndexTuplesInfo(height int) string {
 		mu("itemlen — bytes consumed by this entry; posting lists are much longer than singles") + "\n")
 	b.WriteString("    " + padRight("flags", 8) +
 		styleBadge.Render("N") + mu(" = has NULLs in the key  ·  ") +
-		styleBadge.Render("V") + mu(" = has variable-width attributes") + "\n")
+		styleBadge.Render("V") + mu(" = has variable-width attributes  ·  ") +
+		styleBadge.Render("H") + mu(" = ctid is a HOT redirect (see ▸off below)") + "\n")
 	b.WriteString("    " + padRight("ctid", 8) +
 		mu("heap pointer (leaf entries), ") + styleIndexSeg.Render("→ blk N") +
 		mu(" downlink (internal), or ") +
@@ -754,7 +755,13 @@ func renderIndexTupleRow(t pg.IndexTuple, pageType string, o idxRowOpts, cols []
 		off = styleSelected.Render(off)
 	}
 	lenStr := strconv.Itoa(int(t.ItemLen))
+	// H is ours, not bt_page_items': the entry's line pointer turned out to be
+	// a HOT redirect, so the ctid shows a hop. Surfacing it as a flag lets
+	// the eye pick out HOT-updated entries without reading the ctid column.
 	flags := boolFlag("N", t.Nulls) + boolFlag("V", t.Vars)
+	if t.HotCtid != nil {
+		flags += styleBadge.Render("H")
+	}
 	if flags == "" {
 		flags = styleMuted.Render("—")
 	}
@@ -1660,8 +1667,8 @@ func (m *Model) renderGistInfo(height int, tuples bool) string {
 		b.WriteString("    " + strings.Repeat(" ", 8) + mu("on internal pages it's the bounding predicate covering the child block") + "\n")
 		b.WriteString("    " + padRight("ctid", 8) + mu("heap pointer on a leaf, ") + styleGistSeg.Render("→ blk N") + mu(" downlink on an internal page") + "\n")
 		b.WriteString("    " + padRight("dead", 8) + mu("entry marked dead (reclaimable on the next vacuum)") + "\n\n")
-		b.WriteString("  " + mu("Enter descends an internal downlink toward the leaves, or opens the heap row a") + "\n")
-		b.WriteString("  " + mu("leaf entry points at. GiST keys have no total order, so there's no key-seek —") + "\n")
+		b.WriteString("  " + mu("Enter descends an internal downlink toward the leaves, or opens the heap page a") + "\n")
+		b.WriteString("  " + mu("leaf entry points at, cursor on its tuple. GiST keys have no total order, so there's no key-seek —") + "\n")
 		b.WriteString("  " + mu("use the ") + styleBadge.Render("/") + mu(" filter to search the rendered keys text.") + "\n")
 		return padInfo(&b, height)
 	}

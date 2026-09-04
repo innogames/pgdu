@@ -281,14 +281,7 @@ func (m *Model) drillGistItem(s *screen, cur item) tea.Cmd {
 	if t.Dead || t.Ctid == nil {
 		return nil
 	}
-	parent := pg.Table{DB: s.db, Schema: s.schema, OID: s.pages.index.ParentOID, Name: s.pages.index.ParentName}
-	next := &screen{
-		level: levelTupleRow, title: "row", tool: s.tool,
-		db: s.db, schema: s.schema, table: parent,
-		pages: pageState{tupleCtid: *t.Ctid},
-		sort:  sortByName, sortDesc: false}
-	m.stack = append(m.stack, next)
-	return m.loadCurrent()
+	return m.drillHeapTupleAt(s, *t.Ctid)
 }
 
 // drillBrinPage opens a regular BRIN page's range summaries; meta/revmap pages
@@ -329,13 +322,15 @@ func (m *Model) drillBrinItem(s *screen, cur item) tea.Cmd {
 	return m.loadCurrent()
 }
 
-// drillIndexLeafEntry opens the heap row behind a B-tree leaf entry — a
-// singleton or one posting-list member — in the per-column tuple view.
+// drillIndexLeafEntry opens the heap page behind a B-tree leaf entry — a
+// singleton or one posting-list member — with the cursor on its tuple and the
+// byte-layout overlay open, so the index → heap hop lands in the page
+// inspector rather than a detached column/value list.
 func (m *Model) drillIndexLeafEntry(s *screen, t pg.IndexTuple) tea.Cmd {
 	if t.Ctid == nil || (t.Decoded == nil && t.HotDecoded == nil) {
 		// Leaf entries drill only when a live heap row was projected.
 		// Pivot/posting summary entries and vacuumed rows land here too; none
-		// has a single heap row to show in the per-column view.
+		// has a single heap row to show.
 		return nil
 	}
 	// A HOT-updated row lives at the redirect target, not at the ctid the
@@ -344,6 +339,18 @@ func (m *Model) drillIndexLeafEntry(s *screen, t pg.IndexTuple) tea.Cmd {
 	if t.Decoded == nil && t.HotCtid != nil {
 		ctid = *t.HotCtid
 	}
+	return m.drillHeapTupleAt(s, ctid)
+}
+
+// drillHeapTupleAt pushes the parent table's heap-tuples screen for the page a
+// ctid names, asking the load to land on that line pointer (pageState.focusLP).
+// Shared by the B-tree and GiST leaf-entry drills.
+func (m *Model) drillHeapTupleAt(s *screen, ctid string) tea.Cmd {
+	blk, ok := parseCtidBlock(&ctid)
+	if !ok {
+		return nil
+	}
+	off, _ := parseCtidOffset(&ctid)
 	// The parent's schema matches the index's by Postgres rule — indexes
 	// live in the same namespace as their table.
 	parent := pg.Table{
@@ -351,10 +358,10 @@ func (m *Model) drillIndexLeafEntry(s *screen, t pg.IndexTuple) tea.Cmd {
 		OID: s.pages.index.ParentOID, Name: s.pages.index.ParentName,
 	}
 	next := &screen{
-		level: levelTupleRow, title: "row", tool: s.tool,
+		level: levelHeapTuples, title: "tuples", tool: s.tool,
 		db: s.db, schema: s.schema, table: parent,
-		pages: pageState{tupleCtid: ctid},
-		sort:  sortByName, sortDesc: false}
+		pages: pageState{heapPageBlkno: blk, focusLP: off},
+		sort:  sortByLP, sortDesc: sortByLP.defaultDesc()}
 	m.stack = append(m.stack, next)
 	return m.loadCurrent()
 }

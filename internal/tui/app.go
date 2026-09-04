@@ -675,6 +675,12 @@ type pageState struct {
 
 	// levelHeapTuples: which page we drilled into.
 	heapPageBlkno int32
+	// focusLP, when non-zero on a levelHeapTuples screen, names the line
+	// pointer to land the cursor on — and open the byte-layout overlay for —
+	// once the page's tuples arrive. Set by the index-entry drills, which
+	// arrive here through a ctid rather than a cursor pick; consumed by the
+	// first load so a later reload of the page doesn't re-open the overlay.
+	focusLP int32
 
 	// tuplePKCols names the table's primary-key columns, in key order, as of
 	// the last tuple load. Non-empty enables the tuple list's pk column and

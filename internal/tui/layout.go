@@ -250,7 +250,7 @@ const (
 const (
 	idxTupleOffColW   = 5 // "#NNNN"
 	idxTupleLenColW   = 6
-	idxTupleFlagsColW = 8  // "N/V"
+	idxTupleFlagsColW = 8  // "N/V/H"
 	idxTupleCtidColW  = 18 // "(blkno,off)" with room for big blocks + a "▸off" HOT hop
 )
 

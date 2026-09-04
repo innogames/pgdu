@@ -244,6 +244,9 @@ func TestIndexTupleRowHotRedirect(t *testing.T) {
 	if !strings.Contains(row, "(0,50)▸112") {
 		t.Errorf("row = %q, want the ctid to show the redirect hop (0,50)▸112", row)
 	}
+	if !strings.Contains(row, "  H  ") {
+		t.Errorf("row = %q, want an H flag for a HOT-redirected entry", row)
+	}
 	if !strings.Contains(row, key) {
 		t.Errorf("row = %q, want the key resolved through the redirect", row)
 	}
@@ -414,5 +417,49 @@ func TestTogglePosting(t *testing.T) {
 	m.togglePosting(s, posting)
 	if len(s.items) != 3 {
 		t.Errorf("re-folded: %d rows, want 3", len(s.items))
+	}
+}
+
+// Enter on a leaf entry lands in the heap page inspector — cursor on the
+// tuple the ctid names, byte-layout overlay open — instead of a detached
+// column/value list. A HOT-updated entry follows the redirect first.
+func TestDrillIndexLeafEntryOpensHeapTupleLayout(t *testing.T) {
+	root, live, key := "(7,3)", "(7,9)", "(42,alice)"
+	m := &Model{}
+	idx := &screen{level: levelIndexTuples, db: "db", schema: "public"}
+	idx.pages.index = pg.Relation{ParentOID: 99, ParentName: "t"}
+	m.stack = []*screen{idx}
+
+	if cmd := m.drillIndexLeafEntry(idx, pg.IndexTuple{Ctid: &root, HotCtid: &live, HotDecoded: &key}); cmd == nil {
+		t.Fatal("drill returned no load command")
+	}
+	s := m.stack[len(m.stack)-1]
+	if s.level != levelHeapTuples || s.table.OID != 99 || s.pages.heapPageBlkno != 7 || s.pages.focusLP != 9 {
+		t.Fatalf("pushed screen = level %v table %d blk %d focusLP %d; want heap tuples of table 99, block 7, lp 9",
+			s.level, s.table.OID, s.pages.heapPageBlkno, s.pages.focusLP)
+	}
+
+	ctid9 := "(7,9)"
+	tuples := []pg.HeapTuple{
+		{LP: 3, LPFlags: pg.LPRedirect, LPOff: 9},
+		{LP: 8, LPFlags: pg.LPNormal, Data: []byte{1}},
+		{LP: 9, LPFlags: pg.LPNormal, Ctid: &ctid9, Data: []byte{1}},
+	}
+	cmd := m.onHeapTuplesLoaded(heapTuplesLoadedMsg{tableOID: 99, blkno: 7, tuples: tuples})
+	if s.cursor != 2 {
+		t.Errorf("cursor = %d, want 2 (lp 9)", s.cursor)
+	}
+	if !m.showTupleLayout || s.pages.tupleAttrsLP != 9 || cmd == nil {
+		t.Errorf("overlay open=%v attrsLP=%d cmd=%v; want the byte layout of lp 9 loading", m.showTupleLayout, s.pages.tupleAttrsLP, cmd != nil)
+	}
+	if s.pages.focusLP != 0 {
+		t.Error("focusLP should be consumed by the first load")
+	}
+
+	// A later reload of the same page must not re-open the overlay.
+	m.closeTupleLayout(s)
+	m.onHeapTuplesLoaded(heapTuplesLoadedMsg{tableOID: 99, blkno: 7, tuples: tuples})
+	if m.showTupleLayout {
+		t.Error("reload re-opened the overlay")
 	}
 }
