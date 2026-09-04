@@ -170,6 +170,7 @@ func fixTableBloat(get func(string) (string, bool)) (string, bool) {
 	return strings.Join([]string{
 		"VACUUM (VERBOSE) " + tbl + ";",
 		"-- " + repack,
+		"-- TRUNCATE " + tbl + "; returns the file to the OS but deletes every row",
 	}, "\n"), true
 }
 
