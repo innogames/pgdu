@@ -209,6 +209,10 @@ func itemLP(it item) (int64, bool) {
 		return int64(t.LP), true
 	case pg.IndexTuple:
 		return int64(t.ItemOffset), true
+	case postingMember:
+		// Members sort with their parent; the name tiebreak keeps them in
+		// posting order right below it.
+		return int64(t.parent.ItemOffset), true
 	case pg.GistItem:
 		return int64(t.ItemOffset), true
 	case pg.BrinItem:
@@ -334,11 +338,41 @@ func indexTupleToItem(t pg.IndexTuple) item {
 	// through the entry's HOT redirect) — that's the same gate the drill
 	// handler uses, so the "+" marker tracks what ENTER will actually do.
 	// Internal-page downlinks and entries whose heap row is gone don't drill.
+	// A posting-list tuple with known members drills too: Enter unfolds them.
 	return item{
 		name:        fmt.Sprintf("#%04d", t.ItemOffset),
 		size:        int64(t.ItemLen),
-		hasChildren: (t.Decoded != nil || t.HotDecoded != nil) && t.Ctid != nil,
+		hasChildren: ((t.Decoded != nil || t.HotDecoded != nil) && t.Ctid != nil) || len(t.Posting) > 0,
 		data:        t,
+	}
+}
+
+// postingMember is one heap tid unpacked from a posting-list tuple (PG 13+
+// B-tree dedup), listed as its own row right below the parent entry. n is the
+// 1-based position within the posting list; tuple carries the member's ctid and
+// heap projection, resolved like a regular leaf entry's.
+type postingMember struct {
+	parent pg.IndexTuple
+	n      int
+	tuple  pg.IndexTuple
+}
+
+// postingMemberToItem builds the row for the n-th tid of a posting tuple. The
+// name extends the parent's ("#0002.001") so the generic sort's name tiebreak
+// keeps members glued below their parent in either direction, and so `/` can
+// filter by heap ctid. size mirrors the parent's itemlen — the member has no
+// bytes of its own — which keeps a size sort from scattering members away
+// from their parent.
+func postingMemberToItem(parent pg.IndexTuple, n int, t pg.IndexTuple) item {
+	name := fmt.Sprintf("#%04d.%03d", parent.ItemOffset, n)
+	if t.Ctid != nil {
+		name += " " + *t.Ctid
+	}
+	return item{
+		name:        name,
+		size:        int64(parent.ItemLen),
+		hasChildren: (t.Decoded != nil || t.HotDecoded != nil) && t.Ctid != nil,
+		data:        postingMember{parent: parent, n: n, tuple: t},
 	}
 }
 
@@ -569,6 +603,23 @@ func itemWALFPI(it item) (int64, bool) {
 		return int64(v.FPILength), true
 	case pg.WALRelStat:
 		return v.FPIBytes, true
+	}
+	return 0, false
+}
+
+func itemWALRecordBytes(it item) (int64, bool) {
+	switch v := it.data.(type) {
+	case pg.WALRmgrStat:
+		return v.RecordSize, true
+	case pg.WALRelStat:
+		return v.DataBytes, true
+	}
+	return 0, false
+}
+
+func itemWALPages(it item) (int64, bool) {
+	if v, ok := it.data.(pg.WALRelStat); ok {
+		return v.BlockCount, true
 	}
 	return 0, false
 }

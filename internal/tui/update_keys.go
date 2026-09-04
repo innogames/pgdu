@@ -85,20 +85,20 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	// While the seek input has focus, route keys into the seek editor (typing
 	// builds the key value and live-jumps the cursor) instead of the list.
-	if s.seekFocused {
+	if s.pages.seekFocused {
 		return m.handleSeekKey(s, msg)
 	}
 	// When a reindex confirmation is armed, capture the next key here: `y`
 	// (case-insensitive) executes; anything else cancels. Using y/n instead of
 	// a second Enter avoids running REINDEX on an accidental double-tap.
-	if s.pendingReindex != "" {
-		idx := s.pendingReindex
-		s.pendingReindex = ""
+	if s.reindex.pending != "" {
+		idx := s.reindex.pending
+		s.reindex.pending = ""
 		if confirmGate(msg) {
-			s.reindexing = idx
-			s.reindexProg = nil
-			s.reindexPctMax = 0
-			s.reindexErr = nil
+			s.reindex.running = idx
+			s.reindex.prog = nil
+			s.reindex.pctMax = 0
+			s.reindex.err = nil
 			// Run the (blocking) REINDEX and, alongside it, start polling
 			// pg_stat_progress_create_index so the banner shows a live bar.
 			return m, tea.Batch(m.reindexIndexCmd(s.table, idx), m.reindexTick())
@@ -106,17 +106,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// VACUUM confirmation on levelParts: `v` armed it, y/Y executes, any other key cancels.
-	if s.pendingVacuum {
-		s.pendingVacuum = false
+	if s.parts.pendingVacuum {
+		s.parts.pendingVacuum = false
 		if confirmGate(msg) {
 			return m, m.vacuumTableCmd(s.table)
 		}
 		return m, nil
 	}
 	// Maintenance stats reset confirmation — same y/n pattern as reindex.
-	if s.pendingReset != "" {
-		which := s.pendingReset
-		s.pendingReset = ""
+	if s.maintenance.pendingReset != "" {
+		which := s.maintenance.pendingReset
+		s.maintenance.pendingReset = ""
 		if confirmGate(msg) {
 			switch which {
 			case "statements":
@@ -141,12 +141,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// Backend cancel/terminate confirmation — same y/n pattern as reindex.
-	if s.pendingBackendAction != "" {
-		action := s.pendingBackendAction
-		pid := s.pendingBackendPID
-		s.pendingBackendAction = ""
-		s.pendingBackendPID = 0
-		s.pendingBackendQuery = ""
+	if s.act.pendingAction != "" {
+		action := s.act.pendingAction
+		pid := s.act.pendingPID
+		s.act.pendingAction = ""
+		s.act.pendingPID = 0
+		s.act.pendingQuery = ""
 		if confirmGate(msg) {
 			switch action {
 			case "cancel":
@@ -157,22 +157,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	// The activity column-config overlay is modal — mirrors showColumnConfig for
-	// the top-queries table.
-	if m.showActColumnConfig && s.level == levelActivity {
+	if m.actTable.showCfg && s.level == levelActivity {
 		return m, m.handleActColumnConfigKey(s, msg)
 	}
-	if m.showLogColumnConfig && s.level == levelLogs {
+	if s.level == levelLogs && m.logTableFor(s.log.view).showCfg {
 		return m, m.handleLogColumnConfigKey(s, msg)
 	}
-	// The column-config overlay is modal: while open (only on the top-queries
-	// table) it captures navigation and toggle keys instead of the normal list
-	// bindings (Quit still quits).
-	if m.showColumnConfig && s.level == levelStatements {
+	// The column-config overlays are modal: while open they capture navigation
+	// and toggle keys instead of the normal list bindings (Quit still quits).
+	if m.stmtTable.showCfg && s.level == levelStatements {
 		return m, m.handleColumnConfigKey(s, msg)
 	}
-	// Table overview column-config overlay — mirrors the two above.
-	if m.showTblColumnConfig && s.level == levelTableStats {
+	if m.tblTable.showCfg && s.level == levelTableStats {
 		return m, m.handleTblColumnConfigKey(s, msg)
 	}
 	// Tuple byte-layout overlay (Enter on a heap tuple) — same modal pattern.
@@ -221,18 +217,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// aren't obvious — use ? to toggle a dedicated reference overlay
 		// instead of expanding the key list. Other levels keep the standard
 		// help-expansion behaviour.
-		if s.level == levelBufferTables || s.level == levelBufferDetail || s.level == levelShmem ||
-			s.level == levelHeapPages || s.level == levelHeapTuples ||
-			s.level == levelIndexPages || s.level == levelIndexTuples ||
-			s.level == levelWAL || s.level == levelWALRecords || s.level == levelWALBlocks ||
-			s.level == levelWALRelations || s.level == levelWALRelBlocks ||
-			s.level == levelStatements || s.level == levelStatementDetail || s.level == levelSnapshots ||
-			s.level == levelMaintenance || s.level == levelSettings ||
-			s.level == levelActivity || s.level == levelTableStats || s.level == levelWaitProfile ||
-			s.level == levelDiagnostics || s.level == levelDiagnosticResult ||
-			s.level == levelDescribe ||
-			s.level == levelLogFiles || s.level == levelLogs || s.level == levelLogGroup || s.level == levelLogEntry ||
-			s.level == levelPgBouncers || s.level == levelPgBouncer || s.level == levelPgBouncerShow {
+		if m.hasInfoOverlay(s) {
 			m.showInfo = !m.showInfo
 			if m.showInfo {
 				m.infoOffset = 0 // always open scrolled to the top
@@ -245,9 +230,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Seek):
 		// Seek is enabled only on levelIndexTuples (see applyContext). Open the
 		// input fresh; mutually exclusive with the fuzzy filter.
-		s.seekFocused = true
-		s.seekQuery = ""
-		s.seekStatus = ""
+		s.pages.seekFocused = true
+		s.pages.seekQuery = ""
+		s.pages.seekStatus = ""
 		s.filterFocused = false
 	case key.Matches(msg, m.keys.Down):
 		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
@@ -263,13 +248,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelMaintenance {
 			// ↑↓ moves the capacity cursor (4 rows: statements, qualstats, table
 			// stats, table stats · all dbs).
-			s.maintCursor = min(s.maintCursor+1, 3)
+			s.maintenance.cursor = min(s.maintenance.cursor+1, 3)
 			break
 		}
 		if s.cursor < s.visibleLen()-1 {
 			s.cursor++
 		}
-		if s.level == levelLogs && s.logView == logViewGroups {
+		if s.level == levelLogs && s.log.view == logViewGroups {
 			m.skipLogHeader(s, 1) // section headers are inert; never rest on one
 		}
 	case key.Matches(msg, m.keys.Up):
@@ -283,13 +268,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if s.level == levelMaintenance {
-			s.maintCursor = max(s.maintCursor-1, 0)
+			s.maintenance.cursor = max(s.maintenance.cursor-1, 0)
 			break
 		}
 		if s.cursor > 0 {
 			s.cursor--
 		}
-		if s.level == levelLogs && s.logView == logViewGroups {
+		if s.level == levelLogs && s.log.view == logViewGroups {
 			m.skipLogHeader(s, -1)
 		}
 	case key.Matches(msg, m.keys.PageDown):
@@ -309,10 +294,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// window instead of the cursor — within a window the cursor moves
 		// with j/k. Clamps to the last full window so we never call
 		// get_raw_page past EOF.
-		if (s.level == levelHeapPages || s.level == levelIndexPages) && s.heapWindowCount > 0 && s.heapPageCount > s.heapWindowStart+s.heapWindowCount {
-			s.heapWindowStart += s.heapWindowCount
-			if s.heapWindowStart >= s.heapPageCount {
-				s.heapWindowStart = max32(s.heapPageCount-s.heapWindowCount, 0)
+		if (s.level == levelHeapPages || s.level == levelIndexPages) && s.pages.heapWindowCount > 0 && s.pages.heapPageCount > s.pages.heapWindowStart+s.pages.heapWindowCount {
+			s.pages.heapWindowStart += s.pages.heapWindowCount
+			if s.pages.heapWindowStart >= s.pages.heapPageCount {
+				s.pages.heapWindowStart = max32(s.pages.heapPageCount-s.pages.heapWindowCount, 0)
 			}
 			s.resetCursor()
 			return m, m.loadCurrent()
@@ -332,8 +317,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.offset = max(s.offset-m.pageStep(), 0)
 			break
 		}
-		if (s.level == levelHeapPages || s.level == levelIndexPages) && s.heapWindowStart > 0 {
-			s.heapWindowStart = max32(s.heapWindowStart-s.heapWindowCount, 0)
+		if (s.level == levelHeapPages || s.level == levelIndexPages) && s.pages.heapWindowStart > 0 {
+			s.pages.heapWindowStart = max32(s.pages.heapWindowStart-s.pages.heapWindowCount, 0)
 			s.resetCursor()
 			return m, m.loadCurrent()
 		}
@@ -398,8 +383,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelActivity {
 			next := &screen{
 				level: levelWaitProfile, title: "wait profile", tool: toolActivity,
-				db: s.db, loaded: true,
-			}
+				db: s.db, loaded: true}
 			m.stack = append(m.stack, next)
 			return m, nil
 		}
@@ -411,8 +395,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Params (p, statement detail).
 		next := &screen{
 			level: levelProgress, title: "progress", tool: toolMaintenance,
-			db: s.db, loading: true,
-		}
+			db: s.db, loading: true}
 		m.stack = append(m.stack, next)
 		return m, m.loadCurrent()
 	case key.Matches(msg, m.keys.SortNext):
@@ -430,8 +413,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelActivity {
 			next := &screen{
 				level: levelLockTree, title: "lock tree", tool: toolActivity,
-				db: s.db, loading: true,
-			}
+				db: s.db, loading: true}
 			m.stack = append(m.stack, next)
 			return m, m.loadCurrent()
 		}
@@ -444,10 +426,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// snapshot becomes the new "since" point. Also drops any loaded disk
 		// snapshot (base→now or frozen A→B) and the cumulative flag.
 		if s.level == levelStatements {
-			s.statBaseline = nil
-			s.statBaseSnap = nil
-			s.statEndSnap = nil
-			s.statCumulative = false
+			s.stat.baseline = nil
+			s.stat.baseSnap = nil
+			s.stat.endSnap = nil
+			s.stat.cumulative = false
 			return m, m.loadCurrent()
 		}
 	case key.Matches(msg, m.keys.SaveSnapshot):
@@ -472,9 +454,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case key.Matches(msg, m.keys.ActivityFilter):
 		if s.level == levelActivity {
-			s.actFilter = s.actFilter.Next()
+			s.act.filter = s.act.filter.Next()
 			// Reload immediately with the new filter.
-			return m, m.loadActivityCmd(s.db, s.actFilter)
+			return m, m.loadActivityCmd(s.db, s.act.filter)
 		}
 		if s.level == levelDiagnostics {
 			// Cycle the category filter (all → index → table → …) client-side.
@@ -498,41 +480,32 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Arm the two-step confirmation for pg_cancel_backend, from the activity
 		// table or the lock tree.
 		if pid, query := backendActionTarget(s); pid != 0 {
-			s.pendingBackendPID = pid
-			s.pendingBackendAction = "cancel"
-			s.pendingBackendQuery = query
+			s.act.pendingPID = pid
+			s.act.pendingAction = "cancel"
+			s.act.pendingQuery = query
 		}
 	case key.Matches(msg, m.keys.TerminateBackend):
 		if pid, query := backendActionTarget(s); pid != 0 {
-			s.pendingBackendPID = pid
-			s.pendingBackendAction = "terminate"
-			s.pendingBackendQuery = query
+			s.act.pendingPID = pid
+			s.act.pendingAction = "terminate"
+			s.act.pendingQuery = query
 		}
 	case key.Matches(msg, m.keys.Columns):
-		// Open the htop-style column picker — on the top-queries table or on
-		// the activity table.
-		if s.level == levelStatements {
-			m.ensureStmtColsInit()
-			m.showInfo = false
-			m.showColumnConfig = true
-			m.colCfgCursor = 0
-		}
-		if s.level == levelActivity {
-			m.ensureActColsInit()
-			m.showInfo = false
-			m.showActColumnConfig = true
-			m.actColCfgCursor = 0
-		}
-		if s.level == levelTableStats {
-			m.ensureTblColsInit()
-			m.showInfo = false
-			m.showTblColumnConfig = true
-			m.tblColCfgCursor = 0
-		}
-		if (s.level == levelDiagnosticResult || s.level == levelPgBouncerShow) && s.diagResult != nil {
-			m.showInfo = false
-			m.showDiagColumnConfig = true
-			m.diagColCfgCursor = 0
+		// Open the htop-style column picker of the registry-backed table under
+		// the cursor (log panes open theirs in handleLogKey).
+		switch s.level {
+		case levelStatements:
+			stmtSpec.open(m, &m.stmtTable)
+		case levelActivity:
+			actSpec.open(m, &m.actTable)
+		case levelTableStats:
+			tblSpec.open(m, &m.tblTable)
+		case levelDiagnosticResult, levelPgBouncerShow:
+			if s.diagResult != nil {
+				m.showInfo = false
+				m.showDiagColumnConfig = true
+				m.diagColCfgCursor = 0
+			}
 		}
 	case key.Matches(msg, m.keys.ToggleRefresh):
 		// Cycle the live window's auto-refresh cadence (activity: 500ms → 1s → 2s → 5s → 10s → off).
@@ -561,36 +534,32 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Browse the real values pg_qualstats captured for this query — only
 		// meaningful when pg_qualstats is present (else there's nothing real to
 		// show). Pushes levelStatementSamples and loads the captured constants.
-		if s.level == levelStatementDetail && s.statDetail != nil && s.statQualstats {
+		if s.level == levelStatementDetail && s.stat.detail != nil && s.stat.qualstats {
 			next := &screen{
 				level: levelStatementSamples, title: "values", tool: s.tool,
-				db: s.db, statDetail: s.statDetail,
-				statSampleCall: s.statSampleCall, statSampleReal: s.statSampleReal,
-				statQualstats: s.statQualstats, loading: true,
-			}
+				db: s.db, stat: stmtState{detail: s.stat.detail, sampleCall: s.stat.sampleCall, sampleReal: s.stat.sampleReal, qualstats: s.stat.qualstats}, loading: true}
 			m.stack = append(m.stack, next)
-			return m, m.loadStatementSamplesCmd(s.db, s.statDetail.QueryID)
+			return m, m.loadStatementSamplesCmd(s.db, s.stat.detail.QueryID)
 		}
 	case key.Matches(msg, m.keys.Execute):
 		// Execute the detail view's query for real and show its rows as a table.
 		// Gated exactly like the EXPLAIN ANALYZE affordance (handleStatementAnalyze):
 		// read-only statements only, and only once a literal sample call exists to
 		// actually run (the normalized query has unbindable $n placeholders).
-		if s.level == levelStatementDetail && s.statDetail != nil &&
-			pg.ReadOnlyQuery(s.statDetail.Query) && s.statSampleCall != "" {
+		if s.level == levelStatementDetail && s.stat.detail != nil &&
+			pg.ReadOnlyQuery(s.stat.detail.Query) && s.stat.sampleCall != "" {
 			next := &screen{
 				level: levelStatementResult, title: "result", tool: s.tool,
-				db: s.db, statDetail: s.statDetail, diagBarCol: -1, loading: true,
-			}
+				db: s.db, stat: stmtState{detail: s.stat.detail}, diagBarCol: -1, loading: true}
 			m.stack = append(m.stack, next)
-			return m, m.loadStatementResultCmd(s.db, s.statDetail.Query, s.statSampleCall)
+			return m, m.loadStatementResultCmd(s.db, s.stat.detail.Query, s.stat.sampleCall)
 		}
 	case key.Matches(msg, m.keys.Verbose):
 		// Toggle the verbose detail view (parameter table + extra metric rows).
 		// Scoped to the detail level; the body re-renders in place and reflows
 		// through scrollWindow, so no offset reset is needed.
 		if s.level == levelStatementDetail {
-			s.statVerbose = !s.statVerbose
+			s.stat.verbose = !s.stat.verbose
 		}
 		// On the parts level, `v` arms the VACUUM VERBOSE confirmation.
 		if s.level == levelParts && s.table.OID != 0 {
@@ -598,13 +567,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// A vacuum is already running; ignore.
 				break
 			}
-			s.pendingVacuum = true
+			s.parts.pendingVacuum = true
 		}
 		// On the activity table, `v` toggles visibility of evergreen auxiliary
 		// backends (walwriter, checkpointer, launchers, io workers, …). The rebuild
 		// uses the cached actRows so no DB round-trip is needed.
 		if s.level == levelActivity {
-			s.actVerbose = !s.actVerbose
+			s.act.verbose = !s.act.verbose
 			m.rebuildActivityItems(s)
 		}
 	case key.Matches(msg, m.keys.Export):
@@ -621,12 +590,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// plain view never pays for it); an extPrompt or a prior error stands
 		// in for the stat and suppresses the re-fetch.
 		if s.level == levelDescribe {
-			s.descDetail = !s.descDetail
-			if s.descDetail && s.describe != nil && s.describe.Kind == pg.DescribeTable &&
-				s.describe.OID != 0 && s.descBuf == nil && s.descBufErr == nil && s.extPrompt == nil &&
-				!s.descBufLoading {
-				s.descBufLoading = true
-				return m, m.loadDescribeBuffersCmd(s.db, s.describe.OID)
+			s.desc.detail = !s.desc.detail
+			if s.desc.detail && s.desc.info != nil && s.desc.info.Kind == pg.DescribeTable &&
+				s.desc.info.OID != 0 && s.desc.buf == nil && s.desc.bufErr == nil && s.extPrompt == nil &&
+				!s.desc.bufLoading {
+				s.desc.bufLoading = true
+				return m, m.loadDescribeBuffersCmd(s.db, s.desc.info.OID)
 			}
 			break
 		}
@@ -640,8 +609,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			tool:    s.tool,
 			db:      s.db,
 			schema:  s.schema,
-			loading: true,
-		}
+			loading: true}
 		m.stack = append(m.stack, next)
 		if t.indexByName {
 			return m, m.loadDescribeIndexByNameCmd(t.db, t.indexName)
@@ -669,8 +637,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		next := &screen{
 			level: levelParts, title: "disk usage", tool: toolDisk,
 			db: t.db, loading: true,
-			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
-		}
+			sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 		m.stack = append(m.stack, next)
 		return m, m.resolveDiskTableCmd(t.db, t.tableName)
 	case key.Matches(msg, m.keys.WALByRelation):
@@ -680,9 +647,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelWAL && s.loaded && (s.extPrompt == nil || !s.extPrompt.blocking) {
 			next := &screen{
 				level: levelWALRelations, title: "wal relations", tool: s.tool,
-				db: s.db, walStart: s.walStart, walEnd: s.walEnd,
-				sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
-			}
+				db: s.db, wal: walState{start: s.wal.start, end: s.wal.end},
+				sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 			m.stack = append(m.stack, next)
 			return m, m.loadCurrent()
 		}
@@ -692,8 +658,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelBufferTables && (s.extPrompt == nil || !s.extPrompt.blocking) {
 			next := &screen{
 				level: levelShmem, title: "shmem", tool: toolBuffers, db: s.db,
-				sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
-			}
+				sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 			m.stack = append(m.stack, next)
 			return m, m.loadCurrent()
 		}
@@ -724,46 +689,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		if s.level == levelMaintenance {
-			// Arm the reset confirmation for the highlighted extension capacity row.
-			switch s.maintCursor {
-			case 0:
-				s.pendingReset = "statements"
-			case 1:
-				s.pendingReset = "qualstats"
-			case 2:
-				s.pendingReset = "tablestats"
-			case 3:
-				s.pendingReset = "tablestats-all"
-			}
-			return m, nil
+			return m, m.handleMaintenanceEnter(s)
 		}
-		if s.level == levelStatementDetail {
-			// The detail view doesn't drill further; Enter (not l/→) confirms an
-			// EXPLAIN ANALYZE run on read-only queries.
-			if msg.Type == tea.KeyEnter {
-				return m, m.handleStatementAnalyze(s)
-			}
-			return m, nil
-		}
-		if s.level == levelStatementSamples {
-			// The captured-values list doesn't drill further; Enter runs EXPLAIN
-			// ANALYZE for the highlighted real value (read-only queries only).
-			if msg.Type == tea.KeyEnter {
-				return m, m.handleSampleAnalyze(s)
-			}
-			return m, nil
+		if cmd, ok := m.handleStatementEnter(s, msg); ok {
+			return m, cmd
 		}
 		if s.level == levelDiagnosticResult {
-			// Diagnostic rows don't drill; Enter opens the suggested-fix overlay
-			// for diagnostics that define one. A fresh run state per open: the
-			// previous row's output must not show under a different script.
-			if fix, db, ok := m.diagFixForCursor(s); ok {
-				s.diagFix = &diagFixRun{sql: fix, db: db}
-				m.showDiagFix = true
-			} else if s.diag != nil && s.diag.Fix != nil {
-				m.notice = "no suggested fix for this row"
-			}
-			return m, nil
+			return m, m.handleDiagEnter(s)
 		}
 		if s.level == levelParts && reindexCandidate(s) != "" {
 			// First ENTER on a bloated index row → request confirmation;
@@ -792,42 +724,15 @@ type descTarget struct {
 // check). Returns (descTarget{}, false) when the current level or row is not
 // describable (e.g. tools/databases/schemas, heap/toast rows, non-btree index).
 func describeTarget(s *screen) (descTarget, bool) {
-	// Helper: resolve the item under the cursor (same as drillIn).
-	curItem := func() (item, bool) {
-		vis := s.visibleIndexes()
-		if s.cursor < 0 || s.cursor >= len(vis) {
-			return item{}, false
-		}
-		return s.items[vis[s.cursor]], true
-	}
-
+	curItem := s.currentItem
 	switch s.level {
 	case levelLogs, levelLogGroup, levelLogEntry:
 		return logDescribeTarget(s)
 
 	case levelStatements:
-		// item.name is the flattened statement text; parse out its main table and
-		// describe it by name (resolved server-side, since we have no OID here).
-		it, ok := curItem()
-		if !ok {
-			return descTarget{}, false
-		}
-		name := pg.MainTable(it.name)
-		if name == "" {
-			return descTarget{}, false
-		}
-		return descTarget{byName: true, db: s.db, tableName: name}, true
-
+		return stmtDescribeTarget(s)
 	case levelStatementDetail, levelStatementSamples:
-		if s.statDetail == nil {
-			return descTarget{}, false
-		}
-		name := pg.MainTable(s.statDetail.Query)
-		if name == "" {
-			return descTarget{}, false
-		}
-		return descTarget{byName: true, db: s.db, tableName: name}, true
-
+		return stmtDescribeTarget(s)
 	case levelProgress:
 		// Describe the operation's target relation by name (basebackup rows have
 		// none). The name was resolved in the operation's own database, so route
@@ -858,46 +763,11 @@ func describeTarget(s *screen) (descTarget, bool) {
 		return descTarget{table: t}, true
 
 	case levelBufferTables:
-		it, ok := curItem()
-		if !ok {
-			return descTarget{}, false
-		}
-		st, ok := it.data.(pg.TableBufferStat)
-		if !ok {
-			return descTarget{}, false
-		}
-		// TableBufferStat has no pg.Table field; reconstruct from its own fields.
-		return descTarget{table: pg.Table{
-			DB: st.DB, Schema: st.Schema, Name: st.Name,
-			OID: st.OID, TotalBytes: st.TotalBytes,
-		}}, true
-
+		return bufDescribeTarget(s)
 	case levelBufferDetail:
-		// The inspected table is carried on the screen; same reconstruction as
-		// the buffer-tables list row.
-		if s.bufDetail == nil {
-			return descTarget{}, false
-		}
-		st := s.bufDetail
-		return descTarget{table: pg.Table{
-			DB: st.DB, Schema: st.Schema, Name: st.Name,
-			OID: st.OID, TotalBytes: st.TotalBytes,
-		}}, true
-
+		return bufDescribeTarget(s)
 	case levelTableStats:
-		// Generic-table rows carry the relation OID in statQueryID; resolve it
-		// back to the loaded TableStat and describe by exact OID (no name lookup).
-		it, ok := curItem()
-		if !ok {
-			return descTarget{}, false
-		}
-		for i := range s.tblRows {
-			if int64(s.tblRows[i].OID) == it.statQueryID {
-				return descTarget{table: s.tblRows[i].AsTable()}, true
-			}
-		}
-		return descTarget{}, false
-
+		return tblDescribeTarget(s)
 	case levelColumns:
 		// The table being described is always s.table at these levels.
 		return descTarget{table: s.table}, true
@@ -923,87 +793,15 @@ func describeTarget(s *screen) (descTarget, bool) {
 		return descTarget{table: s.table}, true
 
 	case levelRelations:
-		it, ok := curItem()
-		if !ok {
-			return descTarget{}, false
-		}
-		r, ok := it.data.(pg.Relation)
-		if !ok {
-			return descTarget{}, false
-		}
-		switch r.Kind {
-		case pg.RelTable, pg.RelToast:
-			return descTarget{table: pg.Table{
-				DB: r.DB, Schema: r.Schema, OID: r.OID, Name: r.Name,
-				TotalBytes: r.SizeBytes, EstRows: r.EstRows,
-			}}, true
-		case pg.RelBTreeIndex, pg.RelGist, pg.RelBrin, pg.RelGin:
-			return descTarget{
-				isIndex:   true,
-				db:        r.DB,
-				indexOID:  r.OID,
-				indexName: r.Qualified(),
-			}, true
-		}
-		return descTarget{}, false
-
+		return pagesDescribeTarget(s)
 	case levelHeapPages, levelHeapTuples, levelTupleRow:
-		return descTarget{table: s.table}, true
-
+		return pagesDescribeTarget(s)
 	case levelIndexPages, levelIndexTuples:
-		return descTarget{
-			isIndex:   true,
-			db:        s.db,
-			indexOID:  s.index.OID,
-			indexName: s.index.Qualified(),
-		}, true
-
+		return pagesDescribeTarget(s)
 	case levelActivity:
-		// Describe the main table of the highlighted backend's query, in that
-		// backend's database (which may differ from the screen's connection).
-		pid := activitySelectedPID(s)
-		if pid == 0 {
-			return descTarget{}, false
-		}
-		for i := range s.actRows {
-			if s.actRows[i].PID != pid {
-				continue
-			}
-			name := pg.MainTable(s.actRows[i].Query)
-			if name == "" {
-				return descTarget{}, false
-			}
-			db := s.actRows[i].Database
-			if db == "" {
-				db = s.db
-			}
-			return descTarget{byName: true, db: db, tableName: name}, true
-		}
-		return descTarget{}, false
-
+		return actDescribeTarget(s)
 	case levelDiagnosticResult:
-		// Generic diagnostic rows carry no pg.Table — resolve the relation by
-		// the name in the row (server-side, like the top-queries view). Only
-		// the table-shaped diagnostics expose a name column; the rest return
-		// false here and `d` is a no-op.
-		it, ok := curItem()
-		if !ok {
-			return descTarget{}, false
-		}
-		cells, ok := it.data.([]pg.DiagCell)
-		if !ok {
-			return descTarget{}, false
-		}
-		// Prefer a table column; fall back to an index column (index-only
-		// diagnostics: unused/duplicate/redundant/index-I/O), resolved via
-		// ResolveIndex into a DescribeIndex panel.
-		if name, ok := diagDescribeName(s.diagCols, cells); ok {
-			return descTarget{byName: true, db: s.db, tableName: name}, true
-		}
-		if name, ok := diagDescribeIndexName(s.diagCols, cells); ok {
-			return descTarget{indexByName: true, db: s.db, indexName: name}, true
-		}
-		return descTarget{}, false
+		return diagDescribeTarget(s)
 	}
 
 	return descTarget{}, false
@@ -1127,9 +925,8 @@ func (m *Model) diagFixForCursor(s *screen) (sql, db string, ok bool) {
 	return fix, db, true
 }
 
-// handleDiagFixKey drives the suggested-fix overlay. Idle: Enter arms the
-// confirm, any other key dismisses. Armed: y runs (the same confirmGate as
-// reindex/vacuum), any other key disarms but keeps the script up. Running:
+// handleDiagFixKey drives the suggested-fix overlay. It opens armed: y runs
+// (the same confirmGate as reindex/vacuum), any other key dismisses. Running:
 // only the output scrolls — the run can't be abandoned from the UI, so the
 // overlay stays until it completes. Finished: scroll keys page the output,
 // anything else dismisses, and a successful run reloads the result table
@@ -1150,6 +947,7 @@ func (m *Model) handleDiagFixKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	case f.pending:
 		f.pending = false
 		if !confirmGate(msg) {
+			m.showDiagFix = false
 			return nil
 		}
 		*f = diagFixRun{sql: f.sql, db: f.db, running: true, started: time.Now(), follow: true}
@@ -1164,10 +962,6 @@ func (m *Model) handleDiagFixKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 	default:
-		if msg.Type == tea.KeyEnter {
-			f.pending = true
-			return nil
-		}
 		m.showDiagFix = false
 		return nil
 	}
@@ -1226,9 +1020,9 @@ func backendActionTarget(s *screen) (int32, string) {
 		if pid == 0 {
 			return 0, ""
 		}
-		for i := range s.actRows {
-			if s.actRows[i].PID == pid {
-				return pid, s.actRows[i].Query
+		for i := range s.act.rows {
+			if s.act.rows[i].PID == pid {
+				return pid, s.act.rows[i].Query
 			}
 		}
 		return pid, ""

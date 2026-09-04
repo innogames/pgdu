@@ -58,10 +58,7 @@ func (m *Model) renderDiagQuery(s *screen, height int) string {
 		b.WriteString("  " + line + "\n")
 		used++
 	}
-	for i := used; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // renderDiagFix draws the suggested-fix overlay for the row Enter was pressed
@@ -119,6 +116,7 @@ func (m *Model) renderDiagFix(s *screen, height int) string {
 			mu(fmt.Sprintf("  %s", elapsed))
 	case f.pending:
 		status = confirmBanner("run this fix in " + f.db)
+		status = strings.Replace(status, "to cancel", "to dismiss", 1)
 	case f.err != nil:
 		status = "  " + styleErr.Render("failed: "+shortErr(f.err)) +
 			mu(fmt.Sprintf("  (after %s) · press any key to dismiss", elapsed))
@@ -275,7 +273,7 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
 
-	d := s.describe
+	d := s.desc.info
 	if d == nil {
 		// Should not happen: the loading guard in View fires before this,
 		// but defend anyway.
@@ -344,7 +342,7 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 					badges += " " + styleBadge.Render("clustered")
 				}
 				line := "    " + idx.Name + badges + "  " + mu(humanize.Bytes(idx.SizeBytes))
-				if s.descDetail {
+				if s.desc.detail {
 					line += mu(" · ") + describeIndexUsage(idx, d.EstRows, d.LoadedAt)
 				}
 				b.WriteString(line + "\n")
@@ -379,7 +377,7 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 			formatRows(d.EstRows),
 		)) + "\n")
 
-		if s.descDetail {
+		if s.desc.detail {
 			// --- cache footprint (shared_buffers occupancy of this table) ---
 			b.WriteString("\n  " + styleHeader.Render(" cache footprint ") + "\n")
 			b.WriteString(m.renderDescribeBufferRows(s))
@@ -387,7 +385,7 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 		}
 
 		hint := " to show details (cache footprint, index usage, activity)"
-		if s.descDetail {
+		if s.desc.detail {
 			hint = " to hide details"
 		}
 		b.WriteString("\n    " + mu("press ") + styleBadge.Render("d") + mu(hint) +
@@ -466,7 +464,7 @@ func (m *Model) renderDescribeInfo(s *screen, height int) string {
 	row := func(name, desc string) {
 		b.WriteString("    " + padRight(name, 13) + mu(desc) + "\n")
 	}
-	isIndex := s.describe != nil && s.describe.Kind == pg.DescribeIndex
+	isIndex := s.desc.info != nil && s.desc.info.Kind == pg.DescribeIndex
 
 	if isIndex {
 		infoHeader(&b, "Describe index reference")
@@ -581,10 +579,10 @@ func (m *Model) renderDescribeBufferRows(s *screen) string {
 				styleBadge.Render("i") + mu(" to install") + "\n"
 		}
 	}
-	if s.descBufErr != nil {
-		return "    " + styleErr.Render(s.descBufErr.Error()) + "\n"
+	if s.desc.bufErr != nil {
+		return "    " + styleErr.Render(s.desc.bufErr.Error()) + "\n"
 	}
-	st := s.descBuf
+	st := s.desc.buf
 	if st == nil {
 		return "    " + mu("…") + "\n"
 	}
@@ -888,7 +886,7 @@ func (m *Model) renderDiagColumnConfig(s *screen, height int) string {
 	if s.diag != nil {
 		title = s.diag.Title
 	} else if s.level == levelPgBouncerShow {
-		title, remembered = "SHOW "+strings.ToUpper(s.pgbShow.spec().what), "per SHOW"
+		title, remembered = "SHOW "+strings.ToUpper(s.pgb.show.spec().what), "per SHOW"
 	}
 	subtitle := "choose which columns " + title + " shows (remembered " + remembered + ")"
 	res := s.diagResult

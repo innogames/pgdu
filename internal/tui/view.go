@@ -21,7 +21,7 @@ func (m *Model) View() string {
 		m.height-4, 3)
 
 	var rankByOID map[uint32]int
-	if s.level == levelBufferTables && (s.bufferSummary != nil || s.bufferSummaryErr != nil) {
+	if s.level == levelBufferTables && (s.buf.summary != nil || s.buf.summaryErr != nil) {
 		var summary string
 		summary, rankByOID = m.renderBufferSummary(s)
 		b.WriteString(summary)
@@ -37,7 +37,7 @@ func (m *Model) View() string {
 	}
 
 	if s.level == levelWAL && (s.extPrompt == nil || !s.extPrompt.blocking) &&
-		(s.walSummary != nil || s.walSummaryErr != nil) {
+		(s.wal.summary != nil || s.wal.summaryErr != nil) {
 		summary := m.renderWALSummary(s)
 		b.WriteString(summary)
 		b.WriteString("\n")
@@ -45,7 +45,7 @@ func (m *Model) View() string {
 	}
 
 	if s.level == levelWALRecords && (s.extPrompt == nil || !s.extPrompt.blocking) &&
-		len(s.walRecTypeStats) > 0 {
+		len(s.wal.recTypeStats) > 0 {
 		stats := m.renderWALRecTypeStats(s)
 		b.WriteString(stats)
 		b.WriteString("\n")
@@ -67,7 +67,7 @@ func (m *Model) View() string {
 		contentHeight -= strings.Count(hdr, "\n") + 1
 	}
 
-	if s.level == levelActivity && s.loaded && s.actErr == nil {
+	if s.level == levelActivity && s.loaded && s.act.err == nil {
 		hdr := m.renderActivityHeader(s)
 		b.WriteString(hdr)
 		b.WriteString("\n")
@@ -169,13 +169,13 @@ func (m *Model) View() string {
 	}
 
 	switch {
-	case m.showActColumnConfig && s.level == levelActivity:
+	case m.actTable.showCfg && s.level == levelActivity:
 		b.WriteString(m.renderActColumnConfig(s, contentHeight))
-	case m.showLogColumnConfig && s.level == levelLogs:
-		b.WriteString(m.renderLogColumnConfig(contentHeight))
-	case m.showColumnConfig && s.level == levelStatements:
+	case s.level == levelLogs && m.logTableFor(s.log.view).showCfg:
+		b.WriteString(m.renderLogColumnConfig(s.log.view, contentHeight))
+	case m.stmtTable.showCfg && s.level == levelStatements:
 		b.WriteString(m.renderColumnConfig(s, contentHeight))
-	case m.showTblColumnConfig && s.level == levelTableStats:
+	case m.tblTable.showCfg && s.level == levelTableStats:
 		b.WriteString(m.renderTblColumnConfig(s, contentHeight))
 	case m.showDiagColumnConfig && (s.level == levelDiagnosticResult || s.level == levelPgBouncerShow):
 		b.WriteString(m.renderDiagColumnConfig(s, contentHeight))
@@ -243,7 +243,7 @@ func (m *Model) View() string {
 		case levelRelations:
 			b.WriteString(m.renderRelationsList(s, contentHeight))
 		case levelIndexPages:
-			switch s.index.AccessMethod {
+			switch s.pages.index.AccessMethod {
 			case "gist":
 				b.WriteString(m.renderGistPagesList(s, contentHeight))
 			case "brin":
@@ -254,7 +254,7 @@ func (m *Model) View() string {
 				b.WriteString(m.renderIndexPagesList(s, contentHeight))
 			}
 		case levelIndexTuples:
-			switch s.index.AccessMethod {
+			switch s.pages.index.AccessMethod {
 			case "gist":
 				b.WriteString(m.renderGistTuplesList(s, contentHeight))
 			case "brin":
@@ -329,7 +329,7 @@ func (m *Model) View() string {
 		case levelPgBouncerShow:
 			b.WriteString(m.renderDiagResult(s, contentHeight))
 		case levelLogs:
-			if s.logView.table() && s.logErr == nil && s.logReport != nil {
+			if s.log.view.table() && s.log.err == nil && s.log.report != nil {
 				b.WriteString(m.renderDiagResult(s, contentHeight))
 			} else {
 				b.WriteString(m.renderLogGroups(s, contentHeight))
@@ -429,13 +429,13 @@ func (m *Model) renderStatus(s *screen) string {
 func walStatusLabel(s *screen) string {
 	switch s.level {
 	case levelWALRecords:
-		return "rmgr: " + s.walRmgr + "  ·  window: " + shortLSN(s.walStart) + "–" + shortLSN(s.walEnd)
+		return "rmgr: " + s.wal.rmgr + "  ·  window: " + shortLSN(s.wal.start) + "–" + shortLSN(s.wal.end)
 	case levelWALBlocks:
-		return "rmgr: " + s.walRmgr + "  ·  record: " + s.walRecLSN
+		return "rmgr: " + s.wal.rmgr + "  ·  record: " + s.wal.recLSN
 	case levelWALRelations:
-		return "window: " + shortLSN(s.walStart) + "–" + shortLSN(s.walEnd)
+		return "window: " + shortLSN(s.wal.start) + "–" + shortLSN(s.wal.end)
 	case levelWALRelBlocks:
-		return "relation: " + s.walRelLabel + "  ·  window: " + shortLSN(s.walStart) + "–" + shortLSN(s.walEnd)
+		return "relation: " + s.wal.relLabel + "  ·  window: " + shortLSN(s.wal.start) + "–" + shortLSN(s.wal.end)
 	}
 	return ""
 }
@@ -471,19 +471,19 @@ func (m *Model) breadcrumb() string {
 		case levelHeapPages:
 			parts = append(parts, sc.table.Name)
 		case levelHeapTuples:
-			parts = append(parts, fmt.Sprintf("page #%d", sc.heapPageBlkno))
+			parts = append(parts, fmt.Sprintf("page #%d", sc.pages.heapPageBlkno))
 		case levelTupleRow:
-			if sc.toastChunkID != 0 {
-				parts = append(parts, fmt.Sprintf("chunk %d", sc.toastChunkID))
+			if sc.pages.toastChunkID != 0 {
+				parts = append(parts, fmt.Sprintf("chunk %d", sc.pages.toastChunkID))
 			} else {
-				parts = append(parts, "row "+sc.tupleCtid)
+				parts = append(parts, "row "+sc.pages.tupleCtid)
 			}
 		case levelRelations:
 			parts = append(parts, sc.schema)
 		case levelIndexPages:
-			parts = append(parts, sc.index.Name)
+			parts = append(parts, sc.pages.index.Name)
 		case levelIndexTuples:
-			parts = append(parts, fmt.Sprintf("page #%d", sc.indexPageBlkno))
+			parts = append(parts, fmt.Sprintf("page #%d", sc.pages.indexPageBlkno))
 		case levelDiagnostics:
 			parts = append(parts, "tools")
 		case levelDiagnosticResult:
@@ -493,13 +493,13 @@ func (m *Model) breadcrumb() string {
 		case levelWAL:
 			parts = append(parts, "wal")
 		case levelWALRecords:
-			parts = append(parts, sc.walRmgr)
+			parts = append(parts, sc.wal.rmgr)
 		case levelWALBlocks:
-			parts = append(parts, "rec "+shortLSN(sc.walRecLSN))
+			parts = append(parts, "rec "+shortLSN(sc.wal.recLSN))
 		case levelWALRelations:
 			parts = append(parts, "by relation")
 		case levelWALRelBlocks:
-			parts = append(parts, sc.walRelLabel)
+			parts = append(parts, sc.wal.relLabel)
 		case levelActivity:
 			parts = append(parts, "activity")
 		case levelStatements:
@@ -507,8 +507,8 @@ func (m *Model) breadcrumb() string {
 			// name); show the chosen database here instead of repeating it.
 			parts = append(parts, sc.db)
 		case levelStatementDetail:
-			if sc.statDetail != nil {
-				parts = append(parts, fmt.Sprintf("query %d", sc.statDetail.QueryID))
+			if sc.stat.detail != nil {
+				parts = append(parts, fmt.Sprintf("query %d", sc.stat.detail.QueryID))
 			}
 		case levelStatementResult:
 			parts = append(parts, "result")
@@ -523,25 +523,25 @@ func (m *Model) breadcrumb() string {
 		case levelLogFiles:
 			parts = append(parts, "logs")
 		case levelLogs:
-			if sc.logSrc != nil {
-				parts = append(parts, filepath.Base(sc.logSrc.Info().Path))
+			if sc.log.src != nil {
+				parts = append(parts, filepath.Base(sc.log.src.Info().Path))
 			} else {
 				parts = append(parts, "logs")
 			}
 		case levelLogGroup:
-			if sc.logGroup != nil {
-				parts = append(parts, sc.logGroup.Category.Short()+" group")
+			if sc.log.group != nil {
+				parts = append(parts, sc.log.group.Category.Short()+" group")
 			}
 		case levelLogEntry:
 			parts = append(parts, "entry")
 		case levelPgBouncers:
 			parts = append(parts, "pgbouncer")
 		case levelPgBouncer:
-			if sc.pgbInst != nil {
-				parts = append(parts, sc.pgbInst.Name)
+			if sc.pgb.inst != nil {
+				parts = append(parts, sc.pgb.inst.Name)
 			}
 		case levelPgBouncerShow:
-			parts = append(parts, sc.pgbShow.spec().title)
+			parts = append(parts, sc.pgb.show.spec().title)
 		}
 	}
 	out := make([]string, len(parts))
@@ -577,10 +577,7 @@ func (m *Model) renderToolPicker(s *screen, height int) string {
 		b.WriteString(styleMuted.Render(it.detail))
 		b.WriteString("\n")
 	}
-	for i := len(vis); i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // renderFilterLine draws the single-line filter affordance above the list.
@@ -606,25 +603,25 @@ func (m *Model) renderFilterLine(s *screen) string {
 // "seek (player_id): <value>▏  <status>". The status reports where the cursor
 // jumped. Returns "" unless the seek input is focused or carries a query.
 func (m *Model) renderSeekLine(s *screen) string {
-	if s.level != levelIndexTuples || (s.seekQuery == "" && !s.seekFocused) {
+	if s.level != levelIndexTuples || (s.pages.seekQuery == "" && !s.pages.seekFocused) {
 		return ""
 	}
 	label := "seek"
-	if s.index.AccessMethod == "brin" {
+	if s.pages.index.AccessMethod == "brin" {
 		// BRIN seeks by heap block number, not by key value.
 		label = "seek (heap block)"
-	} else if col := firstKeyColName(s.indexKeyCols); col != "" {
+	} else if col := firstKeyColName(s.pages.indexKeyCols); col != "" {
 		label = "seek (" + col + ")"
 	}
 	var status string
-	if s.seekStatus != "" {
-		status = "  " + styleMuted.Render(s.seekStatus)
+	if s.pages.seekStatus != "" {
+		status = "  " + styleMuted.Render(s.pages.seekStatus)
 	}
-	if s.seekFocused {
+	if s.pages.seekFocused {
 		caret := styleSelected.Render("▏")
-		return "  " + styleSelected.Render(label+": ") + s.seekQuery + caret + status
+		return "  " + styleSelected.Render(label+": ") + s.pages.seekQuery + caret + status
 	}
-	return "  " + styleMuted.Render(label+": ") + s.seekQuery + status
+	return "  " + styleMuted.Render(label+": ") + s.pages.seekQuery + status
 }
 
 // summaryLabelWidth is the width of the label column ("server memory" /

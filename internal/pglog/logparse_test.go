@@ -1,4 +1,4 @@
-package pg
+package pglog
 
 import (
 	"os"
@@ -8,13 +8,13 @@ import (
 )
 
 // parseStderr is the test shorthand: Debian prefix, one Feed, classified.
-func parseStderr(t *testing.T, text string) []LogEntry {
+func parseStderr(t *testing.T, text string) []Entry {
 	t.Helper()
 	m, err := CompilePrefix(debianPrefix, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := NewLogParser(LogFormatStderr, m, time.UTC)
+	p := NewParser(FormatStderr, m, time.UTC)
 	p.Feed([]byte(text), 0)
 	es := p.Entries()
 	Classify(es)
@@ -161,7 +161,7 @@ func TestParseCheckpoint(t *testing.T) {
 func TestClassifyCanonicalLines(t *testing.T) {
 	cases := []struct {
 		line string
-		cat  LogCategory
+		cat  Category
 	}{
 		{`LOG:  automatic vacuum of table "shop.public.orders": index scans: 1`, CatAutovacuum},
 		{`LOG:  automatic analyze of table "shop.public.orders"`, CatAutovacuum},
@@ -214,7 +214,7 @@ func TestClassifyCanonicalLines(t *testing.T) {
 
 func TestParserResumeAcrossFeeds(t *testing.T) {
 	m, _ := CompilePrefix(debianPrefix, time.UTC)
-	p := NewLogParser(LogFormatStderr, m, time.UTC)
+	p := NewParser(FormatStderr, m, time.UTC)
 	first := "2026-09-02 00:18:30 UTC [1-1] u@h LOG:  duration: 1.000 ms  statement: SELECT 1\n" +
 		"2026-09-02 00:18:31 UTC [2-1] u@h ERROR:  boom\n"
 	p.Feed([]byte(first), 0)
@@ -235,7 +235,7 @@ func TestParserResumeAcrossFeeds(t *testing.T) {
 func TestParseCSVAndJSON(t *testing.T) {
 	csvText := `2026-09-02 00:15:25.123 UTC,"app","shop",4242,"10.0.0.9:5000",68b6.1092,7,"INSERT",2026-09-02 00:15:20 UTC,3/12,0,ERROR,23505,"duplicate key value violates unique constraint ""channel_name_plugin_idx""","Key (name)=(x) already exists.",,,,,"INSERT INTO channel VALUES ($1)",,"_bt_check_unique, nbtinsert.c:664","psql","client backend",,0
 `
-	p := NewLogParser(LogFormatCSV, nil, time.UTC)
+	p := NewParser(FormatCSV, nil, time.UTC)
 	p.Feed([]byte(csvText), 0)
 	es := p.Entries()
 	Classify(es)
@@ -250,7 +250,7 @@ func TestParseCSVAndJSON(t *testing.T) {
 
 	jsonText := `{"timestamp":"2026-09-02 00:15:25.123 UTC","user":"app","dbname":"shop","pid":4242,"remote_host":"10.0.0.9","session_id":"68b6.1092","line_num":7,"error_severity":"LOG","message":"duration: 12.5 ms  statement: SELECT 1","application_name":"psql","backend_type":"client backend"}
 `
-	p = NewLogParser(LogFormatJSON, nil, time.UTC)
+	p = NewParser(FormatJSON, nil, time.UTC)
 	p.Feed([]byte(jsonText), 0)
 	es = p.Entries()
 	Classify(es)
@@ -266,7 +266,7 @@ func TestParseSampleLog(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Skip("sample log not present")
 	}
-	r, err := LoadLog(t.Context(), OpenLocalLog(path), "", time.UTC, 0, AggOptions{})
+	r, err := Load(t.Context(), OpenLocal(path), "", time.UTC, 0, AggOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +314,7 @@ func TestParseSampleLog(t *testing.T) {
 
 func TestParseAutoExplainPlans(t *testing.T) {
 	m, _ := CompilePrefix(debianPrefix, time.UTC)
-	p := NewLogParser(LogFormatStderr, m, time.UTC)
+	p := NewParser(FormatStderr, m, time.UTC)
 	p.Feed([]byte("2026-09-02 01:14:42 UTC [3273675-1] foe00@[local] LOG:  duration: 912.432 ms  plan:\n"+
 		"        Query Text: DELETE FROM game_player_social_interactions WHERE received_time < 1787879681 \n"+
 		"        Delete on game_player_social_interactions  (cost=0.43..45304.05 rows=0 width=0) (actual rows=0 loops=1)\n"+
@@ -353,7 +353,7 @@ func TestParseAutoExplainPlans(t *testing.T) {
 		t.Errorf("standalone plan key = %q", key)
 	}
 
-	r := &LogReport{Entries: es}
+	r := &Report{Entries: es}
 	Aggregate(r, AggOptions{})
 	for _, g := range r.Groups {
 		if g.Plans != 1 {

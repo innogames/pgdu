@@ -175,7 +175,7 @@ func defaultKeys() keyMap {
 		WaitProfile: key.NewBinding(key.WithKeys("W"), key.WithHelp("W", "wait profile")),
 
 		LogGroupMode: key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "section mode")),
-		LogPane:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "groups/timeline/slow")),
+		LogPane:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "groups/timeline/slow/stats")),
 		LogWindow:    key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "widen window")),
 		LogJump:      key.NewBinding(key.WithKeys("j"), key.WithHelp("j", "jump to timeline")),
 
@@ -216,8 +216,8 @@ func (k *keyMap) applyContext(s *screen) {
 	// activity table, the table overview and diagnostic results. The picker is
 	// hard to find without a header hint, so surface it in the footer everywhere
 	// but the top-queries table, whose header already advertises it.
-	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult || (logs && s.logView.table()) || pgbShow)
-	k.columnsInFooter = activity || tableStats || diagResult || (logs && s.logView.table()) || pgbShow
+	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult || (logs && s.log.view.table()) || pgbShow)
+	k.columnsInFooter = activity || tableStats || diagResult || (logs && s.log.view.table()) || pgbShow
 	// t (ToggleRefresh) cycles the auto-refresh cadence on top-queries levels and
 	// on the live activity/progress levels. Surface it in the footer on the pure
 	// live monitors, whose header shows the cadence but not the key that changes
@@ -326,7 +326,7 @@ func (k *keyMap) applyContext(s *screen) {
 	// there (use the / filter). The physical key is otherwise ShowQuery
 	// (diagnostic-result only), so the two never overlap.
 	k.Seek.SetEnabled(s.level == levelIndexTuples &&
-		(s.index.AccessMethod == "btree" || s.index.AccessMethod == "brin"))
+		(s.pages.index.AccessMethod == "btree" || s.pages.index.AccessMethod == "brin"))
 }
 
 func (k keyMap) ShortHelp() []key.Binding {

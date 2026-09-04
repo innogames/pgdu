@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
+	"pgdu/internal/pglog"
 )
 
 // handleLogKey dispatches the log-analyzer-only bindings (m group mode, tab
@@ -37,10 +38,10 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 	}
 
 	if key.Matches(msg, m.keys.LogJump) && logs != nil {
-		var e *pg.LogEntry
+		var e *pglog.Entry
 		switch s.level {
 		case levelLogEntry:
-			e = s.logEntry
+			e = s.log.entry
 		case levelLogGroup:
 			if vis := s.visibleIndexes(); s.cursor >= 0 && s.cursor < len(vis) {
 				e = s.logEntryOf(s.items[vis[s.cursor]])
@@ -58,20 +59,20 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 
 	switch {
 	case key.Matches(msg, m.keys.LogGroupMode):
-		if s.logGroupBy == logGroupByCategory {
-			s.logGroupBy = logGroupByNone
+		if s.log.groupBy == logGroupByCategory {
+			s.log.groupBy = logGroupByNone
 		} else {
-			s.logGroupBy = logGroupByCategory
+			s.log.groupBy = logGroupByCategory
 		}
-		if s.logView == logViewGroups {
+		if s.log.view == logViewGroups {
 			m.rebuildLogItems(s)
 			m.skipLogHeader(s, 1)
 		}
 		return nil, true
 
 	case key.Matches(msg, m.keys.LogPane):
-		s.logView = s.logView.next()
-		if s.logView == logViewGroups {
+		s.log.view = s.log.view.next(s.log.report != nil && s.log.report.PoolerStats > 0)
+		if s.log.view == logViewGroups {
 			s.sort, s.sortDesc = sortByCount, true
 		}
 		m.rebuildLogItems(s)
@@ -83,20 +84,17 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 		// Widen the tail window: 32 → 64 → 128 → 256 → 512 MiB → whole → 32.
 		next := logWindowSteps[0]
 		for i, w := range logWindowSteps {
-			if w == s.logWindow && i+1 < len(logWindowSteps) {
+			if w == s.log.window && i+1 < len(logWindowSteps) {
 				next = logWindowSteps[i+1]
 				break
 			}
 		}
-		s.logWindow = next
+		s.log.window = next
 		return m.loadCurrent(), true
 
 	case key.Matches(msg, m.keys.Columns):
-		if s.logView.table() {
-			m.ensureLogColsInit()
-			m.showInfo = false
-			m.showLogColumnConfig = true
-			m.logColCfgCursor = 0
+		if s.log.view.table() {
+			logSpec(s.log.view).open(m, m.logTableFor(s.log.view))
 		}
 		return nil, true
 	}
@@ -106,35 +104,15 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 // handleLogColumnConfigKey drives the C picker over the timeline columns.
 // Enabling the hostname column kicks off the reverse-DNS lookups.
 func (m *Model) handleLogColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
-	reg := logColumnRegistry()
-	cmd := m.handleColCfgKey(msg, colCfgSpec{
-		n:      len(reg),
-		cursor: &m.logColCfgCursor,
-		close:  func() { m.showLogColumnConfig = false },
-		reset: func() {
-			m.logColsVisible = nil
-			m.ensureLogColsInit()
-			m.rebuildLogItems(s)
-			m.saveColPrefs(colPrefsLogs, colVisToStrings(m.logColsVisible))
-		},
-		toggle: func(i int) {
-			d := reg[i]
-			if d.mandatory {
-				return
-			}
-			m.ensureLogColsInit()
-			m.logColsVisible[d.id] = !m.logColEnabled(d.id, d.defaultOn)
-			m.rebuildLogItems(s)
-			m.saveColPrefs(colPrefsLogs, colVisToStrings(m.logColsVisible))
-		},
-	})
+	v := s.log.view
+	cmd := logSpec(v).handleKey(m, m.logTableFor(v), msg, logCtx{}, func() { m.rebuildLogItems(s) })
 	return tea.Batch(cmd, m.logHostsCmd(s))
 }
 
 // jumpToLogEntry pops back to the levelLogs screen, switches it to the
 // timeline and puts the cursor on e, so the user sees what happened around
 // that line. Any / filter is lifted so the target row is visible.
-func (m *Model) jumpToLogEntry(logs *screen, e *pg.LogEntry) tea.Cmd {
+func (m *Model) jumpToLogEntry(logs *screen, e *pglog.Entry) tea.Cmd {
 	for i, v := range slices.Backward(m.stack) {
 		if v == logs {
 			m.stack = m.stack[:i+1]
@@ -143,7 +121,7 @@ func (m *Model) jumpToLogEntry(logs *screen, e *pg.LogEntry) tea.Cmd {
 	}
 	logs.filter = ""
 	logs.filterFocused = false
-	logs.logView = logViewTimeline
+	logs.log.view = logViewTimeline
 	m.rebuildLogItems(logs)
 	for vi, idx := range logs.visibleIndexes() {
 		if t := logs.logEntryOf(logs.items[idx]); t != nil && t.Off == e.Off {
@@ -160,10 +138,10 @@ func (m *Model) jumpToLogEntry(logs *screen, e *pg.LogEntry) tea.Cmd {
 // prefix carries %d and in the default database otherwise. On the groups pane
 // the group's newest sample stands in for the row.
 func logDescribeTarget(s *screen) (descTarget, bool) {
-	var e *pg.LogEntry
+	var e *pglog.Entry
 	switch s.level {
 	case levelLogEntry:
-		e = s.logEntry
+		e = s.log.entry
 	default:
 		vis := s.visibleIndexes()
 		if s.cursor < 0 || s.cursor >= len(vis) {
@@ -171,12 +149,12 @@ func logDescribeTarget(s *screen) (descTarget, bool) {
 		}
 		it := s.items[vis[s.cursor]]
 		e = s.logEntryOf(it)
-		if g, ok := it.data.(*pg.LogGroup); ok && e == nil && s.logReport != nil {
+		if g, ok := it.data.(*pglog.Group); ok && e == nil && s.log.report != nil {
 			// Newest sample that carries a statement (an error's STATEMENT line
 			// is only logged with log_min_error_statement, so not every row has one).
 			for _, idx := range slices.Backward(g.Samples) {
-				if idx < len(s.logReport.Entries) {
-					c := &s.logReport.Entries[idx]
+				if idx < len(s.log.report.Entries) {
+					c := &s.log.report.Entries[idx]
 					if len(c.SQL) > 0 || len(c.Statement) > 0 {
 						e = c
 						break

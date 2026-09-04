@@ -1,4 +1,4 @@
-package pg
+package pglog
 
 import (
 	"strings"
@@ -57,10 +57,10 @@ func TestNormalizeMessage(t *testing.T) {
 
 func TestAggregate(t *testing.T) {
 	base := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
-	mk := func(i int, sev LogSeverity, cat LogCategory, msg string) LogEntry {
-		return LogEntry{Time: base.Add(time.Duration(i) * time.Hour), Severity: sev, Category: cat, Message: []byte(msg)}
+	mk := func(i int, sev Severity, cat Category, msg string) Entry {
+		return Entry{Time: base.Add(time.Duration(i) * time.Hour), Severity: sev, Category: cat, Message: []byte(msg)}
 	}
-	r := &LogReport{}
+	r := &Report{}
 	for i, d := range []float64{248.569, 260.446, 8337.081, 3139.568} {
 		e := mk(i, SevLog, CatSlowQuery, "duration")
 		e.DurationMs = d
@@ -95,7 +95,7 @@ func TestAggregate(t *testing.T) {
 	if r.Groups[1].Count != 3 || r.Groups[1].Severity != SevError {
 		t.Errorf("second group = %+v", r.Groups[1])
 	}
-	var ck *LogGroup
+	var ck *Group
 	for i := range r.Groups {
 		if r.Groups[i].Category == CatCheckpoint {
 			ck = &r.Groups[i]
@@ -128,7 +128,7 @@ func TestHistogramBucketChoice(t *testing.T) {
 	}
 	base := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
 	for _, c := range cases {
-		h := histogram([]LogEntry{{Time: base}, {Time: base.Add(c.span)}}, base, base.Add(c.span))
+		h := histogram([]Entry{{Time: base}, {Time: base.Add(c.span)}}, base, base.Add(c.span))
 		if h.Bucket != c.want {
 			t.Errorf("span %v: bucket %v, want %v", c.span, h.Bucket, c.want)
 		}

@@ -101,7 +101,7 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
 
-	t := s.tupleByLP(s.tupleAttrsLP)
+	t := s.tupleByLP(s.pages.tupleAttrsLP)
 
 	b.WriteString("\n")
 	title := "  " + styleSelected.Render("tuple layout")
@@ -111,9 +111,9 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 			title += mu("  ·  ctid " + *t.Ctid)
 		}
 		title += mu(fmt.Sprintf("  ·  %d B", t.LPLen))
-		if len(s.tupleAttrs) > 0 {
+		if len(s.pages.tupleAttrs) > 0 {
 			title += mu(fmt.Sprintf("  ·  stores %d of %d attrs",
-				t.Infomask2&pg.HeapNattsMask2, len(s.tupleAttrs)))
+				t.Infomask2&pg.HeapNattsMask2, len(s.pages.tupleAttrs)))
 		}
 	}
 	arrow := "↑"
@@ -130,18 +130,18 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 	b.WriteString(title + "\n\n")
 
 	switch {
-	case s.tupleAttrsLoading:
+	case s.pages.tupleAttrsLoading:
 		b.WriteString("  " + m.spinner.View() + " splitting tuple…\n")
 		return padInfo(&b, height)
-	case s.tupleAttrsErr != nil:
-		b.WriteString(styleErr.Render("  error: "+s.tupleAttrsErr.Error()) + "\n")
+	case s.pages.tupleAttrsErr != nil:
+		b.WriteString(styleErr.Render("  error: "+s.pages.tupleAttrsErr.Error()) + "\n")
 		return padInfo(&b, height)
-	case t == nil || len(s.tupleAttrs) == 0:
+	case t == nil || len(s.pages.tupleAttrs) == 0:
 		b.WriteString(mu("  tuple gone — the page changed since it was loaded; space to retry") + "\n")
 		return padInfo(&b, height)
 	}
 
-	segs, trusted := computeTupleLayout(*t, s.tupleAttrs)
+	segs, trusted := computeTupleLayout(*t, s.pages.tupleAttrs)
 	order := sortedTupleSegIdx(segs, m.tupleLayoutSort, m.tupleLayoutSortDesc)
 	if m.tupleLayoutCursor >= len(order) {
 		m.tupleLayoutCursor = len(order) - 1

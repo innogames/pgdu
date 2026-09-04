@@ -70,10 +70,11 @@ func TestInternalDownlinkRanges(t *testing.T) {
 	}
 	got := internalDownlinkRanges(items, "i", nil, 200)
 
+	// Lower bounds are padded to a common width so the "…" column lines up.
 	want := map[int32]string{
 		2: "−∞  …  d",
-		3: "d  …  h",
-		4: "h  …  m", // last downlink runs up to the page high key
+		3: "d   …  h",
+		4: "h   …  m", // last downlink runs up to the page high key
 	}
 	for off, w := range want {
 		plain := stripANSI(got[off])
@@ -97,8 +98,8 @@ func TestInternalDownlinkRangesRightmost(t *testing.T) {
 	if plain := stripANSI(got[1]); plain != "−∞  …  k" {
 		t.Errorf("off 1 range = %q, want %q", plain, "−∞  …  k")
 	}
-	if plain := stripANSI(got[2]); plain != "k  …  +∞" {
-		t.Errorf("off 2 range = %q, want %q", plain, "k  …  +∞")
+	if plain := stripANSI(got[2]); plain != "k   …  +∞" {
+		t.Errorf("off 2 range = %q, want %q", plain, "k   …  +∞")
 	}
 }
 
@@ -117,21 +118,21 @@ func TestBtreeLevelsLine(t *testing.T) {
 	if got := btreeLevelsLine(s, w); got != "" {
 		t.Errorf("no scan issued: line = %q, want empty", got)
 	}
-	s.btreeLevelsLoading = true
+	s.pages.btreeLevelsLoading = true
 	if got := stripANSI(btreeLevelsLine(s, w)); !strings.Contains(got, "counting") {
 		t.Errorf("scan in flight: line = %q, want a counting placeholder", got)
 	}
-	s.btreeLevelsLoading = false
-	s.btreeLevelsDone = true
+	s.pages.btreeLevelsLoading = false
+	s.pages.btreeLevelsDone = true
 	if got := btreeLevelsLine(s, w); got != "" {
 		t.Errorf("empty census (metapage-only index): line = %q, want empty", got)
 	}
-	s.btreeLevelsErr = errors.New("permission denied for function bt_multi_page_stats")
+	s.pages.btreeLevelsErr = errors.New("permission denied for function bt_multi_page_stats")
 	if got := stripANSI(btreeLevelsLine(s, w)); !strings.Contains(got, "unavailable — permission denied") {
 		t.Errorf("failed scan: line = %q, want the failure reason inline", got)
 	}
-	s.btreeLevelsErr = nil
-	s.btreeLevels = []pg.BtreeLevelCount{
+	s.pages.btreeLevelsErr = nil
+	s.pages.btreeLevels = []pg.BtreeLevelCount{
 		{Level: 2, Type: "r", Pages: 1},
 		{Level: 1, Type: "i", Pages: 154},
 		{Level: 0, Type: "l", Pages: 139538},
@@ -239,7 +240,7 @@ func TestIndexTupleRowHotRedirect(t *testing.T) {
 	row := stripANSI(renderIndexTupleRow(pg.IndexTuple{
 		ItemOffset: 2, ItemLen: 56, Ctid: &root,
 		Data: hexText("allies-129ece0"), HotCtid: &live, HotDecoded: &key,
-	}, "l", "", nil, 60, false))
+	}, "l", idxRowOpts{}, nil, 60, false))
 	if !strings.Contains(row, "(0,50)▸112") {
 		t.Errorf("row = %q, want the ctid to show the redirect hop (0,50)▸112", row)
 	}
@@ -257,7 +258,7 @@ func TestIndexTupleRowDeadTagFollowsLPDead(t *testing.T) {
 	ctid := "(0,50)"
 	tup := pg.IndexTuple{ItemOffset: 2, ItemLen: 56, Ctid: &ctid, Data: hexText("allies-129ece0")}
 
-	unresolved := stripANSI(renderIndexTupleRow(tup, "l", "", nil, 60, false))
+	unresolved := stripANSI(renderIndexTupleRow(tup, "l", idxRowOpts{}, nil, 60, false))
 	if strings.Contains(unresolved, "dead") {
 		t.Errorf("row = %q, want no dead tag when the heap join merely missed", unresolved)
 	}
@@ -266,7 +267,7 @@ func TestIndexTupleRowDeadTagFollowsLPDead(t *testing.T) {
 	}
 
 	tup.Dead = true
-	dead := stripANSI(renderIndexTupleRow(tup, "l", "", nil, 60, false))
+	dead := stripANSI(renderIndexTupleRow(tup, "l", idxRowOpts{}, nil, 60, false))
 	if !strings.Contains(dead, "dead") {
 		t.Errorf("row = %q, want a dead tag when LP_DEAD is set", dead)
 	}
@@ -279,8 +280,139 @@ func TestIndexTupleRowDecodedPrecedence(t *testing.T) {
 	row := stripANSI(renderIndexTupleRow(pg.IndexTuple{
 		ItemOffset: 2, ItemLen: 56, Ctid: &ctid,
 		Decoded: &direct, HotCtid: &live, HotDecoded: &hot,
-	}, "l", "", nil, 60, false))
+	}, "l", idxRowOpts{}, nil, 60, false))
 	if !strings.Contains(row, direct) || strings.Contains(row, hot) {
 		t.Errorf("row = %q, want the directly-decoded key", row)
+	}
+}
+
+// Item #1 of a non-rightmost internal page is the high key: it carries a key
+// and a keyless minus-infinity downlink follows. On the rightmost page offset 1
+// is that keyless downlink itself, and leaf pages never qualify.
+func TestInternalHighKey(t *testing.T) {
+	nonRightmost := []item{
+		tupleItem(1, hexText("m")),
+		tupleItem(2, nil),
+		tupleItem(3, hexText("d")),
+	}
+	if !internalHighKey(nonRightmost, "i", nil) {
+		t.Error("non-rightmost internal page: want offset 1 recognised as the high key")
+	}
+	rightmost := []item{tupleItem(1, nil), tupleItem(2, hexText("k"))}
+	if internalHighKey(rightmost, "i", nil) {
+		t.Error("rightmost internal page: offset 1 is the −∞ downlink, not a high key")
+	}
+	if internalHighKey(nonRightmost, "l", nil) {
+		t.Error("leaf page: never an internal high key")
+	}
+}
+
+// The internal-page high key must not masquerade as a downlink: no "→ blk",
+// and the key column reads as the page's upper bound.
+func TestIndexTupleRowInternalHighKey(t *testing.T) {
+	ctid := "(634,1)"
+	tup := pg.IndexTuple{ItemOffset: 1, ItemLen: 24, Ctid: &ctid, Data: hexText("124614")}
+	row := stripANSI(renderIndexTupleRow(tup, "i", idxRowOpts{highKey: true}, nil, 80, false))
+	if !strings.Contains(row, "high key") || strings.Contains(row, "→ blk") {
+		t.Errorf("row = %q, want a high-key label and no downlink", row)
+	}
+	if !strings.Contains(row, "(this page)  …  124614") {
+		t.Errorf("row = %q, want the key phrased as the page's upper bound", row)
+	}
+	asDownlink := stripANSI(renderIndexTupleRow(tup, "i", idxRowOpts{}, nil, 80, false))
+	if !strings.Contains(asDownlink, "→ blk 634") {
+		t.Errorf("row = %q, want a downlink label when not flagged as the high key", asDownlink)
+	}
+}
+
+// A posting member row shows its own heap ctid and projection; when the heap
+// row isn't visible it borrows the parent's key (dedup makes them identical)
+// and the dead tag only when the whole posting tuple carries LP_DEAD.
+func TestPostingMemberRow(t *testing.T) {
+	pctid, mctid, key := "(0,8194)", "(599156,8)", "99695"
+	parent := pg.IndexTuple{ItemOffset: 2, ItemLen: 808, Ctid: &pctid, Data: hexText("99695")}
+	live := postingMember{parent: parent, n: 7, tuple: pg.IndexTuple{Ctid: &mctid, Decoded: &key}}
+	row := stripANSI(renderPostingMemberRow(live, nil, 60, false))
+	for _, want := range []string{"·007", mctid, key} {
+		if !strings.Contains(row, want) {
+			t.Errorf("row = %q, want %q", row, want)
+		}
+	}
+	if strings.Contains(row, "808") {
+		t.Errorf("row = %q, want no itemlen on a member row", row)
+	}
+
+	gone := postingMember{parent: parent, n: 8, tuple: pg.IndexTuple{Ctid: &mctid}}
+	row = stripANSI(renderPostingMemberRow(gone, nil, 60, false))
+	if !strings.Contains(row, key) || strings.Contains(row, "dead") {
+		t.Errorf("row = %q, want the parent's key and no dead tag", row)
+	}
+	gone.parent.Dead = true
+	if row = stripANSI(renderPostingMemberRow(gone, nil, 60, false)); !strings.Contains(row, "dead") {
+		t.Errorf("row = %q, want a dead tag when the posting tuple is LP_DEAD", row)
+	}
+}
+
+// Members stay glued below their parent under both sort columns and directions:
+// itemLP/size tie with the parent and the name tiebreak orders them.
+func TestPostingMembersSortUnderParent(t *testing.T) {
+	c1, c2 := "(5,1)", "(6,2)"
+	p2 := pg.IndexTuple{ItemOffset: 2, ItemLen: 800}
+	p3 := pg.IndexTuple{ItemOffset: 3, ItemLen: 800}
+	items := []item{
+		postingMemberToItem(p3, 1, pg.IndexTuple{Ctid: &c2}),
+		indexTupleToItem(p3),
+		postingMemberToItem(p2, 2, pg.IndexTuple{Ctid: &c2}),
+		indexTupleToItem(p2),
+		postingMemberToItem(p2, 1, pg.IndexTuple{Ctid: &c1}),
+	}
+	m := &Model{}
+	for _, tc := range []struct {
+		sort sortMode
+		desc bool
+		want []string
+	}{
+		{sortByLP, false, []string{"#0002", "#0002.001 (5,1)", "#0002.002 (6,2)", "#0003", "#0003.001 (6,2)"}},
+		{sortByLP, true, []string{"#0003", "#0003.001 (6,2)", "#0002", "#0002.001 (5,1)", "#0002.002 (6,2)"}},
+		{sortBySize, true, []string{"#0002", "#0002.001 (5,1)", "#0002.002 (6,2)", "#0003", "#0003.001 (6,2)"}},
+	} {
+		s := &screen{level: levelIndexTuples, sort: tc.sort, sortDesc: tc.desc, items: append([]item(nil), items...)}
+		m.applySort(s)
+		got := make([]string, len(s.items))
+		for i, it := range s.items {
+			got[i] = it.name
+		}
+		if strings.Join(got, "|") != strings.Join(tc.want, "|") {
+			t.Errorf("%s desc=%v: order = %v, want %v", tc.sort.name(), tc.desc, got, tc.want)
+		}
+	}
+}
+
+// Posting tuples fold by default: only the summary row is listed, Enter unfolds
+// the members below it (cursor staying on the summary), Enter again folds.
+func TestTogglePosting(t *testing.T) {
+	c1, c2 := "(5,1)", "(6,2)"
+	posting := pg.IndexTuple{ItemOffset: 2, ItemLen: 800, Posting: []pg.IndexTuple{{Ctid: &c1}, {Ctid: &c2}}}
+	m := &Model{}
+	s := &screen{level: levelIndexTuples, sort: sortByLP}
+	s.pages.indexTuples = []pg.IndexTuple{{ItemOffset: 1, ItemLen: 16}, posting, {ItemOffset: 3, ItemLen: 16}}
+	m.rebuildIndexTupleItems(s)
+	if len(s.items) != 3 {
+		t.Fatalf("folded: %d rows, want 3", len(s.items))
+	}
+	if !s.items[1].hasChildren {
+		t.Error("posting row with members should advertise Enter")
+	}
+	s.cursor = 2
+	m.togglePosting(s, posting)
+	if len(s.items) != 5 || s.cursor != 1 {
+		t.Fatalf("unfolded: %d rows (want 5), cursor %d (want 1 = the posting row)", len(s.items), s.cursor)
+	}
+	if _, ok := s.items[2].data.(postingMember); !ok {
+		t.Errorf("row after the posting tuple = %T, want its first member", s.items[2].data)
+	}
+	m.togglePosting(s, posting)
+	if len(s.items) != 3 {
+		t.Errorf("re-folded: %d rows, want 3", len(s.items))
 	}
 }

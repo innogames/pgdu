@@ -115,7 +115,7 @@ func barReserve(s *screen) int {
 		// Every AM gets the optional [temp] column just before the page name;
 		// it only takes space when buffer data loaded (pg_buffercache).
 		base := colCursor + colBrackets + pageTempReserve(s)
-		switch s.index.AccessMethod {
+		switch s.pages.index.AccessMethod {
 		case "gist":
 			// type + used + items + free% + [temp] + page name (no tree level)
 			return base + idxPageTypeColW + colGutter + idxPageUsedColW + colGutter +
@@ -207,7 +207,7 @@ const (
 // page-inspector screen — zero until pg_buffercache data actually loaded, so
 // the bar doesn't shrink for a column that isn't drawn.
 func pageTempReserve(s *screen) int {
-	if s.pageBufs == nil {
+	if s.pages.pageBufs == nil {
 		return 0
 	}
 	return pageTempColW + colGutter

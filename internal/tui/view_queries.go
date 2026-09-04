@@ -12,7 +12,7 @@ import (
 // (empty) load before any rows exist; buildStatementItems returns the same
 // schema once rows arrive.
 func (m *Model) statementColumns(trackPlanning bool) []pg.DiagColumn {
-	return diagColumnsFrom(m.visibleStmtCols(stmtCtx{trackPlanning: trackPlanning}))
+	return diagColumnsFrom(stmtSpec.visibleCols(&m.stmtTable, stmtCtx{trackPlanning: trackPlanning}))
 }
 
 // buildStatementItems converts window-delta QueryStats into generic-table rows
@@ -27,7 +27,7 @@ func (m *Model) buildStatementItems(rows []pg.QueryStat, trackPlanning bool) ([]
 		windowMs += q.TotalExecTime
 	}
 	ctx := stmtCtx{windowMs: windowMs, trackPlanning: trackPlanning}
-	descs := m.visibleStmtCols(ctx)
+	descs := stmtSpec.visibleCols(&m.stmtTable, ctx)
 
 	items := make([]item, 0, len(rows))
 	for _, q := range rows {
@@ -115,36 +115,36 @@ func planTimeMetric(q pg.QueryStat, trackPlanning bool, mu func(...string) strin
 
 func (m *Model) renderStatementsHeader(s *screen) string {
 	mu := styleMuted.Render
-	if s.statBaselineAt.IsZero() {
+	if s.stat.baselineAt.IsZero() {
 		return "  " + styleHeader.Render(" queries ") + "  " + mu("opening window — run some queries…")
 	}
 	var line string
 	switch {
-	case s.statEndSnap != nil:
+	case s.stat.endSnap != nil:
 		// Frozen A→B diff between two snapshots: no live "now", so the window is the
 		// fixed span between the two capture times and there's nothing to refresh.
 		line = "  " + styleHeader.Render(" queries ") + "  " +
-			styleSelected.Render(s.statBaselineAt.Format("15:04:05")) + mu(" → ") +
-			styleSelected.Render(s.statSampledAt.Format("15:04:05")) +
-			mu(fmt.Sprintf("  ·  snapshot diff (frozen)  ·  %d queries  ·  R for live · Enter for detail", len(s.statRows)))
-	case s.statBaseSnap != nil:
+			styleSelected.Render(s.stat.baselineAt.Format("15:04:05")) + mu(" → ") +
+			styleSelected.Render(s.stat.sampledAt.Format("15:04:05")) +
+			mu(fmt.Sprintf("  ·  snapshot diff (frozen)  ·  %d queries  ·  R for live · Enter for detail", len(s.stat.rows)))
+	case s.stat.baseSnap != nil:
 		// Disk baseline, live end: the window runs from the snapshot's capture time
 		// up to the latest live sample.
-		elapsed := max(s.statSampledAt.Sub(s.statBaselineAt), 0)
+		elapsed := max(s.stat.sampledAt.Sub(s.stat.baselineAt), 0)
 		line = "  " + styleHeader.Render(" queries ") + "  " +
 			mu("over the last ") + styleSelected.Render(fmtDuration(elapsed)) +
-			mu(" (since "+s.statBaselineAt.Format("2006-01-02 15:04:05")+" snapshot) · live") +
+			mu(" (since "+s.stat.baselineAt.Format("2006-01-02 15:04:05")+" snapshot) · live") +
 			mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t cadence · C columns · R for live · Enter for detail",
-				len(s.statRows), m.refreshLabel()))
+				len(s.stat.rows), m.refreshLabel()))
 	default:
-		elapsed := max(s.statSampledAt.Sub(s.statBaselineAt), 0)
+		elapsed := max(s.stat.sampledAt.Sub(s.stat.baselineAt), 0)
 		line = "  " + styleHeader.Render(" queries ") + "  " +
 			mu("over the last ") + styleSelected.Render(fmtDuration(elapsed)) +
-			mu(" (since "+s.statBaselineAt.Format("15:04:05")+")") +
+			mu(" (since "+s.stat.baselineAt.Format("15:04:05")+")") +
 			mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t cadence · C columns · R resets · S saves · L loads · Enter for detail",
-				len(s.statRows), m.refreshLabel()))
+				len(s.stat.rows), m.refreshLabel()))
 	}
-	if !s.statTrackPlanning {
+	if !s.stat.trackPlanning {
 		// The planning-time column is hidden (it would always read 0); point the
 		// user at the setting that turns planning-time collection on.
 		line += "\n  " + mu("planning time column hidden — ") + styleBadge.Render("track_planning off") +
@@ -281,21 +281,5 @@ func (m *Model) renderStatementsInfo(height int) string {
 // columns are toggled with space/Enter; the mandatory query column and the
 // planning columns when track_planning is off are shown but not toggleable.
 func (m *Model) renderColumnConfig(s *screen, height int) string {
-	m.ensureStmtColsInit()
-	ctx := stmtCtx{trackPlanning: s.statTrackPlanning}
-	reg := stmtColumnRegistry()
-	rows := make([]colCfgRow, len(reg))
-	for i, d := range reg {
-		rows[i] = colCfgRow{
-			name:        d.name,
-			desc:        d.desc,
-			on:          d.mandatory || m.stmtColEnabled(d.id, d.defaultOn),
-			mandatory:   d.mandatory,
-			unavailable: d.available != nil && !d.available(ctx),
-			note:        "track_planning off",
-		}
-	}
-	return m.renderColCfgOverlay(
-		"choose which columns the top-queries table shows — opt-in metrics are off by default",
-		rows, m.colCfgCursor, height)
+	return stmtSpec.renderConfig(m, &m.stmtTable, stmtCtx{trackPlanning: s.stat.trackPlanning}, height)
 }

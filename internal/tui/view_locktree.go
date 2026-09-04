@@ -30,10 +30,10 @@ func (m *Model) rebuildLockTreeItems(s *screen) {
 	s.items = s.items[:0]
 	s.itemsRev++
 
-	byPID := make(map[int32]pg.LockNode, len(s.lockNodes))
+	byPID := make(map[int32]pg.LockNode, len(s.lock.nodes))
 	blockedBy := make(map[int32][]int32) // pid → its blockers
 	blocks := make(map[int32][]int32)    // pid → backends it blocks (children)
-	for _, n := range s.lockNodes {
+	for _, n := range s.lock.nodes {
 		byPID[n.PID] = n
 		blockedBy[n.PID] = n.Blockers
 		for _, b := range n.Blockers {
@@ -76,8 +76,8 @@ func (m *Model) rebuildLockTreeItems(s *screen) {
 
 	// Defensive: if the graph is all cycles (no clean root), fall back to listing
 	// every involved backend flat so nothing vanishes from the view.
-	if len(s.items) == 0 && len(s.lockNodes) > 0 {
-		nodes := append([]pg.LockNode(nil), s.lockNodes...)
+	if len(s.items) == 0 && len(s.lock.nodes) > 0 {
+		nodes := append([]pg.LockNode(nil), s.lock.nodes...)
 		sort.Slice(nodes, func(i, j int) bool { return nodes[i].PID < nodes[j].PID })
 		for _, n := range nodes {
 			s.items = append(s.items, item{name: lockRowFilterText(n), data: lockTreeRow{node: n}})
@@ -96,14 +96,14 @@ func (m *Model) renderLockTree(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
 
-	if s.lockErr != nil {
-		b.WriteString("  " + styleErr.Render("error: "+s.lockErr.Error()) + "\n")
+	if s.lock.err != nil {
+		b.WriteString("  " + styleErr.Render("error: "+s.lock.err.Error()) + "\n")
 		return padToHeight(&b, height, 1)
 	}
 
 	// Header line: count + refresh badge + the k/x action hints.
 	waiters := 0
-	for _, n := range s.lockNodes {
+	for _, n := range s.lock.nodes {
 		if n.Waiting() {
 			waiters++
 		}
@@ -113,7 +113,7 @@ func (m *Model) renderLockTree(s *screen, height int) string {
 		refresh = m.activityRefresh.String()
 	}
 	b.WriteString("  " + styleSelected.Render("blocking chains") + mu(fmt.Sprintf("  ·  %d backends, %d waiting  ·  ⟳ %s  ·  ",
-		len(s.lockNodes), waiters, refresh)) +
+		len(s.lock.nodes), waiters, refresh)) +
 		styleBadge.Render("k") + mu(" cancel · ") + styleBadge.Render("x/^k") + mu(" terminate · ") +
 		styleBadge.Render("t") + mu(" cadence") + "\n")
 	used := 1

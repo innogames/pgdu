@@ -118,7 +118,7 @@ func bufferDetailBarWidth(termW int) int {
 func (m *Model) renderBufferDetail(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
-	st := s.bufDetail
+	st := s.buf.detail
 	if st == nil {
 		for range height {
 			b.WriteString("\n")
@@ -139,7 +139,7 @@ func (m *Model) renderBufferDetail(s *screen, height int) string {
 	// table size (on-disk) and hit ratio (cumulative) come from st. On a histogram
 	// error we fall back to st's snapshot since fresh data is unavailable.
 	var totBufs, totDirty, maxBufs, weighted int64
-	for _, u := range s.bufUsage {
+	for _, u := range s.buf.usage {
 		totBufs += u.Buffers
 		totDirty += u.Dirty
 		weighted += int64(u.Count) * u.Buffers
@@ -147,7 +147,7 @@ func (m *Model) renderBufferDetail(s *screen, height int) string {
 			maxBufs = u.Buffers
 		}
 	}
-	bs := s.bufBlockSize
+	bs := s.buf.blockSize
 	if bs <= 0 {
 		bs = 8192 // defensive: standard BLCKSZ if the block_size read failed
 	}
@@ -155,7 +155,7 @@ func (m *Model) renderBufferDetail(s *screen, height int) string {
 	if totBufs > 0 {
 		avgUsage = float64(weighted) / float64(totBufs)
 	}
-	if s.bufUsageErr != nil {
+	if s.buf.usageErr != nil {
 		bufferedBytes, dirtyBytes, avgUsage = st.BufferedBytes, st.DirtyBytes, st.UsageAvg
 	}
 
@@ -200,13 +200,13 @@ func (m *Model) renderBufferDetail(s *screen, height int) string {
 	// --- clock-sweep temperature histogram ---
 	b.WriteString("\n  " + styleHeader.Render(" buffer temperature ") + "\n")
 	switch {
-	case s.bufUsageErr != nil:
-		b.WriteString("    " + styleErr.Render(s.bufUsageErr.Error()) + "\n")
+	case s.buf.usageErr != nil:
+		b.WriteString("    " + styleErr.Render(s.buf.usageErr.Error()) + "\n")
 	default:
 		if totBufs == 0 {
 			b.WriteString("    " + mu("not currently in shared_buffers") + "\n")
 		} else {
-			for _, u := range s.bufUsage {
+			for _, u := range s.buf.usage {
 				word := ""
 				switch u.Count {
 				case 0:
@@ -289,11 +289,11 @@ func (m *Model) summaryBarWidth() int {
 // bufferSlicePalette; the returned rankByOID map ranks every buffered
 // table so list rows below can pick the same palette colour by rank.
 func (m *Model) renderBufferSummary(s *screen) (string, map[uint32]int) {
-	if s.bufferSummaryErr != nil {
+	if s.buf.summaryErr != nil {
 		return "  " + styleMuted.Render("shared buffers: ") +
-			styleErr.Render(s.bufferSummaryErr.Error()), nil
+			styleErr.Render(s.buf.summaryErr.Error()), nil
 	}
-	sum := s.bufferSummary
+	sum := s.buf.summary
 	if sum == nil || sum.TotalBytes <= 0 {
 		return "  " + styleMuted.Render("shared_buffers: unavailable"), nil
 	}

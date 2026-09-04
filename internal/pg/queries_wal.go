@@ -140,6 +140,7 @@ WITH agg AS (
   GROUP  BY reldatabase, reltablespace, relfilenode
 )
 SELECT a.reldatabase,
+       a.reltablespace,
        a.relfilenode,
        a.data_bytes,
        a.fpi_bytes,
@@ -162,6 +163,24 @@ LEFT   JOIN LATERAL (
          WHERE  f.relid IS NOT NULL
        ) r ON true
 ORDER  BY (a.data_bytes + a.fpi_bytes) DESC
+`
+
+// sqlWALResolveFilenodes maps (reltablespace, relfilenode) pairs to relation
+// names in the *connected* database — the second pass that resolves block refs
+// belonging to databases other than the one the WAL was read from, run once per
+// foreign database through its own pool. Same TOAST-owner hop as sqlWALBlocks.
+// $1/$2 are parallel oid arrays; pairs that don't map (dropped) are omitted.
+const sqlWALResolveFilenodes = `
+SELECT x.relfilenode,
+       CASE WHEN owner.oid IS NOT NULL
+            THEN owner.oid::regclass::text
+            ELSE f.relid::text
+       END,
+       owner.oid IS NOT NULL
+FROM   unnest($1::oid[], $2::oid[]) AS x(reltablespace, relfilenode)
+CROSS  JOIN LATERAL (SELECT pg_filenode_relation(x.reltablespace, x.relfilenode) AS relid) f
+LEFT   JOIN pg_class owner ON owner.reltoastrelid = f.relid::oid
+WHERE  f.relid IS NOT NULL
 `
 
 // sqlWALRelBlocks lists every block reference of one relation across the window,

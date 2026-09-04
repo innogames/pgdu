@@ -1,4 +1,4 @@
-package pg
+package pglog
 
 import (
 	"context"
@@ -20,32 +20,32 @@ const samplePgBouncerLog = `2026-09-03 08:00:20.374 UTC [1396084] LOG stats: 921
 
 type memSource struct{ data []byte }
 
-func (s *memSource) Info() LogSourceInfo {
-	return LogSourceInfo{Kind: "local", Path: "/var/log/postgresql/pgbouncer_1.log", Size: int64(len(s.data))}
+func (s *memSource) Info() SourceInfo {
+	return SourceInfo{Kind: "local", Path: "/var/log/postgresql/pgbouncer_1.log", Size: int64(len(s.data))}
 }
 
-func (s *memSource) ReadTail(_ context.Context, n int64) ([]byte, LogWindow, error) {
-	return s.data, LogWindow{Requested: n, FileSize: int64(len(s.data)), Bytes: int64(len(s.data))}, nil
+func (s *memSource) ReadTail(_ context.Context, n int64) ([]byte, Window, error) {
+	return s.data, Window{Requested: n, FileSize: int64(len(s.data)), Bytes: int64(len(s.data))}, nil
 }
 func (s *memSource) ReadFrom(context.Context, int64) ([]byte, error) { return nil, ErrNotIncremental }
-func (s *memSource) Cursor(context.Context) *LogCursor               { return nil }
+func (s *memSource) Cursor(context.Context) *Cursor                  { return nil }
 
 func TestDetectPgBouncerFormat(t *testing.T) {
-	if got := DetectLogFormat([]byte(samplePgBouncerLog)); got != LogFormatPgBouncer {
-		t.Fatalf("DetectLogFormat = %v, want pgbouncer", got)
+	if got := DetectFormat([]byte(samplePgBouncerLog)); got != FormatPgBouncer {
+		t.Fatalf("DetectFormat = %v, want pgbouncer", got)
 	}
 	// A Postgres line with the colon must not be mistaken for pgbouncer.
-	if got := DetectLogFormat([]byte("2026-09-03 08:00:20.374 UTC [1396084] LOG:  checkpoint starting: time\n")); got != LogFormatStderr {
+	if got := DetectFormat([]byte("2026-09-03 08:00:20.374 UTC [1396084] LOG:  checkpoint starting: time\n")); got != FormatStderr {
 		t.Errorf("Postgres %%m [%%p] line detected as %v", got)
 	}
 }
 
 func TestLoadPgBouncerLog(t *testing.T) {
-	r, err := LoadLog(t.Context(), &memSource{data: []byte(samplePgBouncerLog)}, "%t [%p-%l] %q%u@%h ", time.UTC, 0, AggOptions{})
+	r, err := Load(t.Context(), &memSource{data: []byte(samplePgBouncerLog)}, "%t [%p-%l] %q%u@%h ", time.UTC, 0, AggOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Format != LogFormatPgBouncer || r.Prefix != "pgbouncer" || r.PrefixDetected {
+	if r.Format != FormatPgBouncer || r.Prefix != "pgbouncer" || r.PrefixDetected {
 		t.Errorf("format %v prefix %q detected %v", r.Format, r.Prefix, r.PrefixDetected)
 	}
 	if len(r.Entries) != 9 || r.Unparsed != 0 {
@@ -61,8 +61,8 @@ func TestLoadPgBouncerLog(t *testing.T) {
 	if !strings.HasPrefix(string(e.Message), "stats: 921 xacts/s") {
 		t.Errorf("message = %q", e.Message)
 	}
-	wantCat := []LogCategory{CatOther, CatConnection, CatConnection, CatWarning, CatError, CatConnection, CatConnection, CatOther, CatOther}
-	wantSev := []LogSeverity{SevLog, SevLog, SevLog, SevWarning, SevError, SevLog, SevLog, SevDebug, SevLog}
+	wantCat := []Category{CatOther, CatConnection, CatConnection, CatWarning, CatError, CatConnection, CatConnection, CatOther, CatOther}
+	wantSev := []Severity{SevLog, SevLog, SevLog, SevWarning, SevError, SevLog, SevLog, SevDebug, SevLog}
 	for i, e := range r.Entries {
 		if e.Category != wantCat[i] {
 			t.Errorf("entry %d %q: category %v, want %v", i, e.FirstLine(), e.Category, wantCat[i])
@@ -78,8 +78,27 @@ func TestLoadPgBouncerLog(t *testing.T) {
 	for _, g := range r.Groups {
 		titles[g.Title] = g.Count
 	}
-	if titles["stats: N xacts/s, N queries/s, N client parses/s, N server parses/s, N binds/s, in N B/s, out N B/s, xact N us, query N us, wait N us"] != 2 {
+	if titles["stats: periodic pooler statistics (tab → pooler stats pane)"] != 2 {
 		t.Errorf("stats lines not grouped: %v", titles)
+	}
+	if r.PoolerStats != 2 {
+		t.Errorf("PoolerStats = %d, want 2", r.PoolerStats)
+	}
+	st := r.Entries[0].PoolerStats
+	want := PgBouncerStats{XactsPerSec: 921, QueriesPerSec: 1992, InBytesPerSec: 249055, OutBytesPerSec: 4230871, XactUs: 13340, QueryUs: 191}
+	if st == nil || *st != want {
+		t.Errorf("stats = %+v, want %+v", st, want)
+	}
+	if r.Entries[1].PoolerStats != nil {
+		t.Error("socket line carries PoolerStats")
+	}
+	// Two stats lines a minute apart land in two 1-minute buckets; the
+	// series carries each line's own figure (a single-line bucket averages to itself).
+	if len(r.Pooler.Counts) != len(r.Hist.Counts) || r.Hist.Bucket != time.Minute {
+		t.Fatalf("pooler hist %d buckets vs %d (bucket %s)", len(r.Pooler.Counts), len(r.Hist.Counts), r.Hist.Bucket)
+	}
+	if q := r.Pooler.Series(PoolerQueries); q[0] != 1992 || q[len(q)-1] != 1951 {
+		t.Errorf("queries series = %v", q)
 	}
 	if titles["client closing because: client close request (age=Ns)"] != 2 {
 		t.Errorf("closing lines not grouped: %v", titles)
@@ -94,10 +113,33 @@ func TestLoadPgBouncerLog(t *testing.T) {
 	}
 }
 
+func TestParsePgBouncerStats(t *testing.T) {
+	// pre-1.18 shape: no parses/binds fields.
+	e := Entry{Severity: SevLog, Message: []byte("stats: 90 xacts/s, 1357 queries/s, in 399055 B/s, out 1253187 B/s, xact 17861 us, query 242 us, wait 3 us")}
+	classify(&e)
+	want := PgBouncerStats{XactsPerSec: 90, QueriesPerSec: 1357, InBytesPerSec: 399055, OutBytesPerSec: 1253187, XactUs: 17861, QueryUs: 242, WaitUs: 3}
+	if e.Category != CatOther || e.PoolerStats == nil || *e.PoolerStats != want {
+		t.Errorf("short stats line: cat %v stats %+v", e.Category, e.PoolerStats)
+	}
+	e = Entry{Severity: SevLog, Message: []byte("stats: 1 xacts/s, 2 queries/s, 3 client parses/s, 4 server parses/s, 5 binds/s, in 6 B/s, out 7 B/s, xact 8 us, query 9 us, wait 10 us")}
+	classify(&e)
+	want = PgBouncerStats{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	if e.PoolerStats == nil || *e.PoolerStats != want {
+		t.Errorf("full stats line: %+v", e.PoolerStats)
+	}
+	for _, bad := range []string{"stats: garbage", "stats: 90 xacts/s, in 1 B/s", "stats: x xacts/s, 2 queries/s"} {
+		e = Entry{Severity: SevLog, Message: []byte(bad)}
+		classify(&e)
+		if e.PoolerStats != nil || e.Category != CatOther {
+			t.Errorf("%q: stats %+v cat %v, want nil/other", bad, e.PoolerStats, e.Category)
+		}
+	}
+}
+
 func TestClassifyPgBouncerBeforeReplication(t *testing.T) {
 	// "replication=no" contains the bare replication marker; the socket-tagged
 	// shape must win.
-	e := LogEntry{Severity: SevLog, Message: []byte("C-0x1: db/u@1.2.3.4:5 login attempt: db=db user=u tls=no replication=no")}
+	e := Entry{Severity: SevLog, Message: []byte("C-0x1: db/u@1.2.3.4:5 login attempt: db=db user=u tls=no replication=no")}
 	classify(&e)
 	if e.Category != CatConnection {
 		t.Errorf("category %v, want connection", e.Category)

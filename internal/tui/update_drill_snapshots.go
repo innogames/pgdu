@@ -34,7 +34,7 @@ func (m *Model) loadSelectedSnapshot(s *screen, cur item) tea.Cmd {
 		if path == snapNow || path == snapReset || path == snapSession {
 			continue
 		}
-		meta, ok := metaByPath(s.statSnapMetas, path)
+		meta, ok := metaByPath(s.stat.snapMetas, path)
 		if !ok {
 			return nil
 		}
@@ -68,29 +68,29 @@ func (m *Model) loadSelectedSnapshot(s *screen, cur item) tea.Cmd {
 		switch startPath {
 		case snapReset:
 			// Cumulative live: empty baseline, table grows with each refresh tick.
-			st.statBaseSnap = nil
-			st.statEndSnap = nil
-			st.statCumulative = true
-			st.statBaseline = map[int64]pg.QueryStat{}
-			st.statBaselineAt = time.Time{} // will be updated by the first statementsLoadedMsg
+			st.stat.baseSnap = nil
+			st.stat.endSnap = nil
+			st.stat.cumulative = true
+			st.stat.baseline = map[int64]pg.QueryStat{}
+			st.stat.baselineAt = time.Time{} // will be updated by the first statementsLoadedMsg
 			m.popToStatements()
 			return m.loadCurrent()
 		case snapSession:
 			// Restore the original session window: re-install the preserved baseline
 			// and re-sample live, so the table shows everything since the tool opened.
-			st.statBaseline = st.statSessionBaseline
-			st.statBaselineAt = st.statSessionStart
-			st.statBaseSnap = nil
-			st.statEndSnap = nil
-			st.statCumulative = false
+			st.stat.baseline = st.stat.sessionBaseline
+			st.stat.baselineAt = st.stat.sessionStart
+			st.stat.baseSnap = nil
+			st.stat.endSnap = nil
+			st.stat.cumulative = false
 			m.popToStatements()
 			return m.loadCurrent()
 		case snapNow:
 			// Both now → fresh live-from-now (equivalent to R).
-			st.statBaseline = nil
-			st.statBaseSnap = nil
-			st.statEndSnap = nil
-			st.statCumulative = false
+			st.stat.baseline = nil
+			st.stat.baseSnap = nil
+			st.stat.endSnap = nil
+			st.stat.cumulative = false
 			m.popToStatements()
 			return m.loadCurrent()
 		default:
@@ -110,21 +110,21 @@ func (m *Model) loadSelectedSnapshot(s *screen, cur item) tea.Cmd {
 // baseline is neither the session anchor nor any snapshot.
 func (m *Model) appliedWindowPaths(st, s *screen) (startPath, endPath string) {
 	endPath = snapNow
-	if st.statEndSnap != nil {
-		if meta, ok := metaByCapturedAt(s.statSnapMetas, st.statEndSnap.CapturedAt); ok {
+	if st.stat.endSnap != nil {
+		if meta, ok := metaByCapturedAt(s.stat.snapMetas, st.stat.endSnap.CapturedAt); ok {
 			endPath = meta.Path
 		} else {
 			endPath = ""
 		}
 	}
 	switch {
-	case st.statCumulative:
+	case st.stat.cumulative:
 		startPath = snapReset
-	case st.statBaseSnap != nil:
-		if meta, ok := metaByCapturedAt(s.statSnapMetas, st.statBaseSnap.CapturedAt); ok {
+	case st.stat.baseSnap != nil:
+		if meta, ok := metaByCapturedAt(s.stat.snapMetas, st.stat.baseSnap.CapturedAt); ok {
 			startPath = meta.Path
 		}
-	case !st.statSessionStart.IsZero() && st.statBaselineAt.Equal(st.statSessionStart):
+	case !st.stat.sessionStart.IsZero() && st.stat.baselineAt.Equal(st.stat.sessionStart):
 		startPath = snapSession
 	}
 	return startPath, endPath
@@ -154,11 +154,11 @@ func (m *Model) snapTime(s *screen, path string) time.Time {
 		return time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
 	case snapSession:
 		if st := m.findLevel(levelStatements); st != nil {
-			return st.statSessionStart
+			return st.stat.sessionStart
 		}
 		return time.Time{}
 	default:
-		meta, ok := metaByPath(s.statSnapMetas, path)
+		meta, ok := metaByPath(s.stat.snapMetas, path)
 		if !ok {
 			return time.Time{}
 		}

@@ -11,7 +11,7 @@ import (
 // "" when the row doesn't qualify (wrong level, wrong kind, bloat unknown or
 // below threshold, or another reindex is already in flight on this screen).
 func reindexCandidate(s *screen) string {
-	if s.level != levelParts || s.reindexing != "" {
+	if s.level != levelParts || s.reindex.running != "" {
 		return ""
 	}
 	vis := s.visibleIndexes()
@@ -44,7 +44,7 @@ func (m *Model) handleReindexEnter(s *screen) tea.Cmd {
 	if cand == "" {
 		return nil
 	}
-	s.pendingReindex = cand
-	s.reindexErr = nil
+	s.reindex.pending = cand
+	s.reindex.err = nil
 	return nil
 }

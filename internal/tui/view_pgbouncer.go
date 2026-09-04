@@ -18,10 +18,7 @@ func (m *Model) renderPgBouncers(_ *screen, height int) string {
 	b.WriteString("  " + mu("Looked for running pgbouncer processes in /proc, for /etc/pgbouncer/*.ini, and checked whether pgdu's own") + "\n")
 	b.WriteString("  " + mu("connection goes through a pooler. Pass --pgbouncer-target INI|SOCKETDIR|HOST[:PORT] (repeatable, or") + "\n")
 	b.WriteString("  " + mu("PGDU_PGBOUNCER_TARGET comma-separated) to add an instance by hand, e.g. --pgbouncer-target /var/run/pgbouncer_1.") + "\n")
-	for i := 5; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // renderPgbListHint is the one-line status of the highlighted instance above
@@ -34,8 +31,8 @@ func (m *Model) renderPgbListHint(s *screen) string {
 	}
 	mu := styleMuted.Render
 	var pr pg.PgBouncerProbe
-	if it := s.items[s.visibleIndexes()[s.cursor]]; it.pgbIdx > 0 && it.pgbIdx <= len(s.pgbProbes) {
-		pr = s.pgbProbes[it.pgbIdx-1]
+	if it := s.items[s.visibleIndexes()[s.cursor]]; it.pgbIdx > 0 && it.pgbIdx <= len(s.pgb.probes) {
+		pr = s.pgb.probes[it.pgbIdx-1]
 	}
 	var parts []string
 	if inst.IniPath != "" {
@@ -59,7 +56,7 @@ func (m *Model) renderPgbListHint(s *screen) string {
 func (m *Model) renderPgBouncerHeader(s *screen) string {
 	mu := styleMuted.Render
 	var b strings.Builder
-	inst := s.pgbInst
+	inst := s.pgb.inst
 	if inst == nil {
 		return ""
 	}
@@ -72,14 +69,14 @@ func (m *Model) renderPgBouncerHeader(s *screen) string {
 		b.WriteString(mu("  " + inst.IniPath))
 	}
 	b.WriteString("\n")
-	if s.pgbErr != nil {
-		b.WriteString(label("error") + styleErr.Render(oneLineErr(s.pgbErr)) + "\n")
-		if pg.PgBouncerAuthHintApplies(s.pgbErr) {
+	if s.pgb.err != nil {
+		b.WriteString(label("error") + styleErr.Render(oneLineErr(s.pgb.err)) + "\n")
+		if pg.PgBouncerAuthHintApplies(s.pgb.err) {
 			b.WriteString(label("") + mu(pg.PgBouncerAuthHint(*inst, m.client.PgBouncerUser())) + "\n")
 		}
 		return b.String()
 	}
-	ov := s.pgbOverview
+	ov := s.pgb.overview
 	if ov == nil {
 		return b.String()
 	}
@@ -169,28 +166,28 @@ func pgbRefreshLabel(m *Model) string {
 // renderPgbShowHeader is the one-line banner above a SHOW table.
 func (m *Model) renderPgbShowHeader(s *screen) string {
 	mu := styleMuted.Render
-	if s.pgbInst == nil {
+	if s.pgb.inst == nil {
 		return ""
 	}
-	spec := s.pgbShow.spec()
-	line := "  " + s.pgbInst.Name + mu(" · SHOW "+strings.ToUpper(spec.what))
-	if s.pgbErr != nil {
-		return line + "  " + styleErr.Render(oneLineErr(s.pgbErr))
+	spec := s.pgb.show.spec()
+	line := "  " + s.pgb.inst.Name + mu(" · SHOW "+strings.ToUpper(spec.what))
+	if s.pgb.err != nil {
+		return line + "  " + styleErr.Render(oneLineErr(s.pgb.err))
 	}
 	if s.diagResult != nil {
 		line += mu(fmt.Sprintf(" · %d rows", len(s.diagResult.Rows)))
 	}
 	line += mu(" · refresh "+pgbRefreshLabel(m)) + mu("  t cycles · C columns · e csv")
-	if parent := m.findLevel(levelPgBouncer); parent != nil && parent.pgbOverview != nil && parent.pgbInst != nil &&
-		parent.pgbInst.Key() == s.pgbInst.Key() {
-		line += "\n  " + pgbTotalsLine(parent.pgbOverview.Totals)
+	if parent := m.findLevel(levelPgBouncer); parent != nil && parent.pgb.overview != nil && parent.pgb.inst != nil &&
+		parent.pgb.inst.Key() == s.pgb.inst.Key() {
+		line += "\n  " + pgbTotalsLine(parent.pgb.overview.Totals)
 	}
 	return line
 }
 
 // renderPgBouncerMenu draws the overview's SHOW menu (tool-picker style).
 func (m *Model) renderPgBouncerMenu(s *screen, height int) string {
-	if s.pgbErr != nil && len(s.items) == 0 {
+	if s.pgb.err != nil && len(s.items) == 0 {
 		var b strings.Builder
 		for range height {
 			b.WriteString("\n")

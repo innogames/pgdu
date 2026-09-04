@@ -974,3 +974,22 @@ func renderBufferRow(it item, st pg.TableBufferStat, maxSize, maxDirty int64, ba
 		padRight(tempCell(st), bufColTemp) + "  " +
 		name
 }
+
+// scrollWindow renders a height-line slice of body starting at *offset, clamping
+// *offset to the last full screen (writing the clamp back so the key handler can
+// over-scroll and let the view settle it) and padding short content to height so
+// the help row stays pinned.
+func scrollWindow(body string, offset *int, height int) string {
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	*offset = max(0, min(*offset, len(lines)-height))
+	end := min(*offset+height, len(lines))
+	var b strings.Builder
+	for _, ln := range lines[*offset:end] {
+		b.WriteString(ln)
+		b.WriteByte('\n')
+	}
+	for i := end - *offset; i < height; i++ {
+		b.WriteByte('\n')
+	}
+	return b.String()
+}

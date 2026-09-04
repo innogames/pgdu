@@ -37,7 +37,7 @@ func TestBarReserveSane(t *testing.T) {
 		for _, tl := range []tool{toolDisk, toolPageInspect} {
 			for _, am := range ams {
 				s := &screen{level: l, tool: tl}
-				s.index.AccessMethod = am
+				s.pages.index.AccessMethod = am
 				r := barReserve(s)
 				if r < 0 || r > 150 {
 					t.Errorf("barReserve(level=%d tool=%d am=%s) = %d, want 0..150", l, tl, am, r)

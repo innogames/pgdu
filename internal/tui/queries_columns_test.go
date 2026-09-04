@@ -42,14 +42,14 @@ func colIDSet(descs []stmtColDesc) map[stmtColID]bool {
 func TestVisibleStmtColsPlanningGate(t *testing.T) {
 	m := &Model{}
 
-	off := colIDSet(m.visibleStmtCols(stmtCtx{trackPlanning: false}))
+	off := colIDSet(stmtSpec.visibleCols(&m.stmtTable, stmtCtx{trackPlanning: false}))
 	for _, id := range []stmtColID{colPlanMs, colMeanPlanMs, colPlans} {
 		if off[id] {
 			t.Errorf("track_planning off: column %q must be unavailable", id)
 		}
 	}
 
-	on := colIDSet(m.visibleStmtCols(stmtCtx{trackPlanning: true}))
+	on := colIDSet(stmtSpec.visibleCols(&m.stmtTable, stmtCtx{trackPlanning: true}))
 	if !on[colMeanPlanMs] {
 		t.Error("track_planning on: default-on mean_plan_ms should appear")
 	}
@@ -59,12 +59,12 @@ func TestVisibleStmtColsPlanningGate(t *testing.T) {
 }
 
 func TestVisibleStmtColsUserToggles(t *testing.T) {
-	m := &Model{stmtColsVisible: map[stmtColID]bool{
+	m := &Model{stmtTable: colTable[stmtColID]{visible: map[stmtColID]bool{
 		colHit:     false, // hide a default-on column
 		colDirtied: true,  // enable an opt-in column
 		colQuery:   false, // mandatory — the toggle must be ignored
-	}}
-	ids := colIDSet(m.visibleStmtCols(stmtCtx{}))
+	}}}
+	ids := colIDSet(stmtSpec.visibleCols(&m.stmtTable, stmtCtx{}))
 	if ids[colHit] {
 		t.Error("hidden default-on column is still visible")
 	}
@@ -88,7 +88,7 @@ func TestCellsForStaysParallel(t *testing.T) {
 		SharedBlksHit: 9, SharedBlksRead: 3}
 	for _, tp := range []bool{false, true} {
 		ctx := stmtCtx{windowMs: 100, trackPlanning: tp}
-		descs := m.visibleStmtCols(ctx)
+		descs := stmtSpec.visibleCols(&m.stmtTable, ctx)
 		if len(descs) == 0 {
 			t.Fatalf("trackPlanning=%v: no visible columns", tp)
 		}
@@ -100,9 +100,9 @@ func TestCellsForStaysParallel(t *testing.T) {
 		}
 	}
 
-	descs := m.visibleStmtCols(stmtCtx{})
+	descs := stmtSpec.visibleCols(&m.stmtTable, stmtCtx{})
 	cells := cellsFor(descs, q, stmtCtx{})
-	qi := indexOfStmtCol(descs, colQuery)
+	qi := indexOfCol(descs, colQuery)
 	if qi < 0 || cells[qi].Display != "select 1" {
 		t.Errorf("query cell at index %d = %+v, want display %q", qi, cells, "select 1")
 	}
@@ -110,15 +110,15 @@ func TestCellsForStaysParallel(t *testing.T) {
 
 func TestLabelStmtFooter(t *testing.T) {
 	m := &Model{}
-	descs := m.visibleStmtCols(stmtCtx{})
+	descs := stmtSpec.visibleCols(&m.stmtTable, stmtCtx{})
 	total := make([]pg.DiagCell, len(descs))
 	labelStmtFooter(descs, total)
 
-	if qi := indexOfStmtCol(descs, colQuery); total[qi].Display != "← Sum" {
+	if qi := indexOfCol(descs, colQuery); total[qi].Display != "← Sum" {
 		t.Errorf("footer query cell = %q, want ← Sum", total[qi].Display)
 	}
-	for _, id := range []stmtColID{colTable, colType} {
-		if i := indexOfStmtCol(descs, id); i >= 0 && total[i].Display != "" {
+	for _, id := range []stmtColID{colMainTable, colType} {
+		if i := indexOfCol(descs, id); i >= 0 && total[i].Display != "" {
 			t.Errorf("footer %q cell = %q, want blank", id, total[i].Display)
 		}
 	}

@@ -34,10 +34,10 @@ func tblStatsResetLabel(s *screen) string {
 	if s.level != levelTableStats || !s.loaded || s.err != nil {
 		return ""
 	}
-	if s.tblStatsReset.IsZero() {
+	if s.tbl.statsReset.IsZero() {
 		return "counters since: never reset"
 	}
-	t := s.tblStatsReset.Local()
+	t := s.tbl.statsReset.Local()
 	return "counters since: " + t.Format("2006-01-02 15:04") + " (" + relativeAge(time.Since(t)) + ")"
 }
 
@@ -70,7 +70,7 @@ func bloatScanLabel(s *screen) string {
 	if s.level != levelParts || len(s.items) == 0 {
 		return ""
 	}
-	if s.bloatScanning {
+	if s.parts.bloatScanning {
 		return "bloat: scanning…"
 	}
 	scanned := 0
@@ -243,6 +243,19 @@ func fmtAge(ms float64) string {
 	default:
 		return fmt1(ms/(24*60*60*1000)) + "d"
 	}
+}
+
+// fmtMicros renders a mean latency pgbouncer reports in microseconds: whole µs
+// below a millisecond, one decimal of ms below a second, then fmtAge's bands.
+// fmtAge alone would show a 242 µs query time as "0ms".
+func fmtMicros(us int64) string {
+	switch {
+	case us < 1000:
+		return fmt.Sprintf("%dµs", us)
+	case us < 1_000_000:
+		return fmt1(float64(us)/1000) + "ms"
+	}
+	return fmtAge(float64(us) / 1000)
 }
 
 // fmtDuration renders a window span with explicit units — "45s", "13m 12s",

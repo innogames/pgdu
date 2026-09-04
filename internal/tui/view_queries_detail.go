@@ -17,7 +17,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
 
-	q := s.statDetail
+	q := s.stat.detail
 	if q == nil {
 		for range height {
 			b.WriteString("\n")
@@ -30,8 +30,8 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 
 	// --- window metrics ---
 	pct := 0.0
-	if s.statWindowExecMs > 0 {
-		pct = q.TotalExecTime / s.statWindowExecMs * 100
+	if s.stat.windowExecMs > 0 {
+		pct = q.TotalExecTime / s.stat.windowExecMs * 100
 	}
 	hitStr := "—"
 	if hr, ok := q.HitRatio(); ok {
@@ -47,7 +47,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 		{"rows", formatRows(q.Rows) + mu(fmt.Sprintf("  (%s/call)", fmtFloat(q.RowsPerCall())))},
 		{"total time", fmtMs(q.TotalExecTime) + " ms" + mu(fmt.Sprintf("  (%s%% of window)", fmtFloat(pct)))},
 		{"mean time", fmtMs(q.MeanTime()) + " ms"},
-		{"plan time", planTimeMetric(*q, s.statTrackPlanning, mu)},
+		{"plan time", planTimeMetric(*q, s.stat.trackPlanning, mu)},
 		{"shared hit ratio", hitStr},
 		{"I/O time", fmtMs(q.IOTime()) + " ms"},
 		{"shared blocks", fmt.Sprintf("%s hit · %s read (miss) · %s dirtied · %s written",
@@ -66,7 +66,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 		// above, so it's explicitly labelled "lifetime". Higher is better →
 		// percentStyle (green high). Shown only once loaded and the table has
 		// recorded updates; otherwise omitted (no row clutters a SELECT-only table).
-		if hs := s.statHotStats; hs != nil {
+		if hs := s.stat.hotStats; hs != nil {
 			if ratio, ok := hs.HotRatio(); ok {
 				val := percentStyle(ratio).Render(fmtFloat(ratio)+"%") +
 					mu(fmt.Sprintf("  (%s HOT · %s non-HOT of %s updates)",
@@ -81,7 +81,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	// Verbose extras: counters/timings that the compact view collapses or omits.
 	// All read straight off the window-delta QueryStat (no extrema — those are
 	// cumulative-only and meaningless in a delta).
-	if s.statVerbose {
+	if s.stat.verbose {
 		metrics = append(metrics,
 			[2]string{"I/O breakdown", fmt.Sprintf("shared %s/%s · local %s/%s · temp %s/%s ms",
 				fmtMs(q.SharedBlkReadTime), fmtMs(q.SharedBlkWriteTime),
@@ -125,18 +125,18 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	b.WriteString("\n  " + styleHeader.Render(" sample call ") + "\n")
 	// Once the sample source is resolved, name it: real captured values vs
 	// synthesized literals, and how to get real ones when pg_qualstats is absent.
-	if explainable && (s.statSampleCall != "" || s.statSampleErr != nil) {
+	if explainable && (s.stat.sampleCall != "" || s.stat.sampleErr != nil) {
 		var hint string
 		switch {
-		case s.statSampleReal:
+		case s.stat.sampleReal:
 			hint = "real values · pg_qualstats"
-		case s.statSampleFromQual && s.statSampleFromData:
+		case s.stat.sampleFromQual && s.stat.sampleFromData:
 			hint = "values from pg_qualstats + live table data"
-		case s.statSampleFromQual:
+		case s.stat.sampleFromQual:
 			hint = "values from pg_qualstats (per predicate)"
-		case s.statSampleFromData:
+		case s.stat.sampleFromData:
 			hint = "values sampled from live table data"
-		case s.statQualstats:
+		case s.stat.qualstats:
 			hint = "synthesized — pg_qualstats has no sample for this query yet"
 		case s.extPrompt != nil && s.extPrompt.name == extQualstats:
 			hint = "synthesized — press i to install pg_qualstats for real values"
@@ -148,28 +148,28 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	switch {
 	case !explainable:
 		b.WriteString("    " + mu("not a SELECT/DML statement — no parameters to fill") + "\n")
-	case s.statSampleErr != nil:
-		b.WriteString("    " + mu("could not infer parameters: "+s.statSampleErr.Error()) + "\n")
-	case s.statSampleCall != "":
+	case s.stat.sampleErr != nil:
+		b.WriteString("    " + mu("could not infer parameters: "+s.stat.sampleErr.Error()) + "\n")
+	case s.stat.sampleCall != "":
 		// Same highlighter as the query section: the literals substituted for
 		// $n land in the accent the whole block used to wear, so the colour now
 		// marks exactly the filled-in values.
-		for _, line := range highlightSQL(s.statSampleCall, m.width-4) {
+		for _, line := range highlightSQL(s.stat.sampleCall, m.width-4) {
 			b.WriteString("    " + line + "\n")
 		}
 	default:
 		b.WriteString("    " + mu("inferring parameters…") + "\n")
 	}
-	if s.statVerbose && explainable {
+	if s.stat.verbose && explainable {
 		m.renderSampleParams(&b, s)
 	}
 
 	// --- explain ---
 	explainHdr := " explain (generic plan) "
 	switch {
-	case s.statExplainAnalyze:
+	case s.stat.explainAnalyze:
 		explainHdr = " explain (analyze · verbose · buffers) "
-	case s.statSampleReal:
+	case s.stat.sampleReal:
 		// Real captured values → a plain EXPLAIN, so the planner sees real data.
 		explainHdr = " explain (real plan) "
 	}
@@ -177,12 +177,12 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	switch {
 	case !explainable:
 		b.WriteString("    " + mu("EXPLAIN is only available for SELECT/DML statements") + "\n")
-	case s.statExplaining:
+	case s.stat.explaining:
 		b.WriteString("    " + mu("running EXPLAIN…") + "\n")
-	case s.statExplainErr != nil:
-		b.WriteString("    " + styleErr.Render(s.statExplainErr.Error()) + "\n")
-	case s.statExplain != "":
-		for _, line := range m.colorizeExplain(s.statExplain, s.statExplainAnalyze) {
+	case s.stat.explainErr != nil:
+		b.WriteString("    " + styleErr.Render(s.stat.explainErr.Error()) + "\n")
+	case s.stat.explain != "":
+		for _, line := range m.colorizeExplain(s.stat.explain, s.stat.explainAnalyze) {
 			b.WriteString("    " + line + "\n")
 		}
 	default:
@@ -192,7 +192,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	// EXPLAIN ANALYZE affordance. ANALYZE executes the query for real, so it's
 	// offered only for read-only SELECT shapes and only once a sample call (with
 	// synthesized literals filling the $n) is available to actually run.
-	if explainable && !s.statExplaining && pg.ReadOnlyQuery(q.Query) && s.statSampleCall != "" {
+	if explainable && !s.stat.explaining && pg.ReadOnlyQuery(q.Query) && s.stat.sampleCall != "" {
 		b.WriteString("    " + mu("press ") + styleBadge.Render("Enter") +
 			mu(" to run EXPLAIN (ANALYZE, VERBOSE, BUFFERS) — ") +
 			styleErr.Render("executes the query for real") + "\n")
@@ -203,13 +203,13 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 
 	// Captured-values affordance: only when pg_qualstats is present, since that's
 	// the only source of real per-value data to browse.
-	if explainable && s.statQualstats {
+	if explainable && s.stat.qualstats {
 		b.WriteString("    " + mu("press ") + styleBadge.Render("p") +
 			mu(" to browse the real values pg_qualstats captured for this query") + "\n")
 	}
 
 	verbHint := " to show verbose details (parameter sources, full metrics)"
-	if s.statVerbose {
+	if s.stat.verbose {
 		verbHint = " to hide verbose details"
 	}
 	b.WriteString("    " + mu("press ") + styleBadge.Render("v") + mu(verbHint) + "\n")
@@ -233,22 +233,22 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 // it points at the captured-values browser instead.
 func (m *Model) renderSampleParams(b *strings.Builder, s *screen) {
 	mu := styleMuted.Render
-	if s.statSampleReal {
+	if s.stat.sampleReal {
 		b.WriteString("\n    " + mu("parameters") + "\n")
 		b.WriteString("    " + mu("all values captured by pg_qualstats — press ") +
 			styleBadge.Render("p") + mu(" to browse each predicate's real constants") + "\n")
 		return
 	}
-	if len(s.statSampleParams) == 0 {
+	if len(s.stat.sampleParams) == 0 {
 		return
 	}
 	b.WriteString("\n    " + mu("parameters") + "\n")
 	// Pre-pad the fixed-width columns to their widest cell; the value column is
 	// last so it needs no padding (and carries its own accent style).
 	type row struct{ ord, col, typ, src, val string }
-	rows := make([]row, len(s.statSampleParams))
+	rows := make([]row, len(s.stat.sampleParams))
 	var ordW, colW, typW, srcW int
-	for i, p := range s.statSampleParams {
+	for i, p := range s.stat.sampleParams {
 		col := p.Column
 		if col == "" {
 			col = "—"
@@ -286,25 +286,6 @@ func paramSourceLabel(src pg.ParamSource) string {
 	}
 }
 
-// scrollWindow renders a height-line slice of body starting at *offset, clamping
-// *offset to the last full screen (writing the clamp back so the key handler can
-// over-scroll and let the view settle it) and padding short content to height so
-// the help row stays pinned.
-func scrollWindow(body string, offset *int, height int) string {
-	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
-	*offset = max(0, min(*offset, len(lines)-height))
-	end := min(*offset+height, len(lines))
-	var b strings.Builder
-	for _, ln := range lines[*offset:end] {
-		b.WriteString(ln)
-		b.WriteByte('\n')
-	}
-	for i := end - *offset; i < height; i++ {
-		b.WriteByte('\n')
-	}
-	return b.String()
-}
-
 // --- captured values (levelStatementSamples) ---
 
 // renderStatementSamples lists the real predicate constants pg_qualstats
@@ -318,8 +299,8 @@ func (m *Model) renderStatementSamples(s *screen, height int) string {
 
 	b.WriteString("\n")
 	qid := int64(0)
-	if s.statDetail != nil {
-		qid = s.statDetail.QueryID
+	if s.stat.detail != nil {
+		qid = s.stat.detail.QueryID
 	}
 	b.WriteString("  " + styleSelected.Render(fmt.Sprintf("captured values · query %d", qid)) + "\n")
 	b.WriteString("  " + mu("real predicate constants sampled by pg_qualstats — most frequent first") + "\n\n")
@@ -327,7 +308,7 @@ func (m *Model) renderStatementSamples(s *screen, height int) string {
 
 	// Split the remaining height: when a plan is on screen it takes the lower
 	// half, otherwise the list fills everything.
-	explainOn := s.statExplaining || s.statExplain != "" || s.statExplainErr != nil
+	explainOn := s.stat.explaining || s.stat.explain != "" || s.stat.explainErr != nil
 	listH := height - used
 	if explainOn {
 		listH = (height - used) / 2
@@ -369,16 +350,16 @@ func (m *Model) renderStatementSamples(s *screen, height int) string {
 	if explainOn {
 		b.WriteString("\n  " + styleHeader.Render(" explain (analyze · verbose · buffers) ") + "\n")
 		switch {
-		case s.statExplaining:
+		case s.stat.explaining:
 			b.WriteString("    " + mu("running EXPLAIN ANALYZE…") + "\n")
-		case s.statExplainErr != nil:
-			b.WriteString("    " + styleErr.Render(s.statExplainErr.Error()) + "\n")
+		case s.stat.explainErr != nil:
+			b.WriteString("    " + styleErr.Render(s.stat.explainErr.Error()) + "\n")
 		default:
-			for _, line := range m.colorizeExplain(s.statExplain, true) {
+			for _, line := range m.colorizeExplain(s.stat.explain, true) {
 				b.WriteString("    " + line + "\n")
 			}
 		}
-	} else if s.statDetail != nil && pg.ReadOnlyQuery(s.statDetail.Query) {
+	} else if s.stat.detail != nil && pg.ReadOnlyQuery(s.stat.detail.Query) {
 		b.WriteString("    " + mu("press ") + styleBadge.Render("Enter") +
 			mu(" to EXPLAIN (ANALYZE) the highlighted value — ") +
 			styleErr.Render("executes the query for real") + "\n")

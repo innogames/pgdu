@@ -18,10 +18,10 @@ const (
 	progColPhase = 26 // e.g. "building index: scanning table"  (clipped)
 	progColDone  = 10 // "1234567890" or "1023.99 MB"
 	progColTotal = 10
-	progColPct       = 7  // "99.9%", or "~100.0%" for an estimated (approx) total
-	progColAge       = 8  // fmtAge output ("31.1s", "2.4d")
-	progColEta       = 8  // fmtAge output for the extrapolated time remaining
-	progColUser      = 12
+	progColPct   = 7 // "99.9%", or "~100.0%" for an estimated (approx) total
+	progColAge   = 8 // fmtAge output ("31.1s", "2.4d")
+	progColEta   = 8 // fmtAge output for the extrapolated time remaining
+	progColUser  = 12
 )
 
 // progressMark is one operation's clamp entry in screen.progressPctMax. The
@@ -64,7 +64,7 @@ func clampProgressMarks(prev map[int32]progressMark, rows []pg.ProgressRow) map[
 // high-water OverallPct when a mark exists (kept by onProgressLoaded), the
 // raw estimate otherwise.
 func (s *screen) progressPct(r pg.ProgressRow) float64 {
-	if mark, ok := s.progressPctMax[r.PID]; ok && mark.matches(r) {
+	if mark, ok := s.progress.pctMax[r.PID]; ok && mark.matches(r) {
 		return mark.pct
 	}
 	return r.OverallPct()
@@ -76,7 +76,7 @@ func (s *screen) progressPct(r pg.ProgressRow) float64 {
 func (m *Model) rebuildProgressItems(s *screen) {
 	s.items = s.items[:0]
 	s.itemsRev++
-	for _, r := range s.progressRows {
+	for _, r := range s.progress.rows {
 		s.items = append(s.items, item{
 			name: fmt.Sprintf("%d %s %s %s %s %s", r.PID, r.Command, r.Database, r.Relation, r.Phase, r.Username),
 			data: r,
@@ -89,8 +89,8 @@ func (m *Model) renderProgress(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
 
-	if s.progressErr != nil {
-		b.WriteString("  " + styleErr.Render("error: "+s.progressErr.Error()) + "\n")
+	if s.progress.err != nil {
+		b.WriteString("  " + styleErr.Render("error: "+s.progress.err.Error()) + "\n")
 		return padToHeight(&b, height, 1)
 	}
 
@@ -99,7 +99,7 @@ func (m *Model) renderProgress(s *screen, height int) string {
 		refresh = m.activityRefresh.String()
 	}
 	b.WriteString("  " + styleSelected.Render("running operations") +
-		mu(fmt.Sprintf("  ·  %d ops  ·  ⟳ %s  ·  ", len(s.progressRows), refresh)) +
+		mu(fmt.Sprintf("  ·  %d ops  ·  ⟳ %s  ·  ", len(s.progress.rows), refresh)) +
 		styleBadge.Render("d") + mu(" describe · ") +
 		styleBadge.Render("t") + mu(" cadence") + "\n")
 	used := 1

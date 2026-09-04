@@ -67,7 +67,7 @@ func TestRenderProgress(t *testing.T) {
 		t.Errorf("empty render missing empty-state message:\n%s", out)
 	}
 
-	s.progressRows = []pg.ProgressRow{
+	s.progress.rows = []pg.ProgressRow{
 		{PID: 101, Command: "CREATE INDEX", Relation: "public.orders_idx", Phase: "building index",
 			Unit: "blocks", Done: 640, Total: 1000, RunningMs: 252_000, Username: "app"},
 		{PID: 102, Command: "COPY FROM", Relation: "public.events",
@@ -146,7 +146,7 @@ func TestProgressClamp(t *testing.T) {
 
 	// Finished operations drop their marks with their rows.
 	load()
-	if len(s.progressPctMax) != 0 {
-		t.Errorf("marks not pruned: %v", s.progressPctMax)
+	if len(s.progress.pctMax) != 0 {
+		t.Errorf("marks not pruned: %v", s.progress.pctMax)
 	}
 }

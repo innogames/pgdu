@@ -5,6 +5,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
+	"pgdu/internal/pglog"
 )
 
 // handlePgbKey dispatches the pgbouncer tool's own keys. Returns false when
@@ -29,7 +30,7 @@ func (m *Model) handlePgbKey(s *screen, msg tea.KeyMsg) (tea.Cmd, bool) {
 			m.notice = "no logfile configured for " + inst.Name
 			return nil, true
 		}
-		m.stack = append(m.stack, m.logScreen(pg.OpenLocalLog(inst.Logfile)))
+		m.stack = append(m.stack, m.logScreen(pglog.OpenLocal(inst.Logfile)))
 		return m.loadCurrent(), true
 	case key.Matches(msg, m.keys.ToggleRefresh):
 		m.cyclePgbRefresh()
@@ -48,15 +49,15 @@ func (m *Model) handlePgbKey(s *screen, msg tea.KeyMsg) (tea.Cmd, bool) {
 // the list, the screen's own instance below it.
 func (m *Model) pgbSelectedInstance(s *screen) *pg.PgBouncerInstance {
 	if s.level != levelPgBouncers {
-		return s.pgbInst
+		return s.pgb.inst
 	}
 	vis := s.visibleIndexes()
 	if s.cursor < 0 || s.cursor >= len(vis) {
 		return nil
 	}
 	it := s.items[vis[s.cursor]]
-	if it.pgbIdx <= 0 || it.pgbIdx > len(s.pgbInsts) {
+	if it.pgbIdx <= 0 || it.pgbIdx > len(s.pgb.insts) {
 		return nil
 	}
-	return &s.pgbInsts[it.pgbIdx-1]
+	return &s.pgb.insts[it.pgbIdx-1]
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"pgdu/internal/pg"
+	"pgdu/internal/pglog"
 	"pgdu/internal/prefs"
 )
 
@@ -217,23 +218,6 @@ type screen struct {
 	schema string
 	table  pg.Table
 
-	// Populated on the levelBufferTables screen alongside the row data.
-	bufferSummary    *pg.BufferCacheSummary
-	bufferSummaryErr error
-
-	// levelBufferDetail state: bufDetail is the table being inspected (carried
-	// from the parent row, so the overview figures render immediately); bufUsage
-	// is its clock-sweep temperature histogram, loaded asynchronously.
-	bufDetail    *pg.TableBufferStat
-	bufUsage     []pg.BufferUsageCount
-	bufBlockSize int64 // cluster block_size, for expressing the histogram in bytes
-	bufUsageErr  error
-
-	// bloatScanning is true while a FillBloat command for this parts screen
-	// is in flight. The bloat fetch is one-shot (all parts in one call), so
-	// the progress display is "scanning…" / "ready" rather than incremental.
-	bloatScanning bool
-
 	// extPrompt, when set, asks the user whether to install a Postgres
 	// extension. Blocking prompts hide the list (the screen is unusable
 	// without the extension); non-blocking prompts render as a soft hint
@@ -250,15 +234,6 @@ type screen struct {
 	filter        string
 	filterFocused bool
 
-	// Seek-to-key state (levelIndexTuples only). seekFocused routes keypresses
-	// into the seek input; seekQuery is the typed leading-key value; seekStatus
-	// is the one-line result hint ("→ #0008" / "no match"). Distinct from the
-	// fuzzy filter: seek jumps the cursor to the B-tree entry whose key range
-	// covers the value rather than narrowing the list.
-	seekFocused bool
-	seekQuery   string
-	seekStatus  string
-
 	// Filter-result cache. visibleIndexes/visibleLen run on every render frame,
 	// and on a 3000-row table (top-queries) the per-row match dominates the frame
 	// while scrolling — yet the filtered set only changes when the filter text or
@@ -272,23 +247,414 @@ type screen struct {
 	visCacheOK  bool
 	itemsRev    uint64
 
-	// pendingReindex holds the index name the user pressed ENTER on (parts
+	// Diagnostic-runner state (levelDiagnostics / levelDiagnosticResult).
+	// diag is the selected query; diagCols is non-nil once the result is
+	// loaded and switches the sort/render path to the generic table model.
+	// diagSortCol is the index of the currently active sort column.
+	diag        *pg.Diagnostic
+	diagCols    []pg.DiagColumn
+	diagBarCol  int  // headline bar column index, or -1
+	diagSortCol int  // active sort column index for the generic table
+	diagAllDBs  bool // true when this result runs the query across all databases (leading "database" column)
+
+	// diagResult retains the full unprojected result on levelDiagnosticResult so
+	// the C column picker can re-project the visible subset without re-running
+	// the query. diagSortName tracks the active sort column by name (diagnostic
+	// columns have no stable ids) so the sort survives a visibility rebuild.
+	diagResult   *pg.DiagResult
+	diagSortName string
+
+	// diagFix is the suggested-fix overlay's state: the script built for the row
+	// Enter was pressed on (Diagnostic.Fix), the database it targets, and the
+	// confirm/run/output lifecycle once the user chooses to execute it.
+	// Model.showDiagFix toggles the overlay itself.
+	diagFix *diagFixRun
+
+	// diagCatFilter restricts the levelDiagnostics list to one category
+	// (f cycles all → index → table → …); "" shows every diagnostic.
+	diagCatFilter string
+
+	// diagTotalRow, when non-nil, is rendered as a pinned footer aggregating every
+	// row of the table (whole-table, filter-independent). The top-queries and
+	// table-overview load sites set it (sum for additive columns, pooled ratios /
+	// means for the derived ones); every other diagnostic table leaves it nil.
+	diagTotalRow []pg.DiagCell
+
+	// Memoized per-column render metrics for renderDiagResult. These scan every
+	// row (O(rows×cols), calling lipgloss.Width per cell) but depend only on the
+	// loaded cell *values*, not on the cursor or sort order — so recomputing them
+	// on every keypress is what made the table lag on busy servers (thousands of
+	// pg_stat_statements rows). They're computed once per data load: item-load
+	// sites set diagMetricsDirty, and renderDiagResult recomputes lazily.
+	diagMetricsDirty bool
+	diagColWBase     []int     // capped per-column display width (pre last-column grow)
+	diagNaturalW     []int     // uncapped per-column display width
+	diagBarMax       float64   // numeric max of the bar column, for bar scaling
+	diagCostMax      []float64 // per-column numeric max for DiagCostGraded grading
+
+	// Per-tool state lives in one sub-struct each (see the *State types below);
+	// the generic table infra (diag*) and the list/nav core stay top-level.
+	stat        stmtState
+	act         actState
+	wal         walState
+	log         logState
+	pgb         pgbState
+	buf         bufState
+	maintenance maintState
+	desc        describeState
+	reindex     reindexState
+	tbl         tblState
+	progress    progressState
+	lock        lockState
+	triage      triageState
+	parts       partsState
+	pages       pageState
+}
+
+// stmtState: Top-queries state: the live/diffed statement window, snapshot anchors and the detail/sample/explain pane.
+type stmtState struct {
+	// cols is the projected top-queries column descriptors, parallel to
+	// diagCols (same length/order). Non-nil only on levelStatements; it maps the
+	// renderer's column index (diagSortCol) back to a stable column id so the
+	// cycle-sort can record the active column by identity (see m.stmtTable.sortColID).
+	cols []stmtColDesc
+
+	// Top-queries state (levelStatements). baseline is the snapshot taken
+	// when the tool was entered (or last re-baselined); every refresh diffs
+	// the live counters against it so the table shows the window "since you
+	// opened it" — pg_stat_statements has no time axis of its own. rows is
+	// the current set of window deltas (used to resolve a drilled-into row back
+	// to its full QueryStat). windowExecMs is the summed exec time across
+	// the window, the denominator for the time% column. baselineAt /
+	// sampledAt drive the window-status header.
+	baseline      map[int64]pg.QueryStat
+	rows          []pg.QueryStat
+	windowExecMs  float64
+	baselineAt    time.Time
+	sampledAt     time.Time
+	trackPlanning bool // pg_stat_statements.track_planning — gates the plan_ms column
+	liveCount     int  // distinct queries in the last live sample — sizes the "now" anchor bar
+
+	// Session anchor: the very first in-memory baseline taken when the tool was
+	// entered, preserved unchanged even after a disk/cumulative baseline replaces
+	// baseline. The "session start" row in the L browser restores this window.
+	sessionBaseline map[int64]pg.QueryStat
+	sessionStart    time.Time
+
+	// Snapshot baseline state (levelStatements). baseSnap is non-nil when the
+	// window's baseline was loaded from a disk snapshot rather than the live
+	// auto-baseline: the header then reads "since <CapturedAt> (snapshot)".
+	// endSnap is non-nil for a *frozen* A→B diff between two snapshots — the
+	// window then doesn't re-sample live (endSnap is the "now").
+	// cumulative is true when the baseline is an empty map (diff against nothing),
+	// yielding raw cumulative counters since the last pg_stat_statements reset.
+	baseSnap   *pg.Snapshot
+	endSnap    *pg.Snapshot
+	cumulative bool
+
+	// Snapshots-browser state (levelSnapshots). snapMetas is aligned by index
+	// with items (one meta per row).
+	snapMetas []pg.SnapshotMeta
+	liveReset time.Time // live pg_stat_statements stats_reset — dates the "since last reset" anchor
+
+	// Query-detail state (levelStatementDetail). detail is the window-delta
+	// QueryStat for the drilled-into query; sampleCall is the synthesized
+	// example call (or "" with sampleErr set when params couldn't be
+	// inferred); explain holds the EXPLAIN output, run automatically on
+	// entry (generic plan) and re-runnable via x, or replaced by EXPLAIN
+	// ANALYZE on Enter. explainAnalyze flags which of the two the current
+	// explain text is.
+	detail         *pg.QueryStat
+	sampleCall     string
+	sampleParams   []pg.SampleParam // per-$n breakdown behind statSampleCall (verbose table)
+	sampleReal     bool             // statSampleCall is a real pg_qualstats example, not synthesized
+	sampleFromData bool             // statSampleCall is synthesized but uses real values sampled from the live table
+	sampleFromQual bool             // statSampleCall is synthesized but ≥1 placeholder uses a per-predicate pg_qualstats constant
+	qualstats      bool             // pg_qualstats is installed in db (drives source hint + captured-values key)
+	sampleErr      error
+	explain        string
+	explainErr     error
+	explaining     bool
+	explainAnalyze bool
+	verbose        bool // v toggles the verbose detail view (parameter table + extra metric rows)
+	// hotStats holds the main table's cumulative HOT-update counters
+	// (pg_stat_user_tables), fetched async on entry and rendered next to the
+	// parsed table name. nil until loaded or when the table didn't resolve;
+	// hotErr records a fetch failure (kept quiet — the row is just omitted).
+	hotStats *pg.TableHotStats
+	hotErr   error
+}
+
+// actState: Activity tool state: the last pg_stat_activity sample plus its filters and the armed cancel/terminate.
+type actState struct {
+	// ── Activity tool (levelActivity) ────────────────────────────────────────
+	// rows is the last fetched pg_stat_activity snapshot.
+	// err is non-nil when the load failed (shown instead of the list).
+	// hosts maps client_addr → resolved hostname (built incrementally by the
+	// background resolver and merged into items on arrival).
+	// filter is the current backend-filter mode (active+waiting / non-idle / all).
+	// verbose shows all backends including evergreen auxiliary processes when
+	// true; false hides walwriter/checkpointer/launchers/io workers/etc by default.
+	// cols is the projected column descriptor slice, kept so the C picker and
+	// sort cycling can map column indices back to stable actColIDs.
+	// toast maps db+relname (see toastKey) → owning-table display name for the
+	// TOAST relations named in autovacuum rows, built incrementally by the
+	// background resolver and merged into the table column on arrival; "" means
+	// resolution was attempted but yielded nothing.
+	rows    []pg.ActivityRow
+	summary pg.ActivitySummary // server-wide counts + max_connections for the header
+	err     error
+	hosts   map[string]string
+	toast   map[string]string
+	filter  pg.ActivityFilter
+	verbose bool
+	cols    []actColDesc
+	// progressPct is the pid → clamped pg_stat_progress_* percent for the
+	// inline "active - 63%" state cell — the same monotonic high-water clamp as
+	// progressPctMax on the progress screen (see that field for the rationale).
+	progressPct map[int32]progressMark
+
+	// pendingAction is the PID of the backend the user pressed k/x/^k on,
+	// waiting for a y/Y confirmation.  action is "cancel" or "terminate".  The
+	// query text is captured at arm time so an auto-refresh between arm and
+	// confirm can't swap what the banner shows.
+	pendingPID    int32
+	pendingAction string // "cancel" | "terminate" | ""
+	pendingQuery  string
+}
+
+// walState: WAL inspector state.
+type walState struct {
+	// WAL-inspector state. summary is the header snapshot rendered above
+	// the rmgr list on levelWAL (nil until loaded; summaryErr non-nil when
+	// the privilege-gated header sources failed but the list still works).
+	// start/end are the resolved LSN window the overview was computed
+	// over; they're carried down to levelWALRecords so every level analyses
+	// the same window. rmgr names the resource manager whose records a
+	// levelWALRecords screen lists; recLSN is the start LSN of the record
+	// a levelWALBlocks screen drilled into.
+	summary    *pg.WALSummary
+	summaryErr error
+	start      string
+	end        string
+	rmgr       string
+	recLSN     string // start LSN of the drilled-into record
+	recEnd     string // its end LSN — the upper bound for pg_get_wal_block_info
+	// recTypeStats is the per-record-type byte/count breakdown rendered as
+	// a summary table above the levelWALRecords list. Populated alongside the
+	// record rows; nil/empty until loaded.
+	recTypeStats []pg.WALRmgrStat
+	// checkpoint is the best-effort checkpoint context rendered in the
+	// levelWAL header (nil until loaded / when the privilege-gated sources
+	// failed). Loaded independently of summary so each degrades on its own.
+	checkpoint *pg.WALCheckpointInfo
+	// relFilenode / relLabel identify the relation a levelWALRelBlocks
+	// screen lists (its block references across the carried window).
+	relFilenode uint32
+	relLabel    string
+}
+
+// logState: Log analyzer state; the levelLogs screen owns report, children re-point to it on refresh.
+type logState struct {
+	// ── Log analyzer (levelLogFiles / levelLogs / levelLogGroup / levelLogEntry) ──
+	// cands is the picker's candidate list; src the opened file and
+	// report the parsed window (both live on the levelLogs screen — the
+	// child levels read them from that parent via findLevel). err replaces
+	// s.err so the header block still renders around a failed reload.
+	cands  []pg.LogCandidate
+	src    pglog.Source
+	report *pglog.Report
+	err    error
+	// View state, all client-side over report: which pane (groups,
+	// timeline or slow), whether groups are sectioned by category, and the requested
+	// tail window (0 = whole file).
+	view    logView
+	groupBy logGroupBy
+	window  int64
+	// group/entry are what levelLogGroup and levelLogEntry show; cols
+	// is the projected timeline column set (parallel to diagCols).
+	group *pglog.Group
+	entry *pglog.Entry
+	cols  []logColDesc
+	// hosts caches reverse-DNS results (IP → hostname) for the timeline's
+	// opt-in hostname column, filled asynchronously like actHosts.
+	hosts map[string]string
+}
+
+// pgbState: PgBouncer tool state.
+type pgbState struct {
+	// PgBouncer tool state. insts/probes are the instance list (parallel
+	// slices, levelPgBouncers); inst is the instance an overview or SHOW
+	// screen belongs to; show selects the SHOW at levelPgBouncerShow, whose
+	// result rides in diagResult like a diagnostic's. err is the last load
+	// error, rendered in the header instead of failing the screen so a paused
+	// or restarting pooler keeps its place on the stack.
+	insts       []pg.PgBouncerInstance
+	probes      []pg.PgBouncerProbe
+	inst        *pg.PgBouncerInstance
+	overview    *pg.PgBouncerOverview
+	show        pgbShow
+	err         error
+	autoDrilled bool // the single-instance auto-drill already happened once
+}
+
+// bufState: Shared-buffers tool state (levelBufferTables / levelBufferDetail).
+type bufState struct {
+	// Populated on the levelBufferTables screen alongside the row data.
+	summary    *pg.BufferCacheSummary
+	summaryErr error
+
+	// levelBufferDetail state: detail is the table being inspected (carried
+	// from the parent row, so the overview figures render immediately); usage
+	// is its clock-sweep temperature histogram, loaded asynchronously.
+	detail    *pg.TableBufferStat
+	usage     []pg.BufferUsageCount
+	blockSize int64 // cluster block_size, for expressing the histogram in bytes
+	usageErr  error
+}
+
+// maintState: Maintenance / system overview and settings browser state.
+type maintState struct {
+	// ── Maintenance dashboard (levelMaintenance) ─────────────────────────────
+	// info is the loaded snapshot; err is non-nil when the load failed.
+	info *pg.MaintenanceInfo
+	err  error
+	// cursor is the row within the extension-capacity section that ↑↓ move
+	// over (0 = pg_stat_statements, 1 = pg_qualstats, 2 = table stats, 3 = table
+	// stats · all dbs).
+	cursor int
+	// pendingReset is set by Enter on a capacity row; y confirms the reset.
+	pendingReset string
+	// settingRows is the full pg_settings list for levelSettings.
+	settingRows []pg.SettingRow
+}
+
+// describeState: Describe pane (d) state.
+type describeState struct {
+	// info holds the loaded \d-style description for levelDescribe screens.
+	// Nil until the async load completes.
+	info *pg.Description
+	// detail toggles the info panel's detail mode (`d` on the panel):
+	// cache footprint, per-index usage, tuple churn, scans and maintenance.
+	// Off by default so the plain view stays psql-lean and never pays the
+	// pg_buffercache scan.
+	detail bool
+	// buf is the cache-footprint stat for the info-table screen's
+	// shared-buffers section, loaded asynchronously and independently of
+	// info (nil until loaded; bufErr non-nil on a non-extension error).
+	// A missing pg_buffercache is carried by extPrompt instead.
+	// bufLoading is set while a load is in flight so `d` toggles and
+	// refreshes don't stack concurrent full-pool scans (each one is a
+	// multi-second pg_buffercache walk on a big shared_buffers).
+	buf        *pg.TableBufferStat
+	bufErr     error
+	bufLoading bool
+}
+
+// reindexState: REINDEX flow on levelParts: the armed confirm, the running rebuild and its progress.
+type reindexState struct {
+	// pending holds the index name the user pressed ENTER on (parts
 	// level, index row with bloat > 5%). Pressing `y` confirms and runs
 	// REINDEX INDEX CONCURRENTLY; any other key clears it.
-	pendingReindex string
-	// reindexing is the index currently being rebuilt (empty when idle).
-	reindexing string
-	// reindexProg is the last-polled live progress of the running REINDEX from
+	pending string
+	// running is the index currently being rebuilt (empty when idle).
+	running string
+	// prog is the last-polled live progress of the running REINDEX from
 	// pg_stat_progress_create_index; nil until the first sample lands (or
 	// between phases where the view reports no counters).
-	reindexProg *pg.ReindexProgress
-	// reindexPctMax is the high-water mark of reindexProg.OverallPct() across
+	prog *pg.ReindexProgress
+	// pctMax is the high-water mark of prog.OverallPct() across
 	// polls. Phase totals are estimates and briefly read 0 on transitions, so
 	// the banner renders this clamp instead of the raw sample — the overall
 	// bar only ever moves forward.
-	reindexPctMax float64
-	// reindexErr is the last REINDEX failure, shown until the next attempt.
-	reindexErr error
+	pctMax float64
+	// err is the last REINDEX failure, shown until the next attempt.
+	err error
+}
+
+// tblState: Table overview (levelTableStats) state.
+type tblState struct {
+	// ── Table overview tool (levelTableStats) ────────────────────────────────
+	// rows is the last fetched per-table stats snapshot for this schema (the
+	// source of truth for drill-in / describe, looked up by OID). cols is the
+	// projected column descriptor slice, kept so the C picker and sort cycling
+	// can map column indices back to stable tblColIDs.
+	rows []pg.TableStat
+	cols []tblColDesc
+	// statsReset dates the cumulative pg_stat counters shown here (the
+	// database's stats_reset); zero when unknown / never reset. Shown in the
+	// status line so "since when" is never ambiguous.
+	statsReset time.Time
+}
+
+// progressState: Progress view (pg_stat_progress_*) state.
+type progressState struct {
+	// ── Progress monitor (levelProgress) ──────────────────────────────────────
+	// rows is the last fetched set of running operations from the
+	// pg_stat_progress_* views; err is non-nil when the load failed.
+	rows []pg.ProgressRow
+	err  error
+	// pctMax is the per-operation high-water mark of OverallPct(),
+	// keyed by pid — the same monotonic clamp reindexPctMax applies to the
+	// REINDEX banner, so VACUUM's repeated index passes and transiently-zero
+	// totals hold the bar instead of snapping it back. Entries are rebuilt on
+	// every refresh, so a finished operation's mark is dropped with its row.
+	pctMax map[int32]progressMark
+}
+
+// lockState: Lock tree state.
+type lockState struct {
+	// ── Lock tree (levelLockTree) ─────────────────────────────────────────────
+	// nodes is the last fetched set of blocking-chain backends; err is
+	// non-nil when the load failed. The items list is the forest flattened in
+	// DFS order (item.data = lockTreeRow carrying the node and its indent depth).
+	nodes []pg.LockNode
+	err   error
+}
+
+// triageState: Triage state.
+type triageState struct {
+	// ── Health triage (levelTriage) ───────────────────────────────────────────
+	// results holds the checks that have reported so far, severity-sorted;
+	// pending names the ones still running, in battery order; names is the
+	// full battery order SortTriage keys on. items are derived from results
+	// and pending with green checks collapsed (see triageItems).
+	results []pg.TriageResult
+	pending []string
+	names   []string
+	// gen is bumped on every (re)load; messages from an older run carry the
+	// old gen and are dropped, so a refresh mid-run never mixes two reports.
+	gen uint64
+}
+
+// partsState: levelParts extras: bloat scan progress, the per-table maintenance stats and the armed VACUUM.
+type partsState struct {
+	// bloatScanning is true while a FillBloat command for this parts screen
+	// is in flight. The bloat fetch is one-shot (all parts in one call), so
+	// the progress display is "scanning…" / "ready" rather than incremental.
+	bloatScanning bool
+
+	// ── Table maintenance panel (levelParts) ──────────────────────────────────
+	// tableStats is the maintenance snapshot for the current table, loaded
+	// asynchronously alongside the parts list.
+	tableStats    *pg.TableMaintStats
+	tableStatsErr error
+
+	// pendingVacuum is true when the user has armed the vacuum confirm flow
+	// (pressed `v` on levelParts); y executes, any other key cancels.
+	pendingVacuum bool
+}
+
+// pageState: Page inspector state: heap window, tuple/index detail, AM metadata and the seek input. Field names are unchanged.
+type pageState struct {
+	// Seek-to-key state (levelIndexTuples only). seekFocused routes keypresses
+	// into the seek input; seekQuery is the typed leading-key value; seekStatus
+	// is the one-line result hint ("→ #0008" / "no match"). Distinct from the
+	// fuzzy filter: seek jumps the cursor to the B-tree entry whose key range
+	// covers the value rather than narrowing the list.
+	seekFocused bool
+	seekQuery   string
+	seekStatus  string
 
 	// Page-inspector state. levelHeapPages renders a window of the heap's
 	// page array; PgUp/PgDn moves the window in heapWindowCount-sized
@@ -356,9 +722,16 @@ type screen struct {
 	// carry the current page's role string (btree l/r/i/d; gist leaf/intr/del;
 	// brin meta/regular/revmap; gin opaque flags).
 	indexKeyCols []pg.IndexKeyColumn
-	btreeMeta    *pg.BtreeMeta
-	brinMeta     *pg.BrinMeta
-	ginMeta      *pg.GinMeta
+	// indexTuples is the last loaded B-tree page as returned by the client, kept
+	// so the row list can be rebuilt without a reload when a posting-list tuple
+	// is expanded or collapsed. postingOpen records which posting tuples (by
+	// item offset) currently show their member tids; members are heavy (a page
+	// can pack over a thousand) so they stay folded until asked for.
+	indexTuples []pg.IndexTuple
+	postingOpen map[int32]bool
+	btreeMeta   *pg.BtreeMeta
+	brinMeta    *pg.BrinMeta
+	ginMeta     *pg.GinMeta
 
 	// btreeLevels is the whole-tree page census (pages per level) behind the
 	// "levels:" banner line on the B-tree page list. The scan reads every page
@@ -371,301 +744,6 @@ type screen struct {
 	btreeLevelsLoading bool
 	btreeLevelsDone    bool
 	btreeLevelsErr     error
-
-	// describe holds the loaded \d-style description for levelDescribe screens.
-	// Nil until the async load completes.
-	describe *pg.Description
-	// descDetail toggles the describe panel's detail mode (`d` on the panel):
-	// cache footprint, per-index usage, tuple churn, scans and maintenance.
-	// Off by default so the plain view stays psql-lean and never pays the
-	// pg_buffercache scan.
-	descDetail bool
-	// descBuf is the cache-footprint stat for the describe-table screen's
-	// shared-buffers section, loaded asynchronously and independently of
-	// describe (nil until loaded; descBufErr non-nil on a non-extension error).
-	// A missing pg_buffercache is carried by extPrompt instead.
-	// descBufLoading is set while a load is in flight so `d` toggles and
-	// refreshes don't stack concurrent full-pool scans (each one is a
-	// multi-second pg_buffercache walk on a big shared_buffers).
-	descBuf        *pg.TableBufferStat
-	descBufErr     error
-	descBufLoading bool
-
-	// WAL-inspector state. walSummary is the header snapshot rendered above
-	// the rmgr list on levelWAL (nil until loaded; walSummaryErr non-nil when
-	// the privilege-gated header sources failed but the list still works).
-	// walStart/walEnd are the resolved LSN window the overview was computed
-	// over; they're carried down to levelWALRecords so every level analyses
-	// the same window. walRmgr names the resource manager whose records a
-	// levelWALRecords screen lists; walRecLSN is the start LSN of the record
-	// a levelWALBlocks screen drilled into.
-	walSummary    *pg.WALSummary
-	walSummaryErr error
-	walStart      string
-	walEnd        string
-	walRmgr       string
-	walRecLSN     string // start LSN of the drilled-into record
-	walRecEnd     string // its end LSN — the upper bound for pg_get_wal_block_info
-	// walRecTypeStats is the per-record-type byte/count breakdown rendered as
-	// a summary table above the levelWALRecords list. Populated alongside the
-	// record rows; nil/empty until loaded.
-	walRecTypeStats []pg.WALRmgrStat
-	// walCheckpoint is the best-effort checkpoint context rendered in the
-	// levelWAL header (nil until loaded / when the privilege-gated sources
-	// failed). Loaded independently of walSummary so each degrades on its own.
-	walCheckpoint *pg.WALCheckpointInfo
-	// walRelFilenode / walRelLabel identify the relation a levelWALRelBlocks
-	// screen lists (its block references across the carried window).
-	walRelFilenode uint32
-	walRelLabel    string
-
-	// Diagnostic-runner state (levelDiagnostics / levelDiagnosticResult).
-	// diag is the selected query; diagCols is non-nil once the result is
-	// loaded and switches the sort/render path to the generic table model.
-	// diagSortCol is the index of the currently active sort column.
-	diag        *pg.Diagnostic
-	diagCols    []pg.DiagColumn
-	diagBarCol  int  // headline bar column index, or -1
-	diagSortCol int  // active sort column index for the generic table
-	diagAllDBs  bool // true when this result runs the query across all databases (leading "database" column)
-
-	// diagResult retains the full unprojected result on levelDiagnosticResult so
-	// the C column picker can re-project the visible subset without re-running
-	// the query. diagSortName tracks the active sort column by name (diagnostic
-	// columns have no stable ids) so the sort survives a visibility rebuild.
-	diagResult   *pg.DiagResult
-	diagSortName string
-
-	// diagFix is the suggested-fix overlay's state: the script built for the row
-	// Enter was pressed on (Diagnostic.Fix), the database it targets, and the
-	// confirm/run/output lifecycle once the user chooses to execute it.
-	// Model.showDiagFix toggles the overlay itself.
-	diagFix *diagFixRun
-
-	// PgBouncer tool state. pgbInsts/pgbProbes are the instance list (parallel
-	// slices, levelPgBouncers); pgbInst is the instance an overview or SHOW
-	// screen belongs to; pgbShow selects the SHOW at levelPgBouncerShow, whose
-	// result rides in diagResult like a diagnostic's. pgbErr is the last load
-	// error, rendered in the header instead of failing the screen so a paused
-	// or restarting pooler keeps its place on the stack.
-	pgbInsts       []pg.PgBouncerInstance
-	pgbProbes      []pg.PgBouncerProbe
-	pgbInst        *pg.PgBouncerInstance
-	pgbOverview    *pg.PgBouncerOverview
-	pgbShow        pgbShow
-	pgbErr         error
-	pgbAutoDrilled bool // the single-instance auto-drill already happened once
-
-	// diagCatFilter restricts the levelDiagnostics list to one category
-	// (f cycles all → index → table → …); "" shows every diagnostic.
-	diagCatFilter string
-
-	// stmtCols is the projected top-queries column descriptors, parallel to
-	// diagCols (same length/order). Non-nil only on levelStatements; it maps the
-	// renderer's column index (diagSortCol) back to a stable column id so the
-	// cycle-sort can record the active column by identity (see m.stmtSortColID).
-	stmtCols []stmtColDesc
-
-	// diagTotalRow, when non-nil, is rendered as a pinned footer aggregating every
-	// row of the table (whole-table, filter-independent). The top-queries and
-	// table-overview load sites set it (sum for additive columns, pooled ratios /
-	// means for the derived ones); every other diagnostic table leaves it nil.
-	diagTotalRow []pg.DiagCell
-
-	// Memoized per-column render metrics for renderDiagResult. These scan every
-	// row (O(rows×cols), calling lipgloss.Width per cell) but depend only on the
-	// loaded cell *values*, not on the cursor or sort order — so recomputing them
-	// on every keypress is what made the table lag on busy servers (thousands of
-	// pg_stat_statements rows). They're computed once per data load: item-load
-	// sites set diagMetricsDirty, and renderDiagResult recomputes lazily.
-	diagMetricsDirty bool
-	diagColWBase     []int     // capped per-column display width (pre last-column grow)
-	diagNaturalW     []int     // uncapped per-column display width
-	diagBarMax       float64   // numeric max of the bar column, for bar scaling
-	diagCostMax      []float64 // per-column numeric max for DiagCostGraded grading
-
-	// Top-queries state (levelStatements). statBaseline is the snapshot taken
-	// when the tool was entered (or last re-baselined); every refresh diffs
-	// the live counters against it so the table shows the window "since you
-	// opened it" — pg_stat_statements has no time axis of its own. statRows is
-	// the current set of window deltas (used to resolve a drilled-into row back
-	// to its full QueryStat). statWindowExecMs is the summed exec time across
-	// the window, the denominator for the time% column. statBaselineAt /
-	// statSampledAt drive the window-status header.
-	statBaseline      map[int64]pg.QueryStat
-	statRows          []pg.QueryStat
-	statWindowExecMs  float64
-	statBaselineAt    time.Time
-	statSampledAt     time.Time
-	statTrackPlanning bool // pg_stat_statements.track_planning — gates the plan_ms column
-	statLiveCount     int  // distinct queries in the last live sample — sizes the "now" anchor bar
-
-	// Session anchor: the very first in-memory baseline taken when the tool was
-	// entered, preserved unchanged even after a disk/cumulative baseline replaces
-	// statBaseline. The "session start" row in the L browser restores this window.
-	statSessionBaseline map[int64]pg.QueryStat
-	statSessionStart    time.Time
-
-	// Snapshot baseline state (levelStatements). statBaseSnap is non-nil when the
-	// window's baseline was loaded from a disk snapshot rather than the live
-	// auto-baseline: the header then reads "since <CapturedAt> (snapshot)".
-	// statEndSnap is non-nil for a *frozen* A→B diff between two snapshots — the
-	// window then doesn't re-sample live (statEndSnap is the "now").
-	// statCumulative is true when the baseline is an empty map (diff against nothing),
-	// yielding raw cumulative counters since the last pg_stat_statements reset.
-	statBaseSnap   *pg.Snapshot
-	statEndSnap    *pg.Snapshot
-	statCumulative bool
-
-	// Snapshots-browser state (levelSnapshots). statSnapMetas is aligned by index
-	// with items (one meta per row).
-	statSnapMetas []pg.SnapshotMeta
-	statLiveReset time.Time // live pg_stat_statements stats_reset — dates the "since last reset" anchor
-
-	// Query-detail state (levelStatementDetail). statDetail is the window-delta
-	// QueryStat for the drilled-into query; statSampleCall is the synthesized
-	// example call (or "" with statSampleErr set when params couldn't be
-	// inferred); statExplain holds the EXPLAIN output, run automatically on
-	// entry (generic plan) and re-runnable via x, or replaced by EXPLAIN
-	// ANALYZE on Enter. statExplainAnalyze flags which of the two the current
-	// statExplain text is.
-	statDetail         *pg.QueryStat
-	statSampleCall     string
-	statSampleParams   []pg.SampleParam // per-$n breakdown behind statSampleCall (verbose table)
-	statSampleReal     bool             // statSampleCall is a real pg_qualstats example, not synthesized
-	statSampleFromData bool             // statSampleCall is synthesized but uses real values sampled from the live table
-	statSampleFromQual bool             // statSampleCall is synthesized but ≥1 placeholder uses a per-predicate pg_qualstats constant
-	statQualstats      bool             // pg_qualstats is installed in db (drives source hint + captured-values key)
-	statSampleErr      error
-	statExplain        string
-	statExplainErr     error
-	statExplaining     bool
-	statExplainAnalyze bool
-	statVerbose        bool // v toggles the verbose detail view (parameter table + extra metric rows)
-	// statHotStats holds the main table's cumulative HOT-update counters
-	// (pg_stat_user_tables), fetched async on entry and rendered next to the
-	// parsed table name. nil until loaded or when the table didn't resolve;
-	// statHotErr records a fetch failure (kept quiet — the row is just omitted).
-	statHotStats *pg.TableHotStats
-	statHotErr   error
-
-	// ── Activity tool (levelActivity) ────────────────────────────────────────
-	// actRows is the last fetched pg_stat_activity snapshot.
-	// actErr is non-nil when the load failed (shown instead of the list).
-	// actHosts maps client_addr → resolved hostname (built incrementally by the
-	// background resolver and merged into items on arrival).
-	// actFilter is the current backend-filter mode (active+waiting / non-idle / all).
-	// actVerbose shows all backends including evergreen auxiliary processes when
-	// true; false hides walwriter/checkpointer/launchers/io workers/etc by default.
-	// actCols is the projected column descriptor slice, kept so the C picker and
-	// sort cycling can map column indices back to stable actColIDs.
-	// actToast maps db+relname (see toastKey) → owning-table display name for the
-	// TOAST relations named in autovacuum rows, built incrementally by the
-	// background resolver and merged into the table column on arrival; "" means
-	// resolution was attempted but yielded nothing.
-	actRows    []pg.ActivityRow
-	actSummary pg.ActivitySummary // server-wide counts + max_connections for the header
-	actErr     error
-	actHosts   map[string]string
-	actToast   map[string]string
-	actFilter  pg.ActivityFilter
-	actVerbose bool
-	actCols    []actColDesc
-	// actProgressPct is the pid → clamped pg_stat_progress_* percent for the
-	// inline "active - 63%" state cell — the same monotonic high-water clamp as
-	// progressPctMax on the progress screen (see that field for the rationale).
-	actProgressPct map[int32]progressMark
-
-	// ── Lock tree (levelLockTree) ─────────────────────────────────────────────
-	// lockNodes is the last fetched set of blocking-chain backends; lockErr is
-	// non-nil when the load failed. The items list is the forest flattened in
-	// DFS order (item.data = lockTreeRow carrying the node and its indent depth).
-	lockNodes []pg.LockNode
-	lockErr   error
-
-	// ── Table overview tool (levelTableStats) ────────────────────────────────
-	// tblRows is the last fetched per-table stats snapshot for this schema (the
-	// source of truth for drill-in / describe, looked up by OID). tblCols is the
-	// projected column descriptor slice, kept so the C picker and sort cycling
-	// can map column indices back to stable tblColIDs.
-	tblRows []pg.TableStat
-	tblCols []tblColDesc
-	// tblStatsReset dates the cumulative pg_stat counters shown here (the
-	// database's stats_reset); zero when unknown / never reset. Shown in the
-	// status line so "since when" is never ambiguous.
-	tblStatsReset time.Time
-
-	// pendingBackendAction is the PID of the backend the user pressed k/x/^k on,
-	// waiting for a y/Y confirmation.  action is "cancel" or "terminate".  The
-	// query text is captured at arm time so an auto-refresh between arm and
-	// confirm can't swap what the banner shows.
-	pendingBackendPID    int32
-	pendingBackendAction string // "cancel" | "terminate" | ""
-	pendingBackendQuery  string
-
-	// ── Maintenance dashboard (levelMaintenance) ─────────────────────────────
-	// maint is the loaded snapshot; maintErr is non-nil when the load failed.
-	maint    *pg.MaintenanceInfo
-	maintErr error
-	// maintCursor is the row within the extension-capacity section that ↑↓ move
-	// over (0 = pg_stat_statements, 1 = pg_qualstats, 2 = table stats, 3 = table
-	// stats · all dbs).
-	maintCursor int
-	// pendingReset is set by Enter on a capacity row; y confirms the reset.
-	pendingReset string
-	// settingRows is the full pg_settings list for levelSettings.
-	settingRows []pg.SettingRow
-
-	// ── Health triage (levelTriage) ───────────────────────────────────────────
-	// triageResults is the loaded battery result, severity-sorted; items are
-	// derived from it with green checks collapsed (see triageItems).
-	triageResults []pg.TriageResult
-
-	// ── Log analyzer (levelLogFiles / levelLogs / levelLogGroup / levelLogEntry) ──
-	// logCands is the picker's candidate list; logSrc the opened file and
-	// logReport the parsed window (both live on the levelLogs screen — the
-	// child levels read them from that parent via findLevel). logErr replaces
-	// s.err so the header block still renders around a failed reload.
-	logCands  []pg.LogCandidate
-	logSrc    pg.LogSource
-	logReport *pg.LogReport
-	logErr    error
-	// View state, all client-side over logReport: which pane (groups,
-	// timeline or slow), whether groups are sectioned by category, and the requested
-	// tail window (0 = whole file).
-	logView    logView
-	logGroupBy logGroupBy
-	logWindow  int64
-	// logGroup/logEntry are what levelLogGroup and levelLogEntry show; logCols
-	// is the projected timeline column set (parallel to diagCols).
-	logGroup *pg.LogGroup
-	logEntry *pg.LogEntry
-	logCols  []logColDesc
-	// logHosts caches reverse-DNS results (IP → hostname) for the timeline's
-	// opt-in hostname column, filled asynchronously like actHosts.
-	logHosts map[string]string
-
-	// ── Progress monitor (levelProgress) ──────────────────────────────────────
-	// progressRows is the last fetched set of running operations from the
-	// pg_stat_progress_* views; progressErr is non-nil when the load failed.
-	progressRows []pg.ProgressRow
-	progressErr  error
-	// progressPctMax is the per-operation high-water mark of OverallPct(),
-	// keyed by pid — the same monotonic clamp reindexPctMax applies to the
-	// REINDEX banner, so VACUUM's repeated index passes and transiently-zero
-	// totals hold the bar instead of snapping it back. Entries are rebuilt on
-	// every refresh, so a finished operation's mark is dropped with its row.
-	progressPctMax map[int32]progressMark
-
-	// ── Table maintenance panel (levelParts) ──────────────────────────────────
-	// tableStats is the maintenance snapshot for the current table, loaded
-	// asynchronously alongside the parts list.
-	tableStats    *pg.TableMaintStats
-	tableStatsErr error
-
-	// pendingVacuum is true when the user has armed the vacuum confirm flow
-	// (pressed `v` on levelParts); y executes, any other key cancels.
-	pendingVacuum bool
 }
 
 // reindexBloatThreshold is the bloat % above which the parts view offers an
@@ -741,17 +819,15 @@ type Model struct {
 	// it finished the overlay stays up to show the output.
 	showDiagFix bool
 
-	// Top-queries column configuration (C key on levelStatements). stmtColsVisible
-	// is the per-column-id visibility set (nil = registry defaults, so a fresh run
-	// shows the historical columns; lazily filled on first use). stmtSortColID
-	// tracks the active sort column by identity so it survives a visibility change
-	// — the projected index (screen.diagSortCol) is recomputed each rebuild.
-	// showColumnConfig toggles the htop-style picker overlay; colCfgCursor is its
-	// row cursor over the column registry.
-	stmtColsVisible  map[stmtColID]bool
-	stmtSortColID    stmtColID
-	showColumnConfig bool
-	colCfgCursor     int
+	// Column-picker state of the registry-backed tables (C key): the per-column
+	// visibility set (nil = registry defaults, so a fresh run shows the
+	// historical columns), the active sort column by stable id — it survives a
+	// visibility change; the projected index screen.diagSortCol is recomputed
+	// each rebuild — and the modal picker overlay flag + cursor. The static
+	// half (registry, prefs key, sort fallback) is each table's colSpec.
+	stmtTable colTable[stmtColID]
+	actTable  colTable[actColID]
+	tblTable  colTable[tblColID]
 
 	// Tuple byte-layout overlay (Enter on levelHeapTuples). The cursor walks the
 	// legend rows; the offset is the legend's scroll window start. The loaded
@@ -764,28 +840,9 @@ type Model struct {
 	tupleLayoutSort     tlSort
 	tupleLayoutSortDesc bool
 
-	// Activity tool column configuration (C key on levelActivity). actColsVisible
-	// is the per-column-id visibility set (nil = registry defaults). actSortColID
-	// tracks the active sort column by stable id across visibility rebuilds.
-	// actColCfgCursor is the C-picker row cursor; showActColumnConfig opens it.
-	actColsVisible      map[actColID]bool
-	actSortColID        actColID
-	showActColumnConfig bool
-	actColCfgCursor     int
-
-	// Table overview column configuration (C key on levelTableStats). Mirrors
-	// the activity/queries column state: tblColsVisible is the per-column-id
-	// visibility set (nil = registry defaults), tblSortColID tracks the active
-	// sort column by stable id across rebuilds, showTblColumnConfig opens the
-	// C-picker, tblColCfgCursor is its row cursor.
-	tblColsVisible      map[tblColID]bool
-	tblSortColID        tblColID
-	showTblColumnConfig bool
-	tblColCfgCursor     int
-
 	// Diagnostic-result column configuration (C on levelDiagnosticResult).
 	// Diagnostic columns are dynamic (server field descriptions), so unlike the
-	// three static registries above, visibility is kept per diagnostic key and
+	// registry-backed colTables, visibility is kept per diagnostic key and
 	// by column name. A missing inner map (or missing name) means visible;
 	// entries are lazily seeded from prefs by diagVis. diagColCfgCursor is the
 	// C-picker row cursor; showDiagColumnConfig opens it.
@@ -835,13 +892,12 @@ type Model struct {
 	// and opens it directly.
 	logFile string
 
-	// Timeline column picker state (C on the log timeline), mirroring the
-	// activity picker.
-	logColsVisible      map[logColID]bool
-	logSortColID        logColID // timeline pane
-	logSlowSortColID    logColID // slow-queries pane
-	showLogColumnConfig bool
-	logColCfgCursor     int
+	// Log table pickers: the timeline and slow panes share logTable's visibility
+	// set (the slow pane remembers its own sort column), the pooler-stats pane
+	// renders a different registry and so has its own table.
+	logTable         colTable[logColID]
+	logStatsTable    colTable[logColID]
+	logSlowSortColID logColID
 
 	// statRefresh is the top-queries re-sample cadence (from --queries-refresh /
 	// PGDU_QUERIES_REFRESH). Zero disables auto-refresh entirely. The t key cycles
@@ -944,24 +1000,26 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 	// id the user never touched, so columns added in a later build still appear.
 	if colPrefs != nil {
 		if v := colPrefs.Columns(colPrefsActivity); len(v) > 0 {
-			m.actColsVisible = colVisFromStrings[actColID](v)
+			m.actTable.visible = colVisFromStrings[actColID](v)
 		}
 		if v := colPrefs.Columns(colPrefsQueries); len(v) > 0 {
-			m.stmtColsVisible = colVisFromStrings[stmtColID](v)
+			m.stmtTable.visible = colVisFromStrings[stmtColID](v)
 		}
 		if v := colPrefs.Columns(colPrefsTableStats); len(v) > 0 {
-			m.tblColsVisible = colVisFromStrings[tblColID](v)
+			m.tblTable.visible = colVisFromStrings[tblColID](v)
 		}
 		if v := colPrefs.Columns(colPrefsLogs); len(v) > 0 {
-			m.logColsVisible = colVisFromStrings[logColID](v)
+			m.logTable.visible = colVisFromStrings[logColID](v)
+		}
+		if v := colPrefs.Columns(colPrefsLogStats); len(v) > 0 {
+			m.logStatsTable.visible = colVisFromStrings[logColID](v)
 		}
 	}
 	root := &screen{
 		level:    levelTools,
 		title:    "tools",
 		sort:     sortByName,
-		sortDesc: sortByName.defaultDesc(),
-	}
+		sortDesc: sortByName.defaultDesc()}
 	m.stack = []*screen{root}
 	// --<tool> shortcut: open the requested tool directly, but keep the picker as
 	// the stack root so Back/Esc still returns to it. The root is pre-populated

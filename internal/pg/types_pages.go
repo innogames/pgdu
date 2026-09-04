@@ -164,6 +164,12 @@ type IndexTuple struct {
 	Dead       bool
 	HotCtid    *string
 	HotDecoded *string
+	// Posting holds the heap tids a posting-list tuple packs (PG 13+ B-tree
+	// deduplication), one member per tid, each resolved like a regular leaf
+	// entry (Ctid/Decoded/HotCtid/HotDecoded). Members carry the parent's
+	// ItemOffset and no ItemLen of their own. Empty for singletons and pivots,
+	// and when the installed pageinspect predates bt_page_items' tids column.
+	Posting []IndexTuple
 }
 
 // TupleCell is one column of a heap row decoded for the row-detail view.

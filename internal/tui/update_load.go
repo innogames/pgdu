@@ -26,7 +26,7 @@ func (m *Model) loadCurrent() tea.Cmd {
 	s := m.top()
 	// A frozen A→B window rebuilds from its two loaded snapshots — no DB read,
 	// so it's handled before the generic loading path sets the spinner.
-	if s.level == levelStatements && s.statEndSnap != nil {
+	if s.level == levelStatements && s.stat.endSnap != nil {
 		m.populateFrozenWindow(s)
 		return nil
 	}
@@ -50,7 +50,7 @@ func (m *Model) loadCurrent() tea.Cmd {
 		// immediately instead of behind a spinner.
 		s.loading = false
 		s.loaded = true
-		if s.statDetail == nil {
+		if s.stat.detail == nil {
 			return nil
 		}
 		var cmds []tea.Cmd
@@ -58,22 +58,22 @@ func (m *Model) loadCurrent() tea.Cmd {
 		// pg_stat_user_tables). Reset first so a refresh re-fetches and a stale
 		// value from a previous query never lingers; the cmd is nil-safe when no
 		// table parses out.
-		s.statHotStats = nil
-		s.statHotErr = nil
-		if c := m.loadStatementTableHotCmd(s.db, s.statDetail.Query); c != nil {
+		s.stat.hotStats = nil
+		s.stat.hotErr = nil
+		if c := m.loadStatementTableHotCmd(s.db, s.stat.detail.Query); c != nil {
 			cmds = append(cmds, c)
 		}
-		if pg.ExplainableQuery(s.statDetail.Query) {
+		if pg.ExplainableQuery(s.stat.detail.Query) {
 			// Resolve the sample call first, then auto-run the plan once it's
 			// known: a real pg_qualstats example takes a plain EXPLAIN, a
 			// synthesized one the generic plan. onStatementSampleLoaded fires the
 			// EXPLAIN while statExplaining is set. ANALYZE stays opt-in (Enter)
 			// because it executes the query.
-			s.statExplaining = true
-			s.statExplain = ""
-			s.statExplainErr = nil
-			s.statExplainAnalyze = false
-			cmds = append(cmds, m.loadStatementSampleCmd(s.db, s.statDetail.QueryID, s.statDetail.Query))
+			s.stat.explaining = true
+			s.stat.explain = ""
+			s.stat.explainErr = nil
+			s.stat.explainAnalyze = false
+			cmds = append(cmds, m.loadStatementSampleCmd(s.db, s.stat.detail.QueryID, s.stat.detail.Query))
 		}
 		return tea.Batch(cmds...)
 	}
@@ -93,21 +93,21 @@ func (m *Model) loadCurrent() tea.Cmd {
 	case levelTables:
 		return m.loadTablesCmd(s.db, s.schema)
 	case levelBufferTables:
-		s.bufferSummary = nil
-		s.bufferSummaryErr = nil
+		s.buf.summary = nil
+		s.buf.summaryErr = nil
 		return tea.Batch(
 			m.loadBufferStatsCmd(s.db, s.schema),
 			m.loadBufferSummaryCmd(s.db),
 		)
 	case levelBufferDetail:
-		if s.bufDetail == nil {
+		if s.buf.detail == nil {
 			s.loading = false
 			s.loaded = true
 			return nil
 		}
-		s.bufUsage = nil
-		s.bufUsageErr = nil
-		return m.loadBufferDetailCmd(s.db, s.bufDetail.OID)
+		s.buf.usage = nil
+		s.buf.usageErr = nil
+		return m.loadBufferDetailCmd(s.db, s.buf.detail.OID)
 	case levelShmem:
 		return m.loadShmemCmd(s.db)
 	case levelParts:
@@ -125,46 +125,46 @@ func (m *Model) loadCurrent() tea.Cmd {
 	case levelColumns:
 		return m.loadColumnsCmd(s.table)
 	case levelHeapPages:
-		return m.loadHeapPagesCmd(s.table, s.heapWindowStart, s.heapWindowCount)
+		return m.loadHeapPagesCmd(s.table, s.pages.heapWindowStart, s.pages.heapWindowCount)
 	case levelHeapTuples:
-		return m.loadHeapTuplesCmd(s.table, s.heapPageBlkno)
+		return m.loadHeapTuplesCmd(s.table, s.pages.heapPageBlkno)
 	case levelTupleRow:
-		if s.toastChunkID != 0 {
-			return m.loadToastValueCmd(s.table, s.toastChunkID)
+		if s.pages.toastChunkID != 0 {
+			return m.loadToastValueCmd(s.table, s.pages.toastChunkID)
 		}
-		return m.loadTupleRowCmd(s.table, s.tupleCtid)
+		return m.loadTupleRowCmd(s.table, s.pages.tupleCtid)
 	case levelRelations:
 		return m.loadRelationsCmd(s.db, s.schema)
 	case levelIndexPages:
-		switch s.index.AccessMethod {
+		switch s.pages.index.AccessMethod {
 		case "gist":
-			return m.loadGistPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount)
+			return m.loadGistPagesCmd(s.pages.index, s.pages.heapWindowStart, s.pages.heapWindowCount)
 		case "brin":
-			return m.loadBrinPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount)
+			return m.loadBrinPagesCmd(s.pages.index, s.pages.heapWindowStart, s.pages.heapWindowCount)
 		case "gin":
-			return m.loadGinPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount)
+			return m.loadGinPagesCmd(s.pages.index, s.pages.heapWindowStart, s.pages.heapWindowCount)
 		default:
 			// The whole-tree level census reads every page of the index, so it
 			// runs once per screen — window moves and refreshes reuse the cache.
-			if !s.btreeLevelsDone && !s.btreeLevelsLoading {
-				s.btreeLevelsLoading = true
+			if !s.pages.btreeLevelsDone && !s.pages.btreeLevelsLoading {
+				s.pages.btreeLevelsLoading = true
 				return tea.Batch(
-					m.loadIndexPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount),
-					m.loadBtreeLevelCountsCmd(s.index),
+					m.loadIndexPagesCmd(s.pages.index, s.pages.heapWindowStart, s.pages.heapWindowCount),
+					m.loadBtreeLevelCountsCmd(s.pages.index),
 				)
 			}
-			return m.loadIndexPagesCmd(s.index, s.heapWindowStart, s.heapWindowCount)
+			return m.loadIndexPagesCmd(s.pages.index, s.pages.heapWindowStart, s.pages.heapWindowCount)
 		}
 	case levelIndexTuples:
-		switch s.index.AccessMethod {
+		switch s.pages.index.AccessMethod {
 		case "gist":
-			return m.loadGistItemsCmd(s.index, s.indexPageBlkno, s.indexPageType)
+			return m.loadGistItemsCmd(s.pages.index, s.pages.indexPageBlkno, s.pages.indexPageType)
 		case "brin":
-			return m.loadBrinItemsCmd(s.index, s.indexPageBlkno)
+			return m.loadBrinItemsCmd(s.pages.index, s.pages.indexPageBlkno)
 		case "gin":
-			return m.loadGinItemsCmd(s.index, s.indexPageBlkno)
+			return m.loadGinItemsCmd(s.pages.index, s.pages.indexPageBlkno)
 		default:
-			return m.loadIndexTuplesCmd(s.index, s.indexPageBlkno, s.indexPageType)
+			return m.loadIndexTuplesCmd(s.pages.index, s.pages.indexPageBlkno, s.pages.indexPageType)
 		}
 	case levelDescribe:
 		// Re-issue the right loader on Refresh. On first push s.describe is nil
@@ -172,10 +172,10 @@ func (m *Model) loadCurrent() tea.Cmd {
 		// (index describe — s.table.OID is 0 for index targets). The
 		// cache-footprint section is (re)loaded from onDescribeLoaded once the
 		// describe result lands, so all push paths and refresh share one trigger.
-		if s.describe != nil {
-			switch s.describe.Kind {
+		if s.desc.info != nil {
+			switch s.desc.info.Kind {
 			case pg.DescribeIndex:
-				return m.loadDescribeIndexCmd(s.db, s.describe.OID, s.describe.Title)
+				return m.loadDescribeIndexCmd(s.db, s.desc.info.OID, s.desc.info.Title)
 			default:
 				return m.loadDescribeTableCmd(s.table)
 			}
@@ -199,23 +199,23 @@ func (m *Model) loadCurrent() tea.Cmd {
 	case levelWAL:
 		// Clear the header cache so a Refresh re-resolves the window and
 		// re-reads the snapshot against the now-current write position.
-		s.walSummary = nil
-		s.walSummaryErr = nil
-		s.walCheckpoint = nil
+		s.wal.summary = nil
+		s.wal.summaryErr = nil
+		s.wal.checkpoint = nil
 		return tea.Batch(
 			m.loadWALOverviewCmd(s.db),
 			m.loadWALSummaryCmd(s.db),
 			m.loadWALCheckpointCmd(s.db),
 		)
 	case levelWALRecords:
-		s.walRecTypeStats = nil
-		return m.loadWALRecordsCmd(s.db, s.walStart, s.walEnd, s.walRmgr)
+		s.wal.recTypeStats = nil
+		return m.loadWALRecordsCmd(s.db, s.wal.start, s.wal.end, s.wal.rmgr)
 	case levelWALBlocks:
-		return m.loadWALBlocksCmd(s.db, s.walRecLSN, s.walRecEnd)
+		return m.loadWALBlocksCmd(s.db, s.wal.recLSN, s.wal.recEnd)
 	case levelWALRelations:
-		return m.loadWALRelationsCmd(s.db, s.walStart, s.walEnd)
+		return m.loadWALRelationsCmd(s.db, s.wal.start, s.wal.end)
 	case levelWALRelBlocks:
-		return m.loadWALRelBlocksCmd(s.db, s.walStart, s.walEnd, s.walRelFilenode)
+		return m.loadWALRelBlocksCmd(s.db, s.wal.start, s.wal.end, s.wal.relFilenode)
 	case levelStatements:
 		// Kick a snapshot and, unless one is already running, start the
 		// self-rescheduling refresh tick. The first snapshot becomes the
@@ -237,26 +237,27 @@ func (m *Model) loadCurrent() tea.Cmd {
 	case levelActivity:
 		// Kick an immediate snapshot and, unless one is already running, start
 		// the self-rescheduling refresh tick. Pattern mirrors levelStatements.
-		return tea.Batch(m.armActivityTick([]tea.Cmd{m.loadActivityCmd(s.db, s.actFilter)})...)
+		return tea.Batch(m.armActivityTick([]tea.Cmd{m.loadActivityCmd(s.db, s.act.filter)})...)
 	case levelLockTree:
 		// Same live-refresh pattern as the activity table, reusing its tick loop.
 		return tea.Batch(m.armActivityTick([]tea.Cmd{m.loadLockTreeCmd(s.db)})...)
 	case levelTableStats:
 		return m.loadTableOverviewCmd(s.db, s.schema)
 	case levelTriage:
-		return m.loadTriageCmd()
+		s.triage.gen++
+		return m.loadTriageCmd(s.triage.gen)
 	case levelPgBouncers:
 		return tea.Batch(m.armPgbTick([]tea.Cmd{m.discoverPgBouncersCmd()})...)
 	case levelPgBouncer:
-		if s.pgbInst == nil {
+		if s.pgb.inst == nil {
 			return nil
 		}
-		return tea.Batch(m.armPgbTick([]tea.Cmd{m.loadPgbOverviewCmd(*s.pgbInst)})...)
+		return tea.Batch(m.armPgbTick([]tea.Cmd{m.loadPgbOverviewCmd(*s.pgb.inst)})...)
 	case levelPgBouncerShow:
-		if s.pgbInst == nil {
+		if s.pgb.inst == nil {
 			return nil
 		}
-		return tea.Batch(m.armPgbTick([]tea.Cmd{m.loadPgbShowCmd(*s.pgbInst, s.pgbShow)})...)
+		return tea.Batch(m.armPgbTick([]tea.Cmd{m.loadPgbShowCmd(*s.pgb.inst, s.pgb.show)})...)
 	case levelLogFiles:
 		return m.discoverLogsCmd()
 	case levelLogs:

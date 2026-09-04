@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
+	"pgdu/internal/pglog"
 )
 
 // exportDoneMsg reports the outcome of writing the current screen to CSV.
@@ -121,7 +122,7 @@ func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 	case levelLogs:
 		return []string{"category", "severity", "count", "first", "last", "title"},
 			func(it item) []string {
-				g, ok := it.data.(*pg.LogGroup)
+				g, ok := it.data.(*pglog.Group)
 				if !ok {
 					return nil // section headers
 				}
@@ -132,7 +133,7 @@ func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 	case levelLogGroup:
 		return []string{"time", "severity", "pid", "user", "database", "host", "duration_ms", "message", "detail", "statement"},
 			func(it item) []string {
-				e, ok := it.data.(*pg.LogEntry)
+				e, ok := it.data.(*pglog.Entry)
 				if !ok {
 					return nil
 				}
@@ -141,7 +142,7 @@ func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 					ts = e.Time.Format(time.RFC3339)
 				}
 				dur := ""
-				if e.Category == pg.CatSlowQuery {
+				if e.Category == pglog.CatSlowQuery {
 					dur = numStr(e.DurationMs)
 				}
 				stmt := string(e.Statement)
@@ -288,13 +289,18 @@ func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 			}, true
 
 	case levelIndexTuples:
-		return []string{"item_offset", "ctid", "item_len", "nulls", "vars", "data", "decoded"},
+		return []string{"item_offset", "posting_n", "ctid", "item_len", "nulls", "vars", "data", "decoded"},
 			func(it item) []string {
+				// Posting members export as their own rows under the parent's
+				// item_offset; posting_n is empty for everything else.
+				if mem, ok := it.data.(postingMember); ok {
+					return []string{csvInt(mem.parent.ItemOffset), strconv.Itoa(mem.n), csvStrP(mem.tuple.Ctid), "", "", "", "", csvStrP(mem.tuple.Decoded)}
+				}
 				t, ok := it.data.(pg.IndexTuple)
 				if !ok {
 					return nil
 				}
-				return []string{csvInt(t.ItemOffset), csvStrP(t.Ctid), csvInt(t.ItemLen), csvBoolP(t.Nulls), csvBoolP(t.Vars), csvStrP(t.Data), csvStrP(t.Decoded)}
+				return []string{csvInt(t.ItemOffset), "", csvStrP(t.Ctid), csvInt(t.ItemLen), csvBoolP(t.Nulls), csvBoolP(t.Vars), csvStrP(t.Data), csvStrP(t.Decoded)}
 			}, true
 
 	case levelWAL:
@@ -376,7 +382,7 @@ func csvPageBuf(it item) (usagecount, dirty string) {
 	}
 	return strconv.Itoa(int(it.pageBuf.UsageCount)), strconv.FormatBool(it.pageBuf.Dirty)
 }
-func csvUint(n uint32) string                  { return strconv.FormatUint(uint64(n), 10) }
+func csvUint(n uint32) string { return strconv.FormatUint(uint64(n), 10) }
 
 // Pointer-field helpers: empty string when the source value is SQL NULL.
 func csvIntP(p *int32) string {

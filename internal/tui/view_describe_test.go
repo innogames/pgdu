@@ -17,7 +17,7 @@ func TestRenderDescribeInfoVariants(t *testing.T) {
 		{pg.DescribeTable, []string{"Describe table reference", "covers", "hit", "cache footprint", "toggle detail mode"}, []string{"idx_tup_read"}},
 		{pg.DescribeIndex, []string{"Describe index reference", "covers", "idx_tup_read", "partial predicate"}, []string{"cache footprint", "toggle detail mode"}},
 	} {
-		s := &screen{level: levelDescribe, describe: &pg.Description{Kind: tc.kind}}
+		s := &screen{level: levelDescribe, desc: describeState{info: &pg.Description{Kind: tc.kind}}}
 		if !m.hasInfoOverlay(s) {
 			t.Fatalf("describe level has no ? overlay")
 		}

@@ -1,4 +1,4 @@
-package pg
+package pglog
 
 import (
 	"strings"
@@ -127,14 +127,14 @@ func TestDetectPrefix(t *testing.T) {
 }
 
 func TestDetectLogFormat(t *testing.T) {
-	cases := map[string]LogFormat{
-		`2026-09-02 00:15:25 UTC [1-1] LOG:  x`:                    LogFormatStderr,
-		`2026-09-02 00:15:25.123 UTC,"u","d",1,"h",abc.1,1,,,,,LOG`: LogFormatCSV,
-		`{"timestamp":"2026-09-02 00:15:25.123 UTC","pid":1}`:      LogFormatJSON,
+	cases := map[string]Format{
+		`2026-09-02 00:15:25 UTC [1-1] LOG:  x`:                     FormatStderr,
+		`2026-09-02 00:15:25.123 UTC,"u","d",1,"h",abc.1,1,,,,,LOG`: FormatCSV,
+		`{"timestamp":"2026-09-02 00:15:25.123 UTC","pid":1}`:       FormatJSON,
 	}
 	for in, want := range cases {
-		if got := DetectLogFormat([]byte(in + "\n")); got != want {
-			t.Errorf("DetectLogFormat(%q) = %v, want %v", in, got, want)
+		if got := DetectFormat([]byte(in + "\n")); got != want {
+			t.Errorf("DetectFormat(%q) = %v, want %v", in, got, want)
 		}
 	}
 }

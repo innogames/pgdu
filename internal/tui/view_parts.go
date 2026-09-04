@@ -165,7 +165,7 @@ func (m *Model) renderPartsTotals(s *screen) string {
 // renderVacuumBanner renders the one-line confirmation prompt for the vacuum
 // action on the parts level. Returns "" when there is nothing to show.
 func (m *Model) renderVacuumBanner(s *screen) string {
-	if s.level != levelParts || !s.pendingVacuum {
+	if s.level != levelParts || !s.parts.pendingVacuum {
 		return ""
 	}
 	return confirmBanner("VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) " + s.table.Qualified())
@@ -242,16 +242,16 @@ const maintLabelW = 9 // "analyze  " — align value columns
 // the parts list. Returns "" when stats haven't loaded yet. On error, degrades
 // to a single muted line. Always ends with a vacuum hint.
 func (m *Model) renderMaintPanel(s *screen) string {
-	if s.tableStats == nil && s.tableStatsErr == nil {
+	if s.parts.tableStats == nil && s.parts.tableStatsErr == nil {
 		return ""
 	}
 	mu := styleMuted.Render
-	if s.tableStatsErr != nil {
-		return "  " + mu("maintenance stats unavailable: "+s.tableStatsErr.Error()) + "\n" +
+	if s.parts.tableStatsErr != nil {
+		return "  " + mu("maintenance stats unavailable: "+s.parts.tableStatsErr.Error()) + "\n" +
 			"  " + mu("hint: press ") + styleBadge.Render("v") + mu(" to run VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) on this table") + "\n" +
 			m.maintReindexHint(s) + "\n"
 	}
-	st := s.tableStats
+	st := s.parts.tableStats
 	var b strings.Builder
 
 	b.WriteString("  " + mu("─── maintenance") + "\n")

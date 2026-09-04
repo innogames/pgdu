@@ -26,9 +26,9 @@ func (m *Model) onToastTargetResolved(msg toastTargetResolvedMsg) tea.Cmd {
 		return nil
 	}
 	s.table = msg.table
-	s.heapWindowStart = (msg.block / heapWindowDefault) * heapWindowDefault
+	s.pages.heapWindowStart = (msg.block / heapWindowDefault) * heapWindowDefault
 	m.notice = fmt.Sprintf("toast value %d — heap page %d", msg.chunkID, msg.block)
-	return m.loadHeapPagesCmd(s.table, s.heapWindowStart, s.heapWindowCount)
+	return m.loadHeapPagesCmd(s.table, s.pages.heapWindowStart, s.pages.heapWindowCount)
 }
 
 // pageTempHint surfaces the non-blocking "install pg_buffercache" hint when
@@ -60,12 +60,12 @@ func (m *Model) applyAMPages(s *screen, err error, totalPages int32, keyCols []p
 	if cmd, stop := settleLoad(s, err, extPromptReasonPageInspect); stop {
 		return cmd
 	}
-	s.heapPageCount = totalPages
-	s.indexKeyCols = keyCols
+	s.pages.heapPageCount = totalPages
+	s.pages.indexKeyCols = keyCols
 	if setMeta != nil {
 		setMeta(s)
 	}
-	s.pageBufs = bufs
+	s.pages.pageBufs = bufs
 	pageTempHint(s, bufsErr)
 	s.items = s.items[:0]
 	for i := range n {
@@ -91,14 +91,14 @@ func (m *Model) applyAMItems(s *screen, err error, n int, toItem func(i int) ite
 
 func (m *Model) onHeapPagesLoaded(msg heapPagesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelHeapPages)
-	if s == nil || s.table.OID != msg.table.OID || s.heapWindowStart != msg.start {
+	if s == nil || s.table.OID != msg.table.OID || s.pages.heapWindowStart != msg.start {
 		return nil
 	}
 	if cmd, stop := settleLoad(s, msg.err, extPromptReasonPageInspect); stop {
 		return cmd
 	}
-	s.heapPageCount = msg.totalPages
-	s.pageBufs = msg.bufs
+	s.pages.heapPageCount = msg.totalPages
+	s.pages.pageBufs = msg.bufs
 	pageTempHint(s, msg.bufsErr)
 	s.items = s.items[:0]
 	for _, p := range msg.pages {
@@ -110,7 +110,7 @@ func (m *Model) onHeapPagesLoaded(msg heapPagesLoadedMsg) tea.Cmd {
 
 func (m *Model) onTupleRowLoaded(msg tupleRowLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelTupleRow)
-	if s == nil || s.table.OID != msg.tableOID || s.tupleCtid != msg.ctid {
+	if s == nil || s.table.OID != msg.tableOID || s.pages.tupleCtid != msg.ctid {
 		return nil
 	}
 	s.loading = false
@@ -126,7 +126,7 @@ func (m *Model) onTupleRowLoaded(msg tupleRowLoadedMsg) tea.Cmd {
 
 func (m *Model) onToastValueLoaded(msg toastValueLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelTupleRow)
-	if s == nil || s.table.OID != msg.tableOID || s.toastChunkID != msg.chunkID {
+	if s == nil || s.table.OID != msg.tableOID || s.pages.toastChunkID != msg.chunkID {
 		return nil
 	}
 	s.loading = false
@@ -142,13 +142,13 @@ func (m *Model) onToastValueLoaded(msg toastValueLoadedMsg) tea.Cmd {
 
 func (m *Model) onHeapTuplesLoaded(msg heapTuplesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelHeapTuples)
-	if s == nil || s.table.OID != msg.tableOID || s.heapPageBlkno != msg.blkno {
+	if s == nil || s.table.OID != msg.tableOID || s.pages.heapPageBlkno != msg.blkno {
 		return nil
 	}
 	if cmd, stop := settleLoad(s, msg.err, extPromptReasonPageInspect); stop {
 		return cmd
 	}
-	s.tuplePKCols = msg.pkCols
+	s.pages.tuplePKCols = msg.pkCols
 	s.items = s.items[:0]
 	for _, t := range msg.tuples {
 		s.items = append(s.items, heapTupleToItem(t))
@@ -159,12 +159,12 @@ func (m *Model) onHeapTuplesLoaded(msg heapTuplesLoadedMsg) tea.Cmd {
 
 func (m *Model) onTupleAttrsLoaded(msg tupleAttrsLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelHeapTuples)
-	if s == nil || s.table.OID != msg.tableOID || s.heapPageBlkno != msg.blkno || s.tupleAttrsLP != msg.lp {
+	if s == nil || s.table.OID != msg.tableOID || s.pages.heapPageBlkno != msg.blkno || s.pages.tupleAttrsLP != msg.lp {
 		return nil
 	}
-	s.tupleAttrsLoading = false
-	s.tupleAttrs = msg.attrs
-	s.tupleAttrsErr = msg.err
+	s.pages.tupleAttrsLoading = false
+	s.pages.tupleAttrs = msg.attrs
+	s.pages.tupleAttrsErr = msg.err
 	return nil
 }
 
@@ -186,33 +186,33 @@ func (m *Model) onRelationsLoaded(msg relationsLoadedMsg) tea.Cmd {
 
 func (m *Model) onIndexPagesLoaded(msg indexPagesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelIndexPages)
-	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
+	if s == nil || s.pages.index.OID != msg.indexOID || s.pages.heapWindowStart != msg.start {
 		return nil
 	}
 	return m.applyAMPages(s, msg.err, msg.totalPages, msg.keyCols, msg.bufs, msg.bufsErr,
 		len(msg.pages),
 		func(i int) item { return withPageBuf(indexPageToItem(msg.pages[i]), msg.bufs) },
-		func(s *screen) { s.btreeMeta = msg.meta })
+		func(s *screen) { s.pages.btreeMeta = msg.meta })
 }
 
 func (m *Model) onBtreeLevelsLoaded(msg btreeLevelsLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelIndexPages)
-	if s == nil || s.index.OID != msg.indexOID {
+	if s == nil || s.pages.index.OID != msg.indexOID {
 		return nil
 	}
-	s.btreeLevelsLoading = false
-	s.btreeLevelsDone = true
+	s.pages.btreeLevelsLoading = false
+	s.pages.btreeLevelsDone = true
 	// Best-effort banner decoration: a failure (privileges, census timeout on
 	// a very large index) keeps its error for the banner to explain. Except a
 	// missing pageinspect — the page list is showing its install prompt for
 	// that; leaving the census un-done lets the post-install reload retry it.
-	s.btreeLevels = msg.counts
-	s.btreeLevelsErr = msg.err
+	s.pages.btreeLevels = msg.counts
+	s.pages.btreeLevelsErr = msg.err
 	if msg.err != nil {
-		s.btreeLevels = nil
+		s.pages.btreeLevels = nil
 		if asMissingExt(msg.err) != nil {
-			s.btreeLevelsDone = false
-			s.btreeLevelsErr = nil
+			s.pages.btreeLevelsDone = false
+			s.pages.btreeLevelsErr = nil
 		}
 	}
 	return nil
@@ -224,7 +224,7 @@ func (m *Model) onIndexTuplesLoaded(msg indexTuplesLoadedMsg) tea.Cmd {
 	// pushes the screen with an unknown type and the loader resolves it, so the
 	// message's pageType can legitimately differ from the screen's.
 	s := m.findLevel(levelIndexTuples)
-	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno {
+	if s == nil || s.pages.index.OID != msg.indexOID || s.pages.indexPageBlkno != msg.blkno {
 		return nil
 	}
 	if cmd, stop := settleLoad(s, msg.err, extPromptReasonPageInspect); stop {
@@ -232,24 +232,61 @@ func (m *Model) onIndexTuplesLoaded(msg indexTuplesLoadedMsg) tea.Cmd {
 	}
 	// Adopt the resolved page type so the renderer's labels (→ blk N / pivot)
 	// and the downlink-drill guard see the child page's real role.
-	s.indexPageType = msg.pageType
+	s.pages.indexPageType = msg.pageType
 	// The probe (descent path) resolves the depth; -1 means it didn't run, in
 	// which case the direct-drill level already set on the screen stands.
 	if msg.level >= 0 {
 		lv := msg.level
-		s.indexPageLevel = &lv
+		s.pages.indexPageLevel = &lv
 	}
+	s.pages.indexTuples = msg.tuples
+	m.rebuildIndexTupleItems(s)
+	// A seek inherited from the parent page (downlink descent) or left from a
+	// previous load of this page re-targets against the fresh rows.
+	if s.pages.seekQuery != "" {
+		seekApply(s)
+	}
+	return nil
+}
+
+// rebuildIndexTupleItems projects s.pages.indexTuples into rows: one per
+// bt_page_items entry, plus one row per packed heap tid under each posting-list
+// tuple the user has expanded (Enter toggles it, see togglePosting). Re-sorts,
+// since applySort is what keeps members glued below their parent.
+func (m *Model) rebuildIndexTupleItems(s *screen) {
 	s.items = s.items[:0]
-	for _, t := range msg.tuples {
+	for _, t := range s.pages.indexTuples {
 		s.items = append(s.items, indexTupleToItem(t))
+		if !s.pages.postingOpen[t.ItemOffset] {
+			continue
+		}
+		for i, mem := range t.Posting {
+			s.items = append(s.items, postingMemberToItem(t, i+1, mem))
+		}
 	}
 	m.applySort(s)
-	return nil
+}
+
+// togglePosting folds or unfolds the member tids of the posting-list tuple t
+// in place, keeping the cursor on t's own row so the list doesn't jump.
+func (m *Model) togglePosting(s *screen, t pg.IndexTuple) {
+	if s.pages.postingOpen == nil {
+		s.pages.postingOpen = make(map[int32]bool)
+	}
+	s.pages.postingOpen[t.ItemOffset] = !s.pages.postingOpen[t.ItemOffset]
+	m.rebuildIndexTupleItems(s)
+	name := indexTupleToItem(t).name
+	for pos, idx := range s.visibleIndexes() {
+		if s.items[idx].name == name {
+			s.cursor = pos
+			break
+		}
+	}
 }
 
 func (m *Model) onGistPagesLoaded(msg gistPagesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelIndexPages)
-	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
+	if s == nil || s.pages.index.OID != msg.indexOID || s.pages.heapWindowStart != msg.start {
 		return nil
 	}
 	return m.applyAMPages(s, msg.err, msg.totalPages, msg.keyCols, msg.bufs, msg.bufsErr,
@@ -260,13 +297,13 @@ func (m *Model) onGistPagesLoaded(msg gistPagesLoadedMsg) tea.Cmd {
 
 func (m *Model) onGistItemsLoaded(msg gistItemsLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelIndexTuples)
-	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno {
+	if s == nil || s.pages.index.OID != msg.indexOID || s.pages.indexPageBlkno != msg.blkno {
 		return nil
 	}
 	if cmd, stop := settleLoad(s, msg.err, extPromptReasonPageInspect); stop {
 		return cmd
 	}
-	s.indexPageType = msg.pageType
+	s.pages.indexPageType = msg.pageType
 	s.items = s.items[:0]
 	for _, it := range msg.items {
 		s.items = append(s.items, gistItemToItem(it))
@@ -277,18 +314,18 @@ func (m *Model) onGistItemsLoaded(msg gistItemsLoadedMsg) tea.Cmd {
 
 func (m *Model) onBrinPagesLoaded(msg brinPagesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelIndexPages)
-	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
+	if s == nil || s.pages.index.OID != msg.indexOID || s.pages.heapWindowStart != msg.start {
 		return nil
 	}
 	return m.applyAMPages(s, msg.err, msg.totalPages, msg.keyCols, msg.bufs, msg.bufsErr,
 		len(msg.pages),
 		func(i int) item { return withPageBuf(brinPageToItem(msg.pages[i]), msg.bufs) },
-		func(s *screen) { s.brinMeta = msg.meta })
+		func(s *screen) { s.pages.brinMeta = msg.meta })
 }
 
 func (m *Model) onBrinItemsLoaded(msg brinItemsLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelIndexTuples)
-	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno {
+	if s == nil || s.pages.index.OID != msg.indexOID || s.pages.indexPageBlkno != msg.blkno {
 		return nil
 	}
 	return m.applyAMItems(s, msg.err, len(msg.items),
@@ -297,148 +334,20 @@ func (m *Model) onBrinItemsLoaded(msg brinItemsLoadedMsg) tea.Cmd {
 
 func (m *Model) onGinPagesLoaded(msg ginPagesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelIndexPages)
-	if s == nil || s.index.OID != msg.indexOID || s.heapWindowStart != msg.start {
+	if s == nil || s.pages.index.OID != msg.indexOID || s.pages.heapWindowStart != msg.start {
 		return nil
 	}
 	return m.applyAMPages(s, msg.err, msg.totalPages, msg.keyCols, msg.bufs, msg.bufsErr,
 		len(msg.pages),
 		func(i int) item { return withPageBuf(ginPageToItem(msg.pages[i]), msg.bufs) },
-		func(s *screen) { s.ginMeta = msg.meta })
+		func(s *screen) { s.pages.ginMeta = msg.meta })
 }
 
 func (m *Model) onGinItemsLoaded(msg ginItemsLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelIndexTuples)
-	if s == nil || s.index.OID != msg.indexOID || s.indexPageBlkno != msg.blkno {
+	if s == nil || s.pages.index.OID != msg.indexOID || s.pages.indexPageBlkno != msg.blkno {
 		return nil
 	}
 	return m.applyAMItems(s, msg.err, len(msg.items),
 		func(i int) item { return ginItemToItem(msg.items[i]) })
-}
-
-func (m *Model) onWALOverviewLoaded(msg walOverviewLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelWAL)
-	if s == nil || s.db != msg.db {
-		return nil
-	}
-	if cmd, stop := settleLoad(s, msg.err, extPromptReasonWALInspect); stop {
-		return cmd
-	}
-	s.walStart = msg.start
-	s.walEnd = msg.end
-	s.items = s.items[:0]
-	for _, st := range msg.stats {
-		s.items = append(s.items, walRmgrToItem(st))
-	}
-	m.applySort(s)
-	return nil
-}
-
-func (m *Model) onWALSummaryLoaded(msg walSummaryLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelWAL)
-	if s == nil || s.db != msg.db {
-		return nil
-	}
-	// Summary failure is non-fatal: the header sources (pg_ls_waldir /
-	// pg_stat_wal) need a monitoring role the user may lack even when the
-	// pg_walinspect rmgr list works. A missing-extension error here is
-	// already covered by onWALOverviewLoaded's blocking prompt, so swallow it.
-	if asMissingExt(msg.err) != nil {
-		return nil
-	}
-	if msg.err != nil {
-		s.walSummaryErr = msg.err
-		s.walSummary = nil
-		return nil
-	}
-	sum := msg.summary
-	sum.StartLSN = s.walStart
-	sum.EndLSN = s.walEnd
-	sum.WindowBytes = walWindowBytes
-	s.walSummary = &sum
-	s.walSummaryErr = nil
-	return nil
-}
-
-func (m *Model) onWALRecordsLoaded(msg walRecordsLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelWALRecords)
-	if s == nil || s.db != msg.db || s.walRmgr != msg.rmgr {
-		return nil
-	}
-	if cmd, stop := settleLoad(s, msg.err, extPromptReasonWALInspect); stop {
-		s.walRecTypeStats = nil
-		return cmd
-	}
-	s.walRecTypeStats = msg.typeStats
-	s.items = s.items[:0]
-	for _, r := range msg.records {
-		s.items = append(s.items, walRecordToItem(r))
-	}
-	m.applySort(s)
-	return nil
-}
-
-func (m *Model) onWALBlocksLoaded(msg walBlocksLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelWALBlocks)
-	if s == nil || s.db != msg.db || s.walRecLSN != msg.recLSN {
-		return nil
-	}
-	if cmd, stop := settleLoad(s, msg.err, extPromptReasonWALInspect); stop {
-		return cmd
-	}
-	s.items = s.items[:0]
-	for _, b := range msg.blocks {
-		s.items = append(s.items, walBlockToItem(b))
-	}
-	m.applySort(s)
-	return nil
-}
-
-// onWALCheckpointLoaded caches the best-effort checkpoint context for the
-// levelWAL header. Failure is non-fatal and not surfaced — the header's other
-// lines (and the rmgr list) still render; the checkpoint lines just stay hidden.
-func (m *Model) onWALCheckpointLoaded(msg walCheckpointLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelWAL)
-	if s == nil || s.db != msg.db {
-		return nil
-	}
-	if msg.err != nil {
-		return nil
-	}
-	info := msg.info
-	s.walCheckpoint = &info
-	return nil
-}
-
-func (m *Model) onWALRelationsLoaded(msg walRelationsLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelWALRelations)
-	if s == nil || s.db != msg.db {
-		return nil
-	}
-	if cmd, stop := settleLoad(s, msg.err, extPromptReasonWALInspect); stop {
-		return cmd
-	}
-	s.walStart = msg.start
-	s.walEnd = msg.end
-	s.items = s.items[:0]
-	for _, st := range msg.rels {
-		s.items = append(s.items, walRelStatToItem(st))
-	}
-	m.applySort(s)
-	return nil
-}
-
-func (m *Model) onWALRelBlocksLoaded(msg walRelBlocksLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelWALRelBlocks)
-	if s == nil || s.db != msg.db || s.walRelFilenode != msg.relfilenode {
-		return nil
-	}
-	if cmd, stop := settleLoad(s, msg.err, extPromptReasonWALInspect); stop {
-		return cmd
-	}
-	s.items = s.items[:0]
-	for _, b := range msg.blocks {
-		s.items = append(s.items, walBlockToItem(b))
-	}
-	m.applySort(s)
-	return nil
 }

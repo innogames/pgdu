@@ -17,8 +17,7 @@ func TestScreenCSVTyped(t *testing.T) {
 		items: []item{
 			{name: "users", data: pg.Table{Schema: "public", Name: "users", OID: 100, HeapBytes: 2048, IndexesBytes: 512, ToastBytes: 0, TotalBytes: 2560, EstRows: 42}},
 			{name: "orders", data: pg.Table{Schema: "public", Name: "orders", OID: 101, HeapBytes: 4096, TotalBytes: 4096, EstRows: 7}},
-		},
-	}
+		}}
 
 	header, rows, ok := m.screenCSV(s)
 	if !ok {
@@ -52,8 +51,7 @@ func TestScreenCSVGenericRawNumbers(t *testing.T) {
 				{Display: "big"},
 				{Display: "12 MB", Num: 12582912, HasNum: true},
 			}},
-		},
-	}
+		}}
 
 	header, rows, ok := m.screenCSV(s)
 	if !ok {
@@ -80,8 +78,7 @@ func TestScreenCSVRespectsFilter(t *testing.T) {
 		items: []item{
 			{name: "users", data: pg.Table{Schema: "public", Name: "users"}},
 			{name: "orders", data: pg.Table{Schema: "public", Name: "orders"}},
-		},
-	}
+		}}
 
 	_, rows, ok := m.screenCSV(s)
 	if !ok {

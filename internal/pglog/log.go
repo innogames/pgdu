@@ -1,4 +1,4 @@
-package pg
+package pglog
 
 import (
 	"context"
@@ -7,18 +7,9 @@ import (
 	"time"
 )
 
-// LogSettings returns the logging GUCs (see logSettingsKeys), best-effort.
-func (c *Client) LogSettings(ctx context.Context) map[string]string {
-	pool, err := c.PoolFor(ctx, c.DefaultDB())
-	if err != nil {
-		return map[string]string{}
-	}
-	return settingsMap(ctx, pool, sqlMaintSettings, logSettingsKeys)
-}
-
-// LogLocation resolves the server's log_timezone; nil falls back to UTC in
+// Location resolves the server's log_timezone; nil falls back to UTC in
 // the parser. Zone abbreviations in %t are resolved against this location.
-func LogLocation(settings map[string]string) *time.Location {
+func Location(settings map[string]string) *time.Location {
 	if tz := settings["log_timezone"]; tz != "" {
 		if loc, err := time.LoadLocation(tz); err == nil {
 			return loc
@@ -27,19 +18,19 @@ func LogLocation(settings map[string]string) *time.Location {
 	return time.UTC
 }
 
-// LoadLog reads the tail window of src and returns the parsed, classified and
+// Load reads the tail window of src and returns the parsed, classified and
 // aggregated report. serverPrefix is the server's log_line_prefix (empty when
 // unknown); DetectPrefix falls back to sniffing when it does not fit the file.
 // This is a plain function so it is testable without a database.
-func LoadLog(ctx context.Context, src LogSource, serverPrefix string, loc *time.Location, window int64, opts AggOptions) (*LogReport, error) {
+func Load(ctx context.Context, src Source, serverPrefix string, loc *time.Location, window int64, opts AggOptions) (*Report, error) {
 	buf, win, err := src.ReadTail(ctx, window)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", src.Info().Path, err)
 	}
-	r := &LogReport{Source: src.Info(), Window: win, Format: DetectLogFormat(buf)}
+	r := &Report{Source: src.Info(), Window: win, Format: DetectFormat(buf)}
 	var m *prefixMatcher
-	if r.Format == LogFormatStderr || r.Format == LogFormatPgBouncer {
-		if r.Format == LogFormatPgBouncer {
+	if r.Format == FormatStderr || r.Format == FormatPgBouncer {
+		if r.Format == FormatPgBouncer {
 			// pgbouncer's line shape is fixed; the server's log_line_prefix
 			// describes a different program's log and must not be tried.
 			m = compilePgBouncer(loc)
@@ -55,7 +46,7 @@ func LoadLog(ctx context.Context, src LogSource, serverPrefix string, loc *time.
 	} else {
 		r.Prefix = r.Format.String()
 	}
-	p := NewLogParser(r.Format, m, loc)
+	p := NewParser(r.Format, m, loc)
 	p.Feed(buf, r.Window.Start)
 	r.parser = p
 	r.finish(opts)
@@ -70,7 +61,7 @@ func LoadLog(ctx context.Context, src LogSource, serverPrefix string, loc *time.
 }
 
 // finish classifies and aggregates the parser's entries into r.
-func (r *LogReport) finish(opts AggOptions) {
+func (r *Report) finish(opts AggOptions) {
 	r.Entries = r.parser.Entries()
 	Classify(r.Entries)
 	r.Entries = MergePlans(r.Entries)
@@ -79,17 +70,17 @@ func (r *LogReport) finish(opts AggOptions) {
 	Aggregate(r, opts)
 }
 
-// RefreshLog re-reads src for a live tail. When the file merely grew it feeds
+// Refresh re-reads src for a live tail. When the file merely grew it feeds
 // only the appended bytes (re-parsing from the last entry, which may have been
 // mid-flush); a rotation, a shrink, a non-seekable source or a window that
-// outgrew its request by half falls back to a full LoadLog.
-func RefreshLog(ctx context.Context, prev *LogReport, src LogSource, loc *time.Location, opts AggOptions) (*LogReport, error) {
-	full := func() (*LogReport, error) {
+// outgrew its request by half falls back to a full Load.
+func Refresh(ctx context.Context, prev *Report, src Source, loc *time.Location, opts AggOptions) (*Report, error) {
+	full := func() (*Report, error) {
 		hint := prev.Prefix
-		if prev.PrefixDetected || prev.Format != LogFormatStderr {
+		if prev.PrefixDetected || prev.Format != FormatStderr {
 			hint = ""
 		}
-		return LoadLog(ctx, src, hint, loc, prev.Window.Requested, opts)
+		return Load(ctx, src, hint, loc, prev.Window.Requested, opts)
 	}
 	cur := src.Cursor(ctx)
 	if prev.Cursor == nil || cur == nil || prev.parser == nil ||
@@ -112,7 +103,7 @@ func RefreshLog(ctx context.Context, prev *LogReport, src LogSource, loc *time.L
 	p := prev.parser
 	p.TruncateLast()
 	p.Feed(buf, prev.Cursor.Off)
-	r := &LogReport{
+	r := &Report{
 		Source: src.Info(), Window: prev.Window, Format: prev.Format,
 		Prefix: prev.Prefix, PrefixDetected: prev.PrefixDetected, parser: p,
 	}

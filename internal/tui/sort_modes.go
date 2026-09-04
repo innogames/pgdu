@@ -16,6 +16,8 @@ const (
 	sortByLevel
 	sortByCount      // WAL: record count per resource manager
 	sortByFPI        // WAL: full-page-image bytes
+	sortByRecord     // WAL: record-data bytes (combined minus FPI)
+	sortByPages      // WAL: distinct pages a relation's records touched
 	sortByDirty      // buffer-tables: dirty (modified-in-memory) bytes
 	sortByTemp       // buffer-tables: mean clock-sweep usagecount (0..5)
 	sortByType       // index pages: page type (leaf/intr/root/del)
@@ -38,7 +40,7 @@ const (
 // ratio so the worst-cached tables bubble to the top.
 func (sm sortMode) defaultDesc() bool {
 	switch sm {
-	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByDirty, sortByTemp, sortByBloat, sortByHeap, sortByIndex, sortByToast, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByLevel, sortByLast:
+	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByRecord, sortByPages, sortByDirty, sortByTemp, sortByBloat, sortByHeap, sortByIndex, sortByToast, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByLevel, sortByLast:
 		// sortByLevel is descending so the B-tree page view opens root-first
 		// (highest btpo_level at the top), reading the tree top-down.
 		return true
@@ -75,6 +77,10 @@ func (sm sortMode) name() string {
 		return "count"
 	case sortByFPI:
 		return "fpi"
+	case sortByRecord:
+		return "record"
+	case sortByPages:
+		return "pages"
 	case sortByDirty:
 		return "dirty"
 	case sortByTemp:
@@ -152,6 +158,10 @@ func (sm sortMode) less(a, b item) bool {
 		return lessByExtractor(a, b, itemWALCount)
 	case sortByFPI:
 		return lessByExtractor(a, b, itemWALFPI)
+	case sortByRecord:
+		return lessByExtractor(a, b, itemWALRecordBytes)
+	case sortByPages:
+		return lessByExtractor(a, b, itemWALPages)
 	case sortByDirty:
 		return lessByExtractor(a, b, itemDirtyBytes)
 	case sortByTemp:

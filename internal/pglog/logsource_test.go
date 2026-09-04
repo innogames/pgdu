@@ -1,4 +1,4 @@
-package pg
+package pglog
 
 import (
 	"bytes"
@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -28,7 +27,7 @@ func TestLocalTailWindow(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	src := OpenLocalLog(path)
+	src := OpenLocal(path)
 	buf, win, err := src.ReadTail(t.Context(), 100_000)
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +62,7 @@ func TestGzipTailWindow(t *testing.T) {
 	if err := os.WriteFile(path, z.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	src := OpenLocalLog(path)
+	src := OpenLocal(path)
 	if src.Info().Kind != "gz" || !src.Info().Rotated {
 		t.Errorf("info = %+v", src.Info())
 	}
@@ -119,8 +118,8 @@ func TestRefreshLogIncremental(t *testing.T) {
 	if err := os.WriteFile(path, []byte(first), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	src := OpenLocalLog(path)
-	r, err := LoadLog(t.Context(), src, debianPrefix, time.UTC, 32<<20, AggOptions{})
+	src := OpenLocal(path)
+	r, err := Load(t.Context(), src, debianPrefix, time.UTC, 32<<20, AggOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +128,7 @@ func TestRefreshLogIncremental(t *testing.T) {
 	}
 
 	// Unchanged file: same report back.
-	same, err := RefreshLog(t.Context(), r, src, time.UTC, AggOptions{})
+	same, err := Refresh(t.Context(), r, src, time.UTC, AggOptions{})
 	if err != nil || same != r {
 		t.Errorf("unchanged refresh: err=%v same=%v", err, same == r)
 	}
@@ -146,7 +145,7 @@ func TestRefreshLogIncremental(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	r2, err := RefreshLog(t.Context(), r, src, time.UTC, AggOptions{})
+	r2, err := Refresh(t.Context(), r, src, time.UTC, AggOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,31 +163,12 @@ func TestRefreshLogIncremental(t *testing.T) {
 	if err := os.WriteFile(path, []byte("2026-09-02 01:00:00 UTC [9-1] u@h LOG:  fresh\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r3, err := RefreshLog(t.Context(), r2, src, time.UTC, AggOptions{})
+	r3, err := Refresh(t.Context(), r2, src, time.UTC, AggOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(r3.Entries) != 1 || string(r3.Entries[0].Message) != "fresh" {
 		t.Errorf("after rotation: %+v", r3.Entries)
-	}
-}
-
-func TestRotationOrdering(t *testing.T) {
-	c := []LogCandidate{
-		{Info: LogSourceInfo{Kind: "gz", Path: "/var/log/postgresql/postgresql-17-main.log.2.gz", Rotated: true}},
-		{Info: LogSourceInfo{Kind: "local", Path: "/var/log/postgresql/postgresql-17-main.log", Current: true}},
-		{Info: LogSourceInfo{Kind: "local", Path: "/var/log/postgresql/postgresql-17-main.log.1", Rotated: true}},
-		{Info: LogSourceInfo{Kind: "gz", Path: "/var/log/postgresql/postgresql-17-main.log.10.gz", Rotated: true}},
-	}
-	sortCandidates(c)
-	want := []string{".log", ".log.1", ".log.2.gz", ".log.10.gz"}
-	for i, w := range want {
-		if !strings.HasSuffix(c[i].Info.Path, w) {
-			t.Errorf("position %d: %s, want suffix %s", i, c[i].Info.Path, w)
-		}
-	}
-	if !isRotatedName("x.log.3.gz") || isRotatedName("x.log") || rotationIndex("x.log.10.gz") != 10 {
-		t.Error("rotation name helpers")
 	}
 }
 

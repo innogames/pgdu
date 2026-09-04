@@ -19,18 +19,18 @@ import (
 func (m *Model) handleSeekKey(s *screen, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
-		s.seekFocused = false
-		s.seekQuery = ""
-		s.seekStatus = ""
+		s.pages.seekFocused = false
+		s.pages.seekQuery = ""
+		s.pages.seekStatus = ""
 	case tea.KeyEnter:
-		s.seekFocused = false
+		s.pages.seekFocused = false
 	case tea.KeyBackspace, tea.KeyDelete:
-		if r := []rune(s.seekQuery); len(r) > 0 {
-			s.seekQuery = string(r[:len(r)-1])
+		if r := []rune(s.pages.seekQuery); len(r) > 0 {
+			s.pages.seekQuery = string(r[:len(r)-1])
 			seekApply(s)
 		} else {
-			s.seekFocused = false
-			s.seekStatus = ""
+			s.pages.seekFocused = false
+			s.pages.seekStatus = ""
 		}
 	case tea.KeyUp:
 		if s.cursor > 0 {
@@ -44,7 +44,7 @@ func (m *Model) handleSeekKey(s *screen, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if msg.Alt {
 			return m, nil
 		}
-		s.seekQuery += string(msg.Runes)
+		s.pages.seekQuery += string(msg.Runes)
 		seekApply(s)
 	}
 	return m, nil
@@ -53,7 +53,7 @@ func (m *Model) handleSeekKey(s *screen, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // seekApply routes a seek edit to the right scan for the index access method:
 // BRIN seeks by heap block number, everything else (B-tree) by key value.
 func seekApply(s *screen) {
-	if s.index.AccessMethod == "brin" {
+	if s.pages.index.AccessMethod == "brin" {
 		seekToBlock(s)
 		return
 	}
@@ -66,14 +66,14 @@ func seekApply(s *screen) {
 // the last whose BlockNum <= the query. Computed over the visible (filtered)
 // rows; lands on the first row of the covering range.
 func seekToBlock(s *screen) {
-	s.seekStatus = ""
-	q := strings.TrimSpace(s.seekQuery)
+	s.pages.seekStatus = ""
+	q := strings.TrimSpace(s.pages.seekQuery)
 	if q == "" {
 		return
 	}
 	blk, err := strconv.ParseInt(q, 10, 64)
 	if err != nil {
-		s.seekStatus = "enter a heap block number"
+		s.pages.seekStatus = "enter a heap block number"
 		return
 	}
 	type cand struct {
@@ -89,7 +89,7 @@ func seekToBlock(s *screen) {
 		cands = append(cands, cand{visPos: visPos, start: t.BlockNum})
 	}
 	if len(cands) == 0 {
-		s.seekStatus = "no ranges to seek"
+		s.pages.seekStatus = "no ranges to seek"
 		return
 	}
 	sort.Slice(cands, func(i, j int) bool { return cands[i].start < cands[j].start })
@@ -112,10 +112,10 @@ func seekToBlock(s *screen) {
 	s.clampCursor()
 
 	upper := "+∞"
-	if s.brinMeta != nil && s.brinMeta.PagesPerRange > 0 {
-		upper = strconv.FormatInt(coverStart+int64(s.brinMeta.PagesPerRange)-1, 10)
+	if s.pages.brinMeta != nil && s.pages.brinMeta.PagesPerRange > 0 {
+		upper = strconv.FormatInt(coverStart+int64(s.pages.brinMeta.PagesPerRange)-1, 10)
 	}
-	s.seekStatus = fmt.Sprintf("→ blk %d  (range %d…%s)", blk, coverStart, upper)
+	s.pages.seekStatus = fmt.Sprintf("→ blk %d  (range %d…%s)", blk, coverStart, upper)
 }
 
 // seekTarget is one candidate entry for a seek: its position in the visible list
@@ -137,8 +137,8 @@ type seekTarget struct {
 // over the visible (filtered) list so seek respects an active filter, and over
 // offset order regardless of the active display sort.
 func seekTargets(s *screen) []seekTarget {
-	cols := s.indexKeyCols
-	pageType := s.indexPageType
+	cols := s.pages.indexKeyCols
+	pageType := s.pages.indexPageType
 	vis := s.visibleIndexes()
 	out := make([]seekTarget, 0, len(vis))
 	for visPos, idx := range vis {
@@ -162,8 +162,8 @@ func seekTargets(s *screen) []seekTarget {
 // below the first real key; a query past the last key lands on the last entry.
 // It only moves the cursor; it never drills in.
 func seekToKey(s *screen) {
-	s.seekStatus = ""
-	q := strings.TrimSpace(s.seekQuery)
+	s.pages.seekStatus = ""
+	q := strings.TrimSpace(s.pages.seekQuery)
 	if q == "" {
 		return
 	}
@@ -178,7 +178,7 @@ func seekToKey(s *screen) {
 	if !hasAnyKey {
 		// No decodable keys to compare against (e.g. the key-column types failed
 		// to load). Leave the cursor where it is rather than jumping blindly.
-		s.seekStatus = "no key to seek (types unavailable)"
+		s.pages.seekStatus = "no key to seek (types unavailable)"
 		return
 	}
 
@@ -202,7 +202,7 @@ func seekToKey(s *screen) {
 	s.clampCursor()
 
 	status := fmt.Sprintf("→ #%04d", tgt.off)
-	if s.indexPageType == "i" {
+	if s.pages.indexPageType == "i" {
 		lower := "−∞"
 		if tgt.hasKey {
 			lower = tgt.leading
@@ -213,5 +213,5 @@ func seekToKey(s *screen) {
 		}
 		status += fmt.Sprintf("  (%s…%s)", lower, upper)
 	}
-	s.seekStatus = status
+	s.pages.seekStatus = status
 }

@@ -214,7 +214,7 @@ func TestInternalDownlinkRangesTruncated(t *testing.T) {
 	}
 	got := internalDownlinkRanges(items, "i", cols, 200)
 	want := map[int32]string{
-		2: "−∞  …  (10,aa)",
+		2: "−∞       …  (10,aa)",
 		3: "(10,aa)  …  (20,−∞)",
 		4: "(20,−∞)  …  (44,zz)",
 	}

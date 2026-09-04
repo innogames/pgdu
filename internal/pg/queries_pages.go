@@ -400,6 +400,37 @@ FROM   bt_page_items($1, $2::int) i
 ORDER  BY i.itemoffset
 `
 
+// sqlIndexPostingTids expands the posting-list tuples on one leaf page into
+// their member heap tids. bt_page_items exposes them as the tids tid[] column
+// (pageinspect 1.8+, PG 13); singletons and pivots have NULL there and drop
+// out. Re-reading the page is one buffer hit, cheaper than carrying the array
+// through the main query and splitting it client-side. $1 is the index
+// regclass-castable text; $2 the block number.
+const sqlIndexPostingTids = `
+SELECT i.itemoffset::int,
+       t.tid::text,
+       NULL::text AS decoded
+FROM   bt_page_items($1, $2::int) i,
+       LATERAL unnest(i.tids) WITH ORDINALITY AS t(tid, ord)
+WHERE  i.tids IS NOT NULL
+ORDER  BY i.itemoffset, t.ord
+`
+
+// sqlIndexPostingTidsDecoded is sqlIndexPostingTids with the same per-tid heap
+// projection sqlIndexTuplesDecoded does for singletons. Dedup guarantees every
+// member shares the parent's key, so the projection is not about the key — it
+// tells which members still point at a visible heap row and lets Enter open
+// them. %s 1 is the index expression list, %s 2 the parent's quoted regclass.
+const sqlIndexPostingTidsDecoded = `
+SELECT i.itemoffset::int,
+       t.tid::text,
+       (SELECT (%s)::text FROM %s WHERE ctid = t.tid) AS decoded
+FROM   bt_page_items($1, $2::int) i,
+       LATERAL unnest(i.tids) WITH ORDINALITY AS t(tid, ord)
+WHERE  i.tids IS NOT NULL
+ORDER  BY i.itemoffset, t.ord
+`
+
 // sqlHeapRedirectKeys resolves the index entries sqlIndexTuplesDecoded had to
 // give up on because their ctid names a HOT-chain root. After a HOT update the
 // index entry keeps pointing at the original line pointer, which pruning turns

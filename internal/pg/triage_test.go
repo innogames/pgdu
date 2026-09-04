@@ -2,7 +2,9 @@ package pg
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"pgdu/internal/cli"
@@ -133,23 +135,92 @@ func TestDeadlockSeverity(t *testing.T) {
 	if got := deadlockSeverity(0); got != SevOK {
 		t.Errorf("none = %v, want SevOK", got)
 	}
-	if got := deadlockSeverity(20); got != SevWarn {
-		t.Errorf("a few = %v, want SevWarn", got)
+	if got := deadlockSeverity(0.4); got != SevOK {
+		t.Errorf("one every few days = %v, want SevOK", got)
 	}
-	if got := deadlockSeverity(200); got != SevCrit {
-		t.Errorf("many = %v, want SevCrit", got)
+	if got := deadlockSeverity(2); got != SevWarn {
+		t.Errorf("a couple a day = %v, want SevWarn", got)
+	}
+	if got := deadlockSeverity(20); got != SevCrit {
+		t.Errorf("many a day = %v, want SevCrit", got)
 	}
 }
 
 func TestTempBytesSeverity(t *testing.T) {
 	if got := tempBytesSeverity(1 << 20); got != SevOK {
-		t.Errorf("1MB = %v, want SevOK", got)
+		t.Errorf("1MB/day = %v, want SevOK", got)
 	}
 	if got := tempBytesSeverity(20 << 30); got != SevWarn {
-		t.Errorf("20GB = %v, want SevWarn", got)
+		t.Errorf("20GB/day = %v, want SevWarn", got)
 	}
 	if got := tempBytesSeverity(200 << 30); got != SevCrit {
-		t.Errorf("200GB = %v, want SevCrit", got)
+		t.Errorf("200GB/day = %v, want SevCrit", got)
+	}
+}
+
+// dbStatsResult builds a database_stats-shaped result: one row per
+// (counter, stats_age_secs) pair, with a NaN age standing for a missing value.
+func dbStatsResult(col string, rows ...[2]float64) *DiagResult {
+	res := &DiagResult{Columns: []DiagColumn{{Name: "database"}, {Name: col}, {Name: "stats_age_secs"}}}
+	for i, r := range rows {
+		row := []DiagCell{{Display: fmt.Sprintf("db%d", i)}, {Num: r[0], HasNum: true}, {Num: r[1], HasNum: true}}
+		if r[1] < 0 {
+			row[2] = DiagCell{Display: "∅"}
+		}
+		res.Rows = append(res.Rows, row)
+	}
+	return res
+}
+
+// A long-lived cluster's absolute deadlock total must not trip the check when
+// the per-day rate is small; the same total over a short window must.
+func TestDeadlockGradeUsesRate(t *testing.T) {
+	// 12 deadlocks over 30 days: 0.4/day, fine.
+	sev, detail, _ := deadlockGrade(dbStatsResult("deadlocks", [2]float64{12, 30 * 86400}))
+	if sev != SevOK {
+		t.Errorf("12 over 30d = %v, want SevOK (%s)", sev, detail)
+	}
+	if !strings.Contains(detail, "12 deadlock(s)") || !strings.Contains(detail, "30d ago") || !strings.Contains(detail, "~0.4/day") {
+		t.Errorf("detail = %q, want total, window and rate", detail)
+	}
+	// 12 deadlocks in 2 days: 6/day, warn.
+	if sev, detail, _ = deadlockGrade(dbStatsResult("deadlocks", [2]float64{12, 2 * 86400})); sev != SevWarn {
+		t.Errorf("12 over 2d = %v, want SevWarn (%s)", sev, detail)
+	}
+	// 12 deadlocks an hour after a reset: the window floors at a day, so 12/day.
+	if sev, detail, _ = deadlockGrade(dbStatsResult("deadlocks", [2]float64{12, 3600})); sev != SevCrit {
+		t.Errorf("12 over 1h = %v, want SevCrit (%s)", sev, detail)
+	}
+	// Per-database windows differ: rates are summed per row, not total/max window.
+	res := dbStatsResult("deadlocks", [2]float64{1, 30 * 86400}, [2]float64{10, 86400})
+	if sev, detail, _ = deadlockGrade(res); sev != SevCrit {
+		t.Errorf("10/day in a fresh db + 1 over 30d = %v, want SevCrit (%s)", sev, detail)
+	}
+	// No stats_age_secs at all: never critical, but a deadlock still warns.
+	res = &DiagResult{Columns: []DiagColumn{{Name: "deadlocks"}}, Rows: [][]DiagCell{{{Num: 500, HasNum: true}}}}
+	if sev, detail, _ = deadlockGrade(res); sev != SevWarn || !strings.Contains(detail, "rate unknown") {
+		t.Errorf("no window = %v %q, want SevWarn with rate unknown", sev, detail)
+	}
+	if sev, detail, _ = deadlockGrade(dbStatsResult("deadlocks", [2]float64{0, 86400})); sev != SevOK || !strings.Contains(detail, "no deadlocks") {
+		t.Errorf("zero = %v %q, want SevOK", sev, detail)
+	}
+}
+
+func TestTempFilesGradeUsesRate(t *testing.T) {
+	// 300 GB over 100 days is 3 GB/day: fine, though the old absolute check screamed.
+	sev, detail, _ := tempFilesGrade(dbStatsResult("temp_bytes", [2]float64{300 << 30, 100 * 86400}))
+	if sev != SevOK {
+		t.Errorf("300GB over 100d = %v, want SevOK (%s)", sev, detail)
+	}
+	if !strings.Contains(detail, "300.00 GB spilled") || !strings.Contains(detail, "100d ago") || !strings.Contains(detail, "3.00 GB/day") {
+		t.Errorf("detail = %q, want total, window and rate", detail)
+	}
+	if sev, detail, _ = tempFilesGrade(dbStatsResult("temp_bytes", [2]float64{300 << 30, 2 * 86400})); sev != SevCrit {
+		t.Errorf("300GB over 2d = %v, want SevCrit (%s)", sev, detail)
+	}
+	res := &DiagResult{Columns: []DiagColumn{{Name: "temp_bytes"}}, Rows: [][]DiagCell{{{Num: 1 << 40, HasNum: true}}}}
+	if sev, detail, _ = tempFilesGrade(res); sev != SevOK || !strings.Contains(detail, "rate unknown") {
+		t.Errorf("no window = %v %q, want SevOK with rate unknown", sev, detail)
 	}
 }
 
@@ -327,6 +398,7 @@ func TestTriageDuration(t *testing.T) {
 		{48, "48s"},
 		{660, "11m"},
 		{7200, "2h"},
+		{3 * 86400, "3d"},
 	}
 	for _, tt := range tests {
 		if got := triageDuration(tt.secs); got != tt.want {
@@ -390,5 +462,56 @@ func TestTriageDiagKeysExist(t *testing.T) {
 		if _, ok := DiagnosticByKey(r.DiagKey); !ok {
 			t.Errorf("%s: DiagKey %q not in the Diagnostics registry", r.Check, r.DiagKey)
 		}
+	}
+}
+
+// TriageStream must emit exactly one result per check named by
+// TriageCheckNames, and Triage must order them severity-first then in battery
+// order so a streaming report keeps stable row positions.
+func TestTriageStreamCoversEveryCheck(t *testing.T) {
+	c := New(cli.Config{Database: "nope"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	names := c.TriageCheckNames()
+	seen := make(map[string]int, len(names))
+	var mu sync.Mutex
+	c.TriageStream(ctx, func(r TriageResult) {
+		mu.Lock()
+		seen[r.Check]++
+		mu.Unlock()
+	})
+	if len(seen) != len(names) {
+		t.Fatalf("stream emitted %d distinct checks, want %d", len(seen), len(names))
+	}
+	for _, n := range names {
+		if seen[n] != 1 {
+			t.Errorf("%s: emitted %d times, want once", n, seen[n])
+		}
+	}
+
+	results := c.Triage(ctx)
+	for i, r := range results {
+		if r.Check != names[i] {
+			t.Errorf("result %d is %q, want battery order %q (all same severity)", i, r.Check, names[i])
+		}
+	}
+}
+
+func TestSortTriage(t *testing.T) {
+	names := []string{"a", "b", "c", "d"}
+	rs := []TriageResult{
+		{Check: "d", Severity: SevOK},
+		{Check: "c", Severity: SevCrit},
+		{Check: "b", Severity: SevWarn},
+		{Check: "a", Severity: SevCrit},
+	}
+	SortTriage(rs, names)
+	got := make([]string, len(rs))
+	for i, r := range rs {
+		got[i] = r.Check
+	}
+	if want := "a c b d"; strings.Join(got, " ") != want {
+		t.Errorf("SortTriage order %v, want %s", got, want)
 	}
 }

@@ -175,6 +175,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tableOverviewLoadedMsg:
 		return m, m.onTableOverviewLoaded(msg)
 
+	case triageStartedMsg:
+		return m, m.onTriageStarted(msg)
+	case triageCheckMsg:
+		return m, m.onTriageCheck(msg)
 	case triageLoadedMsg:
 		return m, m.onTriageLoaded(msg)
 

@@ -74,7 +74,7 @@ func (m *Model) renderStatementSnapshots(s *screen, height int) string {
 	for vi := s.offset; vi < end; vi++ {
 		it := s.items[vi]
 		anchor := it.snapPath == snapNow || it.snapPath == snapReset || it.snapPath == snapSession
-		meta, _ := metaByPath(s.statSnapMetas, it.snapPath)
+		meta, _ := metaByPath(s.stat.snapMetas, it.snapPath)
 		// Anchors carry no server/db identity — they always apply to the current
 		// database, so they're never flagged incompatible.
 		compatible := anchor || (meta.Target == m.target && meta.Database == curDB)
@@ -129,15 +129,15 @@ func (m *Model) snapshotAge(s *screen, path string, capturedAt time.Time) string
 	case snapNow:
 		return "now"
 	case snapSession:
-		if st := m.findLevel(levelStatements); st != nil && !st.statSessionStart.IsZero() {
-			return relativeAge(time.Since(st.statSessionStart))
+		if st := m.findLevel(levelStatements); st != nil && !st.stat.sessionStart.IsZero() {
+			return relativeAge(time.Since(st.stat.sessionStart))
 		}
 		return "—"
 	case snapReset:
-		if s.statLiveReset.IsZero() {
+		if s.stat.liveReset.IsZero() {
 			return "—"
 		}
-		return relativeAge(time.Since(s.statLiveReset))
+		return relativeAge(time.Since(s.stat.liveReset))
 	default:
 		return relativeAge(time.Since(capturedAt))
 	}
@@ -151,18 +151,18 @@ func (m *Model) renderSnapshotWindowSummary(st *screen) string {
 	if st == nil {
 		return mu("window: —")
 	}
-	start := "since " + st.statBaselineAt.Format("15:04:05") // a fresh R re-base
+	start := "since " + st.stat.baselineAt.Format("15:04:05") // a fresh R re-base
 	switch {
-	case st.statCumulative:
+	case st.stat.cumulative:
 		start = "since last reset"
-	case st.statBaseSnap != nil:
-		start = st.statBaseSnap.CapturedAt.Local().Format("2006-01-02 15:04:05")
-	case !st.statSessionStart.IsZero() && st.statBaselineAt.Equal(st.statSessionStart):
+	case st.stat.baseSnap != nil:
+		start = st.stat.baseSnap.CapturedAt.Local().Format("2006-01-02 15:04:05")
+	case !st.stat.sessionStart.IsZero() && st.stat.baselineAt.Equal(st.stat.sessionStart):
 		start = "session start"
 	}
 	end, mode := "now", "live · refresh "+m.refreshLabel()
-	if st.statEndSnap != nil {
-		end = st.statEndSnap.CapturedAt.Local().Format("2006-01-02 15:04:05")
+	if st.stat.endSnap != nil {
+		end = st.stat.endSnap.CapturedAt.Local().Format("2006-01-02 15:04:05")
 		mode = "frozen"
 	}
 	return mu("window: ") + styleSelected.Render(start) + mu(" → ") +

@@ -134,11 +134,11 @@ func heapPageTableLabel(s *screen) string {
 	case levelHeapPages, levelHeapTuples, levelTupleRow:
 		return "table: " + s.table.Qualified()
 	case levelIndexPages:
-		return "index: " + s.index.Qualified()
+		return "index: " + s.pages.index.Qualified()
 	case levelIndexTuples:
-		label := "index: " + s.index.Qualified()
-		if s.indexPageLevel != nil {
-			label += "  ·  page: L" + strconv.Itoa(int(*s.indexPageLevel))
+		label := "index: " + s.pages.index.Qualified()
+		if s.pages.indexPageLevel != nil {
+			label += "  ·  page: L" + strconv.Itoa(int(*s.pages.indexPageLevel))
 		}
 		return label
 	}
@@ -149,14 +149,14 @@ func heapPageTableLabel(s *screen) string {
 // status line, e.g. "pages 0–1999 / 12345". Returns "" off-level or with no
 // page data so the status row stays terse when there's nothing to show.
 func heapPageWindowLabel(s *screen) string {
-	if s.heapPageCount == 0 {
+	if s.pages.heapPageCount == 0 {
 		return ""
 	}
 	if s.level != levelHeapPages && s.level != levelIndexPages {
 		return ""
 	}
-	end := max(s.heapWindowStart+int32(len(s.items))-1, s.heapWindowStart)
-	return fmt.Sprintf("pages %d–%d / %d", s.heapWindowStart, end, s.heapPageCount)
+	end := max(s.pages.heapWindowStart+int32(len(s.items))-1, s.pages.heapWindowStart)
+	return fmt.Sprintf("pages %d–%d / %d", s.pages.heapWindowStart, end, s.pages.heapPageCount)
 }
 
 // renderHeapPagesList draws one row per heap page with a fixed-scale bar
@@ -166,7 +166,7 @@ func heapPageWindowLabel(s *screen) string {
 // when scanning a heap for hotspots.
 func (m *Model) renderHeapPagesList(s *screen, height int) string {
 	barW := m.barWidth(s)
-	showTemp := s.pageBufs != nil
+	showTemp := s.pages.pageBufs != nil
 	return m.renderRowList(s, height, renderHeapPagesHeader(s.sort, s.sortDesc, barW, showTemp),
 		func(it item, selected bool) string {
 			p, _ := it.data.(pg.HeapPageStat)
@@ -259,7 +259,7 @@ func (m *Model) renderHeapTuplesList(s *screen, height int) string {
 		b.WriteString("\n")
 		lines++
 		if selected {
-			exp := renderHeapTupleExpand(t, s.tuplePKCols)
+			exp := renderHeapTupleExpand(t, s.pages.tuplePKCols)
 			if lines+len(exp) <= rowsH {
 				for _, l := range exp {
 					b.WriteString(l)
@@ -279,7 +279,7 @@ func (m *Model) renderHeapTuplesList(s *screen, height int) string {
 // needs a primary key to project, and the terminal needs the room (see
 // tuplePKMinWidth — the physical columns win a fight for the last cells).
 func (m *Model) showTuplePK(s *screen) bool {
-	return len(s.tuplePKCols) > 0 && m.width >= tuplePKMinWidth
+	return len(s.pages.tuplePKCols) > 0 && m.width >= tuplePKMinWidth
 }
 
 func renderHeapTuplesHeader(sort sortMode, sortDesc bool, showPK bool) string {

@@ -1,23 +1,21 @@
 package tui
 
 import (
-	"fmt"
-
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
+	"pgdu/internal/pglog"
 )
 
 func (m *Model) drillIn() tea.Cmd {
 	s := m.top()
-	if !s.loaded || len(s.items) == 0 {
+	if !s.loaded {
 		return nil
 	}
-	vis := s.visibleIndexes()
-	if s.cursor < 0 || s.cursor >= len(vis) {
+	cur, ok := s.currentItem()
+	if !ok {
 		return nil
 	}
-	cur := s.items[vis[s.cursor]]
 	switch s.level {
 	case levelTools:
 		t := cur.data.(tool)
@@ -31,8 +29,7 @@ func (m *Model) drillIn() tea.Cmd {
 		if d.PerDB {
 			m.stack = append(m.stack, &screen{
 				level: levelDatabases, title: "database", tool: toolTools, diag: &d,
-				sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
-			})
+				sort: sortBySize, sortDesc: sortBySize.defaultDesc()})
 			return m.loadCurrent()
 		}
 		m.stack = append(m.stack, diagnosticResultScreen(&d, "", false))
@@ -58,58 +55,9 @@ func (m *Model) drillIn() tea.Cmd {
 		m.stack = append(m.stack, schemaChildScreen(s.tool, sc))
 		return m.loadCurrent()
 	case levelTables:
-		t := cur.data.(pg.Table)
-		var next *screen
-		switch s.tool {
-		case toolPageInspect:
-			next = &screen{
-				level: levelHeapPages, title: "heap pages", tool: s.tool,
-				db: t.DB, schema: t.Schema, table: t,
-				heapWindowStart: 0, heapWindowCount: heapWindowDefault,
-				sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
-			}
-		default:
-			// Fresh visit to a table: drop a previous run's finished vacuum
-			// output so stale logs don't reappear when the pane is keyed by OID.
-			// Leave a still-running vacuum alone — its pane should stay live.
-			if !m.vacuum.running {
-				m.vacuum = vacuumState{}
-			}
-			next = &screen{
-				level: levelParts, title: "parts", tool: s.tool,
-				db: t.DB, schema: t.Schema, table: t,
-				sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
-			}
-		}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
+		return m.drillTable(s, cur)
 	case levelTableStats:
-		// Drill into the disk "parts" view (heap/index/toast + per-index bloat)
-		// for the table under the cursor. The row carries its OID in statQueryID;
-		// resolve it back to the loaded TableStat (sort-order independent) and
-		// reconstruct a pg.Table. The parts screen is stamped toolDisk — the only
-		// tool that drives levelParts — so it behaves exactly like a disk drill.
-		var ts *pg.TableStat
-		for i := range s.tblRows {
-			if int64(s.tblRows[i].OID) == cur.statQueryID {
-				ts = &s.tblRows[i]
-				break
-			}
-		}
-		if ts == nil {
-			return nil
-		}
-		t := ts.AsTable()
-		if !m.vacuum.running {
-			m.vacuum = vacuumState{}
-		}
-		next := &screen{
-			level: levelParts, title: "parts", tool: toolDisk,
-			db: t.DB, schema: t.Schema, table: t,
-			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
-		}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
+		return m.drillTableStat(s, cur)
 	case levelBufferTables:
 		st, ok := cur.data.(pg.TableBufferStat)
 		if !ok {
@@ -120,303 +68,36 @@ func (m *Model) drillIn() tea.Cmd {
 		stat := st
 		next := &screen{
 			level: levelBufferDetail, title: st.Schema + "." + st.Name, tool: s.tool,
-			db: s.db, schema: st.Schema, bufDetail: &stat,
-		}
+			db: s.db, schema: st.Schema, buf: bufState{detail: &stat}}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
 	case levelHeapPages:
-		p, ok := cur.data.(pg.HeapPageStat)
-		if !ok {
-			return nil
-		}
-		next := &screen{
-			level: levelHeapTuples, title: "tuples", tool: s.tool,
-			db: s.db, schema: s.schema, table: s.table,
-			heapPageBlkno: int32(p.Blkno),
-			sort:          sortByLP, sortDesc: sortByLP.defaultDesc(),
-		}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
+		return m.drillHeapPage(s, cur)
 	case levelHeapTuples:
-		ht, ok := cur.data.(pg.HeapTuple)
-		if !ok {
-			return nil
-		}
-		// REDIRECT hops within the same page: lp_off carries the target's
-		// OffsetNumber, so jump the cursor to that lp instead of drilling.
-		// Lets the user walk a HOT chain by repeatedly pressing Enter.
-		if ht.LPFlags == pg.LPRedirect {
-			for vi, idx := range vis {
-				target, ok := s.items[idx].data.(pg.HeapTuple)
-				if ok && target.LP == ht.LPOff {
-					s.cursor = vi
-					break
-				}
-			}
-			return nil
-		}
-		if ht.LPFlags != pg.LPNormal || ht.Ctid == nil {
-			return nil
-		}
-		// TOAST chunk rows: reassemble the full value from all chunks for this
-		// chunk_id instead of showing one chunk's raw bytes.
-		if ht.ChunkID != nil {
-			next := &screen{
-				level: levelTupleRow, title: "toast value", tool: s.tool,
-				db: s.db, schema: s.schema, table: s.table,
-				toastChunkID: *ht.ChunkID,
-				sort:         sortByName, sortDesc: false,
-			}
-			m.stack = append(m.stack, next)
-			return m.loadCurrent()
-		}
-		if s.table.Schema == "pg_toast" {
-			// A toast page whose LP didn't resolve to a chunk row (dead but
-			// stored) — the classic ctid row view still applies.
-			next := &screen{
-				level: levelTupleRow, title: "row", tool: s.tool,
-				db: s.db, schema: s.schema, table: s.table,
-				tupleCtid: *ht.Ctid,
-				sort:      sortByName, sortDesc: false,
-			}
-			m.stack = append(m.stack, next)
-			return m.loadCurrent()
-		}
-		// Regular heap tuples open the byte-layout overlay in place instead of
-		// drilling — it shows the decoded values *and* their physical layout.
-		if len(ht.Data) == 0 {
-			m.notice = "no tuple body on this line pointer"
-			return nil
-		}
-		return m.openTupleLayout(s, ht.LP)
+		return m.drillHeapTuple(s, cur)
 	case levelRelations:
-		r, ok := cur.data.(pg.Relation)
-		if !ok {
-			return nil
-		}
-		switch r.Kind {
-		case pg.RelTable, pg.RelToast:
-			// Build the heap context the heap-pages flow expects. relpages
-			// is filled in by loadHeapPagesCmd, so the EstRows here is
-			// purely cosmetic for downstream views — fine to carry over.
-			// For RelToast, Schema is "pg_toast" so the loaders use the
-			// correct namespace when building the regclass.
-			t := pg.Table{
-				DB: r.DB, Schema: r.Schema, OID: r.OID, Name: r.Name,
-				HeapBytes: r.SizeBytes, EstRows: r.EstRows,
-			}
-			title := "heap pages"
-			if r.Kind == pg.RelToast {
-				title = "toast pages"
-			}
-			next := &screen{
-				level: levelHeapPages, title: title, tool: s.tool,
-				db: t.DB, schema: t.Schema, table: t,
-				heapWindowStart: 0, heapWindowCount: heapWindowDefault,
-				sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
-			}
-			m.stack = append(m.stack, next)
-			return m.loadCurrent()
-		case pg.RelBTreeIndex, pg.RelGist, pg.RelBrin, pg.RelGin:
-			// Every drillable index AM uses the shared levelIndexPages screen;
-			// the loader/renderer branch on r.AccessMethod from here on.
-			// B-trees open level-first so the root sits at the top (read the tree
-			// top-down); GiST/BRIN/GIN have no meaningful tree level, so a
-			// level sort there would be an inert no-op — keep them block-ordered.
-			pageSort := sortByBlkno
-			if r.Kind == pg.RelBTreeIndex {
-				pageSort = sortByLevel
-			}
-			next := &screen{
-				level: levelIndexPages, title: "index pages", tool: s.tool,
-				db: r.DB, schema: r.Schema, index: r,
-				heapWindowStart: 0, heapWindowCount: heapWindowDefault,
-				sort: pageSort, sortDesc: pageSort.defaultDesc(),
-			}
-			m.stack = append(m.stack, next)
-			return m.loadCurrent()
-		}
-		return nil
+		return m.drillRelation(s, cur)
 	case levelIndexPages:
-		switch s.index.AccessMethod {
-		case "gist":
-			return m.drillGistPage(s, cur)
-		case "brin":
-			return m.drillBrinPage(s, cur)
-		case "gin":
-			return m.drillGinPage(s, cur)
-		}
-		p, ok := cur.data.(pg.IndexPageStat)
-		if !ok {
-			return nil
-		}
-		lvl := p.BtpoLevel
-		next := indexTuplesScreen(s, "index tuples", p.Blkno, indexTuplePageType(p.Type, p.BtpoLevel))
-		next.indexPageLevel = &lvl
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
+		return m.drillIndexPage(s, cur)
 	case levelIndexTuples:
-		switch s.index.AccessMethod {
-		case "gist":
-			return m.drillGistItem(s, cur)
-		case "brin":
-			return m.drillBrinItem(s, cur)
-		case "gin":
-			return nil // GIN posting-list segments are terminal
-		}
-		t, ok := cur.data.(pg.IndexTuple)
-		if !ok {
-			return nil
-		}
-		// On an internal page every entry is a downlink: its ctid block names a
-		// child index page. Enter descends one level toward the leaves so the
-		// user can walk the tree structurally. Leaf high-key pivots live on leaf
-		// pages, not here, so this only fires for real downlinks.
-		if s.indexPageType == "i" {
-			child, ok := downlinkChildBlock(t, s.heapPageCount, s.indexPageBlkno)
-			if !ok {
-				return nil
-			}
-			// Child page type is unknown here; leave it empty and let
-			// loadIndexTuplesCmd probe it (bt_page_stats) so the decode path
-			// and further downlink navigation stay correct mid-descent.
-			m.stack = append(m.stack, indexTuplesScreen(s, "index tuples", child, ""))
-			return m.loadCurrent()
-		}
-		if t.Ctid == nil || (t.Decoded == nil && t.HotDecoded == nil) {
-			// Leaf entries drill only when a live heap row was projected.
-			// Pivot/posting entries and vacuumed rows land here too; none has a
-			// single heap row to show in the per-column view.
-			return nil
-		}
-		// A HOT-updated row lives at the redirect target, not at the ctid the
-		// index entry stores — open the tuple that actually holds the row.
-		ctid := *t.Ctid
-		if t.Decoded == nil && t.HotCtid != nil {
-			ctid = *t.HotCtid
-		}
-		// The parent's schema matches the index's by Postgres rule — indexes
-		// live in the same namespace as their table.
-		parent := pg.Table{
-			DB: s.db, Schema: s.schema,
-			OID: s.index.ParentOID, Name: s.index.ParentName,
-		}
-		next := &screen{
-			level: levelTupleRow, title: "row", tool: s.tool,
-			db: s.db, schema: s.schema, table: parent,
-			tupleCtid: ctid,
-			sort:      sortByName, sortDesc: false,
-		}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
+		return m.drillIndexTuple(s, cur)
 	case levelWAL:
-		st, ok := cur.data.(pg.WALRmgrStat)
-		if !ok || st.Count == 0 {
-			return nil
-		}
-		next := &screen{
-			level: levelWALRecords, title: "wal records", tool: s.tool,
-			db: s.db, walRmgr: st.Name, walStart: s.walStart, walEnd: s.walEnd,
-			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
-		}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
+		return m.drillWALRmgr(s, cur)
 	case levelWALRecords:
-		r, ok := cur.data.(pg.WALRecord)
-		if !ok {
-			return nil
-		}
-		next := &screen{
-			level: levelWALBlocks, title: "wal blocks", tool: s.tool,
-			db: s.db, walRmgr: s.walRmgr, walRecLSN: r.StartLSN, walRecEnd: r.EndLSN,
-			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
-		}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
+		return m.drillWALRecord(s, cur)
 	case levelWALRelations:
-		st, ok := cur.data.(pg.WALRelStat)
-		if !ok || st.RecCount == 0 {
-			return nil
-		}
-		// The block-refs list is keyed on relfilenode; carry a human label for
-		// the breadcrumb/status row (resolved name, or the numeric fallback).
-		label := st.RelName
-		if label == "" {
-			label = fmt.Sprintf("relfilenode %d", st.RelFileNode)
-		}
-		if st.IsToast {
-			label += " (toast)"
-		}
-		next := &screen{
-			level: levelWALRelBlocks, title: "wal rel blocks", tool: s.tool,
-			db: s.db, walStart: s.walStart, walEnd: s.walEnd,
-			walRelFilenode: st.RelFileNode, walRelLabel: label,
-			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
-		}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
+		return m.drillWALRelation(s, cur)
 	case levelStatements:
-		// Resolve the row's queryid back to its full window-delta QueryStat.
-		var qs *pg.QueryStat
-		for i := range s.statRows {
-			if s.statRows[i].QueryID == cur.statQueryID {
-				qs = &s.statRows[i]
-				break
-			}
-		}
-		if qs == nil {
-			return nil
-		}
-		next := &screen{
-			level: levelStatementDetail, title: "query", tool: s.tool,
-			db: s.db, statDetail: qs, statWindowExecMs: s.statWindowExecMs,
-			// Carry the parent's track_planning state so the plan-time line
-			// matches the overview's plan_ms column; without it the detail view
-			// defaults to false and wrongly reports "track_planning off".
-			statTrackPlanning: s.statTrackPlanning,
-		}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
+		return m.drillStatement(s, cur)
 	case levelSnapshots:
 		return m.loadSelectedSnapshot(s, cur)
 	case levelActivity:
-		// Enter drills into the top-queries detail view for the highlighted
-		// backend's query (requires pg_stat_statements; a soft hint is shown
-		// when query_id is zero). The item's statQueryID reuses the same field
-		// that levelStatements uses for the same purpose.
-		if cur.statQueryID == 0 {
-			m.notice = "no query_id — pg_stat_statements not tracking this query"
-			return nil
-		}
-		// Need the query text to build a sample call; it lives in the ActivityRow
-		// stored in screen.actRows, matched by PID embedded in the item (we use
-		// the pid cell display as the lookup key).  Resolve it via actRows directly.
-		if len(s.actRows) == 0 {
-			return nil
-		}
-		// Find the ActivityRow by QueryID (first match).
-		var queryText string
-		var backendPID int32
-		db := s.db
-		for _, r := range s.actRows {
-			if r.QueryID == cur.statQueryID {
-				queryText = r.Query
-				backendPID = r.PID
-				if r.Database != "" {
-					db = r.Database
-				}
-				break
-			}
-		}
-		// Push a loading placeholder while we fetch the QueryStat snapshot.
-		next := &screen{level: levelStatementDetail, title: "query", tool: s.tool, db: db, loading: true}
-		m.stack = append(m.stack, next)
-		return m.loadActivityStatementCmd(db, backendPID, cur.statQueryID, queryText)
+		return m.drillActivityStatement(s, cur)
 	case levelPgBouncers:
-		if cur.pgbIdx <= 0 || cur.pgbIdx > len(s.pgbInsts) {
+		if cur.pgbIdx <= 0 || cur.pgbIdx > len(s.pgb.insts) {
 			return nil
 		}
-		m.stack = append(m.stack, m.pgbOverviewScreen(s.pgbInsts[cur.pgbIdx-1]))
+		m.stack = append(m.stack, m.pgbOverviewScreen(s.pgb.insts[cur.pgbIdx-1]))
 		return m.loadCurrent()
 	case levelPgBouncer:
 		switch d := cur.data.(type) {
@@ -424,28 +105,28 @@ func (m *Model) drillIn() tea.Cmd {
 			m.stack = append(m.stack, m.pgbShowScreen(s, d))
 			return m.loadCurrent()
 		case pgbLogRow:
-			if s.pgbInst == nil || s.pgbInst.Logfile == "" {
+			if s.pgb.inst == nil || s.pgb.inst.Logfile == "" {
 				return nil
 			}
-			m.stack = append(m.stack, m.logScreen(pg.OpenLocalLog(s.pgbInst.Logfile)))
+			m.stack = append(m.stack, m.logScreen(pglog.OpenLocal(s.pgb.inst.Logfile)))
 			return m.loadCurrent()
 		}
 		return nil
 	case levelLogFiles:
-		if cur.logIdx <= 0 || cur.logIdx > len(s.logCands) {
+		if cur.logIdx <= 0 || cur.logIdx > len(s.log.cands) {
 			return nil
 		}
-		m.stack = append(m.stack, m.logScreen(s.logCands[cur.logIdx-1].Open()))
+		m.stack = append(m.stack, m.logScreen(s.log.cands[cur.logIdx-1].Open()))
 		return m.loadCurrent()
 	case levelLogs:
-		if s.logView.table() {
+		if s.log.view.table() {
 			if e := s.logEntryOf(cur); e != nil {
 				m.stack = append(m.stack, m.logEntryScreen(s, e))
 				return m.loadCurrent()
 			}
 			return nil
 		}
-		g, ok := cur.data.(*pg.LogGroup)
+		g, ok := cur.data.(*pglog.Group)
 		if !ok {
 			return nil // section header rows are inert
 		}
@@ -459,38 +140,7 @@ func (m *Model) drillIn() tea.Cmd {
 		m.stack = append(m.stack, m.logEntryScreen(s, e))
 		return m.loadCurrent()
 	case levelTriage:
-		// Drill into the screen that backs the selected triage line. The
-		// collapsed "N checks ok" summary row carries no TriageResult and is
-		// inert.
-		r, ok := cur.data.(pg.TriageResult)
-		if !ok {
-			return nil
-		}
-		switch r.Target {
-		case pg.TriageTargetLockTree:
-			m.stack = append(m.stack, &screen{
-				level: levelLockTree, title: "lock tree", tool: toolActivity,
-				db: s.db, loading: true,
-			})
-			return m.loadCurrent()
-		case pg.TriageTargetMaintenance:
-			m.stack = append(m.stack, m.toolEntryScreen(toolMaintenance))
-			return m.loadCurrent()
-		case pg.TriageTargetActivity:
-			m.stack = append(m.stack, m.toolEntryScreen(toolActivity))
-			return m.loadCurrent()
-		case pg.TriageTargetPgBouncer:
-			m.stack = append(m.stack, m.toolEntryScreen(toolPgBouncer))
-			return m.loadCurrent()
-		default:
-			for i := range pg.Diagnostics {
-				if pg.Diagnostics[i].Key == r.DiagKey {
-					m.stack = append(m.stack, diagnosticResultScreen(&pg.Diagnostics[i], r.DB, false))
-					return m.loadCurrent()
-				}
-			}
-			return nil
-		}
+		return m.drillTriage(s, cur)
 	case levelParts:
 		// Only the heap row drills further — into per-column space estimates.
 		// Toast and index rows have no meaningful sub-breakdown.
@@ -501,184 +151,14 @@ func (m *Model) drillIn() tea.Cmd {
 		next := &screen{
 			level: levelColumns, title: "columns", tool: s.tool,
 			db: s.db, schema: s.schema, table: s.table,
-			sort: sortBySize, sortDesc: sortBySize.defaultDesc(),
-		}
+			sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
 	}
 	return nil
 }
 
-// indexTuplePageType normalizes a B-tree page's bt_page_stats type for the
-// tuple view. pageinspect reports the root as 'r' whether it's a single-page
-// index (the root is also a leaf — its entries are heap pointers we can decode
-// against the table) or the top of a taller tree (the root is internal — its
-// entries are downlinks to child index pages). Only the level disambiguates: a
-// non-leaf root (level > 0) must be treated exactly like an internal page, or
-// its downlink ctids get looked up in the heap and resolve to unrelated rows,
-// printing bogus, unsorted "keys". Mapping it to 'i' here flips both the decode
-// path (ListIndexTuples skips the heap join) and the renderer (downlink ranges
-// and "→ blk N" instead of a fake key column) in one place.
-func indexTuplePageType(typ string, level int32) string {
-	if typ == "r" && level > 0 {
-		return "i"
-	}
-	return typ
-}
-
-// downlinkChildBlock resolves the child index page an internal-page downlink
-// points at. On internal B-tree pages the item's ctid block IS the child block
-// number (the offset word carries pivot flag bits, which we ignore). Returns
-// false when the ctid doesn't parse, points at the meta page / itself, or — when
-// the index's page count is known — lands past EOF, so a malformed downlink
-// can't send get_raw_page off the end.
-func downlinkChildBlock(t pg.IndexTuple, pageCount, current int32) (int32, bool) {
-	blk, ok := parseCtidBlock(t.Ctid)
-	if !ok || blk <= 0 || blk == current {
-		return 0, false
-	}
-	if pageCount > 0 && blk >= pageCount {
-		return 0, false
-	}
-	return blk, true
-}
-
-// indexTuplesScreen builds the per-page items screen every index drill pushes:
-// same index/context as the parent page list (the keys banner and page count
-// carry over — no refetch), positioned at blkno with the given resolved (or
-// to-be-probed, when empty) page type. Callers set per-AM extras
-// (indexPageLevel, brinMeta) on the result.
-func indexTuplesScreen(s *screen, title string, blkno int32, pageType string) *screen {
-	return &screen{
-		level: levelIndexTuples, title: title, tool: s.tool,
-		db: s.db, schema: s.schema, index: s.index,
-		indexKeyCols:   s.indexKeyCols,
-		heapPageCount:  s.heapPageCount,
-		indexPageBlkno: blkno,
-		indexPageType:  pageType,
-		sort:           sortByLP, sortDesc: sortByLP.defaultDesc(),
-	}
-}
-
 // --- GiST / BRIN / GIN drill handlers (called from drillIn) ---
-
-// drillGistPage opens a GiST page's items. Leaf and internal pages both carry
-// items worth showing; deleted/empty pages don't drill.
-func (m *Model) drillGistPage(s *screen, cur item) tea.Cmd {
-	p, ok := cur.data.(pg.GistPageStat)
-	if !ok {
-		return nil
-	}
-	if p.IsDeleted {
-		m.notice = "deleted page — emptied by VACUUM, nothing to inspect"
-		return nil
-	}
-	if p.Items == 0 {
-		m.notice = "empty page — no items to inspect"
-		return nil
-	}
-	m.stack = append(m.stack, indexTuplesScreen(s, "index tuples", p.Blkno, gistPageRole(p.IsLeaf, p.IsDeleted)))
-	return m.loadCurrent()
-}
-
-// drillGistItem walks a GiST internal-page downlink to its child page, or opens
-// the heap row a leaf entry points at (mirrors the B-tree tree-walk).
-func (m *Model) drillGistItem(s *screen, cur item) tea.Cmd {
-	t, ok := cur.data.(pg.GistItem)
-	if !ok {
-		return nil
-	}
-	if s.indexPageType == "intr" {
-		child, ok := gistDownlinkChildBlock(t, s.heapPageCount, s.indexPageBlkno)
-		if !ok {
-			return nil
-		}
-		// Page type probed by loadGistItemsCmd mid-descent.
-		m.stack = append(m.stack, indexTuplesScreen(s, "index tuples", child, ""))
-		return m.loadCurrent()
-	}
-	if t.Dead || t.Ctid == nil {
-		return nil
-	}
-	parent := pg.Table{DB: s.db, Schema: s.schema, OID: s.index.ParentOID, Name: s.index.ParentName}
-	next := &screen{
-		level: levelTupleRow, title: "row", tool: s.tool,
-		db: s.db, schema: s.schema, table: parent,
-		tupleCtid: *t.Ctid,
-		sort:      sortByName, sortDesc: false,
-	}
-	m.stack = append(m.stack, next)
-	return m.loadCurrent()
-}
-
-// gistDownlinkChildBlock resolves the child page a GiST internal-page downlink
-// points at (its ctid block). Mirrors downlinkChildBlock's safety guards.
-func gistDownlinkChildBlock(t pg.GistItem, pageCount, current int32) (int32, bool) {
-	blk, ok := parseCtidBlock(t.Ctid)
-	if !ok || blk <= 0 || blk == current {
-		return 0, false
-	}
-	if pageCount > 0 && blk >= pageCount {
-		return 0, false
-	}
-	return blk, true
-}
-
-// drillBrinPage opens a regular BRIN page's range summaries; meta/revmap pages
-// have nothing to itemize. Carries the metapage down so the range column and
-// block-seek know pages-per-range.
-func (m *Model) drillBrinPage(s *screen, cur item) tea.Cmd {
-	p, ok := cur.data.(pg.BrinPageStat)
-	if !ok {
-		return nil
-	}
-	if p.PageType != "regular" {
-		m.notice = p.PageType + " page holds no range summaries — open a regular page to see them"
-		return nil
-	}
-	next := indexTuplesScreen(s, "brin ranges", p.Blkno, "regular")
-	next.brinMeta = s.brinMeta
-	m.stack = append(m.stack, next)
-	return m.loadCurrent()
-}
-
-// drillBrinItem jumps from a BRIN range summary to the heap pages of the block
-// range it covers, positioning the heap-pages window at the range's start.
-func (m *Model) drillBrinItem(s *screen, cur item) tea.Cmd {
-	t, ok := cur.data.(pg.BrinItem)
-	if !ok {
-		return nil
-	}
-	parent := pg.Table{DB: s.db, Schema: s.schema, OID: s.index.ParentOID, Name: s.index.ParentName}
-	start := max(int32(t.BlockNum), 0)
-	start = (start / heapWindowDefault) * heapWindowDefault // align to the window grid
-	next := &screen{
-		level: levelHeapPages, title: "heap pages", tool: s.tool,
-		db: s.db, schema: s.schema, table: parent,
-		heapWindowStart: start, heapWindowCount: heapWindowDefault,
-		sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
-	}
-	m.notice = fmt.Sprintf("heap pages from block %d — BRIN range start", t.BlockNum)
-	m.stack = append(m.stack, next)
-	return m.loadCurrent()
-}
-
-// drillGinPage opens a GIN data-leaf page's posting-list segments; entry-tree
-// and other pages aren't itemizable via pageinspect.
-func (m *Model) drillGinPage(s *screen, cur item) tea.Cmd {
-	p, ok := cur.data.(pg.GinPageStat)
-	if !ok {
-		return nil
-	}
-	if !ginPageIsDataLeaf(p.Flags) {
-		// pageinspect can only list compressed data-leaf pages; entry-tree and
-		// meta pages aren't itemizable. Point the user at the drillable kind.
-		m.notice = "only data-leaf pages are itemizable (pageinspect can't read entry-tree keys) — sort by type (→) to find them"
-		return nil
-	}
-	m.stack = append(m.stack, indexTuplesScreen(s, "gin posting lists", p.Blkno, "data-leaf"))
-	return m.loadCurrent()
-}
 
 // the picker (and when a --<tool> flag opens one directly at startup). The
 // cluster-wide tools (tools/wal/maintenance/activity) drill straight to their
@@ -706,7 +186,7 @@ func (m *Model) toolEntryScreen(t tool) *screen {
 		// An explicit --log-file skips the picker; otherwise discover candidates
 		// (pg_current_logfile, /var/log/postgresql, server log dir) first.
 		if m.logFile != "" {
-			return m.logScreen(pg.OpenLocalLog(m.logFile))
+			return m.logScreen(pglog.OpenLocal(m.logFile))
 		}
 		return &screen{level: levelLogFiles, title: "log files", tool: toolLogs, db: m.client.DefaultDB(), loading: true}
 	case toolPgBouncer:
@@ -717,13 +197,11 @@ func (m *Model) toolEntryScreen(t tool) *screen {
 		// Activity tool is cluster-wide: skip the database picker and go
 		// directly to the live pg_stat_activity list.
 		return &screen{
-			level:     levelActivity,
-			title:     "activity",
-			tool:      toolActivity,
-			db:        m.client.DefaultDB(),
-			actFilter: pg.ActivityActiveWaiting,
-			actHosts:  make(map[string]string),
-		}
+			level: levelActivity,
+			title: "activity",
+			tool:  toolActivity,
+			db:    m.client.DefaultDB(),
+			act:   actState{filter: pg.ActivityActiveWaiting, hosts: make(map[string]string)}}
 	default:
 		return &screen{level: levelDatabases, title: "databases", tool: t, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 	}
@@ -740,8 +218,7 @@ func diagnosticResultScreen(d *pg.Diagnostic, db string, allDBs bool) *screen {
 		diag:       d,
 		db:         db,
 		diagAllDBs: allDBs,
-		diagBarCol: -1,
-	}
+		diagBarCol: -1}
 }
 
 // databaseChildScreen builds the next screen when drilling into a database,
@@ -785,3 +262,30 @@ func schemaChildScreen(t tool, sc pg.Schema) *screen {
 // and small enough that the resulting item list still scrolls comfortably.
 // PgUp/PgDn slides the window in heapWindowDefault-sized steps.
 const heapWindowDefault int32 = 2000
+
+// drillTable opens a table's parts (disk) or heap pages (page inspector).
+func (m *Model) drillTable(s *screen, cur item) tea.Cmd {
+	t := cur.data.(pg.Table)
+	var next *screen
+	switch s.tool {
+	case toolPageInspect:
+		next = &screen{
+			level: levelHeapPages, title: "heap pages", tool: s.tool,
+			db: t.DB, schema: t.Schema, table: t,
+			pages: pageState{heapWindowStart: 0, heapWindowCount: heapWindowDefault},
+			sort:  sortByBlkno, sortDesc: sortByBlkno.defaultDesc()}
+	default:
+		// Fresh visit to a table: drop a previous run's finished vacuum
+		// output so stale logs don't reappear when the pane is keyed by OID.
+		// Leave a still-running vacuum alone — its pane should stay live.
+		if !m.vacuum.running {
+			m.vacuum = vacuumState{}
+		}
+		next = &screen{
+			level: levelParts, title: "parts", tool: s.tool,
+			db: t.DB, schema: t.Schema, table: t,
+			sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
+	}
+	m.stack = append(m.stack, next)
+	return m.loadCurrent()
+}

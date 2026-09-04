@@ -14,7 +14,7 @@ func TestTriageItemsCollapsesOK(t *testing.T) {
 		{Check: "cache hit ratio", Severity: pg.SevOK, Detail: "99.3%"},
 		{Check: "wraparound", Severity: pg.SevOK, Detail: "41%"},
 	}
-	items := triageItems(results)
+	items := triageItems(results, nil)
 	if len(items) != 3 {
 		t.Fatalf("got %d items, want 3 (2 findings + 1 ok summary)", len(items))
 	}
@@ -40,7 +40,7 @@ func TestTriageItemsAllOK(t *testing.T) {
 	items := triageItems([]pg.TriageResult{
 		{Check: "a", Severity: pg.SevOK},
 		{Check: "b", Severity: pg.SevOK},
-	})
+	}, nil)
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want just the summary row", len(items))
 	}
@@ -51,13 +51,12 @@ func TestRenderTriageList(t *testing.T) {
 	s := &screen{
 		level:  levelTriage,
 		loaded: true,
-		triageResults: []pg.TriageResult{
+		triage: triageState{results: []pg.TriageResult{
 			{Check: "idle-in-xact", Severity: pg.SevCrit, Detail: "pid 8123 idle 11m", DiagKey: "idle_in_xact_holders"},
 			{Check: "blocked backends", Severity: pg.SevWarn, Detail: "2 waiting", Target: pg.TriageTargetLockTree},
 			{Check: "cache hit ratio", Severity: pg.SevOK, Detail: "99.3%"},
-		},
-	}
-	s.items = triageItems(s.triageResults)
+		}}}
+	s.items = triageItems(s.triage.results, nil)
 	out := stripANSI(m.renderTriageList(s, 20))
 
 	for _, want := range []string{

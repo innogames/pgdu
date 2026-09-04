@@ -196,3 +196,13 @@ func maxItemSize(items []item, vis []int) int64 {
 	}
 	return m
 }
+
+// currentItem resolves the item under the cursor through the active filter;
+// ok is false when the list is empty or the cursor is out of range.
+func (s *screen) currentItem() (item, bool) {
+	vis := s.visibleIndexes()
+	if s.cursor < 0 || s.cursor >= len(vis) {
+		return item{}, false
+	}
+	return s.items[vis[s.cursor]], true
+}

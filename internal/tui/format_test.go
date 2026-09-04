@@ -114,7 +114,7 @@ func TestBloatScanLabel(t *testing.T) {
 	}{
 		{"non-parts level", &screen{level: levelTables, items: []item{withBloat}}, ""},
 		{"parts but empty", &screen{level: levelParts}, ""},
-		{"scanning in flight", &screen{level: levelParts, bloatScanning: true, items: []item{{}}}, "bloat: scanning…"},
+		{"scanning in flight", &screen{level: levelParts, parts: partsState{bloatScanning: true}, items: []item{{}}}, "bloat: scanning…"},
 		{"all measured", &screen{level: levelParts, items: []item{withBloat, withBloat}}, "bloat: ready"},
 		{"partial", &screen{level: levelParts, items: []item{withBloat, {}}}, "bloat: 1/2 scanned"},
 		{"none measured yet", &screen{level: levelParts, items: []item{{}, {}}}, ""},

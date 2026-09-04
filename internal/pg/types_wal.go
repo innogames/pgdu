@@ -68,6 +68,7 @@ func (c WALCheckpointInfo) NextCheckpointETA() (time.Time, bool) {
 // in the UI). Source: sqlWALRelStats over pg_get_wal_block_info (PostgreSQL 16+).
 type WALRelStat struct {
 	RelDatabase    uint32
+	RelTablespace  uint32
 	RelFileNode    uint32
 	DataBytes      int64
 	FPIBytes       int64
@@ -139,8 +140,9 @@ type WALBlockRef struct {
 	// RelName is the relation this block belongs to, resolved from
 	// relfilenode via pg_filenode_relation. For a TOAST relation this is the
 	// owning table's name, not the pg_toast.pg_toast_<oid> internal name.
-	// Empty when the relation is in another database or has been dropped
-	// (relfilenode no longer maps).
+	// Relations in other databases are resolved through that database's own
+	// pool (best effort); empty when the relation has been dropped or its
+	// database refused the connection.
 	RelName string
 	// IsToast reports that the block belongs to a TOAST relation; RelName then
 	// names the owning table and the UI tags the row with "(toast)".

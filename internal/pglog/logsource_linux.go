@@ -1,6 +1,6 @@
 //go:build linux
 
-package pg
+package pglog
 
 import (
 	"os"

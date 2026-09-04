@@ -11,6 +11,7 @@ import (
 
 	"pgdu/internal/humanize"
 	"pgdu/internal/pg"
+	"pgdu/internal/pglog"
 )
 
 // Column widths of the groups pane (shared with barReserve in layout.go).
@@ -22,13 +23,13 @@ const (
 
 // logSevStyle colours a severity tag: errors and worse red, warnings yellow,
 // LOG muted, the debug family dimmer still.
-func logSevStyle(sev pg.LogSeverity) lipgloss.Style {
+func logSevStyle(sev pglog.Severity) lipgloss.Style {
 	switch {
-	case sev >= pg.SevError:
+	case sev >= pglog.SevError:
 		return lipgloss.NewStyle().Foreground(colorError)
-	case sev == pg.SevWarning:
+	case sev == pglog.SevWarning:
 		return lipgloss.NewStyle().Foreground(colorAccent)
-	case sev == pg.SevLog:
+	case sev == pglog.SevLog:
 		return lipgloss.NewStyle().Foreground(colorMuted)
 	}
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
@@ -50,25 +51,25 @@ func logSevStyleByName(name string) (lipgloss.Style, bool) {
 	return lipgloss.Style{}, false
 }
 
-func logGlyph(sev pg.LogSeverity) string {
+func logGlyph(sev pglog.Severity) string {
 	switch {
-	case sev >= pg.SevError:
+	case sev >= pglog.SevError:
 		return logSevStyle(sev).Render("✗")
-	case sev == pg.SevWarning:
+	case sev == pglog.SevWarning:
 		return logSevStyle(sev).Render("▲")
 	}
 	return logSevStyle(sev).Render("●")
 }
 
-func logCatStyle(c pg.LogCategory) lipgloss.Style {
+func logCatStyle(c pglog.Category) lipgloss.Style {
 	switch c {
-	case pg.CatError:
+	case pglog.CatError:
 		return lipgloss.NewStyle().Foreground(colorError)
-	case pg.CatWarning, pg.CatLock:
+	case pglog.CatWarning, pglog.CatLock:
 		return lipgloss.NewStyle().Foreground(colorAccent)
-	case pg.CatTempFile:
+	case pglog.CatTempFile:
 		return lipgloss.NewStyle().Foreground(colorBloat)
-	case pg.CatSlowQuery, pg.CatStatement:
+	case pglog.CatSlowQuery, pglog.CatStatement:
 		return lipgloss.NewStyle().Foreground(colorBar)
 	}
 	return lipgloss.NewStyle().Foreground(colorMuted)
@@ -110,11 +111,11 @@ func (m *Model) renderLogHeader(s *screen) string {
 	if logs == nil {
 		return ""
 	}
-	r := logs.logReport
+	r := logs.log.report
 	var b strings.Builder
 	if r == nil {
-		if logs.logErr != nil && logs.logSrc != nil {
-			b.WriteString("  " + mu(logSourceLabel(logs.logSrc.Info())) + "\n")
+		if logs.log.err != nil && logs.log.src != nil {
+			b.WriteString("  " + mu(logSourceLabel(logs.log.src.Info())) + "\n")
 		}
 		return strings.TrimRight(b.String(), "\n")
 	}
@@ -126,7 +127,7 @@ func (m *Model) renderLogHeader(s *screen) string {
 		l1 = append(l1, fmt.Sprintf("%s → %s (%s)", r.Window.From.Format("01-02 15:04:05"), r.Window.To.Format("15:04:05"), fmtDuration(span)))
 	}
 	prefix := "prefix " + r.Prefix
-	if r.Format != pg.LogFormatStderr {
+	if r.Format != pglog.FormatStderr {
 		prefix = r.Format.String()
 	}
 	if r.PrefixDetected {
@@ -143,35 +144,35 @@ func (m *Model) renderLogHeader(s *screen) string {
 		return st.Render(fmt.Sprintf("%d %s", n, name))
 	}
 	total := len(r.Entries)
-	errs := r.BySeverity[pg.SevError]
-	fatal := r.BySeverity[pg.SevFatal] + r.BySeverity[pg.SevPanic]
+	errs := r.BySeverity[pglog.SevError]
+	fatal := r.BySeverity[pglog.SevFatal] + r.BySeverity[pglog.SevPanic]
 	parts := []string{
 		fmt.Sprintf("%d entries", total),
-		count(errs, "errors", logSevStyle(pg.SevError)),
+		count(errs, "errors", logSevStyle(pglog.SevError)),
 	}
 	if fatal > 0 {
-		parts = append(parts, count(fatal, "fatal", logSevStyle(pg.SevFatal)))
+		parts = append(parts, count(fatal, "fatal", logSevStyle(pglog.SevFatal)))
 	}
-	parts = append(parts, count(r.BySeverity[pg.SevWarning], "warnings", logSevStyle(pg.SevWarning)))
-	if r.Format == pg.LogFormatPgBouncer {
+	parts = append(parts, count(r.BySeverity[pglog.SevWarning], "warnings", logSevStyle(pglog.SevWarning)))
+	if r.Format == pglog.FormatPgBouncer {
 		// A pooler log has no locks/temp files/checkpoints; its volume is
 		// connection churn.
-		parts = append(parts, mu(fmt.Sprintf("%d conn", r.ByCategory[pg.CatConnection])))
+		parts = append(parts, mu(fmt.Sprintf("%d conn", r.ByCategory[pglog.CatConnection])))
 	} else {
 		parts = append(parts,
-			count(r.ByCategory[pg.CatLock], "locks", logCatStyle(pg.CatLock)),
-			count(r.ByCategory[pg.CatTempFile], "temp files", logCatStyle(pg.CatTempFile)),
-			count(r.ByCategory[pg.CatSlowQuery], "slow", logCatStyle(pg.CatSlowQuery)),
-			mu(fmt.Sprintf("%d ckpt", r.ByCategory[pg.CatCheckpoint])),
+			count(r.ByCategory[pglog.CatLock], "locks", logCatStyle(pglog.CatLock)),
+			count(r.ByCategory[pglog.CatTempFile], "temp files", logCatStyle(pglog.CatTempFile)),
+			count(r.ByCategory[pglog.CatSlowQuery], "slow", logCatStyle(pglog.CatSlowQuery)),
+			mu(fmt.Sprintf("%d ckpt", r.ByCategory[pglog.CatCheckpoint])),
 		)
 	}
-	if n := r.ByCategory[pg.CatStatement]; n > 0 {
-		parts = append(parts, count(n, "stmts", logCatStyle(pg.CatStatement)))
+	if n := r.ByCategory[pglog.CatStatement]; n > 0 {
+		parts = append(parts, count(n, "stmts", logCatStyle(pglog.CatStatement)))
 	}
-	if n := r.ByCategory[pg.CatAutovacuum]; n > 0 {
+	if n := r.ByCategory[pglog.CatAutovacuum]; n > 0 {
 		parts = append(parts, mu(fmt.Sprintf("%d autovac", n)))
 	}
-	if n := r.ByCategory[pg.CatConnection]; n > 0 && r.Format != pg.LogFormatPgBouncer {
+	if n := r.ByCategory[pglog.CatConnection]; n > 0 && r.Format != pglog.FormatPgBouncer {
 		parts = append(parts, mu(fmt.Sprintf("%d conn", n)))
 	}
 	if r.Unparsed > 0 {
@@ -181,10 +182,10 @@ func (m *Model) renderLogHeader(s *screen) string {
 
 	var badges []string
 	if s.level == levelLogs {
-		if logs.logView.table() {
-			badges = append(badges, styleBadge.Render(logs.logView.label()))
+		if logs.log.view.table() {
+			badges = append(badges, styleBadge.Render(logs.log.view.label()))
 		} else {
-			badges = append(badges, styleBadge.Render(logs.logGroupBy.label()))
+			badges = append(badges, styleBadge.Render(logs.log.groupBy.label()))
 		}
 	}
 	if m.logRefresh > 0 {
@@ -212,27 +213,61 @@ func (m *Model) renderLogHeader(s *screen) string {
 			}
 			b.WriteString("  " + mu(padRight(label, 8)) + st.Render(sparkline(vals, w, 0)) + "\n")
 		}
-		errSeries := r.Hist.Series(pg.SevError)
-		for i, n := range r.Hist.Series(pg.SevFatal) {
-			errSeries[i] += n
+		labelW := 8
+		if s.level == levelLogs && logs.log.view == logViewStats && len(r.Pooler.Counts) == len(r.Hist.Counts) {
+			// The stats pane swaps the severity rows for the pooler metrics on
+			// the same axis: throughput in the bar colour, latencies in the
+			// accent so the two families read apart. The peak sits at the end.
+			labelW = 10
+			for _, met := range pglog.PoolerMetrics {
+				vals := r.Pooler.Series(met)
+				peak := 0.0
+				for _, v := range vals {
+					peak = max(peak, v)
+				}
+				if peak == 0 {
+					continue
+				}
+				st := lipgloss.NewStyle().Foreground(colorBar)
+				if met >= pglog.PoolerXactUs {
+					st = lipgloss.NewStyle().Foreground(colorAccent)
+				}
+				b.WriteString("  " + mu(padRight(met.Label(), labelW)) + st.Render(sparkline(vals, w, 0)) + mu("  peak "+fmtPoolerMetric(met, peak)) + "\n")
+			}
+		} else {
+			errSeries := r.Hist.Series(pglog.SevError)
+			for i, n := range r.Hist.Series(pglog.SevFatal) {
+				errSeries[i] += n
+			}
+			for i, n := range r.Hist.Series(pglog.SevPanic) {
+				errSeries[i] += n
+			}
+			row("errors", errSeries, logSevStyle(pglog.SevError))
+			row("warnings", r.Hist.Series(pglog.SevWarning), logSevStyle(pglog.SevWarning))
+			row("all", r.Hist.Total(), lipgloss.NewStyle().Foreground(colorBar))
 		}
-		for i, n := range r.Hist.Series(pg.SevPanic) {
-			errSeries[i] += n
-		}
-		row("errors", errSeries, logSevStyle(pg.SevError))
-		row("warnings", r.Hist.Series(pg.SevWarning), logSevStyle(pg.SevWarning))
-		row("all", r.Hist.Total(), lipgloss.NewStyle().Foreground(colorBar))
-		b.WriteString("  " + mu(fmt.Sprintf("%-8s%s per cell, %s → %s", "", r.Hist.Bucket, r.Hist.Start.Format("15:04"), r.Window.To.Format("15:04"))) + "\n")
+		b.WriteString("  " + mu(fmt.Sprintf("%-*s%s per cell, %s → %s", labelW, "", r.Hist.Bucket, r.Hist.Start.Format("15:04"), r.Window.To.Format("15:04"))) + "\n")
 	}
 
-	if s.level == levelLogGroup && s.logGroup != nil {
-		b.WriteString(m.renderLogGroupSummary(s.logGroup) + "\n")
+	if s.level == levelLogGroup && s.log.group != nil {
+		b.WriteString(m.renderLogGroupSummary(s.log.group) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// fmtPoolerMetric renders a pooler metric the way its table column does.
+func fmtPoolerMetric(m pglog.PoolerMetric, v float64) string {
+	switch m {
+	case pglog.PoolerIn, pglog.PoolerOut:
+		return humanize.Bytes(int64(v)) + "/s"
+	case pglog.PoolerXactUs, pglog.PoolerQueryUs, pglog.PoolerWaitUs:
+		return fmtMicros(int64(v))
+	}
+	return strconv.FormatInt(int64(v), 10)
+}
+
 // renderLogGroupSummary is the one-line stats strip for a group.
-func (m *Model) renderLogGroupSummary(g *pg.LogGroup) string {
+func (m *Model) renderLogGroupSummary(g *pglog.Group) string {
 	mu := styleMuted.Render
 	parts := []string{
 		logGlyph(g.Severity) + " " + logSevStyle(g.Severity).Render(g.Severity.String()),
@@ -252,7 +287,7 @@ func (m *Model) renderLogGroupSummary(g *pg.LogGroup) string {
 }
 
 // logGroupStats returns the category-specific figures for a group.
-func logGroupStats(g *pg.LogGroup) []string {
+func logGroupStats(g *pglog.Group) []string {
 	var out []string
 	switch {
 	case g.Slow != nil:
@@ -284,15 +319,12 @@ func logGroupStats(g *pg.LogGroup) []string {
 func (m *Model) renderLogGroups(s *screen, height int) string {
 	var b strings.Builder
 	mu := styleMuted.Render
-	if s.logErr != nil {
-		b.WriteString(styleErr.Render("  error: "+s.logErr.Error()) + "\n")
+	if s.log.err != nil {
+		b.WriteString(styleErr.Render("  error: "+s.log.err.Error()) + "\n")
 		b.WriteString("  " + mu("space reloads · esc picks another file · ? explains the privileges server-side reads need") + "\n")
-		for i := 2; i < height; i++ {
-			b.WriteString("\n")
-		}
-		return b.String()
+		return padInfo(&b, height)
 	}
-	if s.logReport == nil {
+	if s.log.report == nil {
 		for range height {
 			b.WriteString("\n")
 		}
@@ -321,7 +353,7 @@ func (m *Model) renderLogGroups(s *screen, height int) string {
 			sec = idx
 			continue
 		}
-		if g, ok := it.data.(*pg.LogGroup); ok && g.Count > sectionMax[sec] {
+		if g, ok := it.data.(*pglog.Group); ok && g.Count > sectionMax[sec] {
 			sectionMax[sec] = g.Count
 		}
 	}
@@ -350,7 +382,7 @@ func (m *Model) renderLogGroups(s *screen, height int) string {
 			b.WriteString(truncateToWidth("  "+styleSelected.Render(hdr.title)+mu(label[len(hdr.title)+1:])+mu(rule), m.width) + "\n")
 			continue
 		}
-		g, ok := it.data.(*pg.LogGroup)
+		g, ok := it.data.(*pglog.Group)
 		if !ok {
 			b.WriteString("\n")
 			continue
@@ -411,10 +443,7 @@ func (m *Model) renderLogFiles(_ *screen, height int) string {
 	b.WriteString("  " + mu("pg_current_logfile() is empty (logging_collector off) and nothing matched /var/log/postgresql/postgresql-*.log*.") + "\n")
 	b.WriteString("  " + mu("Pass --log-file PATH (or PGDU_LOG_FILE) to analyze a specific file; reading the server's log directory") + "\n")
 	b.WriteString("  " + mu("remotely needs pg_read_server_files (pg_ls_logdir needs pg_monitor and logging_collector = on).") + "\n")
-	for i := 5; i < height; i++ {
-		b.WriteString("\n")
-	}
-	return b.String()
+	return padInfo(&b, height)
 }
 
 // renderLogGroup lists the sampled entries behind one group, newest first.
@@ -424,10 +453,7 @@ func (m *Model) renderLogGroup(s *screen, height int) string {
 	vis := s.visibleIndexes()
 	if len(vis) == 0 {
 		b.WriteString("  " + mu("(no entries)") + "\n")
-		for i := 1; i < height; i++ {
-			b.WriteString("\n")
-		}
-		return b.String()
+		return padInfo(&b, height)
 	}
 	rowsH := height
 	if rowsH > 0 {
@@ -463,7 +489,7 @@ func (m *Model) renderLogGroup(s *screen, height int) string {
 			}
 		}
 		dur := ""
-		if e.Category == pg.CatSlowQuery {
+		if e.Category == pglog.CatSlowQuery {
 			dur = durationStyle(e.DurationMs).Render(padLeft(fmtAge(e.DurationMs), 7)) + "  "
 		}
 		if len(e.Plan) > 0 {
@@ -492,7 +518,7 @@ func (m *Model) renderLogGroup(s *screen, height int) string {
 // renderLogEntry shows one full record: prefix fields, then each text field
 // with SQL highlighted. Scrolls through s.offset like the statement detail.
 func (m *Model) renderLogEntry(s *screen, height int) string {
-	e := s.logEntry
+	e := s.log.entry
 	if e == nil {
 		return strings.Repeat("\n", max(height, 0))
 	}
@@ -526,7 +552,7 @@ func (m *Model) renderLogEntry(s *screen, height int) string {
 	field("app", string(e.App))
 	field("sqlstate", string(e.SQLState))
 	switch {
-	case e.Category == pg.CatSlowQuery:
+	case e.Category == pglog.CatSlowQuery:
 		field("duration", durationStyle(e.DurationMs).Render(fmtAge(e.DurationMs)))
 	case e.LockWaitMs > 0:
 		field("waited", fmtAge(e.LockWaitMs))
@@ -646,14 +672,8 @@ func wrapPlain(text string, width int) []string {
 }
 
 // renderLogColumnConfig is the C picker over the timeline columns.
-func (m *Model) renderLogColumnConfig(height int) string {
-	m.ensureLogColsInit()
-	reg := logColumnRegistry()
-	rows := make([]colCfgRow, len(reg))
-	for i, d := range reg {
-		rows[i] = colCfgRow{name: d.name, desc: d.desc, on: m.logColEnabled(d.id, d.defaultOn) || d.mandatory, mandatory: d.mandatory}
-	}
-	return m.renderColCfgOverlay("choose which columns the log timeline shows", rows, m.logColCfgCursor, height)
+func (m *Model) renderLogColumnConfig(v logView, height int) string {
+	return logSpec(v).renderConfig(m, m.logTableFor(v), logCtx{}, height)
 }
 
 // renderLogsInfo is the ? reference for the log analyzer.
@@ -666,8 +686,9 @@ func (m *Model) renderLogsInfo(height int) string {
 	b.WriteString("  " + styleHeader.Render(" what it reads ") + "\n")
 	b.WriteString("  " + mu("The server log, parsed with log_line_prefix (taken from the server, or detected from the file when that") + "\n")
 	b.WriteString("  " + mu("does not match — rotated logs written under an older prefix, files copied from elsewhere). csvlog and jsonlog") + "\n")
-	b.WriteString("  " + mu("are recognised too, as is pgbouncer's own log (\"%m [%p] LOG message\": socket events group under conn, the") + "\n")
-	b.WriteString("  " + mu("periodic stats line under other). Only the tail window is read (w widens it); the header shows the covered range.") + "\n")
+	b.WriteString("  " + mu("are recognised too, as is pgbouncer's own log (\"%m [%p] LOG message\": socket events group under conn; the") + "\n")
+	b.WriteString("  " + mu("periodic stats lines get their own pooler stats pane, one row per stats_period, cells coloured relative to the") + "\n")
+	b.WriteString("  " + mu("column's max). Only the tail window is read (w widens it); the header shows the covered range.") + "\n")
 	b.WriteString("  " + mu("DETAIL / HINT / STATEMENT / CONTEXT lines are attached to their primary line, so a group's entry shows all of them.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" where the file comes from ") + "\n")
@@ -678,20 +699,20 @@ func (m *Model) renderLogsInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" categories ") + "\n")
 	cats := []struct {
-		c pg.LogCategory
+		c pglog.Category
 		d string
 	}{
-		{pg.CatError, "ERROR / FATAL / PANIC, grouped by normalized message (identifiers kept, literals and numbers folded)"},
-		{pg.CatWarning, "WARNING lines"},
-		{pg.CatLock, "lock waits (log_lock_waits) and deadlocks"},
-		{pg.CatTempFile, "temporary file spills (log_temp_files), grouped by the statement in CONTEXT/STATEMENT"},
-		{pg.CatReplication, "recovery, streaming, archiving, startup/shutdown"},
-		{pg.CatOther, "everything else"},
-		{pg.CatSlowQuery, "duration: lines (log_min_duration_statement), grouped by normalized SQL — /* comments */ kept; auto_explain plans fold into their statement (▤)"},
-		{pg.CatStatement, "statement: / execute lines (log_statement), grouped by normalized SQL like slow queries"},
-		{pg.CatCheckpoint, "checkpoint / restartpoint starting and complete"},
-		{pg.CatAutovacuum, "automatic vacuum / analyze of table"},
-		{pg.CatConnection, "connection received / authorized / disconnection"},
+		{pglog.CatError, "ERROR / FATAL / PANIC, grouped by normalized message (identifiers kept, literals and numbers folded)"},
+		{pglog.CatWarning, "WARNING lines"},
+		{pglog.CatLock, "lock waits (log_lock_waits) and deadlocks"},
+		{pglog.CatTempFile, "temporary file spills (log_temp_files), grouped by the statement in CONTEXT/STATEMENT"},
+		{pglog.CatReplication, "recovery, streaming, archiving, startup/shutdown"},
+		{pglog.CatOther, "everything else"},
+		{pglog.CatSlowQuery, "duration: lines (log_min_duration_statement), grouped by normalized SQL — /* comments */ kept; auto_explain plans fold into their statement (▤)"},
+		{pglog.CatStatement, "statement: / execute lines (log_statement), grouped by normalized SQL like slow queries"},
+		{pglog.CatCheckpoint, "checkpoint / restartpoint starting and complete"},
+		{pglog.CatAutovacuum, "automatic vacuum / analyze of table"},
+		{pglog.CatConnection, "connection received / authorized / disconnection"},
 	}
 	for _, c := range cats {
 		b.WriteString("  " + logCatStyle(c.c).Render(padRight(c.c.Label(), 14)) + mu(c.d) + "\n")
@@ -701,7 +722,7 @@ func (m *Model) renderLogsInfo(height int) string {
 	b.WriteString("  " + styleHeader.Render(" keys ") + "\n")
 	keys := []struct{ k, d string }{
 		{"↵", "groups pane: open the group's entries · entry rows: the full record (message, DETAIL, STATEMENT highlighted)"},
-		{"tab", "cycle the panes: aggregated groups → chronological timeline → slow queries by duration (both tables sortable, C picks columns)"},
+		{"tab", "cycle the panes: aggregated groups → chronological timeline → slow queries by duration → pooler stats (pgbouncer logs; tables sortable, C picks columns)"},
 		{"m", "section mode: by category ⇄ flat"},
 		{"j", "on an entry or a group's rows: jump to that line in the timeline"},
 		{"d", "describe the main table of the statement behind the row (slow query / log_statement SQL or an error's STATEMENT)"},
@@ -719,6 +740,10 @@ func (m *Model) renderLogsInfo(height int) string {
 	b.WriteString("\n  " + styleHeader.Render(" timeline columns ") + "\n")
 	for _, d := range logColumnRegistry() {
 		b.WriteString("  " + padRight(d.name, 10) + mu(d.desc) + "\n")
+	}
+	b.WriteString("\n  " + styleHeader.Render(" pooler stats columns ") + "\n")
+	for _, d := range logStatsColumnRegistry()[1:] {
+		b.WriteString("  " + padRight(d.name, 11) + mu(d.desc) + "\n")
 	}
 	return padInfo(&b, height)
 }

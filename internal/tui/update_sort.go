@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"pgdu/internal/pg"
+	"pgdu/internal/pglog"
 )
 
 // applySort orders s.items by s.sort/s.sortDesc, using Name as a stable
@@ -17,7 +18,7 @@ func (m *Model) applySort(s *screen) {
 	s.itemsRev++
 	// The log groups pane orders itself (sections, then s.sort within each).
 	if s.level == levelLogs && s.diagCols == nil {
-		if s.logReport != nil {
+		if s.log.report != nil {
 			s.items = m.buildLogGroupItems(s)
 			s.itemsRev++
 		}
@@ -70,25 +71,6 @@ func (m *Model) applySort(s *screen) {
 		return s.items[i].name < s.items[j].name
 	})
 	s.clampCursor()
-}
-
-// syncStmtSort re-resolves the top-queries sort column index (s.diagSortCol) from
-// the identity m.stmtSortColID after a rebuild, since hiding/showing columns
-// shifts every index. When the sorted column is no longer visible it falls back
-// to total_ms (the default), or the first visible column if that's hidden too.
-func (m *Model) syncStmtSort(s *screen, descs []stmtColDesc) {
-	idx := indexOfStmtCol(descs, m.stmtSortColID)
-	if idx < 0 {
-		idx = indexOfStmtCol(descs, colTotalMs)
-		s.sortDesc = true
-		if idx < 0 {
-			idx = 0
-		}
-		if idx < len(descs) {
-			m.stmtSortColID = descs[idx].id
-		}
-	}
-	s.diagSortCol = idx
 }
 
 // itemHitRatio extracts the hit ratio from an item's payload when it carries
@@ -253,9 +235,9 @@ func itemSchemaTables(it item) (int64, bool) {
 // entry's timestamp, as unix nanoseconds.
 func itemLogTime(it item) (int64, bool) {
 	switch v := it.data.(type) {
-	case *pg.LogGroup:
+	case *pglog.Group:
 		return v.Last.UnixNano(), true
-	case *pg.LogEntry:
+	case *pglog.Entry:
 		return v.Time.UnixNano(), true
 	}
 	return 0, false
@@ -299,13 +281,13 @@ func validSorts(l level) []sortMode {
 	case levelIndexTuples:
 		return []sortMode{sortByLP, sortBySize}
 	case levelWAL:
-		return []sortMode{sortBySize, sortByCount, sortByFPI, sortByName}
+		return []sortMode{sortBySize, sortByRecord, sortByFPI, sortByCount, sortByName}
 	case levelWALRecords:
 		return []sortMode{sortBySize, sortByFPI, sortByName}
 	case levelWALBlocks:
 		return []sortMode{sortBySize, sortByName}
 	case levelWALRelations:
-		return []sortMode{sortBySize, sortByFPI, sortByCount, sortByName}
+		return []sortMode{sortBySize, sortByFPI, sortByCount, sortByPages, sortByName}
 	case levelWALRelBlocks:
 		return []sortMode{sortBySize, sortByName}
 	case levelLogs:
@@ -342,17 +324,17 @@ func (m *Model) cycleSort(s *screen, dir int) {
 		// On the top-queries table, remember the chosen column by stable id so a
 		// later column hide/show re-pins the sort to the same column (see
 		// syncStmtSort). Same logic for the Activity table's actCols.
-		if s.stmtCols != nil && s.diagSortCol < len(s.stmtCols) {
-			m.stmtSortColID = s.stmtCols[s.diagSortCol].id
+		if s.stat.cols != nil && s.diagSortCol < len(s.stat.cols) {
+			m.stmtTable.sortColID = s.stat.cols[s.diagSortCol].id
 		}
-		if s.actCols != nil && s.diagSortCol < len(s.actCols) {
-			m.actSortColID = s.actCols[s.diagSortCol].id
+		if s.act.cols != nil && s.diagSortCol < len(s.act.cols) {
+			m.actTable.sortColID = s.act.cols[s.diagSortCol].id
 		}
-		if s.tblCols != nil && s.diagSortCol < len(s.tblCols) {
-			m.tblSortColID = s.tblCols[s.diagSortCol].id
+		if s.tbl.cols != nil && s.diagSortCol < len(s.tbl.cols) {
+			m.tblTable.sortColID = s.tbl.cols[s.diagSortCol].id
 		}
-		if s.level == levelLogs && s.logCols != nil && s.diagSortCol < len(s.logCols) {
-			*m.logSortCol(s.logView) = s.logCols[s.diagSortCol].id
+		if s.level == levelLogs && s.log.cols != nil && s.diagSortCol < len(s.log.cols) {
+			*m.logSortCol(s.log.view) = s.log.cols[s.diagSortCol].id
 		}
 		// Diagnostic results track the sort column by name (no stable ids), so a
 		// later column hide/show can re-pin it (see rebuildDiagItems).

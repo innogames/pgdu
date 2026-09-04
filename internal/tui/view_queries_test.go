@@ -32,7 +32,7 @@ func renderModel(top *screen) string {
 // cellByID resolves a footer/row cell by its stable column id, independent of
 // where the column lands in the current projection.
 func cellByID(descs []stmtColDesc, cells []pg.DiagCell, id stmtColID) pg.DiagCell {
-	i := indexOfStmtCol(descs, id)
+	i := indexOfCol(descs, id)
 	if i < 0 || i >= len(cells) {
 		return pg.DiagCell{}
 	}
@@ -48,12 +48,9 @@ func TestRenderStatementsTable(t *testing.T) {
 	items, descs, windowMs, total := m.buildStatementItems(rows, true)
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
-		loaded: true, statRows: rows, statWindowExecMs: windowMs, items: items,
-		diagCols: diagColumnsFrom(descs), stmtCols: descs, diagBarCol: -1, diagTotalRow: total,
-		diagSortCol: 0, sortDesc: true,
-		statBaselineAt: time.Now().Add(-90 * time.Second), statSampledAt: time.Now(),
-		statTrackPlanning: true,
-	}
+		loaded: true, stat: stmtState{rows: rows, windowExecMs: windowMs, cols: descs, baselineAt: time.Now().Add(-90 * time.Second), sampledAt: time.Now(), trackPlanning: true}, items: items,
+		diagCols: diagColumnsFrom(descs), diagBarCol: -1, diagTotalRow: total,
+		diagSortCol: 0, sortDesc: true}
 	out := renderModel(s)
 	for _, want := range []string{"total_ms", "hit%", "plan_ms", "miss", "blk/row", "query", "over the last", "since", "← Sum"} {
 		if !strings.Contains(out, want) {
@@ -109,12 +106,9 @@ func TestRenderStatementsTrackPlanningOff(t *testing.T) {
 	items, descs, windowMs, total := m.buildStatementItems(rows, false)
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
-		loaded: true, statRows: rows, statWindowExecMs: windowMs, items: items,
-		diagCols: diagColumnsFrom(descs), stmtCols: descs, diagBarCol: -1, diagTotalRow: total,
-		diagSortCol: 0, sortDesc: true,
-		statBaselineAt: time.Now().Add(-30 * time.Second), statSampledAt: time.Now(),
-		statTrackPlanning: false,
-	}
+		loaded: true, stat: stmtState{rows: rows, windowExecMs: windowMs, cols: descs, baselineAt: time.Now().Add(-30 * time.Second), sampledAt: time.Now(), trackPlanning: false}, items: items,
+		diagCols: diagColumnsFrom(descs), diagBarCol: -1, diagTotalRow: total,
+		diagSortCol: 0, sortDesc: true}
 	out := renderModel(s)
 	if strings.Contains(out, "plan_ms") {
 		t.Error("plan_ms column should be hidden when track_planning is off")
@@ -137,8 +131,7 @@ func TestStatementsMissingExtension(t *testing.T) {
 	m.width, m.height = 120, 30
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
-		items: []item{{name: "x"}}, diagCols: m.statementColumns(true),
-	}
+		items: []item{{name: "x"}}, diagCols: m.statementColumns(true)}
 	m.stack = append(m.stack, s)
 	m.onStatementsLoaded(statementsLoadedMsg{
 		db:  "test",
@@ -167,16 +160,14 @@ func TestRenderStatementDetailAnalyzeAffordance(t *testing.T) {
 	sel := pg.QueryStat{QueryID: 1, Query: "select * from t where id = $1", Calls: 1}
 	s := &screen{
 		level: levelStatementDetail, title: "query", tool: toolQueries, db: "test",
-		loaded: true, statDetail: &sel, statWindowExecMs: 100,
-		statSampleCall: "select * from t where id = 1::integer",
-	}
+		loaded: true, stat: stmtState{detail: &sel, windowExecMs: 100, sampleCall: "select * from t where id = 1::integer"}}
 	if out := renderModel(s); !strings.Contains(out, "ANALYZE") {
 		t.Error("read-only SELECT detail should offer EXPLAIN ANALYZE")
 	}
 
 	upd := pg.QueryStat{QueryID: 2, Query: "update t set x = $1 where id = $2", Calls: 1}
-	s.statDetail = &upd
-	s.statSampleCall = "update t set x = 1 where id = 2"
+	s.stat.detail = &upd
+	s.stat.sampleCall = "update t set x = 1 where id = 2"
 	if out := renderModel(s); strings.Contains(out, "ANALYZE") {
 		t.Error("UPDATE detail must not offer EXPLAIN ANALYZE (it would execute)")
 	}
@@ -190,10 +181,7 @@ func TestRenderStatementDetailAndInfo(t *testing.T) {
 	}
 	s := &screen{
 		level: levelStatementDetail, title: "query", tool: toolQueries, db: "test",
-		loaded: true, statDetail: &q, statWindowExecMs: 1000,
-		statSampleCall: "select * from t where id = 1::integer",
-		statExplain:    "Seq Scan on t  (cost=0.00..1.00 rows=1 width=4)\n  Filter: (id = $1)",
-	}
+		loaded: true, stat: stmtState{detail: &q, windowExecMs: 1000, sampleCall: "select * from t where id = 1::integer", explain: "Seq Scan on t  (cost=0.00..1.00 rows=1 width=4)\n  Filter: (id = $1)"}}
 	out := renderModel(s)
 	for _, want := range []string{"query 7", "window metrics", "plan time", "blocks/row", "sample call", "explain (generic plan)", "Seq Scan"} {
 		if !strings.Contains(out, want) {
@@ -227,16 +215,14 @@ func TestRenderStatementDetailSourceHint(t *testing.T) {
 	base := func() *screen {
 		return &screen{
 			level: levelStatementDetail, title: "query", tool: toolQueries, db: "test",
-			loaded: true, statDetail: &sel, statWindowExecMs: 100,
-			statSampleCall: "select * from t where id = 42",
-		}
+			loaded: true, stat: stmtState{detail: &sel, windowExecMs: 100, sampleCall: "select * from t where id = 42"}}
 	}
 
 	// Real values from pg_qualstats: "real values" hint, "(real plan)" header,
 	// and the captured-values affordance offered.
 	s := base()
-	s.statSampleReal = true
-	s.statQualstats = true
+	s.stat.sampleReal = true
+	s.stat.qualstats = true
 	out := renderModel(s)
 	for _, want := range []string{"real values · pg_qualstats", "explain (real plan)", "to browse the real values"} {
 		if !strings.Contains(out, want) {
@@ -249,8 +235,8 @@ func TestRenderStatementDetailSourceHint(t *testing.T) {
 
 	// No pg_qualstats: synthesized, with the install hint and generic plan.
 	s = base()
-	s.statSampleReal = false
-	s.statQualstats = false
+	s.stat.sampleReal = false
+	s.stat.qualstats = false
 	out = renderModel(s)
 	if !strings.Contains(out, "synthesized — install pg_qualstats") {
 		t.Error("missing-qualstats detail should suggest installing pg_qualstats")
@@ -265,8 +251,8 @@ func TestRenderStatementDetailSourceHint(t *testing.T) {
 	// pg_qualstats absent but preloaded: an install offer is surfaced, so both
 	// the sample-call hint and the non-blocking ext hint point at the i key.
 	s = base()
-	s.statSampleReal = false
-	s.statQualstats = false
+	s.stat.sampleReal = false
+	s.stat.qualstats = false
 	s.extPrompt = &extPrompt{name: extQualstats, db: "test", installable: true, reason: extPromptReasonQualstats}
 	out = renderModel(s)
 	if !strings.Contains(out, "press i to install pg_qualstats for real values") {
@@ -287,10 +273,8 @@ func TestRenderStatementSamples(t *testing.T) {
 	}
 	s := &screen{
 		level: levelStatementSamples, title: "values", tool: toolQueries, db: "test",
-		loaded: true, statDetail: &sel, statQualstats: true, statSampleReal: true,
-		statSampleCall: "select * from t where id = 42::integer",
-		items:          sampleItems(samples),
-	}
+		loaded: true, stat: stmtState{detail: &sel, qualstats: true, sampleReal: true, sampleCall: "select * from t where id = 42::integer"},
+		items: sampleItems(samples)}
 	out := renderModel(s)
 	for _, want := range []string{"captured values · query 9", "t.id = 42::integer", "t.id = 7::integer", "EXPLAIN (ANALYZE)"} {
 		if !strings.Contains(out, want) {
@@ -349,18 +333,18 @@ func TestStatementColumnProjectionParallel(t *testing.T) {
 	}
 	check("defaults")
 
-	m.ensureStmtColsInit()
+	stmtSpec.ensureInit(&m.stmtTable)
 	for _, d := range stmtColumnRegistry() {
-		m.stmtColsVisible[d.id] = true
+		m.stmtTable.visible[d.id] = true
 	}
 	check("all opt-in enabled")
-	m.stmtColsVisible[colMiss] = false
+	m.stmtTable.visible[colMiss] = false
 	check("a default column hidden")
 
 	// The query column is mandatory: it survives even when explicitly disabled.
-	m.stmtColsVisible[colQuery] = false
+	m.stmtTable.visible[colQuery] = false
 	_, descs, _, _ := m.buildStatementItems(rows, true)
-	if indexOfStmtCol(descs, colQuery) < 0 {
+	if indexOfCol(descs, colQuery) < 0 {
 		t.Error("query column must always be present (mandatory)")
 	}
 }
@@ -369,19 +353,19 @@ func TestStatementColumnProjectionParallel(t *testing.T) {
 // enabled them — they'd always read zero.
 func TestStatementColumnsTrackPlanningGate(t *testing.T) {
 	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil, "", "")
-	m.ensureStmtColsInit()
-	m.stmtColsVisible[colPlanMs] = true
-	m.stmtColsVisible[colMeanPlanMs] = true
-	m.stmtColsVisible[colPlans] = true
+	stmtSpec.ensureInit(&m.stmtTable)
+	m.stmtTable.visible[colPlanMs] = true
+	m.stmtTable.visible[colMeanPlanMs] = true
+	m.stmtTable.visible[colPlans] = true
 
-	off := m.visibleStmtCols(stmtCtx{trackPlanning: false})
+	off := stmtSpec.visibleCols(&m.stmtTable, stmtCtx{trackPlanning: false})
 	for _, id := range []stmtColID{colPlanMs, colMeanPlanMs, colPlans} {
-		if indexOfStmtCol(off, id) >= 0 {
+		if indexOfCol(off, id) >= 0 {
 			t.Errorf("%q must be hidden when track_planning is off even if enabled", id)
 		}
 	}
-	on := m.visibleStmtCols(stmtCtx{trackPlanning: true})
-	if indexOfStmtCol(on, colPlanMs) < 0 {
+	on := stmtSpec.visibleCols(&m.stmtTable, stmtCtx{trackPlanning: true})
+	if indexOfCol(on, colPlanMs) < 0 {
 		t.Error("plan_ms should appear when track_planning is on and enabled")
 	}
 }
@@ -391,11 +375,11 @@ func TestStatementColumnsTrackPlanningGate(t *testing.T) {
 func TestSyncStmtSortFallback(t *testing.T) {
 	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil, "", "")
 	s := &screen{level: levelStatements}
-	m.stmtSortColID = colPlans // opt-in + planning-gated, so absent from the defaults
-	descs := m.visibleStmtCols(stmtCtx{trackPlanning: true})
-	m.syncStmtSort(s, descs)
-	if m.stmtSortColID != colTotalMs {
-		t.Errorf("hidden sort column should fall back to total_ms, got %q", m.stmtSortColID)
+	m.stmtTable.sortColID = colPlans // opt-in + planning-gated, so absent from the defaults
+	descs := stmtSpec.visibleCols(&m.stmtTable, stmtCtx{trackPlanning: true})
+	stmtSpec.syncSort(&m.stmtTable, s, descs)
+	if m.stmtTable.sortColID != colTotalMs {
+		t.Errorf("hidden sort column should fall back to total_ms, got %q", m.stmtTable.sortColID)
 	}
 	if s.diagSortCol < 0 || s.diagSortCol >= len(descs) || descs[s.diagSortCol].id != colTotalMs {
 		t.Errorf("diagSortCol should point at total_ms")
@@ -414,12 +398,9 @@ func TestColumnConfigToggleRebuilds(t *testing.T) {
 	items, descs, windowMs, total := m.buildStatementItems(rows, true)
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
-		loaded: true, statRows: rows, statWindowExecMs: windowMs, items: items,
-		diagCols: diagColumnsFrom(descs), stmtCols: descs, diagBarCol: -1, diagTotalRow: total,
-		diagSortCol: 0, sortDesc: true,
-		statBaselineAt: time.Now().Add(-time.Minute), statSampledAt: time.Now(),
-		statTrackPlanning: true,
-	}
+		loaded: true, stat: stmtState{rows: rows, windowExecMs: windowMs, cols: descs, baselineAt: time.Now().Add(-time.Minute), sampledAt: time.Now(), trackPlanning: true}, items: items,
+		diagCols: diagColumnsFrom(descs), diagBarCol: -1, diagTotalRow: total,
+		diagSortCol: 0, sortDesc: true}
 	m.stack = append(m.stack, s)
 
 	// temp_read is opt-in (off by default), so it isn't in the table yet.
@@ -427,23 +408,23 @@ func TestColumnConfigToggleRebuilds(t *testing.T) {
 		t.Fatal("temp_read should be hidden by default")
 	}
 	// Open the picker, move to temp_read, toggle it on.
-	m.ensureStmtColsInit()
-	m.showColumnConfig = true
-	m.colCfgCursor = indexInRegistry(colTempRead)
+	stmtSpec.ensureInit(&m.stmtTable)
+	m.stmtTable.showCfg = true
+	m.stmtTable.cfgCursor = indexInRegistry(colTempRead)
 	if cmd := m.handleColumnConfigKey(s, keyMsg(" ")); cmd != nil {
 		t.Fatal("toggling a column should not issue a command (no DB round-trip)")
 	}
-	if !m.showColumnConfig {
+	if !m.stmtTable.showCfg {
 		t.Fatal("space should toggle the column, not close the overlay")
 	}
-	m.showColumnConfig = false // close the overlay to render the table
+	m.stmtTable.showCfg = false // close the overlay to render the table
 	if !strings.Contains(m.View(), "temp_read") {
 		t.Error("temp_read should appear in the table after enabling it")
 	}
 }
 
 func indexInRegistry(id stmtColID) int {
-	return indexOfStmtCol(stmtColumnRegistry(), id)
+	return indexOfCol(stmtColumnRegistry(), id)
 }
 
 func TestSampleLabel(t *testing.T) {
@@ -465,8 +446,7 @@ func TestRenderStatementsEmptyWindow(t *testing.T) {
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
 		loaded: true, diagCols: mb.statementColumns(true), diagBarCol: -1, diagSortCol: 0,
-		statBaselineAt: time.Now(), statSampledAt: time.Now(),
-	}
+		stat: stmtState{baselineAt: time.Now(), sampledAt: time.Now()}}
 	out := renderModel(s)
 	if !strings.Contains(out, "queries") {
 		t.Error("empty-window render lost the header")

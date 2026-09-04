@@ -43,9 +43,9 @@ type TriageResult struct {
 }
 
 // Triage thresholds. All are deliberately named constants so opinions live in
-// one place and can be tuned without hunting through check code. Where a check
-// reads cumulative counters (deadlocks, temp_bytes) the thresholds are generous
-// because there is no baseline to compute a rate against.
+// one place and can be tuned without hunting through check code. Cumulative
+// counters (deadlocks, temp_bytes) are graded as a per-day rate over the window
+// since stats_reset, so a long-lived cluster is not punished for its uptime.
 const (
 	// wraparound: autovacuum starts aggressive freezing at
 	// autovacuum_freeze_max_age; being most of the way there means autovacuum
@@ -93,12 +93,18 @@ const (
 	slotRetainedCapBytes  = 16 << 30
 	slotStaleInactiveSecs = 3600
 
-	// temp files / deadlocks: cumulative since the last stats reset, so only
-	// large absolute numbers are meaningful.
-	deadlocksWarn = 10
-	deadlocksCrit = 100
-	tempBytesWarn = 10 << 30
-	tempBytesCrit = 100 << 30
+	// temp files / deadlocks: cumulative since the last stats reset, graded as
+	// a per-day average over that window. A deadlock a day is an application
+	// lock-ordering bug that keeps biting; ten a day is routine breakage. Temp
+	// spill at 10 GB/day means work_mem is undersized for a recurring query;
+	// 100 GB/day is a constant stream of disk sorts. The window is floored at
+	// one day so a fresh reset does not extrapolate an hour's burst into a
+	// day's rate.
+	deadlocksWarnPerDay = 1
+	deadlocksCritPerDay = 10
+	tempBytesWarnPerDay = 10 << 30
+	tempBytesCritPerDay = 100 << 30
+	rateMinWindowSecs   = 86_400
 
 	// connection saturation: fraction of max_connections in use. Past ~80% a
 	// spike risks "too many clients"; superuser-reserved slots are the last line.
@@ -169,150 +175,236 @@ const (
 	triageCheckTimeout = 10 * time.Second
 )
 
+// triageCheck is one entry of the battery: a name, where Enter drills to, and
+// the grader. ready, when set, is closed once the shared input the grader
+// reads has been fetched; run must not be called before then.
+type triageCheck struct {
+	name    string
+	target  TriageTarget
+	diagKey string
+	db      string
+	// dbFn, when set, resolves the drill database at emit time instead of db —
+	// for checks whose target database is only known once a shared input loaded.
+	dbFn  func() string
+	ready <-chan struct{}
+	run   func(ctx context.Context) (Severity, string, error)
+}
+
+// triageShared holds the inputs several checks read. Each is an expensive
+// one-shot (MaintenanceInfo, the database_stats view), fetched once and handed
+// to the pure graders — calling them N times would multiply the load on a
+// server we may already suspect is unwell. The ready channels let the cheap
+// independent checks report while these are still in flight.
+type triageShared struct {
+	info      *MaintenanceInfo
+	infoErr   error
+	infoReady chan struct{}
+
+	dbStats *DiagResult
+	dbErr   error
+	dbReady chan struct{}
+}
+
 // Triage runs the curated health battery concurrently and returns one line per
-// check, sorted most-severe first. A failed or slow check degrades to a
-// SevWarn "could not evaluate" line; Triage itself never fails.
+// check, sorted most-severe first (battery order within a severity). A failed
+// or slow check degrades to a SevWarn "could not evaluate" line; Triage itself
+// never fails. It is TriageStream collected; interactive callers use the
+// stream so fast checks show before the slow ones finish.
+func (c *Client) Triage(ctx context.Context) []TriageResult {
+	var results []TriageResult
+	var mu sync.Mutex
+	c.TriageStream(ctx, func(r TriageResult) {
+		mu.Lock()
+		results = append(results, r)
+		mu.Unlock()
+	})
+	SortTriage(results, c.TriageCheckNames())
+	return results
+}
+
+// SortTriage orders results most-severe first and, within a severity, in
+// battery order (as listed by TriageCheckNames) so a streaming report keeps
+// rows in stable places as late results land.
+func SortTriage(results []TriageResult, names []string) {
+	pos := make(map[string]int, len(names))
+	for i, n := range names {
+		pos[n] = i
+	}
+	sort.SliceStable(results, func(a, b int) bool {
+		if results[a].Severity != results[b].Severity {
+			return results[a].Severity > results[b].Severity
+		}
+		return pos[results[a].Check] < pos[results[b].Check]
+	})
+}
+
+// TriageCheckNames lists the battery's checks in order, so a streaming UI can
+// show a placeholder per check before its result arrives.
+func (c *Client) TriageCheckNames() []string {
+	checks := c.triageChecks(c.DefaultDB(), &triageShared{})
+	names := make([]string, len(checks))
+	for i, chk := range checks {
+		names[i] = chk.name
+	}
+	return names
+}
+
+// TriageStream runs the battery and calls emit once per check, from worker
+// goroutines, as soon as that check finishes — independent checks report
+// while the shared MaintenanceInfo / database_stats fetches are still in
+// flight. It returns when every check has been emitted; emit must be safe to
+// call concurrently.
 //
 // Per-database checks (sequences, stale statistics, FK indexes, table/index
 // bloat, invalid indexes) run against the default database only — sweeping
 // every database would multiply the fan-out by the cluster's database count and
 // blow the budget. Their detail lines name the database they looked at.
-func (c *Client) Triage(ctx context.Context) []TriageResult {
-	type check struct {
-		name    string
-		target  TriageTarget
-		diagKey string
-		db      string
-		run     func(ctx context.Context) (Severity, string, error)
-	}
+func (c *Client) TriageStream(ctx context.Context, emit func(TriageResult)) {
+	sh := &triageShared{infoReady: make(chan struct{}), dbReady: make(chan struct{})}
+	checks := c.triageChecks(c.DefaultDB(), sh)
 
-	db := c.DefaultDB()
-
-	// Shared inputs, each an expensive one-shot, are fetched once here and handed
-	// to the pure graders below — several checks read the same MaintenanceInfo or
-	// database_stats view, and calling those N times would multiply the load on a
-	// server we may already suspect is unwell.
-	var (
-		info    *MaintenanceInfo
-		infoErr error
-		dbStats *DiagResult
-		dbErr   error
-	)
-	var pre sync.WaitGroup
-	pre.Go(func() {
+	// The shared fetches take semaphore slots like any check, so the server
+	// never sees more than triageFanout concurrent triage queries. Dependent
+	// checks wait for their input *before* taking a slot (see below), so they
+	// can't starve the fetch they are waiting on.
+	sem := make(chan struct{}, triageFanout)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		defer close(sh.infoReady)
+		sem <- struct{}{}
+		defer func() { <-sem }()
 		cctx, cancel := context.WithTimeout(ctx, triageCheckTimeout)
 		defer cancel()
-		info, infoErr = c.Maintenance(cctx, "")
+		sh.info, sh.infoErr = c.Maintenance(cctx, "")
 		// Maintenance is best-effort: it absorbs every sub-query failure and
 		// returns a zero struct with a nil error when the connection is dead.
 		// version() is always populated over a live connection, so an empty
 		// Version means "unreachable" — degrade every MaintenanceInfo-backed
 		// check uniformly instead of reporting false greens.
-		if infoErr == nil && (info == nil || info.Version == "") {
-			infoErr = errors.New("server unreachable")
+		if sh.infoErr == nil && (sh.info == nil || sh.info.Version == "") {
+			sh.infoErr = errors.New("server unreachable")
 		}
 	})
-	pre.Go(func() {
+	wg.Go(func() {
+		defer close(sh.dbReady)
+		sem <- struct{}{}
+		defer func() { <-sem }()
 		cctx, cancel := context.WithTimeout(ctx, triageCheckTimeout)
 		defer cancel()
-		dbStats, dbErr = c.runTriageDiag(cctx, "", "database_stats")
+		sh.dbStats, sh.dbErr = c.runTriageDiag(cctx, "", "database_stats")
 	})
-	pre.Wait()
 
-	// mgrade/dgrade adapt a pure grader over a shared input into a check.run,
-	// short-circuiting to "could not evaluate" when that input failed to load.
-	mgrade := func(g func(*MaintenanceInfo) (Severity, string, error)) func(context.Context) (Severity, string, error) {
-		return func(context.Context) (Severity, string, error) {
-			if infoErr != nil {
-				return 0, "", infoErr
-			}
-			return g(info)
-		}
-	}
-	dgrade := func(g func(*DiagResult) (Severity, string, error)) func(context.Context) (Severity, string, error) {
-		return func(context.Context) (Severity, string, error) {
-			if dbErr != nil {
-				return 0, "", dbErr
-			}
-			return g(dbStats)
-		}
-	}
-
-	// The wraparound figure is cluster-wide but its drill-down (per-table freeze
-	// ages) is per-database, so it opens in whichever database holds the oldest
-	// datfrozenxid rather than in the default one.
-	wraparoundDB := ""
-	if infoErr == nil {
-		wraparoundDB = info.XidAgeDB
-	}
-
-	checks := []check{
-		{"wraparound", TriageTargetDiagnostic, "wraparound_tables", wraparoundDB, mgrade(wraparoundGrade)},
-		{"WAL archiver", TriageTargetMaintenance, "", "", mgrade(archiverGrade)},
-		{"replication lag", TriageTargetMaintenance, "", "", mgrade(replicationGrade)},
-		{"connection saturation", TriageTargetMaintenance, "", "", mgrade(connSaturationGrade)},
-		{"pgbouncer waits", TriageTargetPgBouncer, "", "", c.triagePgBouncer},
-		{"checkpoint pressure", TriageTargetMaintenance, "", "", mgrade(checkpointGrade)},
-		{"prepared transactions", TriageTargetMaintenance, "", "", mgrade(preparedXactGrade)},
-		{"extension capacity", TriageTargetMaintenance, "", "", mgrade(extCapacityGrade)},
-		{"blocked backends", TriageTargetLockTree, "", "", c.triageBlocked},
-		{"long-running transaction", TriageTargetActivity, "", "", mgrade(longXactGrade)},
-		{"idle-in-xact", TriageTargetDiagnostic, "idle_in_xact_holders", "", c.triageIdleInXact},
-		{"replication slots", TriageTargetDiagnostic, "replication_slots", "", c.triageReplicationSlots},
-		{"cache hit ratio", TriageTargetDiagnostic, "database_stats", "", dgrade(cacheHitGrade)},
-		{"SLRU pressure", TriageTargetDiagnostic, "slru_stats", "", c.triageSLRU},
-		{"deadlocks", TriageTargetDiagnostic, "database_stats", "", dgrade(deadlockGrade)},
-		{"temp files", TriageTargetDiagnostic, "database_stats", "", dgrade(tempFilesGrade)},
-		{"rollback ratio", TriageTargetDiagnostic, "database_stats", "", dgrade(rollbackGrade)},
-		{"sequence exhaustion", TriageTargetDiagnostic, "sequences", db, func(ctx context.Context) (Severity, string, error) {
-			return c.triageSequences(ctx, db)
-		}},
-		{"stale statistics", TriageTargetDiagnostic, "stale_statistics", db, func(ctx context.Context) (Severity, string, error) {
-			return c.triageStaleStats(ctx, db)
-		}},
-		{"FK missing index", TriageTargetDiagnostic, "fk_missing_index", db, func(ctx context.Context) (Severity, string, error) {
-			return c.triageFKMissingIndex(ctx, db)
-		}},
-		{"table bloat", TriageTargetDiagnostic, "bloat_table", db, func(ctx context.Context) (Severity, string, error) {
-			return c.triageTableBloat(ctx, db)
-		}},
-		{"index bloat", TriageTargetDiagnostic, "bloat_index", db, func(ctx context.Context) (Severity, string, error) {
-			return c.triageIndexBloat(ctx, db)
-		}},
-		{"invalid indexes", TriageTargetDiagnostic, "index_invalid", db, func(ctx context.Context) (Severity, string, error) {
-			return c.triageInvalidIndexes(ctx, db)
-		}},
-	}
-
-	results := make([]TriageResult, len(checks))
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, triageFanout)
-	for i, chk := range checks {
+	for _, chk := range checks {
 		wg.Go(func() {
-			sem <- struct{}{}
-			defer func() { <-sem }()
 			cctx, cancel := context.WithTimeout(ctx, triageCheckTimeout)
 			defer cancel()
-			sev, detail, err := chk.run(cctx)
-			if err != nil {
-				sev, detail = SevWarn, "could not evaluate: "+err.Error()
+			var sev Severity
+			var detail string
+			var err error
+			// inputReady is false only when the wait on the shared input timed
+			// out; the grader and dbFn must not touch it then — the fetch may
+			// still be writing it.
+			inputReady := true
+			if chk.ready != nil {
+				select {
+				case <-chk.ready:
+				case <-cctx.Done():
+					inputReady, err = false, cctx.Err()
+				}
 			}
-			results[i] = TriageResult{
+			if err == nil {
+				sem <- struct{}{}
+				sev, detail, err = chk.run(cctx)
+				<-sem
+			}
+			if err != nil {
+				sev, detail = SevWarn, "could not evaluate: "+oneLine(err.Error())
+			}
+			db := chk.db
+			if chk.dbFn != nil && inputReady {
+				db = chk.dbFn()
+			}
+			emit(TriageResult{
 				Check:    chk.name,
 				Severity: sev,
 				Detail:   detail,
 				DiagKey:  chk.diagKey,
-				DB:       chk.db,
+				DB:       db,
 				Target:   chk.target,
-			}
+			})
 		})
 	}
 	wg.Wait()
+}
 
-	sort.SliceStable(results, func(a, b int) bool {
-		return results[a].Severity > results[b].Severity
-	})
-	return results
+// triageChecks builds the battery. The graders read sh lazily (at run time,
+// after its ready channel closed), so the list can be built — and its names
+// listed — before anything has been fetched.
+func (c *Client) triageChecks(db string, sh *triageShared) []triageCheck {
+	// mgrade/dgrade adapt a pure grader over a shared input into a check.run,
+	// short-circuiting to "could not evaluate" when that input failed to load.
+	mgrade := func(g func(*MaintenanceInfo) (Severity, string, error)) func(context.Context) (Severity, string, error) {
+		return func(context.Context) (Severity, string, error) {
+			if sh.infoErr != nil {
+				return 0, "", sh.infoErr
+			}
+			return g(sh.info)
+		}
+	}
+	dgrade := func(g func(*DiagResult) (Severity, string, error)) func(context.Context) (Severity, string, error) {
+		return func(context.Context) (Severity, string, error) {
+			if sh.dbErr != nil {
+				return 0, "", sh.dbErr
+			}
+			return g(sh.dbStats)
+		}
+	}
+	// The wraparound figure is cluster-wide but its drill-down (per-table freeze
+	// ages) is per-database, so it opens in whichever database holds the oldest
+	// datfrozenxid rather than in the default one. That database is only known
+	// once MaintenanceInfo has loaded, hence dbFn rather than db.
+	wraparoundDB := func() string {
+		if sh.infoErr != nil || sh.info == nil {
+			return ""
+		}
+		return sh.info.XidAgeDB
+	}
+	perDB := func(f func(context.Context, string) (Severity, string, error)) func(context.Context) (Severity, string, error) {
+		return func(ctx context.Context) (Severity, string, error) { return f(ctx, db) }
+	}
+
+	m := func(name string, target TriageTarget, diagKey string, g func(*MaintenanceInfo) (Severity, string, error)) triageCheck {
+		return triageCheck{name: name, target: target, diagKey: diagKey, ready: sh.infoReady, run: mgrade(g)}
+	}
+	d := func(name, diagKey string, g func(*DiagResult) (Severity, string, error)) triageCheck {
+		return triageCheck{name: name, target: TriageTargetDiagnostic, diagKey: diagKey, ready: sh.dbReady, run: dgrade(g)}
+	}
+
+	return []triageCheck{
+		{name: "wraparound", target: TriageTargetDiagnostic, diagKey: "wraparound_tables", dbFn: wraparoundDB, ready: sh.infoReady, run: mgrade(wraparoundGrade)},
+		m("WAL archiver", TriageTargetMaintenance, "", archiverGrade),
+		m("replication lag", TriageTargetMaintenance, "", replicationGrade),
+		m("connection saturation", TriageTargetMaintenance, "", connSaturationGrade),
+		{name: "pgbouncer waits", target: TriageTargetPgBouncer, run: c.triagePgBouncer},
+		m("checkpoint pressure", TriageTargetMaintenance, "", checkpointGrade),
+		m("prepared transactions", TriageTargetMaintenance, "", preparedXactGrade),
+		m("extension capacity", TriageTargetMaintenance, "", extCapacityGrade),
+		{name: "blocked backends", target: TriageTargetLockTree, run: c.triageBlocked},
+		m("long-running transaction", TriageTargetActivity, "", longXactGrade),
+		{name: "idle-in-xact", target: TriageTargetDiagnostic, diagKey: "idle_in_xact_holders", run: c.triageIdleInXact},
+		{name: "replication slots", target: TriageTargetDiagnostic, diagKey: "replication_slots", run: c.triageReplicationSlots},
+		d("cache hit ratio", "database_stats", cacheHitGrade),
+		{name: "SLRU pressure", target: TriageTargetDiagnostic, diagKey: "slru_stats", run: c.triageSLRU},
+		d("deadlocks", "database_stats", deadlockGrade),
+		d("temp files", "database_stats", tempFilesGrade),
+		d("rollback ratio", "database_stats", rollbackGrade),
+		{name: "sequence exhaustion", target: TriageTargetDiagnostic, diagKey: "sequences", db: db, run: perDB(c.triageSequences)},
+		{name: "stale statistics", target: TriageTargetDiagnostic, diagKey: "stale_statistics", db: db, run: perDB(c.triageStaleStats)},
+		{name: "FK missing index", target: TriageTargetDiagnostic, diagKey: "fk_missing_index", db: db, run: perDB(c.triageFKMissingIndex)},
+		{name: "table bloat", target: TriageTargetDiagnostic, diagKey: "bloat_table", db: db, run: perDB(c.triageTableBloat)},
+		{name: "index bloat", target: TriageTargetDiagnostic, diagKey: "bloat_index", db: db, run: perDB(c.triageIndexBloat)},
+		{name: "invalid indexes", target: TriageTargetDiagnostic, diagKey: "index_invalid", db: db, run: perDB(c.triageInvalidIndexes)},
+	}
 }
 
 func wraparoundGrade(info *MaintenanceInfo) (Severity, string, error) {
@@ -548,9 +640,10 @@ func longXactSeverity(secs float64) Severity {
 
 // triagePgBouncer flags clients queued in any discovered pgbouncer instance
 // for a server connection. Instances are probed concurrently and the worst
-// one is reported; a fleet where every console is unreachable degrades to
-// "could not evaluate" carrying the first error (with the login hint when
-// that error is an auth rejection), not to a false green.
+// one is reported. A fleet where every console is unreachable is not a
+// Postgres health problem — the console is often simply not open to pgdu's
+// user — so it stays green, with the first error (plus the login hint when it
+// is an auth rejection) kept in the detail rather than raised as a warning.
 func (c *Client) triagePgBouncer(ctx context.Context) (Severity, string, error) {
 	// Discovery itself is filesystem work that ignores ctx; honour the budget
 	// explicitly so a cancelled report degrades this check like every other.
@@ -602,7 +695,8 @@ func worstPgBouncerProbe(insts []PgBouncerInstance, probes []PgBouncerProbe) (Se
 		}
 	}
 	if reachable == 0 {
-		return 0, "", fmt.Errorf("%d instance(s) found, console unreachable: %w", len(insts), firstErr)
+		return SevOK, fmt.Sprintf("%d instance(s) found, console unreachable: %s",
+			len(insts), oneLine(firstErr.Error())), nil
 	}
 	if sev == SevOK {
 		detail = fmt.Sprintf("no clients waiting in %d instance(s)", reachable)
@@ -851,36 +945,80 @@ func slruSeverity(hitPct, blksRead float64) Severity {
 	return SevOK
 }
 
-func deadlockGrade(res *DiagResult) (Severity, string, error) {
-	deadlocks := diagSum(res, "deadlocks")
-	sev := deadlockSeverity(deadlocks)
-	if deadlocks == 0 {
-		return sev, "no deadlocks since stats reset", nil
+// counterRate turns a cumulative pg_stat_database counter into a per-day rate.
+// Each database's stats_reset can differ, so the rate is summed per row over
+// that row's own window (stats_age_secs) rather than dividing one grand total
+// by one window. It returns the total, the rate, and the longest window seen;
+// windowSecs is 0 when the column is missing, in which case the rate is 0 too
+// and the caller must not grade on it.
+func counterRate(res *DiagResult, col string) (total, perDay, windowSecs float64) {
+	idx := diagColIdx(res, col)
+	ageIdx := diagColIdx(res, "stats_age_secs")
+	for _, row := range res.Rows {
+		v, ok := diagNum(row, idx)
+		if !ok {
+			continue
+		}
+		total += v
+		age, ok := diagNum(row, ageIdx)
+		if !ok {
+			continue
+		}
+		if age > windowSecs {
+			windowSecs = age
+		}
+		perDay += v / (max(age, rateMinWindowSecs) / 86_400)
 	}
-	return sev, fmt.Sprintf("%d deadlock(s) since stats reset", int64(deadlocks)), nil
+	return total, perDay, windowSecs
 }
 
-func deadlockSeverity(deadlocks float64) Severity {
+// sinceReset renders the "since stats reset (34d ago)" tail shared by the
+// counter checks; without a known window it says only "since stats reset".
+func sinceReset(windowSecs float64) string {
+	if windowSecs <= 0 {
+		return "since stats reset"
+	}
+	return "since stats reset (" + triageDuration(windowSecs) + " ago)"
+}
+
+func deadlockGrade(res *DiagResult) (Severity, string, error) {
+	total, perDay, window := counterRate(res, "deadlocks")
+	if total == 0 {
+		return SevOK, "no deadlocks " + sinceReset(window), nil
+	}
+	if window <= 0 {
+		// No stats_reset to compute a rate from: any deadlock is worth a look,
+		// but without a window there is no honest way to call it critical.
+		return SevWarn, fmt.Sprintf("%d deadlock(s) %s, rate unknown", int64(total), sinceReset(window)), nil
+	}
+	return deadlockSeverity(perDay), fmt.Sprintf("%d deadlock(s) %s, ~%s/day",
+		int64(total), sinceReset(window), triageRate(perDay)), nil
+}
+
+func deadlockSeverity(perDay float64) Severity {
 	switch {
-	case deadlocks >= deadlocksCrit:
+	case perDay >= deadlocksCritPerDay:
 		return SevCrit
-	case deadlocks >= deadlocksWarn:
+	case perDay >= deadlocksWarnPerDay:
 		return SevWarn
 	}
 	return SevOK
 }
 
 func tempFilesGrade(res *DiagResult) (Severity, string, error) {
-	tempBytes := diagSum(res, "temp_bytes")
-	sev := tempBytesSeverity(tempBytes)
-	return sev, humanize.Bytes(int64(tempBytes)) + " spilled to temp files since stats reset", nil
+	total, perDay, window := counterRate(res, "temp_bytes")
+	spilled := humanize.Bytes(int64(total)) + " spilled to temp files " + sinceReset(window)
+	if window <= 0 {
+		return SevOK, spilled + ", rate unknown", nil
+	}
+	return tempBytesSeverity(perDay), spilled + ", ~" + humanize.Bytes(int64(perDay)) + "/day", nil
 }
 
-func tempBytesSeverity(tempBytes float64) Severity {
+func tempBytesSeverity(perDay float64) Severity {
 	switch {
-	case tempBytes >= tempBytesCrit:
+	case perDay >= tempBytesCritPerDay:
 		return SevCrit
-	case tempBytes >= tempBytesWarn:
+	case perDay >= tempBytesWarnPerDay:
 		return SevWarn
 	}
 	return SevOK
@@ -1087,11 +1225,29 @@ func diagMax(res *DiagResult, col string) float64 {
 	return maxV
 }
 
+// oneLine flattens a multi-line error for the single-line report. pgx's
+// connect errors put the actual cause on a tab-indented second line, which a
+// one-line row would otherwise cut off right after "failed to connect to …:".
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// triageRate renders a per-day count: whole numbers once it is at least one a
+// day, one decimal below that so "0.4/day" does not round to a misleading 0.
+func triageRate(perDay float64) string {
+	if perDay >= 1 {
+		return fmt.Sprintf("%.0f", perDay)
+	}
+	return fmt.Sprintf("%.1f", perDay)
+}
+
 // triageDuration renders seconds the way the report reads them: "48s", "11m",
-// "3h".
+// "3h", "34d".
 func triageDuration(secs float64) string {
 	d := time.Duration(secs * float64(time.Second))
 	switch {
+	case d >= 24*time.Hour:
+		return fmt.Sprintf("%.0fd", d.Hours()/24)
 	case d >= time.Hour:
 		return fmt.Sprintf("%.0fh", d.Hours())
 	case d >= time.Minute:

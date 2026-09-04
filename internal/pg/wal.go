@@ -91,16 +91,91 @@ func (c *Client) WALRelStats(ctx context.Context, db, start, end string) ([]WALR
 	if err != nil {
 		return nil, err
 	}
-	return collect(ctx, pool, fmt.Sprintf("wal rel stats in %q", db), sqlWALRelStats, []any{start, end},
+	rows, err := collect(ctx, pool, fmt.Sprintf("wal rel stats in %q", db), sqlWALRelStats, []any{start, end},
 		func(row pgx.CollectableRow) (WALRelStat, error) {
 			var r WALRelStat
 			err := row.Scan(
-				&r.RelDatabase, &r.RelFileNode, &r.DataBytes, &r.FPIBytes,
+				&r.RelDatabase, &r.RelTablespace, &r.RelFileNode, &r.DataBytes, &r.FPIBytes,
 				&r.RecCount, &r.BlockCount, &r.OtherForkCount,
 				&r.RelName, &r.IsToast, &r.DBName,
 			)
 			return r, err
 		})
+	if err != nil {
+		return nil, err
+	}
+	c.resolveForeignFilenodes(ctx, len(rows), func(i int) *walRelRef {
+		r := &rows[i]
+		return &walRelRef{DBName: r.DBName, Tablespace: r.RelTablespace, Filenode: r.RelFileNode, RelName: &r.RelName, IsToast: &r.IsToast}
+	})
+	return rows, nil
+}
+
+// walRelRef is the resolver's view of one row: where the relation file lives
+// and where to write the name once it is known.
+type walRelRef struct {
+	DBName     string
+	Tablespace uint32
+	Filenode   uint32
+	RelName    *string
+	IsToast    *bool
+}
+
+// resolveForeignFilenodes fills in names the main query could not: WAL is
+// cluster-wide but pg_filenode_relation is database-local, so a filenode from
+// another database only resolves through a connection *to* that database. The
+// client already keeps a lazy pool per database, so each foreign db costs one
+// connection and one query. Strictly best effort — a database that refuses the
+// connection (datallowconn=false, missing grant) or a dropped relation simply
+// keeps its numeric fallback; nothing here can fail the caller.
+func (c *Client) resolveForeignFilenodes(ctx context.Context, n int, ref func(i int) *walRelRef) {
+	type key struct{ ts, fn uint32 }
+	byDB := map[string]map[key][]*walRelRef{}
+	for i := range n {
+		r := ref(i)
+		// DBName "" is a shared relation (reldatabase 0) — no db to ask.
+		if *r.RelName != "" || r.DBName == "" {
+			continue
+		}
+		if byDB[r.DBName] == nil {
+			byDB[r.DBName] = map[key][]*walRelRef{}
+		}
+		k := key{r.Tablespace, r.Filenode}
+		byDB[r.DBName][k] = append(byDB[r.DBName][k], r)
+	}
+	for db, refs := range byDB {
+		pool, err := c.PoolFor(ctx, db)
+		if err != nil {
+			continue
+		}
+		tss := make([]uint32, 0, len(refs))
+		fns := make([]uint32, 0, len(refs))
+		for k := range refs {
+			tss = append(tss, k.ts)
+			fns = append(fns, k.fn)
+		}
+		rows, err := pool.Query(ctx, sqlWALResolveFilenodes, tss, fns)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var fn uint32
+			var name string
+			var toast bool
+			if rows.Scan(&fn, &name, &toast) != nil {
+				continue
+			}
+			for k, rs := range refs {
+				if k.fn != fn {
+					continue
+				}
+				for _, r := range rs {
+					*r.RelName, *r.IsToast = name, toast
+				}
+			}
+		}
+		rows.Close()
+	}
 }
 
 // WALRelBlocks lists every block reference of one relation across the window
@@ -114,7 +189,20 @@ func (c *Client) WALRelBlocks(ctx context.Context, db, start, end string, relfil
 	if err != nil {
 		return nil, err
 	}
-	return collect(ctx, pool, fmt.Sprintf("wal rel blocks in %q", db), sqlWALRelBlocks, []any{start, end, int64(relfilenode)}, scanWALBlockRef)
+	blocks, err := collect(ctx, pool, fmt.Sprintf("wal rel blocks in %q", db), sqlWALRelBlocks, []any{start, end, int64(relfilenode)}, scanWALBlockRef)
+	if err != nil {
+		return nil, err
+	}
+	c.resolveBlockRefNames(ctx, blocks)
+	return blocks, nil
+}
+
+// resolveBlockRefNames runs the foreign-database name pass over block refs.
+func (c *Client) resolveBlockRefNames(ctx context.Context, blocks []WALBlockRef) {
+	c.resolveForeignFilenodes(ctx, len(blocks), func(i int) *walRelRef {
+		b := &blocks[i]
+		return &walRelRef{DBName: b.DBName, Tablespace: b.RelTablespace, Filenode: b.RelFileNode, RelName: &b.RelName, IsToast: &b.IsToast}
+	})
 }
 
 // scanWALBlockRef scans one pg_get_wal_block_info row — shared by the
@@ -201,5 +289,10 @@ func (c *Client) WALBlocks(ctx context.Context, db, start, end string) ([]WALBlo
 	if err != nil {
 		return nil, err
 	}
-	return collect(ctx, pool, fmt.Sprintf("wal block info at %s in %q", start, db), sqlWALBlocks, []any{start, end}, scanWALBlockRef)
+	blocks, err := collect(ctx, pool, fmt.Sprintf("wal block info at %s in %q", start, db), sqlWALBlocks, []any{start, end}, scanWALBlockRef)
+	if err != nil {
+		return nil, err
+	}
+	c.resolveBlockRefNames(ctx, blocks)
+	return blocks, nil
 }

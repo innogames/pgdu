@@ -12,6 +12,7 @@ import (
 
 	"pgdu/internal/humanize"
 	"pgdu/internal/pg"
+	"pgdu/internal/pglog"
 )
 
 // logView is which pane the levelLogs screen shows.
@@ -21,19 +22,25 @@ const (
 	logViewGroups   logView = iota // aggregated messages under section headers
 	logViewTimeline                // every entry chronologically, generic table
 	logViewSlow                    // only the duration: entries, slowest first
+	logViewStats                   // pgbouncer's periodic stats lines, one metric per column
 )
 
 // table reports whether the pane is one of the generic-table views (timeline,
 // slow), as opposed to the self-ordering groups pane.
 func (v logView) table() bool { return v != logViewGroups }
 
-// next cycles the panes on tab: groups → timeline → slow → groups.
-func (v logView) next() logView {
+// next cycles the panes on tab: groups → timeline → slow → (stats) → groups.
+// The stats pane only exists when the report carries pgbouncer stats lines.
+func (v logView) next(hasStats bool) logView {
 	switch v {
 	case logViewGroups:
 		return logViewTimeline
 	case logViewTimeline:
 		return logViewSlow
+	case logViewSlow:
+		if hasStats {
+			return logViewStats
+		}
 	}
 	return logViewGroups
 }
@@ -44,6 +51,8 @@ func (v logView) label() string {
 		return "timeline"
 	case logViewSlow:
 		return "slow queries"
+	case logViewStats:
+		return "pooler stats"
 	}
 	return ""
 }
@@ -73,30 +82,27 @@ type logSection struct {
 
 // logScreen builds the levelLogs screen for one source, with the default view
 // state: grouped by category, default window.
-func (m *Model) logScreen(src pg.LogSource) *screen {
+func (m *Model) logScreen(src pglog.Source) *screen {
 	return &screen{
 		level: levelLogs, title: "log", tool: toolLogs, db: m.client.DefaultDB(),
-		logSrc: src, logWindow: logDefaultWindow, loading: true,
-		sort: sortByCount, sortDesc: true,
-	}
+		log: logState{src: src, window: logDefaultWindow}, loading: true,
+		sort: sortByCount, sortDesc: true}
 }
 
 // logGroupScreen is the entries-of-one-group child; it renders from the
 // parent's report, so it carries the group pointer and a back-reference via
 // findLevel(levelLogs).
-func (m *Model) logGroupScreen(parent *screen, g *pg.LogGroup) *screen {
+func (m *Model) logGroupScreen(parent *screen, g *pglog.Group) *screen {
 	return &screen{
 		level: levelLogGroup, title: "group", tool: toolLogs, db: parent.db,
-		logGroup: g, logReport: parent.logReport, logSrc: parent.logSrc,
-		sort: sortByLast, sortDesc: true,
-	}
+		log:  logState{group: g, report: parent.log.report, src: parent.log.src},
+		sort: sortByLast, sortDesc: true}
 }
 
-func (m *Model) logEntryScreen(parent *screen, e *pg.LogEntry) *screen {
+func (m *Model) logEntryScreen(parent *screen, e *pglog.Entry) *screen {
 	return &screen{
 		level: levelLogEntry, title: "entry", tool: toolLogs, db: parent.db,
-		logEntry: e, logReport: parent.logReport, logSrc: parent.logSrc,
-	}
+		log: logState{entry: e, report: parent.log.report, src: parent.log.src}}
 }
 
 func (m *Model) onLogFilesLoaded(msg logFilesLoadedMsg) tea.Cmd {
@@ -106,7 +112,7 @@ func (m *Model) onLogFilesLoaded(msg logFilesLoadedMsg) tea.Cmd {
 	}
 	s.loading = false
 	s.loaded = true
-	s.logCands = msg.cands
+	s.log.cands = msg.cands
 	s.diagCols = logFileColumns()
 	s.diagBarCol = -1
 	// Newest first: the live log leads, then the rotations in age order.
@@ -115,6 +121,15 @@ func (m *Model) onLogFilesLoaded(msg logFilesLoadedMsg) tea.Cmd {
 	s.diagMetricsDirty = true
 	m.applySort(s)
 	s.resetCursor()
+	// The live server log is what people came for, but sorting by mtime can
+	// put a chattier pgbouncer log above it — so pre-select the ● row instead
+	// of whatever sorted first.
+	for i, it := range s.items {
+		if it.logIdx > 0 && it.logIdx <= len(msg.cands) && msg.cands[it.logIdx-1].Info.Current {
+			s.cursor = i
+			break
+		}
+	}
 	// One readable candidate: skip the picker (it stays on the stack for o/Esc).
 	if len(msg.cands) == 1 && m.top() == s {
 		m.stack = append(m.stack, m.logScreen(msg.cands[0].Open()))
@@ -175,42 +190,42 @@ func logFileItems(cands []pg.LogCandidate) []item {
 
 func (m *Model) onLogLoaded(msg logLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelLogs)
-	if s == nil || s.logSrc == nil || s.logSrc.Info().Path != msg.path {
+	if s == nil || s.log.src == nil || s.log.src.Info().Path != msg.path {
 		return nil
 	}
 	s.loading = false
 	s.loaded = true
 	if msg.err != nil {
-		s.logErr = msg.err
+		s.log.err = msg.err
 		if !msg.refresh {
-			s.logReport = nil
+			s.log.report = nil
 			s.items = nil
 			s.itemsRev++
 		}
 		return nil
 	}
-	s.logErr = nil
+	s.log.err = nil
 	// Remember the highlighted group across a refresh so a live tail doesn't
 	// yank the cursor when counts reshuffle the order.
 	var keepKey string
-	if msg.refresh && s.logView == logViewGroups {
+	if msg.refresh && s.log.view == logViewGroups {
 		if g := s.selectedLogGroup(); g != nil {
 			keepKey = g.Key
 		}
 	}
-	s.logReport = msg.report
+	s.log.report = msg.report
 	// Child screens hold the previous report pointer; refresh them too so a
 	// group opened before a tick keeps showing live data.
 	for _, sc := range m.stack {
 		if sc.level == levelLogGroup || sc.level == levelLogEntry {
-			sc.logReport = msg.report
+			sc.log.report = msg.report
 		}
 	}
 	m.rebuildLogItems(s)
 	if keepKey != "" {
 		vis := s.visibleIndexes()
 		for vi, idx := range vis {
-			if g, ok := s.items[idx].data.(*pg.LogGroup); ok && g.Key == keepKey {
+			if g, ok := s.items[idx].data.(*pglog.Group); ok && g.Key == keepKey {
 				s.cursor = vi
 				break
 			}
@@ -231,11 +246,11 @@ func (m *Model) onLogHosts(msg logHostsMsg) tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	if s.logHosts == nil {
-		s.logHosts = make(map[string]string)
+	if s.log.hosts == nil {
+		s.log.hosts = make(map[string]string)
 	}
-	maps.Copy(s.logHosts, msg.hosts)
-	if s.logView.table() && s.logReport != nil {
+	maps.Copy(s.log.hosts, msg.hosts)
+	if s.log.view.table() && s.log.report != nil {
 		m.rebuildLogItems(s)
 	}
 	return nil
@@ -260,12 +275,12 @@ func (m *Model) onLogTick() tea.Cmd {
 }
 
 // selectedLogGroup returns the group under the cursor in the groups pane.
-func (s *screen) selectedLogGroup() *pg.LogGroup {
+func (s *screen) selectedLogGroup() *pglog.Group {
 	vis := s.visibleIndexes()
 	if s.cursor < 0 || s.cursor >= len(vis) {
 		return nil
 	}
-	g, _ := s.items[vis[s.cursor]].data.(*pg.LogGroup)
+	g, _ := s.items[vis[s.cursor]].data.(*pglog.Group)
 	return g
 }
 
@@ -295,19 +310,19 @@ func (m *Model) skipLogHeader(s *screen, dir int) {
 // diagnostic-table path (diagCols + []pg.DiagCell rows) and its sort — the
 // slow pane is the timeline restricted to CatSlowQuery rows.
 func (m *Model) rebuildLogItems(s *screen) {
-	r := s.logReport
+	r := s.log.report
 	if r == nil {
 		s.items = nil
 		s.diagCols = nil
 		s.itemsRev++
 		return
 	}
-	if s.logView.table() {
+	if s.log.view.table() {
 		m.rebuildLogTimeline(s)
 		return
 	}
 	s.diagCols = nil
-	s.logCols = nil
+	s.log.cols = nil
 	s.items = m.buildLogGroupItems(s)
 	s.itemsRev++
 	s.clampCursor()
@@ -315,19 +330,19 @@ func (m *Model) rebuildLogItems(s *screen) {
 
 // buildLogGroupItems orders the groups into sections. Within a
 // section rows follow s.sort (count / last seen / title); sections follow
-// pg.LogCategories (signal first, chatter last), or there is a single unnamed
+// pglog.Categories (signal first, chatter last), or there is a single unnamed
 // one in flat mode.
 func (m *Model) buildLogGroupItems(s *screen) []item {
-	r := s.logReport
+	r := s.log.report
 	type section struct {
 		key     int
 		title   string
-		groups  []*pg.LogGroup
+		groups  []*pglog.Group
 		entries int
 	}
 	secs := map[int]*section{}
 	var order []int
-	add := func(key int, title string, g *pg.LogGroup) {
+	add := func(key int, title string, g *pglog.Group) {
 		sec := secs[key]
 		if sec == nil {
 			sec = &section{key: key, title: title}
@@ -339,12 +354,12 @@ func (m *Model) buildLogGroupItems(s *screen) []item {
 	}
 	for i := range r.Groups {
 		g := &r.Groups[i]
-		switch s.logGroupBy {
+		switch s.log.groupBy {
 		case logGroupByNone:
 			add(0, "", g)
 		default:
 			pos := 0
-			for j, c := range pg.LogCategories {
+			for j, c := range pglog.Categories {
 				if c == g.Category {
 					pos = j
 				}
@@ -354,7 +369,7 @@ func (m *Model) buildLogGroupItems(s *screen) []item {
 	}
 	sort.Ints(order)
 
-	less := func(a, b *pg.LogGroup) bool {
+	less := func(a, b *pglog.Group) bool {
 		var l bool
 		switch s.sort {
 		case sortByLast:
@@ -377,7 +392,7 @@ func (m *Model) buildLogGroupItems(s *screen) []item {
 	for _, key := range order {
 		sec := secs[key]
 		sort.SliceStable(sec.groups, func(i, j int) bool { return less(sec.groups[i], sec.groups[j]) })
-		if s.logGroupBy != logGroupByNone {
+		if s.log.groupBy != logGroupByNone {
 			items = append(items, item{
 				name: sec.title,
 				data: logSection{title: sec.title, groups: len(sec.groups), entries: sec.entries},
@@ -395,15 +410,20 @@ func (m *Model) buildLogGroupItems(s *screen) []item {
 	return items
 }
 
-// rebuildLogTimeline projects every entry onto the generic table.
+// rebuildLogTimeline projects every entry onto the generic table; the slow
+// pane keeps only duration: lines, the stats pane only pgbouncer stats lines
+// (with its own column registry).
 func (m *Model) rebuildLogTimeline(s *screen) {
-	r := s.logReport
-	descs := m.visibleLogCols()
-	ctx := logCtx{multiDay: !r.Window.From.IsZero() && r.Window.To.Sub(r.Window.From) > 24*time.Hour, hosts: s.logHosts}
+	r := s.log.report
+	descs := logSpec(s.log.view).visibleCols(m.logTableFor(s.log.view), logCtx{})
+	ctx := logCtx{multiDay: !r.Window.From.IsZero() && r.Window.To.Sub(r.Window.From) > 24*time.Hour, hosts: s.log.hosts}
 	items := make([]item, 0, len(r.Entries))
 	for i := range r.Entries {
 		e := &r.Entries[i]
-		if s.logView == logViewSlow && e.Category != pg.CatSlowQuery {
+		if s.log.view == logViewSlow && e.Category != pglog.CatSlowQuery {
+			continue
+		}
+		if s.log.view == logViewStats && e.PoolerStats == nil {
 			continue
 		}
 		cells := make([]pg.DiagCell, len(descs))
@@ -414,8 +434,8 @@ func (m *Model) rebuildLogTimeline(s *screen) {
 		}
 		items = append(items, item{name: strings.Join(parts, " "), data: cells, logIdx: i + 1})
 	}
-	s.logCols = descs
-	s.diagCols = logDiagColumnsFrom(descs)
+	s.log.cols = descs
+	s.diagCols = diagColumnsFrom(descs)
 	s.diagBarCol = -1
 	m.syncLogSort(s, descs)
 	s.items = items
@@ -426,17 +446,17 @@ func (m *Model) rebuildLogTimeline(s *screen) {
 // rebuildLogChild fills a levelLogGroup screen's rows from its group's sample
 // entries (newest first); levelLogEntry has no rows.
 func (m *Model) rebuildLogChild(s *screen) {
-	if s.level != levelLogGroup || s.logGroup == nil || s.logReport == nil {
+	if s.level != levelLogGroup || s.log.group == nil || s.log.report == nil {
 		return
 	}
-	r := s.logReport
+	r := s.log.report
 	// The group pointer may belong to an older report after a refresh; re-find
 	// it by key so the rows track live data.
-	g := s.logGroup
+	g := s.log.group
 	for i := range r.Groups {
 		if r.Groups[i].Key == g.Key {
 			g = &r.Groups[i]
-			s.logGroup = g
+			s.log.group = g
 			break
 		}
 	}
@@ -454,19 +474,19 @@ func (m *Model) rebuildLogChild(s *screen) {
 }
 
 // logEntryOf resolves the entry a row refers to, on any log level.
-func (s *screen) logEntryOf(it item) *pg.LogEntry {
-	if e, ok := it.data.(*pg.LogEntry); ok {
+func (s *screen) logEntryOf(it item) *pglog.Entry {
+	if e, ok := it.data.(*pglog.Entry); ok {
 		return e
 	}
-	if it.logIdx > 0 && s.logReport != nil && it.logIdx <= len(s.logReport.Entries) {
-		return &s.logReport.Entries[it.logIdx-1]
+	if it.logIdx > 0 && s.log.report != nil && it.logIdx <= len(s.log.report.Entries) {
+		return &s.log.report.Entries[it.logIdx-1]
 	}
 	return nil
 }
 
 // logSourceLabel is the compact "file · kind · size" used in the header and
 // the picker.
-func logSourceLabel(info pg.LogSourceInfo) string {
+func logSourceLabel(info pglog.SourceInfo) string {
 	parts := []string{filepath.Base(info.Path), info.Kind}
 	if info.Size >= 0 {
 		parts = append(parts, humanize.Bytes(info.Size))
@@ -475,7 +495,7 @@ func logSourceLabel(info pg.LogSourceInfo) string {
 }
 
 // logWindowLabel describes how much of the file the report covers.
-func logWindowLabel(w pg.LogWindow) string {
+func logWindowLabel(w pglog.Window) string {
 	switch {
 	case w.FileSize < 0:
 		return "last " + humanize.Bytes(w.Bytes)

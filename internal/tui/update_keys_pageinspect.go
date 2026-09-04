@@ -67,10 +67,8 @@ func (m *Model) jumpToPageInspector(s *screen) tea.Cmd {
 		}
 		next = &screen{
 			level: levelIndexPages, title: "index pages", tool: toolPageInspect,
-			db: r.DB, schema: r.Schema, index: r,
-			heapWindowStart: 0, heapWindowCount: heapWindowDefault,
-			sort: pageSort, sortDesc: pageSort.defaultDesc(),
-		}
+			db: r.DB, schema: r.Schema, pages: pageState{index: r, heapWindowStart: 0, heapWindowCount: heapWindowDefault},
+			sort: pageSort, sortDesc: pageSort.defaultDesc()}
 	default:
 		return nil
 	}
@@ -84,7 +82,47 @@ func heapPagesScreen(t pg.Table, title string) *screen {
 	return &screen{
 		level: levelHeapPages, title: title, tool: toolPageInspect,
 		db: t.DB, schema: t.Schema, table: t,
-		heapWindowStart: 0, heapWindowCount: heapWindowDefault,
-		sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
+		pages: pageState{heapWindowStart: 0, heapWindowCount: heapWindowDefault},
+		sort:  sortByBlkno, sortDesc: sortByBlkno.defaultDesc()}
+}
+
+// pagesDescribeTarget names the relation behind a page-inspector screen for `d`: the row's relation on the relation list, the screen's table or index below it.
+func pagesDescribeTarget(s *screen) (descTarget, bool) {
+	curItem := s.currentItem
+	switch s.level {
+	case levelRelations:
+		it, ok := curItem()
+		if !ok {
+			return descTarget{}, false
+		}
+		r, ok := it.data.(pg.Relation)
+		if !ok {
+			return descTarget{}, false
+		}
+		switch r.Kind {
+		case pg.RelTable, pg.RelToast:
+			return descTarget{table: pg.Table{
+				DB: r.DB, Schema: r.Schema, OID: r.OID, Name: r.Name,
+				TotalBytes: r.SizeBytes, EstRows: r.EstRows,
+			}}, true
+		case pg.RelBTreeIndex, pg.RelGist, pg.RelBrin, pg.RelGin:
+			return descTarget{
+				isIndex:   true,
+				db:        r.DB,
+				indexOID:  r.OID,
+				indexName: r.Qualified(),
+			}, true
+		}
+		return descTarget{}, false
+	case levelHeapPages, levelHeapTuples, levelTupleRow:
+		return descTarget{table: s.table}, true
+	case levelIndexPages, levelIndexTuples:
+		return descTarget{
+			isIndex:   true,
+			db:        s.db,
+			indexOID:  s.pages.index.OID,
+			indexName: s.pages.index.Qualified(),
+		}, true
 	}
+	return descTarget{}, false
 }

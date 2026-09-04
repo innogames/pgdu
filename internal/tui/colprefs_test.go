@@ -19,17 +19,17 @@ func TestNewModelSeedsColumnVisibility(t *testing.T) {
 
 	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", p, "", "")
 
-	if m.stmtColEnabled(colWAL, true) {
+	if m.stmtTable.enabled(colWAL, true) {
 		t.Errorf("colWAL should be hidden per persisted prefs")
 	}
-	if !m.stmtColEnabled(colDirtied, false) {
+	if !m.stmtTable.enabled(colDirtied, false) {
 		t.Errorf("colDirtied should be shown per persisted prefs (overriding default off)")
 	}
 	// A column the user never touched keeps its registry default.
-	if !m.stmtColEnabled(colTotalMs, true) {
+	if !m.stmtTable.enabled(colTotalMs, true) {
 		t.Errorf("colTotalMs should fall back to its default-on")
 	}
-	if !m.actColEnabled(actColCPU, false) {
+	if !m.actTable.enabled(actColCPU, false) {
 		t.Errorf("actColCPU should be shown per persisted prefs (overriding default off)")
 	}
 }
@@ -38,7 +38,7 @@ func TestNewModelSeedsColumnVisibility(t *testing.T) {
 // and saveColPrefs is a no-op.
 func TestNewModelNilPrefsIsSafe(t *testing.T) {
 	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil, "", "")
-	if m.actColsVisible != nil || m.stmtColsVisible != nil {
+	if m.actTable.visible != nil || m.stmtTable.visible != nil {
 		t.Errorf("expected nil visibility maps with nil prefs")
 	}
 	// Must not panic.

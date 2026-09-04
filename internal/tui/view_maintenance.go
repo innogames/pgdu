@@ -27,15 +27,12 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 		return b.String()
 	}
 
-	if s.maintErr != nil {
-		b.WriteString("  " + styleErr.Render("error: "+s.maintErr.Error()) + "\n")
-		for i := 1; i < height; i++ {
-			b.WriteString("\n")
-		}
-		return b.String()
+	if s.maintenance.err != nil {
+		b.WriteString("  " + styleErr.Render("error: "+s.maintenance.err.Error()) + "\n")
+		return padInfo(&b, height)
 	}
 
-	info := s.maint
+	info := s.maintenance.info
 
 	var body strings.Builder
 
@@ -130,7 +127,7 @@ func renderColumns(left, right string, leftW, rightW int) string {
 func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, cap pg.ExtCapacity) string {
 	mu := styleMuted.Render
 	cursor := "  "
-	if s.maintCursor == idx {
+	if s.maintenance.cursor == idx {
 		cursor = styleSelected.Render("▶ ")
 	}
 	if !cap.Installed {
@@ -201,7 +198,7 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 func (m *Model) renderTableStatsRow(s *screen, info *pg.MaintenanceInfo, idx int) string {
 	mu := styleMuted.Render
 	cursor := "  "
-	if s.maintCursor == idx {
+	if s.maintenance.cursor == idx {
 		cursor = styleSelected.Render("▶ ")
 	}
 	detail := "table & index counters in " + s.db
@@ -220,7 +217,7 @@ func (m *Model) renderTableStatsRow(s *screen, info *pg.MaintenanceInfo, idx int
 func (m *Model) renderTableStatsAllRow(s *screen, idx int) string {
 	mu := styleMuted.Render
 	cursor := "  "
-	if s.maintCursor == idx {
+	if s.maintenance.cursor == idx {
 		cursor = styleSelected.Render("▶ ")
 	}
 	return cursor + padRight(mu("table stats · all dbs"), 22) +
@@ -247,10 +244,10 @@ func maintResetTarget(which string) string {
 // renderMaintHint returns the one-line reset-confirm banner when a reset is
 // armed, or "" otherwise. Mirrors renderReindexBanner.
 func (m *Model) renderMaintHint(s *screen) string {
-	if s.pendingReset == "" {
+	if s.maintenance.pendingReset == "" {
 		return ""
 	}
-	return confirmBanner("reset " + maintResetTarget(s.pendingReset))
+	return confirmBanner("reset " + maintResetTarget(s.maintenance.pendingReset))
 }
 
 // formatUptime formats a duration as "Xd Yh Zm" or "Yh Zm" or "Zm" depending
@@ -316,10 +313,7 @@ func (m *Model) renderSettingsList(s *screen, height int) string {
 	if s.err != nil {
 		var b strings.Builder
 		b.WriteString("  " + styleErr.Render("error: "+s.err.Error()) + "\n")
-		for i := 1; i < height; i++ {
-			b.WriteString("\n")
-		}
-		return b.String()
+		return padInfo(&b, height)
 	}
 
 	vis := s.visibleIndexes()

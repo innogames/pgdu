@@ -21,14 +21,14 @@ func TestNewModelSeedsTableStatsColumns(t *testing.T) {
 
 	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", p, "", "")
 
-	if m.tblColEnabled(tblColSeqScan, true) {
+	if m.tblTable.enabled(tblColSeqScan, true) {
 		t.Errorf("tblColSeqScan should be hidden per persisted prefs")
 	}
-	if !m.tblColEnabled(tblColHeap, false) {
+	if !m.tblTable.enabled(tblColHeap, false) {
 		t.Errorf("tblColHeap should be shown per persisted prefs (overriding default off)")
 	}
 	// A column the user never touched keeps its registry default.
-	if !m.tblColEnabled(tblColSize, true) {
+	if !m.tblTable.enabled(tblColSize, true) {
 		t.Errorf("tblColSize should fall back to its default-on")
 	}
 }
@@ -37,8 +37,8 @@ func TestNewModelSeedsTableStatsColumns(t *testing.T) {
 // column and the default-on set, and drops default-off columns.
 func TestVisibleTblColsDefaults(t *testing.T) {
 	m := &Model{}
-	descs := m.visibleTblCols()
-	has := func(id tblColID) bool { return indexOfTblCol(descs, id) >= 0 }
+	descs := tblSpec.visibleCols(&m.tblTable, tblCtx{})
+	has := func(id tblColID) bool { return indexOfCol(descs, id) >= 0 }
 	if !has(tblColTable) {
 		t.Errorf("mandatory table column must always be present")
 	}
@@ -81,8 +81,8 @@ func TestBuildTableStatItems(t *testing.T) {
 func TestSyncTblSortDefault(t *testing.T) {
 	m := &Model{}
 	s := &screen{level: levelTableStats}
-	descs := m.visibleTblCols()
-	m.syncTblSort(s, descs)
+	descs := tblSpec.visibleCols(&m.tblTable, tblCtx{})
+	tblSpec.syncSort(&m.tblTable, s, descs)
 	if got := descs[s.diagSortCol].id; got != tblColSize {
 		t.Errorf("default sort column = %q, want %q", got, tblColSize)
 	}

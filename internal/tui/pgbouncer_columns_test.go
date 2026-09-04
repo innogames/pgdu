@@ -118,11 +118,11 @@ func TestPgbInstanceItemsParallelToColumns(t *testing.T) {
 func TestRenderPgBouncerScreens(t *testing.T) {
 	m := &Model{width: 200, height: 40, keys: defaultKeys(), pgbRefresh: 0}
 	list := &screen{level: levelPgBouncers, title: "pgbouncer", tool: toolPgBouncer, loaded: true}
-	list.pgbInsts = []pg.PgBouncerInstance{{Name: "pgbouncer_1", IniPath: "/etc/pgbouncer/pgbouncer_1.ini", SocketDir: "/var/run/pgbouncer_1", AuthFile: "/etc/pgbouncer/userlist.txt"}}
-	list.pgbProbes = []pg.PgBouncerProbe{{Err: errors.New("SASL authentication failed"), AuthErr: true, User: "postgres"}}
+	list.pgb.insts = []pg.PgBouncerInstance{{Name: "pgbouncer_1", IniPath: "/etc/pgbouncer/pgbouncer_1.ini", SocketDir: "/var/run/pgbouncer_1", AuthFile: "/etc/pgbouncer/userlist.txt"}}
+	list.pgb.probes = []pg.PgBouncerProbe{{Err: errors.New("SASL authentication failed"), AuthErr: true, User: "postgres"}}
 	list.diagCols = pgbInstanceColumns()
 	list.diagBarCol = -1
-	list.items = pgbInstanceItems(list.pgbInsts, list.pgbProbes)
+	list.items = pgbInstanceItems(list.pgb.insts, list.pgb.probes)
 	list.diagMetricsDirty = true
 	m.stack = []*screen{{level: levelTools}, list}
 
@@ -137,15 +137,15 @@ func TestRenderPgBouncerScreens(t *testing.T) {
 		t.Errorf("table:\n%s", table)
 	}
 
-	ov := &screen{level: levelPgBouncer, title: "pgbouncer_1", tool: toolPgBouncer, loaded: true, pgbInst: &list.pgbInsts[0]}
-	ov.pgbInst.PoolMode = "transaction"
-	ov.pgbOverview = &pg.PgBouncerOverview{
+	ov := &screen{level: levelPgBouncer, title: "pgbouncer_1", tool: toolPgBouncer, loaded: true, pgb: pgbState{inst: &list.pgb.insts[0]}}
+	ov.pgb.inst.PoolMode = "transaction"
+	ov.pgb.overview = &pg.PgBouncerOverview{
 		Version: "PgBouncer 1.25.2 on x86_64-pc-linux-gnu",
 		State:   map[string]string{"active": "yes", "paused": "yes"},
 		Lists:   map[string]int64{"databases": 2, "pools": 3},
 		Totals:  pg.PgBouncerPoolTotals{Pools: 3, ClActive: 40, ClWaiting: 2, SvActive: 10, SvIdle: 6, MaxWaitSec: 4},
 	}
-	ov.items = pgbMenuItems(*ov.pgbInst)
+	ov.items = pgbMenuItems(*ov.pgb.inst)
 	hdr := m.renderPgBouncerHeader(ov)
 	for _, want := range []string{"1.25.2", "PAUSED", "2 waiting", "max wait", "databases", "transaction"} {
 		if !strings.Contains(hdr, want) {
@@ -158,8 +158,8 @@ func TestRenderPgBouncerScreens(t *testing.T) {
 	if len(ov.items) != len(pgbShowRegistry()) {
 		t.Errorf("menu without a logfile must list exactly the SHOW specs: %d rows", len(ov.items))
 	}
-	ov.pgbInst.Logfile = "/var/log/postgresql/pgbouncer_1.log"
-	if items := pgbMenuItems(*ov.pgbInst); len(items) != len(pgbShowRegistry())+1 || items[len(items)-1].name != "log" {
+	ov.pgb.inst.Logfile = "/var/log/postgresql/pgbouncer_1.log"
+	if items := pgbMenuItems(*ov.pgb.inst); len(items) != len(pgbShowRegistry())+1 || items[len(items)-1].name != "log" {
 		t.Errorf("menu with a logfile must end in the log row")
 	}
 }
@@ -173,7 +173,7 @@ func TestPgbLevelsWired(t *testing.T) {
 	if tl, ok := toolByName("pgbouncer"); !ok || tl != toolPgBouncer {
 		t.Errorf("toolByName(pgbouncer) = %v %v", tl, ok)
 	}
-	s := &screen{level: levelPgBouncerShow, pgbShow: pgbShowClients}
+	s := &screen{level: levelPgBouncerShow, pgb: pgbState{show: pgbShowClients}}
 	if s.diagVisKey() != "pgbouncer/clients" {
 		t.Errorf("diagVisKey = %q", s.diagVisKey())
 	}

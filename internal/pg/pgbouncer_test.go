@@ -224,9 +224,13 @@ func TestWorstPgBouncerProbe(t *testing.T) {
 		t.Errorf("all quiet: %v %q %v", sev, detail, err)
 	}
 	authInst := PgBouncerInstance{Name: "x", IniPath: "/etc/x.ini"}
-	_, _, err = worstPgBouncerProbe([]PgBouncerInstance{authInst}, []PgBouncerProbe{{Err: errors.New("auth"), AuthErr: true, User: "postgres"}})
-	if err == nil || !strings.Contains(err.Error(), "stats_users") || !strings.Contains(err.Error(), "/etc/x.ini") {
-		t.Errorf("all-unreachable with auth failure must carry the hint: %v", err)
+	sev, detail, err = worstPgBouncerProbe([]PgBouncerInstance{authInst}, []PgBouncerProbe{{Err: errors.New("auth"), AuthErr: true, User: "postgres"}})
+	if err != nil || sev != SevOK || !strings.Contains(detail, "stats_users") || !strings.Contains(detail, "/etc/x.ini") {
+		t.Errorf("all-unreachable must stay green and carry the hint: %v %q %v", sev, detail, err)
+	}
+	sev, detail, err = worstPgBouncerProbe(insts[:1], []PgBouncerProbe{{Err: errors.New("failed to connect to `x`:\n\tdial error")}})
+	if err != nil || sev != SevOK || !strings.Contains(detail, "console unreachable: failed to connect to `x`: dial error") {
+		t.Errorf("unreachable detail must be flattened to one line: %v %q %v", sev, detail, err)
 	}
 }
 

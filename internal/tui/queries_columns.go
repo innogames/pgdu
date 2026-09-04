@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"slices"
-
 	"pgdu/internal/humanize"
 	"pgdu/internal/pg"
 )
@@ -38,7 +36,7 @@ const (
 	colTempWritten stmtColID = "temp_written"
 	colWALRecs     stmtColID = "wal_recs"
 	colWALFPI      stmtColID = "wal_fpi"
-	colTable       stmtColID = "table"
+	colMainTable   stmtColID = "table"
 	colType        stmtColID = "T"
 	colQuery       stmtColID = "query"
 )
@@ -51,20 +49,16 @@ type stmtCtx struct {
 	trackPlanning bool
 }
 
-// stmtColDesc describes one top-queries column: its stable id, header label,
-// render kind, whether it's shown by default, whether it can be toggled off, a
-// one-line description for the C picker, an optional availability gate, and the
-// cell builder. Adding a new metric column is a single entry in
-// stmtColumnRegistry — statementColumns/cellsFor/the C picker all derive from it.
-type stmtColDesc struct {
-	id        stmtColID
-	name      string
-	kind      pg.DiagColumnKind
-	defaultOn bool               // shown unless the user hides it
-	mandatory bool               // can't be hidden (the query text — the table's reason to exist)
-	desc      string             // one-line explanation shown in the C picker
-	available func(stmtCtx) bool // nil = always available; gates plan columns on track_planning
-	cell      func(pg.QueryStat, stmtCtx) pg.DiagCell
+// stmtColDesc is a top-queries column; stmtSpec binds the registry to its picker
+// state (Model.stmtTable), prefs key and sort fallback.
+type stmtColDesc = colDesc[stmtColID, pg.QueryStat, stmtCtx]
+
+var stmtSpec = colSpec[stmtColID, pg.QueryStat, stmtCtx]{
+	registry:    stmtColumnRegistry,
+	prefsKey:    colPrefsQueries,
+	defaultSort: colTotalMs,
+	title:       "choose which columns the top-queries table shows — opt-in metrics are off by default",
+	unavailNote: "track_planning off",
 }
 
 // stmtColumnRegistry is the single source of truth for the top-queries table's
@@ -221,7 +215,7 @@ func stmtColumnRegistry() []stmtColDesc {
 		{id: colWALFPI, name: "wal_fpi", kind: pg.DiagCostGraded,
 			desc: "WAL full-page images written",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return diagNum(formatRows(q.WALFPI), float64(q.WALFPI)) }},
-		{id: colTable, name: "table", kind: pg.DiagText, defaultOn: true,
+		{id: colMainTable, name: "table", kind: pg.DiagText, defaultOn: true,
 			desc: "main table parsed from the statement (d describes it)",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return pg.DiagCell{Display: mainTableDisplay(q.Query)} }},
 		{id: colType, name: "T", kind: pg.DiagCmdType, defaultOn: true,
@@ -233,70 +227,6 @@ func stmtColumnRegistry() []stmtColDesc {
 	}
 }
 
-// indexOfStmtCol returns the position of id within descs, or -1 when absent.
-func indexOfStmtCol(descs []stmtColDesc, id stmtColID) int {
-	return slices.IndexFunc(descs, func(d stmtColDesc) bool { return d.id == id })
-}
-
-// stmtColEnabled reports whether column id should be shown. With no explicit
-// entry in the visibility set it falls back to def (the registry default), so a
-// fresh Model with a nil set renders exactly the historical default columns.
-func (m *Model) stmtColEnabled(id stmtColID, def bool) bool {
-	if v, ok := m.stmtColsVisible[id]; ok {
-		return v
-	}
-	return def
-}
-
-// ensureStmtColsInit lazily materializes the visibility set from the registry
-// defaults, so the C picker shows concrete checkbox state and toggling one
-// column doesn't implicitly pin the defaults of every other.
-func (m *Model) ensureStmtColsInit() {
-	if m.stmtColsVisible != nil {
-		return
-	}
-	m.stmtColsVisible = make(map[stmtColID]bool)
-	for _, d := range stmtColumnRegistry() {
-		m.stmtColsVisible[d.id] = d.defaultOn || d.mandatory
-	}
-}
-
-// visibleStmtCols projects the registry to the columns that are both available
-// for ctx and enabled by the user, in registry order. Mandatory columns are
-// always kept regardless of the visibility set.
-func (m *Model) visibleStmtCols(ctx stmtCtx) []stmtColDesc {
-	var out []stmtColDesc
-	for _, d := range stmtColumnRegistry() {
-		if d.available != nil && !d.available(ctx) {
-			continue
-		}
-		if d.mandatory || m.stmtColEnabled(d.id, d.defaultOn) {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-// diagColumnsFrom maps projected descriptors to the renderer's column schema.
-func diagColumnsFrom(descs []stmtColDesc) []pg.DiagColumn {
-	cols := make([]pg.DiagColumn, len(descs))
-	for i, d := range descs {
-		cols[i] = pg.DiagColumn{Name: d.name, Kind: d.kind}
-	}
-	return cols
-}
-
-// cellsFor builds one row's cells over the already-projected descriptors, so the
-// cells stay parallel to diagColumnsFrom(descs) by construction — there is no
-// index arithmetic to keep in sync.
-func cellsFor(descs []stmtColDesc, q pg.QueryStat, ctx stmtCtx) []pg.DiagCell {
-	cells := make([]pg.DiagCell, len(descs))
-	for i, d := range descs {
-		cells[i] = d.cell(q, ctx)
-	}
-	return cells
-}
-
 // labelStmtFooter turns a summed row into the pinned "← Sum" footer: the label
 // in the query column and blanks in the table/T text columns (the empty
 // aggregate query would otherwise make MainTable/QueryKind emit junk). Located
@@ -306,7 +236,7 @@ func labelStmtFooter(descs []stmtColDesc, total []pg.DiagCell) {
 		switch d.id {
 		case colQuery:
 			total[i].Display = "← Sum"
-		case colTable, colType:
+		case colMainTable, colType:
 			total[i].Display = ""
 		}
 	}

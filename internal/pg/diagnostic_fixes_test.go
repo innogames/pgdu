@@ -52,7 +52,7 @@ func TestFixIdent(t *testing.T) {
 		"orders":       "orders",
 		"_t1":          "_t1",
 		"public":       "public",
-		"Orders":       `"Orders"`,  // upper case folds — must quote
+		"Orders":       `"Orders"`,   // upper case folds — must quote
 		"my table":     `"my table"`, // space
 		"1st":          `"1st"`,      // leading digit
 		"a$b":          `"a$b"`,      // quote_ident quotes $ too
@@ -119,6 +119,15 @@ func TestFixBuilders(t *testing.T) {
 	sql, ok = fixDropDuplicateIndex(fixGetter(map[string]string{"idx1": "public.a", "idx2": "public.b"}))
 	if !ok || !strings.Contains(sql, "DROP INDEX CONCURRENTLY public.b;") || !strings.Contains(sql, "public.a") {
 		t.Errorf("duplicate: got %q, %v", sql, ok)
+	}
+
+	sql, ok = fixTableBloat(fixGetter(map[string]string{
+		"databasename": "game", "schemaname": "public", "tablename": "Events",
+	}))
+	if !ok || !strings.HasPrefix(sql, `VACUUM (VERBOSE) public."Events";`) ||
+		!strings.Contains(sql, `pg_repack -d game -t public."Events"`) ||
+		!strings.Contains(sql, "TRUNCATE") {
+		t.Errorf("bloat: got %q, %v", sql, ok)
 	}
 
 	sql, ok = fixClusterOn(fixGetter(map[string]string{

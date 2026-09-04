@@ -8,19 +8,7 @@ import (
 // overview tool (C on levelTableStats). Same look-and-feel as
 // renderActColumnConfig / renderColumnConfig.
 func (m *Model) renderTblColumnConfig(_ *screen, height int) string {
-	m.ensureTblColsInit()
-	reg := tableColumnRegistry()
-	rows := make([]colCfgRow, len(reg))
-	for i, d := range reg {
-		rows[i] = colCfgRow{
-			name:      d.name,
-			desc:      d.desc,
-			on:        d.mandatory || m.tblColEnabled(d.id, d.defaultOn),
-			mandatory: d.mandatory,
-		}
-	}
-	return m.renderColCfgOverlay("choose which columns the table overview shows",
-		rows, m.tblColCfgCursor, height)
+	return tblSpec.renderConfig(m, &m.tblTable, tblCtx{}, height)
 }
 
 // renderTableStatsInfo is the ? reference overlay for the Table overview: a

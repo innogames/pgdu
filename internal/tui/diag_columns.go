@@ -56,7 +56,7 @@ func (s *screen) diagVisKey() string {
 		return s.diag.Key
 	}
 	if s.level == levelPgBouncerShow {
-		return pgbVisKey(s.pgbShow)
+		return pgbVisKey(s.pgb.show)
 	}
 	return ""
 }

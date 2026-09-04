@@ -229,8 +229,8 @@ func diagByKey(t *testing.T, key string) Diagnostic {
 func TestIntegration_Triage(t *testing.T) {
 	c, _ := diagTestClient(t)
 	results := c.Triage(context.Background())
-	if len(results) != 10 {
-		t.Fatalf("Triage returned %d results, want 10", len(results))
+	if want := len(c.TriageCheckNames()); len(results) != want {
+		t.Fatalf("Triage returned %d results, want %d", len(results), want)
 	}
 	for _, r := range results {
 		if strings.HasPrefix(r.Detail, "could not evaluate") {

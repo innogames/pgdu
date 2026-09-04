@@ -130,7 +130,7 @@ func (m *Model) onPartsLoaded(msg partsLoadedMsg) tea.Cmd {
 	}
 	m.applySort(s)
 	if m.fetchBloat && msg.err == nil {
-		s.bloatScanning = true
+		s.parts.bloatScanning = true
 		return m.fillBloatCmd(msg.table, msg.parts)
 	}
 	return nil
@@ -159,75 +159,6 @@ func (m *Model) onDiskTableResolved(msg diskTableResolvedMsg) tea.Cmd {
 	return m.loadCurrent()
 }
 
-func (m *Model) onBufferStatsLoaded(msg bufferStatsLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelBufferTables)
-	if s == nil || s.db != msg.db || s.schema != msg.schema {
-		return nil
-	}
-	if cmd, stop := settleLoad(s, msg.err, extPromptReasonBufferCache); stop {
-		return cmd
-	}
-	s.items = s.items[:0]
-	for _, st := range msg.stats {
-		s.items = append(s.items, bufferStatToItem(st))
-	}
-	m.applySort(s)
-	return nil
-}
-
-func (m *Model) onBufferSummaryLoaded(msg bufferSummaryLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelBufferTables)
-	if s == nil || s.db != msg.db {
-		return nil
-	}
-	if ext := asMissingExt(msg.err); ext != nil {
-		// The summary error is swallowed; the blocking prompt set by
-		// onBufferStatsLoaded already covers the user-visible state.
-		return nil
-	}
-	if msg.err != nil {
-		s.bufferSummaryErr = msg.err
-		s.bufferSummary = nil
-	} else {
-		sum := msg.summary
-		s.bufferSummary = &sum
-		s.bufferSummaryErr = nil
-	}
-	return nil
-}
-
-func (m *Model) onBufferDetailLoaded(msg bufferDetailLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelBufferDetail)
-	if s == nil || s.db != msg.db || s.bufDetail == nil || s.bufDetail.OID != msg.oid {
-		return nil
-	}
-	s.loading = false
-	s.loaded = true
-	if ext := asMissingExt(msg.err); ext != nil {
-		return setExtensionPrompt(s, ext, extPromptReasonBufferCache)
-	}
-	s.bufUsageErr = msg.err
-	s.bufUsage = msg.counts
-	s.bufBlockSize = msg.blockSize
-	return nil
-}
-
-func (m *Model) onShmemLoaded(msg shmemLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelShmem)
-	if s == nil || s.db != msg.db {
-		return nil
-	}
-	s.loading = false
-	s.loaded = true
-	s.err = msg.err
-	s.items = s.items[:0]
-	for _, a := range msg.allocs {
-		s.items = append(s.items, shmemAllocToItem(a))
-	}
-	m.applySort(s)
-	return nil
-}
-
 func (m *Model) onColumnsLoaded(msg columnsLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelColumns)
 	if s == nil || s.table.OID != msg.tableOID {
@@ -249,7 +180,7 @@ func (m *Model) onBloatFilled(msg bloatFilledMsg) tea.Cmd {
 	if s == nil || s.table.OID != msg.table.OID {
 		return nil
 	}
-	s.bloatScanning = false
+	s.parts.bloatScanning = false
 	if msg.err != nil {
 		s.err = msg.err
 		return nil
@@ -325,13 +256,13 @@ func (m *Model) onDescribeLoaded(msg describeLoadedMsg) tea.Cmd {
 	}
 	// Guard against stale messages: accept when this is the first load
 	// (s.describe == nil) or when the OID matches a refresh.
-	if s.describe != nil && s.describe.OID != msg.oid {
+	if s.desc.info != nil && s.desc.info.OID != msg.oid {
 		return nil
 	}
 	s.loading = false
 	s.loaded = true
 	s.err = msg.err
-	s.describe = msg.desc
+	s.desc.info = msg.desc
 	// (Re)load the cache-footprint section for table describes — but only while
 	// detail mode is showing it: the plain view never scans pg_buffercache (the
 	// `d` toggle issues the first load instead). Triggering here — rather than
@@ -340,11 +271,11 @@ func (m *Model) onDescribeLoaded(msg describeLoadedMsg) tea.Cmd {
 	// prior section state first so a refresh doesn't show stale figures. A
 	// scan already in flight is left to finish and reused: its result is at
 	// most a few seconds older than what a second concurrent scan would give.
-	s.descBuf = nil
-	s.descBufErr = nil
-	if s.descDetail && msg.err == nil && msg.desc != nil &&
-		msg.desc.Kind == pg.DescribeTable && msg.desc.OID != 0 && !s.descBufLoading {
-		s.descBufLoading = true
+	s.desc.buf = nil
+	s.desc.bufErr = nil
+	if s.desc.detail && msg.err == nil && msg.desc != nil &&
+		msg.desc.Kind == pg.DescribeTable && msg.desc.OID != 0 && !s.desc.bufLoading {
+		s.desc.bufLoading = true
 		return m.loadDescribeBuffersCmd(s.db, msg.desc.OID)
 	}
 	return nil
@@ -362,15 +293,15 @@ func (m *Model) onDescribeBuffersLoaded(msg describeBuffersLoadedMsg) tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	s.descBufLoading = false
-	if s.db != msg.db || s.describe == nil || s.describe.OID != msg.oid {
+	s.desc.bufLoading = false
+	if s.db != msg.db || s.desc.info == nil || s.desc.info.OID != msg.oid {
 		// Stale: the screen moved to another table while this scan ran. The
 		// describe load for the new table skipped its own scan because ours was
 		// in flight, so issue it now if detail mode still wants the section.
-		if s.descDetail && s.descBuf == nil && s.descBufErr == nil && s.extPrompt == nil &&
-			s.describe != nil && s.describe.Kind == pg.DescribeTable && s.describe.OID != 0 {
-			s.descBufLoading = true
-			return m.loadDescribeBuffersCmd(s.db, s.describe.OID)
+		if s.desc.detail && s.desc.buf == nil && s.desc.bufErr == nil && s.extPrompt == nil &&
+			s.desc.info != nil && s.desc.info.Kind == pg.DescribeTable && s.desc.info.OID != 0 {
+			s.desc.bufLoading = true
+			return m.loadDescribeBuffersCmd(s.db, s.desc.info.OID)
 		}
 		return nil
 	}
@@ -384,10 +315,10 @@ func (m *Model) onDescribeBuffersLoaded(msg describeBuffersLoadedMsg) tea.Cmd {
 		}
 		return nil
 	}
-	s.descBufErr = msg.err
+	s.desc.bufErr = msg.err
 	if msg.err == nil {
 		stat := msg.stat
-		s.descBuf = &stat
+		s.desc.buf = &stat
 	}
 	return nil
 }
@@ -398,14 +329,14 @@ func (m *Model) onReindexDone(msg reindexDoneMsg) tea.Cmd {
 		return nil
 	}
 	// Clearing reindexing stops the progress-poll tick on its next fire.
-	s.reindexing = ""
-	s.reindexProg = nil
-	s.reindexPctMax = 0
+	s.reindex.running = ""
+	s.reindex.prog = nil
+	s.reindex.pctMax = 0
 	if msg.err != nil {
-		s.reindexErr = msg.err
+		s.reindex.err = msg.err
 		return nil
 	}
-	s.reindexErr = nil
+	s.reindex.err = nil
 	// Refresh: the index has been rebuilt, so size and bloat have changed.
 	return m.loadCurrent()
 }
@@ -415,7 +346,7 @@ func (m *Model) onReindexDone(msg reindexDoneMsg) tea.Cmd {
 // stray tick outlives the rebuild.
 func (m *Model) onReindexTick() tea.Cmd {
 	s := m.findLevel(levelParts)
-	if s == nil || s.reindexing == "" {
+	if s == nil || s.reindex.running == "" {
 		return nil
 	}
 	return tea.Batch(m.loadReindexProgressCmd(s.db, s.table.OID), m.reindexTick())
@@ -423,14 +354,14 @@ func (m *Model) onReindexTick() tea.Cmd {
 
 func (m *Model) onReindexProgress(msg reindexProgressMsg) tea.Cmd {
 	s := m.findLevel(levelParts)
-	if s == nil || s.table.OID != msg.tableOID || s.reindexing == "" {
+	if s == nil || s.table.OID != msg.tableOID || s.reindex.running == "" {
 		return nil
 	}
-	s.reindexProg = msg.row
+	s.reindex.prog = msg.row
 	if msg.row != nil {
 		// OverallPct is -1 for unmapped phases; max() also absorbs that, so
 		// the bar simply holds until a known phase reports again.
-		s.reindexPctMax = max(s.reindexPctMax, msg.row.OverallPct())
+		s.reindex.pctMax = max(s.reindex.pctMax, msg.row.OverallPct())
 	}
 	return nil
 }
@@ -469,11 +400,11 @@ func (m *Model) onMaintLoaded(msg maintLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	if msg.err != nil {
-		s.maintErr = msg.err
+		s.maintenance.err = msg.err
 		return nil
 	}
-	s.maintErr = nil
-	s.maint = msg.info
+	s.maintenance.err = nil
+	s.maintenance.info = msg.info
 	return nil
 }
 
@@ -488,7 +419,7 @@ func (m *Model) onSettingsLoaded(msg settingsLoadedMsg) tea.Cmd {
 		s.err = msg.err
 		return nil
 	}
-	s.settingRows = msg.rows
+	s.maintenance.settingRows = msg.rows
 	s.items = make([]item, len(msg.rows))
 	for i, r := range msg.rows {
 		detail := r.Category
@@ -505,7 +436,7 @@ func (m *Model) onMaintResetDone(msg maintResetDoneMsg) tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	s.pendingReset = ""
+	s.maintenance.pendingReset = ""
 	if msg.err != nil {
 		// Surface the error as a transient notice so the dashboard stays visible.
 		m.notice = fmt.Sprintf("reset %s failed: %s", maintResetTarget(msg.which), msg.err)
@@ -521,9 +452,9 @@ func (m *Model) onTableStatsLoaded(msg tableStatsLoadedMsg) tea.Cmd {
 	if s == nil || s.table.OID != msg.table.OID {
 		return nil
 	}
-	s.tableStatsErr = msg.err
+	s.parts.tableStatsErr = msg.err
 	if msg.err == nil {
-		s.tableStats = msg.stats
+		s.parts.tableStats = msg.stats
 	}
 	return nil
 }
@@ -533,7 +464,7 @@ func (m *Model) onVacuumStarted(msg vacuumStartedMsg) tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	s.pendingVacuum = false
+	s.parts.pendingVacuum = false
 	m.vacuum = vacuumState{
 		table:   msg.table,
 		started: time.Now(),
@@ -617,19 +548,19 @@ func (m *Model) onActivityLoaded(msg activityLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	if msg.err != nil {
-		s.actErr = msg.err
+		s.act.err = msg.err
 		return nil
 	}
-	s.actErr = nil
-	s.actRows = msg.rows
-	s.actSummary = msg.summary
-	s.actProgressPct = clampProgressMarks(s.actProgressPct, msg.progress)
+	s.act.err = nil
+	s.act.rows = msg.rows
+	s.act.summary = msg.summary
+	s.act.progressPct = clampProgressMarks(s.act.progressPct, msg.progress)
 
-	if s.actHosts == nil {
-		s.actHosts = make(map[string]string)
+	if s.act.hosts == nil {
+		s.act.hosts = make(map[string]string)
 	}
-	if s.actToast == nil {
-		s.actToast = make(map[string]string)
+	if s.act.toast == nil {
+		s.act.toast = make(map[string]string)
 	}
 	m.rebuildActivityItems(s)
 	// Feed the wait-event profile: every snapshot becomes one histogram bucket,
@@ -644,7 +575,7 @@ func (m *Model) onActivityLoaded(msg activityLoadedMsg) tea.Cmd {
 	for i, r := range msg.rows {
 		pids[i] = r.PID
 		if r.ClientAddr != "" {
-			if _, ok := s.actHosts[r.ClientAddr]; !ok {
+			if _, ok := s.act.hosts[r.ClientAddr]; !ok {
 				unresolved = append(unresolved, r.ClientAddr)
 			}
 		}
@@ -652,7 +583,7 @@ func (m *Model) onActivityLoaded(msg activityLoadedMsg) tea.Cmd {
 		// own datname; skip rows without one (walsenders, etc.) rather than guess.
 		if r.Database != "" {
 			if rn, ok := strings.CutPrefix(pg.MainTable(r.Query), "pg_toast."); ok {
-				if _, seen := s.actToast[toastKey(r.Database, rn)]; !seen {
+				if _, seen := s.act.toast[toastKey(r.Database, rn)]; !seen {
 					toastReqs = append(toastReqs, toastResolveReq{db: r.Database, relname: rn})
 				}
 			}
@@ -677,8 +608,8 @@ func (m *Model) onTableOverviewLoaded(msg tableOverviewLoadedMsg) tea.Cmd {
 		return nil
 	}
 	s.err = nil
-	s.tblRows = msg.rows
-	s.tblStatsReset = msg.statsReset
+	s.tbl.rows = msg.rows
+	s.tbl.statsReset = msg.statsReset
 	m.rebuildTableStatItems(s)
 	return nil
 }
@@ -705,7 +636,7 @@ func (m *Model) onActivityTick() tea.Cmd {
 	case levelProgress:
 		return tea.Batch(m.loadProgressCmd(top.db), next)
 	}
-	return tea.Batch(m.loadActivityCmd(top.db, top.actFilter), next)
+	return tea.Batch(m.loadActivityCmd(top.db, top.act.filter), next)
 }
 
 func (m *Model) onLockTreeLoaded(msg lockTreeLoadedMsg) tea.Cmd {
@@ -716,11 +647,11 @@ func (m *Model) onLockTreeLoaded(msg lockTreeLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	if msg.err != nil {
-		s.lockErr = msg.err
+		s.lock.err = msg.err
 		return nil
 	}
-	s.lockErr = nil
-	s.lockNodes = msg.nodes
+	s.lock.err = nil
+	s.lock.nodes = msg.nodes
 	m.rebuildLockTreeItems(s)
 	return nil
 }
@@ -733,12 +664,12 @@ func (m *Model) onProgressLoaded(msg progressLoadedMsg) tea.Cmd {
 	s.loading = false
 	s.loaded = true
 	if msg.err != nil {
-		s.progressErr = msg.err
+		s.progress.err = msg.err
 		return nil
 	}
-	s.progressErr = nil
-	s.progressRows = msg.rows
-	s.progressPctMax = clampProgressMarks(s.progressPctMax, msg.rows)
+	s.progress.err = nil
+	s.progress.rows = msg.rows
+	s.progress.pctMax = clampProgressMarks(s.progress.pctMax, msg.rows)
 	m.rebuildProgressItems(s)
 	return nil
 }
@@ -748,11 +679,11 @@ func (m *Model) onActivityHosts(msg activityHostsMsg) tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	if s.actHosts == nil {
-		s.actHosts = make(map[string]string)
+	if s.act.hosts == nil {
+		s.act.hosts = make(map[string]string)
 	}
-	maps.Copy(s.actHosts, msg.hosts)
-	if s.actRows != nil {
+	maps.Copy(s.act.hosts, msg.hosts)
+	if s.act.rows != nil {
 		m.rebuildActivityItems(s)
 	}
 	return nil
@@ -763,11 +694,11 @@ func (m *Model) onActivityToast(msg activityToastMsg) tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	if s.actToast == nil {
-		s.actToast = make(map[string]string)
+	if s.act.toast == nil {
+		s.act.toast = make(map[string]string)
 	}
-	maps.Copy(s.actToast, msg.owners)
-	if s.actRows != nil {
+	maps.Copy(s.act.toast, msg.owners)
+	if s.act.rows != nil {
 		m.rebuildActivityItems(s)
 	}
 	return nil
@@ -783,9 +714,9 @@ func (m *Model) onBackendAction(msg backendActionMsg) tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	s.pendingBackendAction = ""
-	s.pendingBackendPID = 0
-	s.pendingBackendQuery = ""
+	s.act.pendingAction = ""
+	s.act.pendingPID = 0
+	s.act.pendingQuery = ""
 	switch {
 	case msg.err != nil:
 		m.notice = fmt.Sprintf("%s %d failed: %s", msg.action, msg.pid, msg.err)
@@ -798,7 +729,7 @@ func (m *Model) onBackendAction(msg backendActionMsg) tea.Cmd {
 	if s.level == levelLockTree {
 		return m.loadLockTreeCmd(s.db)
 	}
-	return m.loadActivityCmd(s.db, s.actFilter)
+	return m.loadActivityCmd(s.db, s.act.filter)
 }
 
 func (m *Model) onActivityStatement(msg activityStatementMsg) tea.Cmd {
@@ -811,12 +742,11 @@ func (m *Model) onActivityStatement(msg activityStatementMsg) tea.Cmd {
 		return nil
 	}
 	next := &screen{
-		level:      levelStatementDetail,
-		title:      "query",
-		tool:       s.tool,
-		db:         msg.db,
-		statDetail: msg.qs,
-	}
+		level: levelStatementDetail,
+		title: "query",
+		tool:  s.tool,
+		db:    msg.db,
+		stat:  stmtState{detail: msg.qs}}
 	m.stack = append(m.stack, next)
 	return m.loadCurrent()
 }

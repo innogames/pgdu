@@ -78,10 +78,10 @@ func shortLSN(lsn string) string {
 // shape. A header-source failure renders as a single muted error line — the
 // rmgr list still works without it.
 func (m *Model) renderWALSummary(s *screen) string {
-	if s.walSummaryErr != nil {
-		return "  " + styleMuted.Render("WAL summary: ") + styleErr.Render(s.walSummaryErr.Error())
+	if s.wal.summaryErr != nil {
+		return "  " + styleMuted.Render("WAL summary: ") + styleErr.Render(s.wal.summaryErr.Error())
 	}
-	sum := s.walSummary
+	sum := s.wal.summary
 	if sum == nil {
 		return "  " + styleMuted.Render("WAL summary: unavailable")
 	}
@@ -122,7 +122,7 @@ func (m *Model) renderWALSummary(s *screen) string {
 
 	// Checkpoint context is best-effort (pg_control_checkpoint /
 	// pg_stat_checkpointer may need superuser); render only what loaded.
-	if cp := s.walCheckpoint; cp != nil {
+	if cp := s.wal.checkpoint; cp != nil {
 		if cp.MaxWALBytes > 0 {
 			ratio := float64(cp.BytesSinceCheckpoint) / float64(cp.MaxWALBytes)
 			if ratio > 1 {
@@ -240,7 +240,7 @@ func (m *Model) renderWALList(s *screen, height int) string {
 func renderWALHeader(sort sortMode, sortDesc bool, barW int) string {
 	line := headerIndent(barW) +
 		padRight(sortMark("combined", sort == sortBySize, sortDesc), walColCombined) + "  " +
-		padRight("record", walColRecord) + "  " +
+		padRight(sortMark("record", sort == sortByRecord, sortDesc), walColRecord) + "  " +
 		padRight(sortMark("fpi", sort == sortByFPI, sortDesc), walColFPI) + "  " +
 		padRight(sortMark("count", sort == sortByCount, sortDesc), walColCount) + "  " +
 		"  " + sortMark("resource manager", sort == sortByName, sortDesc)
@@ -291,12 +291,12 @@ const walRecTypePctW = 6
 // Source is pg_get_wal_stats with per_record=true, already filtered to this
 // rmgr and sorted biggest-combined-first by the query.
 func (m *Model) renderWALRecTypeStats(s *screen) string {
-	stats := s.walRecTypeStats
+	stats := s.wal.recTypeStats
 	mu := styleMuted.Render
 	indent := strings.Repeat(" ", 8)
 
 	title := "  " + styleHeader.Render(" by record-type ") + "  " +
-		mu("WAL written per ") + styleSelected.Render(s.walRmgr) +
+		mu("WAL written per ") + styleSelected.Render(s.wal.rmgr) +
 		mu(fmt.Sprintf(" operation in this window  ·  %d types", len(stats)))
 
 	header := indent +
@@ -474,19 +474,19 @@ func (m *Model) renderWALRelationsHeader(s *screen) string {
 		mu("WAL generated per table/index in this window  ·  ") +
 		styleSelected.Render(humanize.Bytes(combined)) + mu(" total · fpi ") + share +
 		mu("  ·  ") + styleBadge.Render("↵") + mu(" block refs")
-	// Names resolve only for the connected database (pg_filenode_relation is
-	// database-local), but WAL is cluster-wide — rows for other databases fall
-	// back to "relfilenode N". Flag it so the numeric rows don't read as a bug.
+	// Other databases' names are resolved through their own pools, so what is
+	// left numeric is either dropped or in a database pgdu could not connect to.
+	// Flag it so the numeric rows don't read as a bug.
 	if unresolved > 0 {
 		header += "\n" + strings.Repeat(" ", 8) +
-			mu(fmt.Sprintf("%d shown as relfilenode N — connect to that db (e.g. -d %s) to resolve names",
+			mu(fmt.Sprintf("%d shown as relfilenode N — dropped since, or pgdu cannot connect to their db (e.g. %s)",
 				unresolved, walFirstOtherDB(s)))
 	}
 	return header
 }
 
 // walFirstOtherDB returns the database name of the first relation whose name
-// didn't resolve, to seed the "-d <db>" hint. Falls back to "<db>" when even
+// didn't resolve, to seed the header hint. Falls back to "<db>" when even
 // the db name is unknown (shared catalog / dropped, reldatabase 0).
 func walFirstOtherDB(s *screen) string {
 	for _, it := range s.items {
@@ -512,7 +512,7 @@ func renderWALRelationsListHeader(sort sortMode, sortDesc bool, barW int) string
 		padRight(sortMark("combined", sort == sortBySize, sortDesc), walRelCombinedColW) + "  " +
 		padRight(sortMark("fpi", sort == sortByFPI, sortDesc), walRelFPIColW) + "  " +
 		padRight(sortMark("records", sort == sortByCount, sortDesc), walRelRecColW) + "  " +
-		padRight("pages", walRelBlkColW) + "  " +
+		padRight(sortMark("pages", sort == sortByPages, sortDesc), walRelBlkColW) + "  " +
 		"  " + sortMark("relation", sort == sortByName, sortDesc)
 	return styleMuted.Render(line)
 }
@@ -595,7 +595,9 @@ func (m *Model) renderWALInfo(height int) string {
 	b.WriteString("    " + padRight("combined", 10) + mu("record + FPI bytes — the total WAL volume this rmgr produced") + "\n")
 	b.WriteString("    " + padRight("record", 10) + mu("bytes spent on record data alone") + "\n")
 	b.WriteString("    " + padRight("fpi", 10) + mu("bytes spent on full-page images") + "\n")
-	b.WriteString("    " + padRight("count", 10) + mu("number of WAL records this rmgr emitted in the window") + "\n\n")
+	b.WriteString("    " + padRight("count", 10) + mu("number of WAL records this rmgr emitted in the window") + "\n")
+	b.WriteString("    " + mu("every column sorts: ") + styleBadge.Render("←") + mu("/") + styleBadge.Render("→") +
+		mu(" cycle combined → record → fpi → count → name; the header marks the active one") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" header ") + "  " +
 		mu("insert/flush LSN = current write position · segment = WAL file the head sits in") + "\n")
@@ -670,8 +672,8 @@ func (m *Model) renderWALBlocksInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" block reference ") + "  " +
 		mu("rel <relation>/<fork> blk <n> identifies the exact page touched") + "\n")
-	b.WriteString("    " + padRight("relation", 12) + mu("name resolved from relfilenode via pg_filenode_relation; falls back to the raw") + "\n")
-	b.WriteString("    " + strings.Repeat(" ", 12) + mu("relfilenode when the relation is in another database or has been dropped") + "\n")
+	b.WriteString("    " + padRight("relation", 12) + mu("name resolved from relfilenode via pg_filenode_relation (other databases via") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 12) + mu("their own connection); falls back to the raw relfilenode when dropped or unreachable") + "\n")
 	b.WriteString("    " + padRight("tid", 12) + mu("heap tuple id (block,offset) parsed from the record description, when present") + "\n")
 	b.WriteString("    " + padRight("fork", 12) +
 		mu("which fork: ") + styleBadge.Render("main") + mu(" heap/index data · ") +
@@ -728,10 +730,12 @@ func (m *Model) renderWALRelationsInfo(height int) string {
 	b.WriteString("    " + padRight("combined", 10) + mu("record + FPI bytes this relation contributed to the window") + "\n")
 	b.WriteString("    " + padRight("fpi", 10) + mu("full-page-image bytes — the write-amplification share of this relation") + "\n")
 	b.WriteString("    " + padRight("records", 10) + mu("distinct WAL records that touched the relation") + "\n")
-	b.WriteString("    " + padRight("pages", 10) + mu("distinct (fork, block) pages those records modified") + "\n\n")
+	b.WriteString("    " + padRight("pages", 10) + mu("distinct (fork, block) pages those records modified") + "\n")
+	b.WriteString("    " + mu("every column sorts: ") + styleBadge.Render("←") + mu("/") + styleBadge.Render("→") +
+		mu(" cycle combined → fpi → records → pages → name; the header marks the active one") + "\n\n")
 
 	b.WriteString("  " + mu("Enter drills into the relation's individual block references across the window (FPI-heaviest") + "\n")
-	b.WriteString("  " + mu("first); a relation that resolves to a dropped/other-database relfilenode shows the number.") + "\n")
+	b.WriteString("  " + mu("first); a relation whose relfilenode was dropped or whose db is unreachable shows the number.") + "\n")
 
 	return padInfo(&b, height)
 }

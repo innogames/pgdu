@@ -10,16 +10,14 @@ import (
 func (m *Model) pgbOverviewScreen(inst pg.PgBouncerInstance) *screen {
 	return &screen{
 		level: levelPgBouncer, title: inst.Name, tool: toolPgBouncer, db: m.client.DefaultDB(),
-		pgbInst: &inst, sort: sortByName, loading: true,
-	}
+		pgb: pgbState{inst: &inst}, sort: sortByName, loading: true}
 }
 
 // pgbShowScreen is one SHOW table of an instance.
 func (m *Model) pgbShowScreen(parent *screen, show pgbShow) *screen {
 	return &screen{
 		level: levelPgBouncerShow, title: show.spec().title, tool: toolPgBouncer, db: parent.db,
-		pgbInst: parent.pgbInst, pgbShow: show, diagBarCol: -1, loading: true,
-	}
+		pgb: pgbState{inst: parent.pgb.inst, show: show}, diagBarCol: -1, loading: true}
 }
 
 func (m *Model) onPgbDiscovered(msg pgbDiscoveredMsg) tea.Cmd {
@@ -29,8 +27,8 @@ func (m *Model) onPgbDiscovered(msg pgbDiscoveredMsg) tea.Cmd {
 	}
 	s.loading = false
 	s.loaded = true
-	s.pgbInsts = msg.insts
-	s.pgbProbes = msg.probes
+	s.pgb.insts = msg.insts
+	s.pgb.probes = msg.probes
 	s.diagCols = pgbInstanceColumns()
 	s.diagBarCol = -1
 	if s.diagCols != nil && s.items == nil {
@@ -44,8 +42,8 @@ func (m *Model) onPgbDiscovered(msg pgbDiscoveredMsg) tea.Cmd {
 	}
 	// One reachable instance: skip the list (it stays on the stack for q/Esc).
 	// An unreachable one stays on the list, whose hint line explains why.
-	if len(msg.insts) == 1 && len(msg.probes) == 1 && msg.probes[0].Err == nil && m.top() == s && !s.pgbAutoDrilled {
-		s.pgbAutoDrilled = true
+	if len(msg.insts) == 1 && len(msg.probes) == 1 && msg.probes[0].Err == nil && m.top() == s && !s.pgb.autoDrilled {
+		s.pgb.autoDrilled = true
 		m.stack = append(m.stack, m.pgbOverviewScreen(msg.insts[0]))
 		return m.loadCurrent()
 	}
@@ -54,11 +52,11 @@ func (m *Model) onPgbDiscovered(msg pgbDiscoveredMsg) tea.Cmd {
 
 func (m *Model) onPgbProbed(msg pgbProbedMsg) tea.Cmd {
 	s := m.findLevel(levelPgBouncers)
-	if s == nil || len(msg.probes) != len(s.pgbInsts) {
+	if s == nil || len(msg.probes) != len(s.pgb.insts) {
 		return nil
 	}
-	s.pgbProbes = msg.probes
-	s.items = pgbInstanceItems(s.pgbInsts, msg.probes)
+	s.pgb.probes = msg.probes
+	s.items = pgbInstanceItems(s.pgb.insts, msg.probes)
 	s.diagMetricsDirty = true
 	m.applySort(s)
 	return nil
@@ -66,17 +64,17 @@ func (m *Model) onPgbProbed(msg pgbProbedMsg) tea.Cmd {
 
 func (m *Model) onPgbOverviewLoaded(msg pgbOverviewLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelPgBouncer)
-	if s == nil || s.pgbInst == nil || s.pgbInst.Key() != msg.key {
+	if s == nil || s.pgb.inst == nil || s.pgb.inst.Key() != msg.key {
 		return nil
 	}
 	s.loading = false
 	s.loaded = true
-	s.pgbErr = msg.err
+	s.pgb.err = msg.err
 	if msg.err == nil {
-		s.pgbOverview = msg.ov
+		s.pgb.overview = msg.ov
 	}
 	if len(s.items) == 0 {
-		s.items = pgbMenuItems(*s.pgbInst)
+		s.items = pgbMenuItems(*s.pgb.inst)
 		s.itemsRev++
 	}
 	return nil
@@ -84,12 +82,12 @@ func (m *Model) onPgbOverviewLoaded(msg pgbOverviewLoadedMsg) tea.Cmd {
 
 func (m *Model) onPgbShowLoaded(msg pgbShowLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelPgBouncerShow)
-	if s == nil || s.pgbInst == nil || s.pgbInst.Key() != msg.key || s.pgbShow != msg.show {
+	if s == nil || s.pgb.inst == nil || s.pgb.inst.Key() != msg.key || s.pgb.show != msg.show {
 		return nil
 	}
 	s.loading = false
 	s.loaded = true
-	s.pgbErr = msg.err
+	s.pgb.err = msg.err
 	if msg.err != nil {
 		return nil
 	}
@@ -120,12 +118,12 @@ func (m *Model) onPgbTick() tea.Cmd {
 	}
 	switch top.level {
 	case levelPgBouncers:
-		if len(top.pgbInsts) == 0 {
+		if len(top.pgb.insts) == 0 {
 			return next
 		}
-		return tea.Batch(m.probePgBouncersCmd(top.pgbInsts), next)
+		return tea.Batch(m.probePgBouncersCmd(top.pgb.insts), next)
 	case levelPgBouncer:
-		return tea.Batch(m.loadPgbOverviewCmd(*top.pgbInst), next)
+		return tea.Batch(m.loadPgbOverviewCmd(*top.pgb.inst), next)
 	}
-	return tea.Batch(m.loadPgbShowCmd(*top.pgbInst, top.pgbShow), next)
+	return tea.Batch(m.loadPgbShowCmd(*top.pgb.inst, top.pgb.show), next)
 }

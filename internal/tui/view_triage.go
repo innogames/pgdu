@@ -47,7 +47,7 @@ func (m *Model) renderTriageList(s *screen, height int) string {
 	var b strings.Builder
 
 	crit, warn := 0, 0
-	for _, r := range s.triageResults {
+	for _, r := range s.triage.results {
 		switch r.Severity {
 		case pg.SevCrit:
 			crit++
@@ -66,8 +66,13 @@ func (m *Model) renderTriageList(s *screen, height int) string {
 			}
 			summary += triageGlyph(pg.SevWarn) + " " + lipgloss.NewStyle().Foreground(colorAccent).Render(fmt.Sprintf("%d warning(s)", warn))
 		}
-	} else {
+	} else if len(s.triage.pending) == 0 {
 		summary = triageGlyph(pg.SevOK) + " " + styleMuted.Render("all checks ok")
+	} else {
+		summary = triageGlyph(pg.SevOK) + " " + styleMuted.Render("nothing flagged so far")
+	}
+	if n := len(s.triage.pending); n > 0 {
+		summary += styleMuted.Render(fmt.Sprintf("  ·  %d of %d checks done ", len(s.triage.results), len(s.triage.names))) + m.spinner.View()
 	}
 	b.WriteString("  " + summary + "\n")
 	height--
@@ -97,9 +102,12 @@ func (m *Model) renderTriageList(s *screen, height int) string {
 		}
 		glyph := triageGlyph(pg.SevOK)
 		hint := ""
-		if r, ok := it.data.(pg.TriageResult); ok {
+		switch r := it.data.(type) {
+		case pg.TriageResult:
 			glyph = triageGlyph(r.Severity)
 			hint = "  " + styleMuted.Render("↵ "+triageTargetLabel(r))
+		case triagePending:
+			glyph = m.spinner.View()
 		}
 		line := cursor + glyph + " " + name + "  " + styleMuted.Render(it.detail) + hint
 		b.WriteString(truncateToWidth(line, m.width) + "\n")

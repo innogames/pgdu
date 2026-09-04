@@ -7,7 +7,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
-	"pgdu/internal/sysmem"
 )
 
 // Synthetic sentinel paths for the two timeline anchors in the L snapshots browser.
@@ -54,28 +53,6 @@ type bloatFilledMsg struct {
 	table pg.Table
 	parts []pg.Part
 	err   error
-}
-type bufferStatsLoadedMsg struct {
-	db, schema string
-	stats      []pg.TableBufferStat
-	err        error
-}
-type bufferSummaryLoadedMsg struct {
-	db      string
-	summary pg.BufferCacheSummary
-	err     error
-}
-type bufferDetailLoadedMsg struct {
-	db        string
-	oid       uint32
-	counts    []pg.BufferUsageCount
-	blockSize int64
-	err       error
-}
-type shmemLoadedMsg struct {
-	db     string
-	allocs []pg.ShmemAllocation
-	err    error
 }
 type columnsLoadedMsg struct {
 	tableOID uint32
@@ -255,49 +232,6 @@ type diagnosticLoadedMsg struct {
 	result *pg.DiagResult
 	err    error
 }
-type walOverviewLoadedMsg struct {
-	db    string
-	start string // resolved window start LSN
-	end   string // resolved window end LSN
-	stats []pg.WALRmgrStat
-	err   error
-}
-type walSummaryLoadedMsg struct {
-	db      string
-	summary pg.WALSummary
-	err     error
-}
-type walRecordsLoadedMsg struct {
-	db        string
-	rmgr      string
-	records   []pg.WALRecord
-	typeStats []pg.WALRmgrStat // per-record-type breakdown for the summary table
-	err       error
-}
-type walBlocksLoadedMsg struct {
-	db     string
-	recLSN string
-	blocks []pg.WALBlockRef
-	err    error
-}
-type walCheckpointLoadedMsg struct {
-	db   string
-	info pg.WALCheckpointInfo
-	err  error
-}
-type walRelationsLoadedMsg struct {
-	db    string
-	start string
-	end   string
-	rels  []pg.WALRelStat
-	err   error
-}
-type walRelBlocksLoadedMsg struct {
-	db          string
-	relfilenode uint32
-	blocks      []pg.WALBlockRef
-	err         error
-}
 
 // --- commands ---
 
@@ -357,50 +291,6 @@ func (m *Model) loadColumnsCmd(t pg.Table) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		cols, err := m.client.ListColumns(ctx, t)
 		return columnsLoadedMsg{tableOID: t.OID, columns: cols, err: err}
-	})
-}
-
-func (m *Model) loadBufferStatsCmd(db, schema string) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		stats, err := m.client.TableBufferStats(ctx, db, schema)
-		return bufferStatsLoadedMsg{db: db, schema: schema, stats: stats, err: err}
-	})
-}
-
-func (m *Model) loadBufferSummaryCmd(db string) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		sum, err := m.client.BufferCacheSummary(ctx, db)
-		if err == nil {
-			mem := sysmem.Read()
-			sum.ServerMemBytes = mem.Total
-			sum.ServerMemAvailableBytes = mem.Available
-			sum.ServerMemFreeBytes = mem.Free
-		}
-		return bufferSummaryLoadedMsg{db: db, summary: sum, err: err}
-	})
-}
-
-func (m *Model) loadBufferDetailCmd(db string, oid uint32) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		counts, blockSize, err := m.client.TableBufferUsageCounts(ctx, db, oid)
-		return bufferDetailLoadedMsg{db: db, oid: oid, counts: counts, blockSize: blockSize, err: err}
-	})
-}
-
-func (m *Model) loadShmemCmd(db string) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		allocs, err := m.client.ShmemAllocations(ctx, db)
-		return shmemLoadedMsg{db: db, allocs: allocs, err: err}
-	})
-}
-
-// loadDescribeBuffersCmd fetches the single-table cache-footprint stat for the
-// describe-table view. Runs separately from the describe load so a missing
-// pg_buffercache (or any buffer error) never breaks the columns panel.
-func (m *Model) loadDescribeBuffersCmd(db string, oid uint32) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		stat, err := m.client.TableBufferStatByOID(ctx, db, oid)
-		return describeBuffersLoadedMsg{db: db, oid: oid, stat: stat, err: err}
 	})
 }
 
@@ -736,62 +626,3 @@ func (m *Model) loadDiagnosticAllDBsCmd(d pg.Diagnostic) tea.Cmd {
 // interesting, small enough that pg_get_wal_stats / _records_info stay snappy
 // under the 30 s query cap on a busy server.
 const walWindowBytes int64 = 16 << 20
-
-func (m *Model) loadWALOverviewCmd(db string) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		start, end, err := m.client.WALWindow(ctx, db, walWindowBytes)
-		if err != nil {
-			return walOverviewLoadedMsg{db: db, err: err}
-		}
-		stats, err := m.client.WALRmgrStats(ctx, db, start, end)
-		return walOverviewLoadedMsg{db: db, start: start, end: end, stats: stats, err: err}
-	})
-}
-
-func (m *Model) loadWALSummaryCmd(db string) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		sum, err := m.client.WALOverview(ctx, db)
-		return walSummaryLoadedMsg{db: db, summary: sum, err: err}
-	})
-}
-
-func (m *Model) loadWALRecordsCmd(db, start, end, rmgr string) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		recs, err := m.client.WALRecords(ctx, db, start, end, rmgr)
-		if err != nil {
-			return walRecordsLoadedMsg{db: db, rmgr: rmgr, err: err}
-		}
-		// Best-effort: the per-type summary is decoration over the record
-		// list, so a failure here shouldn't drop the whole load.
-		stats, _ := m.client.WALRecordTypeStats(ctx, db, start, end, rmgr)
-		return walRecordsLoadedMsg{db: db, rmgr: rmgr, records: recs, typeStats: stats}
-	})
-}
-
-func (m *Model) loadWALBlocksCmd(db, recLSN, recEnd string) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		blocks, err := m.client.WALBlocks(ctx, db, recLSN, recEnd)
-		return walBlocksLoadedMsg{db: db, recLSN: recLSN, blocks: blocks, err: err}
-	})
-}
-
-func (m *Model) loadWALCheckpointCmd(db string) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		info, err := m.client.WALCheckpoint(ctx, db)
-		return walCheckpointLoadedMsg{db: db, info: info, err: err}
-	})
-}
-
-func (m *Model) loadWALRelationsCmd(db, start, end string) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		rels, err := m.client.WALRelStats(ctx, db, start, end)
-		return walRelationsLoadedMsg{db: db, start: start, end: end, rels: rels, err: err}
-	})
-}
-
-func (m *Model) loadWALRelBlocksCmd(db, start, end string, relfilenode uint32) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		blocks, err := m.client.WALRelBlocks(ctx, db, start, end, relfilenode)
-		return walRelBlocksLoadedMsg{db: db, relfilenode: relfilenode, blocks: blocks, err: err}
-	})
-}

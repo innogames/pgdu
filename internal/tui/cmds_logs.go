@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
+	"pgdu/internal/pglog"
 )
 
 // logFilesLoadedMsg delivers the picker's candidates. Discovery never fails as
@@ -21,7 +22,7 @@ type logFilesLoadedMsg struct {
 // marks a live-tail re-read (keep the cursor where it is).
 type logLoadedMsg struct {
 	path    string
-	report  *pg.LogReport
+	report  *pglog.Report
 	err     error
 	refresh bool
 }
@@ -42,13 +43,13 @@ const logMaxHostLookups = 200
 // cache does not have yet. nil when the hostname column is hidden, the pane is
 // not a table (timeline/slow), or everything is already known.
 func (m *Model) logHostsCmd(s *screen) tea.Cmd {
-	if !s.logView.table() || s.logReport == nil || indexOfLogCol(s.logCols, logColHostname) < 0 {
+	if !s.log.view.table() || s.log.report == nil || indexOfCol(s.log.cols, logColHostname) < 0 {
 		return nil
 	}
 	seen := map[string]bool{}
 	var ips []string
-	for i := range s.logReport.Entries {
-		e := &s.logReport.Entries[i]
+	for i := range s.log.report.Entries {
+		e := &s.log.report.Entries[i]
 		if len(e.Host) == 0 {
 			continue
 		}
@@ -56,7 +57,7 @@ func (m *Model) logHostsCmd(s *screen) tea.Cmd {
 		if h == "[local]" || seen[h] {
 			continue
 		}
-		if _, ok := s.logHosts[h]; ok {
+		if _, ok := s.log.hosts[h]; ok {
 			continue
 		}
 		seen[h] = true
@@ -100,12 +101,12 @@ func (m *Model) discoverLogsCmd() tea.Cmd {
 // takes the incremental path (append-only re-read from the last entry); a
 // first load, a window change or a rotation go through the full LoadLog.
 func (m *Model) loadLogCmd(s *screen, refresh bool) tea.Cmd {
-	src := s.logSrc
+	src := s.log.src
 	if src == nil {
 		return nil
 	}
-	prev := s.logReport
-	window := s.logWindow
+	prev := s.log.report
+	window := s.log.window
 	path := src.Info().Path
 	timeout := queryTimeout
 	if window <= 0 || window > 128<<20 {
@@ -115,12 +116,12 @@ func (m *Model) loadLogCmd(s *screen, refresh bool) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		settings := m.client.LogSettings(ctx)
-		loc := pg.LogLocation(settings)
+		loc := pglog.Location(settings)
 		if refresh && prev != nil {
-			r, err := pg.RefreshLog(ctx, prev, src, loc, pg.AggOptions{})
+			r, err := pglog.Refresh(ctx, prev, src, loc, pglog.AggOptions{})
 			return logLoadedMsg{path: path, report: r, err: err, refresh: true}
 		}
-		r, err := pg.LoadLog(ctx, src, settings["log_line_prefix"], loc, window, pg.AggOptions{})
+		r, err := pglog.Load(ctx, src, settings["log_line_prefix"], loc, window, pglog.AggOptions{})
 		return logLoadedMsg{path: path, report: r, err: err}
 	}
 }

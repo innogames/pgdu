@@ -36,21 +36,21 @@ func (m *Model) openTupleLayout(s *screen, lp int32) tea.Cmd {
 // issues the load — the one place the tupleAttrs* fields are armed, shared by
 // the overlay's open and space-reload paths.
 func (m *Model) reloadTupleAttrs(s *screen, lp int32) tea.Cmd {
-	s.tupleAttrsLP = lp
-	s.tupleAttrs = nil
-	s.tupleAttrsErr = nil
-	s.tupleAttrsLoading = true
-	return m.loadTupleAttrsCmd(s.table, s.heapPageBlkno, lp)
+	s.pages.tupleAttrsLP = lp
+	s.pages.tupleAttrs = nil
+	s.pages.tupleAttrsErr = nil
+	s.pages.tupleAttrsLoading = true
+	return m.loadTupleAttrsCmd(s.table, s.pages.heapPageBlkno, lp)
 }
 
 // closeTupleLayout dismisses the modal and drops the loaded split so a stale
 // tupleAttrsLoadedMsg can't repopulate a closed overlay.
 func (m *Model) closeTupleLayout(s *screen) {
 	m.showTupleLayout = false
-	s.tupleAttrsLP = 0
-	s.tupleAttrs = nil
-	s.tupleAttrsErr = nil
-	s.tupleAttrsLoading = false
+	s.pages.tupleAttrsLP = 0
+	s.pages.tupleAttrs = nil
+	s.pages.tupleAttrsErr = nil
+	s.pages.tupleAttrsLoading = false
 }
 
 // handleTupleLayoutKey drives the modal tuple byte-layout overlay (Enter on a
@@ -95,8 +95,7 @@ func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 			db:      s.db,
 			schema:  s.schema,
 			loading: true,
-			table:   t.table,
-		}
+			table:   t.table}
 		m.stack = append(m.stack, next)
 		return m.loadDescribeTableCmd(t.table)
 	case key.Matches(msg, m.keys.Up):
@@ -120,7 +119,7 @@ func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, m.keys.ReverseSort):
 		m.tupleLayoutSortDesc = !m.tupleLayoutSortDesc
 	case key.Matches(msg, m.keys.Refresh):
-		return m.reloadTupleAttrs(s, s.tupleAttrsLP)
+		return m.reloadTupleAttrs(s, s.pages.tupleAttrsLP)
 	}
 	return nil
 }
@@ -130,11 +129,11 @@ func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 // cursor indexes the sorted legend, so order[cursor] gives the physical segment.
 // Reports false when there's no tuple/segment under the cursor.
 func (m *Model) tupleLayoutSegUnderCursor(s *screen) (tupleSeg, bool) {
-	t := s.tupleByLP(s.tupleAttrsLP)
-	if t == nil || len(s.tupleAttrs) == 0 {
+	t := s.tupleByLP(s.pages.tupleAttrsLP)
+	if t == nil || len(s.pages.tupleAttrs) == 0 {
 		return tupleSeg{}, false
 	}
-	segs, _ := computeTupleLayout(*t, s.tupleAttrs)
+	segs, _ := computeTupleLayout(*t, s.pages.tupleAttrs)
 	order := sortedTupleSegIdx(segs, m.tupleLayoutSort, m.tupleLayoutSortDesc)
 	if m.tupleLayoutCursor < 0 || m.tupleLayoutCursor >= len(order) {
 		return tupleSeg{}, false
@@ -163,11 +162,10 @@ func (m *Model) openToastChunkNav(s *screen, toastOID, chunkID uint32) tea.Cmd {
 	next := &screen{
 		level: levelHeapPages, title: "toast pages", tool: s.tool,
 		db: s.db, schema: "pg_toast",
-		table:           pg.Table{DB: s.db, OID: toastOID, Schema: "pg_toast"},
-		loading:         true,
-		heapWindowStart: 0, heapWindowCount: heapWindowDefault,
-		sort: sortByBlkno, sortDesc: sortByBlkno.defaultDesc(),
-	}
+		table:   pg.Table{DB: s.db, OID: toastOID, Schema: "pg_toast"},
+		loading: true,
+		pages:   pageState{heapWindowStart: 0, heapWindowCount: heapWindowDefault},
+		sort:    sortByBlkno, sortDesc: sortByBlkno.defaultDesc()}
 	m.stack = append(m.stack, next)
 	return m.resolveToastTargetCmd(s.db, toastOID, chunkID)
 }

@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -64,17 +63,15 @@ func (ctx actCtx) toastOwner(db, mainTable string) string {
 	return ctx.toast[toastKey(db, rn)]
 }
 
-// actColDesc describes one Activity tool column: stable id, header label, render
-// kind, whether shown by default, whether it's mandatory, a one-line description
-// for the C picker, and the cell builder.
-type actColDesc struct {
-	id        actColID
-	name      string
-	kind      pg.DiagColumnKind
-	defaultOn bool
-	mandatory bool   // can't be hidden
-	desc      string // one-line explanation shown in the C picker
-	cell      func(pg.ActivityRow, actCtx) pg.DiagCell
+// actColDesc is an Activity column; actSpec binds the registry to its picker
+// state (Model.actTable). The sort falls back to query_age (longest-running first).
+type actColDesc = colDesc[actColID, pg.ActivityRow, actCtx]
+
+var actSpec = colSpec[actColID, pg.ActivityRow, actCtx]{
+	registry:    actColumnRegistry,
+	prefsKey:    colPrefsActivity,
+	defaultSort: actColQueryAge,
+	title:       "choose which columns the activity table shows",
 }
 
 // actColumnRegistry is the single source of truth for the Activity table's columns
@@ -245,72 +242,14 @@ func actColumnRegistry() []actColDesc {
 	}
 }
 
-// indexOfActCol returns the position of id within descs, or -1 when absent.
-func indexOfActCol(descs []actColDesc, id actColID) int {
-	return slices.IndexFunc(descs, func(d actColDesc) bool { return d.id == id })
-}
-
-// actColEnabled reports whether column id should be shown. Falls back to def
-// (the registry default) when the visibility set has no explicit entry.
-func (m *Model) actColEnabled(id actColID, def bool) bool {
-	if v, ok := m.actColsVisible[id]; ok {
-		return v
-	}
-	return def
-}
-
-// ensureActColsInit lazily materialises the visibility set from the registry
-// defaults so the C picker shows concrete checkbox state.
-func (m *Model) ensureActColsInit() {
-	if m.actColsVisible != nil {
-		return
-	}
-	m.actColsVisible = make(map[actColID]bool)
-	for _, d := range actColumnRegistry() {
-		m.actColsVisible[d.id] = d.defaultOn || d.mandatory
-	}
-}
-
-// visibleActCols projects the registry to the columns enabled by the user, in
-// registry order. Mandatory columns are always kept.
-func (m *Model) visibleActCols() []actColDesc {
-	var out []actColDesc
-	for _, d := range actColumnRegistry() {
-		if d.mandatory || m.actColEnabled(d.id, d.defaultOn) {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-// actDiagColumnsFrom maps projected activity descriptors to the renderer's
-// column schema (parallel to actCellsFor).
-func actDiagColumnsFrom(descs []actColDesc) []pg.DiagColumn {
-	cols := make([]pg.DiagColumn, len(descs))
-	for i, d := range descs {
-		cols[i] = pg.DiagColumn{Name: d.name, Kind: d.kind}
-	}
-	return cols
-}
-
-// actCellsFor builds one row's cells over the projected descriptors, keeping
-// cells parallel to actDiagColumnsFrom(descs) by construction.
-func actCellsFor(descs []actColDesc, r pg.ActivityRow, ctx actCtx) []pg.DiagCell {
-	cells := make([]pg.DiagCell, len(descs))
-	for i, d := range descs {
-		cells[i] = d.cell(r, ctx)
-	}
-	return cells
-}
-
 // buildActivityItems converts ActivityRows into generic-table rows using the
 // supplied context (resolved hostnames + proc stats). Returns items and the
 // projected column descriptors (parallel to each item's cells).
 func (m *Model) buildActivityItems(rows []pg.ActivityRow, ctx actCtx) ([]item, []actColDesc) {
-	descs := m.visibleActCols()
+	descs := actSpec.visibleCols(&m.actTable, ctx)
 	items := make([]item, len(rows))
 	for i, r := range rows {
-		cells := actCellsFor(descs, r, ctx)
+		cells := cellsFor(descs, r, ctx)
 		// item.name is the space-joined cell display so the fuzzy filter can
 		// match any column value.
 		parts := make([]string, len(cells))
@@ -376,35 +315,14 @@ func visibleActRows(rows []pg.ActivityRow, verbose bool, filter pg.ActivityFilte
 // whenever actVerbose changes or a fresh snapshot arrives so the two code paths
 // share exactly the same projection + sort logic.
 func (m *Model) rebuildActivityItems(s *screen) {
-	rows := visibleActRows(s.actRows, s.actVerbose, s.actFilter)
-	ctx := actCtx{hosts: s.actHosts, proc: m.actProcStats, toast: s.actToast, progress: s.actProgressPct}
+	rows := visibleActRows(s.act.rows, s.act.verbose, s.act.filter)
+	ctx := actCtx{hosts: s.act.hosts, proc: m.actProcStats, toast: s.act.toast, progress: s.act.progressPct}
 	items, descs := m.buildActivityItems(rows, ctx)
-	s.actCols = descs
-	s.diagCols = actDiagColumnsFrom(descs)
+	s.act.cols = descs
+	s.diagCols = diagColumnsFrom(descs)
 	s.diagBarCol = -1 // no headline bar on the activity table
-	m.syncActSort(s, descs)
+	actSpec.syncSort(&m.actTable, s, descs)
 	s.items = items
 	s.diagMetricsDirty = true
 	m.applySort(s)
-}
-
-// syncActSort maps the stable actSortColID to the projected index diagSortCol.
-// If the active sort column was hidden, falls back to query_age desc, then
-// first column. Writes the resolved id back to m.actSortColID.
-func (m *Model) syncActSort(s *screen, descs []actColDesc) {
-	if i := indexOfActCol(descs, m.actSortColID); i >= 0 {
-		s.diagSortCol = i
-		return
-	}
-	// Preferred default: query_age descending (longest-running first).
-	if i := indexOfActCol(descs, actColQueryAge); i >= 0 {
-		s.diagSortCol = i
-		s.sortDesc = true
-		m.actSortColID = actColQueryAge
-		return
-	}
-	s.diagSortCol = 0
-	if len(descs) > 0 {
-		m.actSortColID = descs[0].id
-	}
 }

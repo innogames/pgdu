@@ -1,4 +1,4 @@
-package pg
+package pglog
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// logField names the LogEntry text field a prefixed line (or its continuation
+// logField names the Entry text field a prefixed line (or its continuation
 // lines) is written to.
 type logField int
 
@@ -25,7 +25,7 @@ const (
 	fieldLocation
 )
 
-func (e *LogEntry) fieldPtr(f logField) *[]byte {
+func (e *Entry) fieldPtr(f logField) *[]byte {
 	switch f {
 	case fieldDetail:
 		return &e.Detail
@@ -43,16 +43,16 @@ func (e *LogEntry) fieldPtr(f logField) *[]byte {
 	return &e.Message
 }
 
-// LogParser turns raw log bytes into LogEntries. It is resumable: a second
+// Parser turns raw log bytes into LogEntries. It is resumable: a second
 // Feed continues the entry left open by the first, which is how an incremental
 // refresh re-parses from the start of the last (possibly unfinished) entry
 // rather than re-reading the whole window.
-type LogParser struct {
+type Parser struct {
 	m      *prefixMatcher
-	format LogFormat
+	format Format
 	loc    *time.Location
 
-	entries []LogEntry
+	entries []Entry
 	// open is the entry receiving continuation lines, -1 when none; openField
 	// is the field they extend and openBuf/openStart locate that field's start
 	// so the extension stays a re-slice of the same buffer (zero-copy).
@@ -69,27 +69,27 @@ type LogParser struct {
 	unparsed int
 }
 
-// NewLogParser builds a parser for one file. m may be nil for csv/json.
-func NewLogParser(format LogFormat, m *prefixMatcher, loc *time.Location) *LogParser {
+// NewParser builds a parser for one file. m may be nil for csv/json.
+func NewParser(format Format, m *prefixMatcher, loc *time.Location) *Parser {
 	if loc == nil {
 		loc = time.UTC
 	}
-	return &LogParser{m: m, format: format, loc: loc, open: -1, lastPrimary: make(map[string]int)}
+	return &Parser{m: m, format: format, loc: loc, open: -1, lastPrimary: make(map[string]int)}
 }
 
 // Entries returns everything parsed so far.
-func (p *LogParser) Entries() []LogEntry { return p.entries }
+func (p *Parser) Entries() []Entry { return p.entries }
 
 // Lines is the number of physical lines fed.
-func (p *LogParser) Lines() int { return p.lines }
+func (p *Parser) Lines() int { return p.lines }
 
 // Unparsed counts continuation-looking lines that had no entry to extend.
-func (p *LogParser) Unparsed() int { return p.unparsed }
+func (p *Parser) Unparsed() int { return p.unparsed }
 
 // LastEntryOff returns the window offset of the last primary entry, or -1.
 // An incremental refresh re-reads from here so a still-growing entry (its
 // STATEMENT lines may not be flushed yet) is parsed whole.
-func (p *LogParser) LastEntryOff() int64 {
+func (p *Parser) LastEntryOff() int64 {
 	if len(p.entries) == 0 {
 		return -1
 	}
@@ -98,7 +98,7 @@ func (p *LogParser) LastEntryOff() int64 {
 
 // TruncateLast drops the last entry so the caller can re-feed it. Attachment
 // bookkeeping pointing at it is cleared.
-func (p *LogParser) TruncateLast() {
+func (p *Parser) TruncateLast() {
 	if len(p.entries) == 0 {
 		return
 	}
@@ -113,18 +113,18 @@ func (p *LogParser) TruncateLast() {
 }
 
 // Feed parses buf, whose first byte sits at window offset base.
-func (p *LogParser) Feed(buf []byte, base int64) {
+func (p *Parser) Feed(buf []byte, base int64) {
 	switch p.format {
-	case LogFormatCSV:
+	case FormatCSV:
 		p.feedCSV(buf, base)
-	case LogFormatJSON:
+	case FormatJSON:
 		p.feedJSON(buf, base)
 	default:
 		p.feedStderr(buf, base)
 	}
 }
 
-func (p *LogParser) feedStderr(buf []byte, base int64) {
+func (p *Parser) feedStderr(buf []byte, base int64) {
 	off := 0
 	for off < len(buf) {
 		end := bytes.IndexByte(buf[off:], '\n')
@@ -170,7 +170,7 @@ func (p *LogParser) feedStderr(buf []byte, base int64) {
 			continue
 		}
 
-		e := LogEntry{
+		e := Entry{
 			Off:      base + int64(off),
 			Time:     f.time,
 			PID:      f.pid,
@@ -201,7 +201,7 @@ func sameBacking(a, b []byte) bool {
 	return len(a) > 0 && len(b) > 0 && &a[0] == &b[0]
 }
 
-func (p *LogParser) sessionKey(f prefixFields) string {
+func (p *Parser) sessionKey(f prefixFields) string {
 	if len(f.session) > 0 {
 		return string(f.session)
 	}
@@ -215,7 +215,7 @@ func (p *LogParser) sessionKey(f prefixFields) string {
 // last primary, provided the session line number (when present) is later. A
 // missing primary — cut off by the window head — gets a synthetic orphan so the
 // detail is not lost.
-func (p *LogParser) primaryFor(f prefixFields) int {
+func (p *Parser) primaryFor(f prefixFields) int {
 	key := p.sessionKey(f)
 	if key != "" {
 		if idx, ok := p.lastPrimary[key]; ok {
@@ -229,7 +229,7 @@ func (p *LogParser) primaryFor(f prefixFields) int {
 		// primary, so the open entry is the best available guess.
 		return p.open
 	}
-	p.entries = append(p.entries, LogEntry{
+	p.entries = append(p.entries, Entry{
 		Time: f.time, PID: f.pid, Line: f.line, Session: f.session,
 		User: f.user, DB: f.db, Host: f.host, App: f.app,
 		Severity: SevLog, Category: CatOther, Orphan: true,
@@ -259,7 +259,7 @@ func attachmentField(tag []byte) (logField, bool) {
 	return fieldMessage, false
 }
 
-func severityOf(tag []byte) LogSeverity {
+func severityOf(tag []byte) Severity {
 	switch string(tag) {
 	case "ERROR":
 		return SevError
@@ -317,7 +317,7 @@ const (
 
 const csvTimeLayout = "2006-01-02 15:04:05.000 MST"
 
-func (p *LogParser) feedCSV(buf []byte, base int64) {
+func (p *Parser) feedCSV(buf []byte, base int64) {
 	r := csv.NewReader(bytes.NewReader(buf))
 	r.FieldsPerRecord = -1
 	r.LazyQuotes = true
@@ -343,7 +343,7 @@ func (p *LogParser) feedCSV(buf []byte, base int64) {
 			p.unparsed++
 			continue
 		}
-		e := LogEntry{
+		e := Entry{
 			Off:       base + off,
 			Time:      ts,
 			User:      []byte(rec[csvUser]),
@@ -398,7 +398,7 @@ type jsonLogLine struct {
 	FuncName  string `json:"func_name"`
 }
 
-func (p *LogParser) feedJSON(buf []byte, base int64) {
+func (p *Parser) feedJSON(buf []byte, base int64) {
 	off := 0
 	for off < len(buf) {
 		end := bytes.IndexByte(buf[off:], '\n')
@@ -421,7 +421,7 @@ func (p *LogParser) feedJSON(buf []byte, base int64) {
 			continue
 		}
 		ts, _ := time.ParseInLocation(csvTimeLayout, j.Timestamp, p.loc)
-		p.entries = append(p.entries, LogEntry{
+		p.entries = append(p.entries, Entry{
 			Off:       base + int64(off),
 			Time:      ts,
 			User:      []byte(j.User),
@@ -444,19 +444,19 @@ func (p *LogParser) feedJSON(buf []byte, base int64) {
 	}
 }
 
-// DetectLogFormat sniffs the first complete line of a window.
-func DetectLogFormat(buf []byte) LogFormat {
+// DetectFormat sniffs the first complete line of a window.
+func DetectFormat(buf []byte) Format {
 	if lines := sampleLines(buf, 1); len(lines) > 0 {
 		switch ln := lines[0]; {
 		case ln[0] == '{':
-			return LogFormatJSON
+			return FormatJSON
 		case csvHeadRe.Match(ln):
-			return LogFormatCSV
+			return FormatCSV
 		case pgbHeadRe.Match(ln):
-			return LogFormatPgBouncer
+			return FormatPgBouncer
 		}
 	}
-	return LogFormatStderr
+	return FormatStderr
 }
 
 var csvHeadRe = regexp.MustCompile(`^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} [A-Z0-9+\-]{1,6},`)
@@ -471,13 +471,13 @@ var (
 
 // Classify assigns every entry a category and extracts the per-category
 // fields. It runs once per entry after parsing and is safe to re-run.
-func Classify(entries []LogEntry) {
+func Classify(entries []Entry) {
 	for i := range entries {
 		classify(&entries[i])
 	}
 }
 
-func classify(e *LogEntry) {
+func classify(e *Entry) {
 	if e.Orphan {
 		e.Category = CatOther
 		return
@@ -527,6 +527,10 @@ func classify(e *LogEntry) {
 		if m := lockWaitRe.FindSubmatch(msg); m != nil {
 			e.LockWaitMs, _ = strconv.ParseFloat(string(m[1]), 64)
 		}
+	case bytes.HasPrefix(msg, []byte("stats: ")) && parsePgBouncerStats(e, msg):
+		// pgbouncer's periodic stats line: parsed into PoolerStats, category
+		// stays other so it never masquerades as a connection event.
+		e.Category = CatOther
 	case isPgBouncerSocketMsg(msg):
 		// pgbouncer's per-socket lines (login attempt, new connection to server,
 		// closing because: …) are connection lifecycle. Checked before the
@@ -540,9 +544,81 @@ func classify(e *LogEntry) {
 	}
 }
 
+// parsePgBouncerStats reads pgbouncer's "stats: 90 xacts/s, 1357 queries/s,
+// 0 client parses/s, 0 server parses/s, 0 binds/s, in 399055 B/s, out 1253187
+// B/s, xact 17861 us, query 242 us, wait 0 us" line. Fields are matched by
+// name, not position, so the shorter pre-1.18 line (no parses/binds) parses
+// too. Reports false unless at least the xacts and queries rates were found.
+func parsePgBouncerStats(e *Entry, msg []byte) bool {
+	st := &PgBouncerStats{}
+	var gotXacts, gotQueries bool
+	for tok := range bytes.SplitSeq(msg[len("stats: "):], []byte(", ")) {
+		f := bytes.Fields(tok)
+		switch {
+		case len(f) == 2 && bytes.HasSuffix(f[1], []byte("/s")):
+			// "<n> xacts/s" · "<n> queries/s" · "<n> binds/s"
+			n, err := strconv.ParseInt(string(f[0]), 10, 64)
+			if err != nil {
+				return false
+			}
+			switch string(f[1]) {
+			case "xacts/s":
+				st.XactsPerSec, gotXacts = n, true
+			case "queries/s":
+				st.QueriesPerSec, gotQueries = n, true
+			case "binds/s":
+				st.BindsPerSec = n
+			}
+		case len(f) == 3 && bytes.Equal(f[2], []byte("parses/s")):
+			// "<n> client parses/s" · "<n> server parses/s"
+			n, err := strconv.ParseInt(string(f[0]), 10, 64)
+			if err != nil {
+				return false
+			}
+			if string(f[1]) == "client" {
+				st.ClientParsesPerSec = n
+			} else {
+				st.ServerParsesPerSec = n
+			}
+		case len(f) == 3 && bytes.Equal(f[2], []byte("B/s")):
+			// "in <n> B/s" · "out <n> B/s"
+			n, err := strconv.ParseInt(string(f[1]), 10, 64)
+			if err != nil {
+				return false
+			}
+			if string(f[0]) == "in" {
+				st.InBytesPerSec = n
+			} else {
+				st.OutBytesPerSec = n
+			}
+		case len(f) == 3 && bytes.Equal(f[2], []byte("us")):
+			// "xact <n> us" · "query <n> us" · "wait <n> us"
+			n, err := strconv.ParseInt(string(f[1]), 10, 64)
+			if err != nil {
+				return false
+			}
+			switch string(f[0]) {
+			case "xact":
+				st.XactUs = n
+			case "query":
+				st.QueryUs = n
+			case "wait":
+				st.WaitUs = n
+			}
+		default:
+			return false
+		}
+	}
+	if !gotXacts || !gotQueries {
+		return false
+	}
+	e.PoolerStats = st
+	return true
+}
+
 // parseDuration handles "duration: 248.569 ms  execute <unnamed>/C_15: SQL",
 // "duration: 1.2 ms  statement: SQL" and the bare log_duration form.
-func parseDuration(e *LogEntry) {
+func parseDuration(e *Entry) {
 	rest := e.Message[len("duration: "):]
 	i := bytes.Index(rest, []byte(" ms"))
 	if i < 0 {
@@ -653,7 +729,7 @@ func dedentBytes(b []byte) []byte {
 // and carries its plan. A plan with no matching statement line — auto_explain
 // on, log_min_duration_statement off — stays a slow-query entry of its own,
 // grouped by its query text.
-func MergePlans(entries []LogEntry) []LogEntry {
+func MergePlans(entries []Entry) []Entry {
 	const lookahead = 8
 	drop := make([]bool, len(entries))
 	for i := range entries {
@@ -677,7 +753,7 @@ func MergePlans(entries []LogEntry) []LogEntry {
 			}
 		}
 	}
-	out := make([]LogEntry, 0, len(entries))
+	out := make([]Entry, 0, len(entries))
 	for i := range entries {
 		if !drop[i] {
 			out = append(out, entries[i])
@@ -686,7 +762,7 @@ func MergePlans(entries []LogEntry) []LogEntry {
 	return out
 }
 
-func parseCheckpoint(e *LogEntry, msg []byte) {
+func parseCheckpoint(e *Entry, msg []byte) {
 	cf := &CheckpointFields{}
 	e.Checkpoint = cf
 	s := string(msg)

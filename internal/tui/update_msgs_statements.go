@@ -30,54 +30,54 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 	if msg.err != nil {
 		return nil
 	}
-	s.statSampledAt = time.Now()
-	s.statTrackPlanning = msg.trackPlanning
+	s.stat.sampledAt = time.Now()
+	s.stat.trackPlanning = msg.trackPlanning
 	// Best-effort "now" magnitude for the L browser's live anchor; updated every tick.
-	s.statLiveCount = len(msg.stats)
+	s.stat.liveCount = len(msg.stats)
 
 	// First snapshot becomes the baseline: the window opens here, so there are
 	// no deltas to show yet — the table fills in as queries run. A disk baseline
 	// (statBaseSnap) is installed before this load, so statBaseline is non-nil
 	// and we skip straight to the diff path below.
-	if s.statBaseline == nil {
-		s.statBaseline = make(map[int64]pg.QueryStat, len(msg.stats))
+	if s.stat.baseline == nil {
+		s.stat.baseline = make(map[int64]pg.QueryStat, len(msg.stats))
 		for _, q := range msg.stats {
-			s.statBaseline[q.QueryID] = q
+			s.stat.baseline[q.QueryID] = q
 		}
-		s.statBaselineAt = s.statSampledAt
+		s.stat.baselineAt = s.stat.sampledAt
 		// Preserve this very first baseline as the session anchor: the "session
 		// start" row in L restores it even after a disk baseline replaces
 		// statBaseline. Captured once — later live re-bases (R) keep the original.
-		if s.statSessionBaseline == nil {
-			s.statSessionBaseline = s.statBaseline
-			s.statSessionStart = s.statBaselineAt
+		if s.stat.sessionBaseline == nil {
+			s.stat.sessionBaseline = s.stat.baseline
+			s.stat.sessionStart = s.stat.baselineAt
 		}
-		s.statRows = nil
+		s.stat.rows = nil
 		s.items = s.items[:0]
-		s.statWindowExecMs = 0
-		descs := m.visibleStmtCols(stmtCtx{trackPlanning: s.statTrackPlanning})
-		s.stmtCols = descs
+		s.stat.windowExecMs = 0
+		descs := stmtSpec.visibleCols(&m.stmtTable, stmtCtx{trackPlanning: s.stat.trackPlanning})
+		s.stat.cols = descs
 		s.diagCols = diagColumnsFrom(descs)
 		s.diagBarCol = -1
-		m.stmtSortColID = colTotalMs
+		m.stmtTable.sortColID = colTotalMs
 		s.sortDesc = true
-		m.syncStmtSort(s, descs)
+		stmtSpec.syncSort(&m.stmtTable, s, descs)
 		return nil
 	}
 
 	// A disk baseline can produce negative deltas if the counters were reset
 	// between capture and now; clamp them. (Snapshots invalidated this way are
 	// already filtered out of the L browser, so this is just defence in depth.)
-	if s.statBaseSnap != nil {
-		s.statRows = pg.DiffStatementsClamped(s.statBaseline, msg.stats)
+	if s.stat.baseSnap != nil {
+		s.stat.rows = pg.DiffStatementsClamped(s.stat.baseline, msg.stats)
 	} else {
-		s.statRows = pg.DiffStatements(s.statBaseline, msg.stats)
+		s.stat.rows = pg.DiffStatements(s.stat.baseline, msg.stats)
 	}
 	// For a cumulative window (empty baseline) the baseline time is the server's
 	// last stats reset, not when the tool opened. Update it on every tick so it
 	// stays correct if a reset happens while the window is live.
-	if s.statCumulative && !msg.statsReset.IsZero() {
-		s.statBaselineAt = msg.statsReset
+	if s.stat.cumulative && !msg.statsReset.IsZero() {
+		s.stat.baselineAt = msg.statsReset
 	}
 	// rebuildStatementItems preserves the user's chosen sort column (tracked by id)
 	// and the current column visibility across refreshes.
@@ -90,15 +90,15 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 // track_planning state — no DB round-trip. Used by every load site and by the C
 // column-config toggles so the columns, cells, footer and sort stay consistent.
 func (m *Model) rebuildStatementItems(s *screen) {
-	items, descs, windowMs, total := m.buildStatementItems(s.statRows, s.statTrackPlanning)
+	items, descs, windowMs, total := m.buildStatementItems(s.stat.rows, s.stat.trackPlanning)
 	s.items = items
-	s.stmtCols = descs
+	s.stat.cols = descs
 	s.diagCols = diagColumnsFrom(descs)
-	s.statWindowExecMs = windowMs
+	s.stat.windowExecMs = windowMs
 	s.diagTotalRow = total
 	s.diagBarCol = -1
 	s.diagMetricsDirty = true
-	m.syncStmtSort(s, descs)
+	stmtSpec.syncSort(&m.stmtTable, s, descs)
 	m.applySort(s)
 }
 
@@ -123,7 +123,7 @@ func (m *Model) onStatementsTick() tea.Cmd {
 	if top.level == levelStatements {
 		// A frozen A→B diff has no "now" to re-sample — keep the tick alive (so it
 		// resumes if the user returns to a live window) but don't reload.
-		if top.statEndSnap != nil {
+		if top.stat.endSnap != nil {
 			return next
 		}
 		return tea.Batch(m.loadStatementsCmd(top.db), next)
@@ -156,7 +156,7 @@ func (m *Model) onSnapshotsListed(msg snapshotsListedMsg) tea.Cmd {
 	s.loaded = true
 	s.err = msg.err
 
-	s.statLiveReset = msg.liveReset
+	s.stat.liveReset = msg.liveReset
 
 	st := m.findLevel(levelStatements)
 	curDB := ""
@@ -173,7 +173,7 @@ func (m *Model) onSnapshotsListed(msg snapshotsListedMsg) tea.Cmd {
 		metas = append(metas, meta)
 	}
 
-	s.statSnapMetas = metas
+	s.stat.snapMetas = metas
 	// Synthetic timeline anchors bracket the real snapshots, newest→oldest: "now"
 	// (live end) at the top, then "session start" (the in-memory baseline from when
 	// the tool opened) when we have one, the saved snapshots, and "since last reset"
@@ -183,14 +183,14 @@ func (m *Model) onSnapshotsListed(msg snapshotsListedMsg) tea.Cmd {
 	items := make([]item, 0, len(metas)+3)
 	now := item{name: "now · live", snapPath: snapNow}
 	if st != nil {
-		now.size = int64(st.statLiveCount)
+		now.size = int64(st.stat.liveCount)
 	}
 	items = append(items, now)
-	if st != nil && !st.statSessionStart.IsZero() {
+	if st != nil && !st.stat.sessionStart.IsZero() {
 		items = append(items, item{
 			name:     "session start",
 			snapPath: snapSession,
-			size:     int64(len(st.statSessionBaseline)),
+			size:     int64(len(st.stat.sessionBaseline)),
 		})
 	}
 	for _, meta := range metas {
@@ -221,11 +221,11 @@ func (m *Model) onSnapshotBaseLoaded(msg snapshotBaseLoadedMsg) tea.Cmd {
 		m.popToStatements()
 		return nil
 	}
-	st.statBaseSnap = msg.snap
-	st.statCumulative = false
-	st.statEndSnap = nil
-	st.statBaseline = msg.snap.BaselineMap()
-	st.statBaselineAt = msg.snap.CapturedAt
+	st.stat.baseSnap = msg.snap
+	st.stat.cumulative = false
+	st.stat.endSnap = nil
+	st.stat.baseline = msg.snap.BaselineMap()
+	st.stat.baselineAt = msg.snap.CapturedAt
 	m.popToStatements()
 	return m.loadCurrent()
 }
@@ -245,26 +245,26 @@ func (m *Model) onSnapshotFrozenLoaded(msg snapshotFrozenLoadedMsg) tea.Cmd {
 	if msg.cumulative {
 		// Empty baseline — the diff against nothing yields the raw cumulative counters
 		// as they stood at the snapshot's capture time.
-		st.statBaseSnap = nil
-		st.statCumulative = true
-		st.statBaseline = map[int64]pg.QueryStat{}
-		st.statBaselineAt = msg.end.StatsReset // zero when unknown
-		st.statEndSnap = msg.end
-		st.statSampledAt = msg.end.CapturedAt
-		st.statTrackPlanning = msg.end.TrackPlanning
+		st.stat.baseSnap = nil
+		st.stat.cumulative = true
+		st.stat.baseline = map[int64]pg.QueryStat{}
+		st.stat.baselineAt = msg.end.StatsReset // zero when unknown
+		st.stat.endSnap = msg.end
+		st.stat.sampledAt = msg.end.CapturedAt
+		st.stat.trackPlanning = msg.end.TrackPlanning
 	} else {
 		if msg.base == nil {
 			m.notice = "load snapshots failed: base snapshot missing"
 			m.popToStatements()
 			return nil
 		}
-		st.statBaseSnap = msg.base
-		st.statCumulative = false
-		st.statEndSnap = msg.end
-		st.statBaseline = msg.base.BaselineMap()
-		st.statBaselineAt = msg.base.CapturedAt
-		st.statSampledAt = msg.end.CapturedAt
-		st.statTrackPlanning = msg.base.TrackPlanning && msg.end.TrackPlanning
+		st.stat.baseSnap = msg.base
+		st.stat.cumulative = false
+		st.stat.endSnap = msg.end
+		st.stat.baseline = msg.base.BaselineMap()
+		st.stat.baselineAt = msg.base.CapturedAt
+		st.stat.sampledAt = msg.end.CapturedAt
+		st.stat.trackPlanning = msg.base.TrackPlanning && msg.end.TrackPlanning
 	}
 	// A reset between the two captures yields negative deltas; clamping floors them.
 	m.populateFrozenWindow(st)
@@ -280,7 +280,7 @@ func (m *Model) onSnapshotFrozenLoaded(msg snapshotFrozenLoadedMsg) tea.Cmd {
 // statEndSnap. Using statBaseline directly (instead of re-deriving it from statBaseSnap)
 // means the cumulative case (empty baseline, no base snapshot) also works here.
 func (m *Model) populateFrozenWindow(st *screen) {
-	st.statRows = pg.DiffStatementsClamped(st.statBaseline, st.statEndSnap.Stats)
+	st.stat.rows = pg.DiffStatementsClamped(st.stat.baseline, st.stat.endSnap.Stats)
 	m.rebuildStatementItems(st)
 	st.loading = false
 	st.loaded = true
@@ -296,16 +296,16 @@ func (m *Model) popToStatements() {
 
 func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelStatementDetail)
-	if s == nil || s.statDetail == nil || s.statDetail.Query != msg.query {
+	if s == nil || s.stat.detail == nil || s.stat.detail.Query != msg.query {
 		return nil
 	}
-	s.statSampleCall = msg.sample
-	s.statSampleParams = msg.params
-	s.statSampleReal = msg.real
-	s.statSampleFromData = msg.fromData
-	s.statSampleFromQual = msg.fromQual
-	s.statQualstats = msg.qualstats
-	s.statSampleErr = msg.err
+	s.stat.sampleCall = msg.sample
+	s.stat.sampleParams = msg.params
+	s.stat.sampleReal = msg.real
+	s.stat.sampleFromData = msg.fromData
+	s.stat.sampleFromQual = msg.fromQual
+	s.stat.qualstats = msg.qualstats
+	s.stat.sampleErr = msg.err
 	// Offer a one-key install when pg_qualstats is absent but already preloaded —
 	// then CREATE EXTENSION alone unlocks real values. Otherwise drop any stale
 	// qualstats prompt (e.g. after the user just installed it out of band).
@@ -324,7 +324,7 @@ func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
 	// where statExplaining was flipped on). A real sample → plain EXPLAIN on it;
 	// otherwise the generic plan, which doesn't need the sample at all, so it
 	// still runs when parameter inference failed.
-	if s.statExplaining {
+	if s.stat.explaining {
 		return m.statementPlanCmd(s)
 	}
 	return nil
@@ -336,11 +336,11 @@ func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
 // the HOT row is simply omitted rather than cluttering a secondary metric.
 func (m *Model) onStatementHotLoaded(msg statementHotLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelStatementDetail)
-	if s == nil || s.statDetail == nil || s.statDetail.Query != msg.query {
+	if s == nil || s.stat.detail == nil || s.stat.detail.Query != msg.query {
 		return nil
 	}
-	s.statHotStats = msg.stats
-	s.statHotErr = msg.err
+	s.stat.hotStats = msg.stats
+	s.stat.hotErr = msg.err
 	return nil
 }
 
@@ -355,7 +355,7 @@ func (m *Model) onExportDone(msg exportDoneMsg) tea.Cmd {
 
 func (m *Model) onStatementSamplesLoaded(msg statementSamplesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelStatementSamples)
-	if s == nil || s.statDetail == nil || s.statDetail.QueryID != msg.queryID {
+	if s == nil || s.stat.detail == nil || s.stat.detail.QueryID != msg.queryID {
 		return nil
 	}
 	s.loading = false
@@ -373,7 +373,7 @@ func (m *Model) onStatementSamplesLoaded(msg statementSamplesLoadedMsg) tea.Cmd 
 // query text (the screen carries no Diagnostic).
 func (m *Model) onStatementResultLoaded(msg statementResultLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelStatementResult)
-	if s == nil || s.statDetail == nil || s.statDetail.Query != msg.query {
+	if s == nil || s.stat.detail == nil || s.stat.detail.Query != msg.query {
 		return nil
 	}
 	s.loading = false
@@ -443,10 +443,10 @@ func (m *Model) onStatementExplainLoaded(msg statementExplainLoadedMsg) tea.Cmd 
 	if s == nil {
 		return nil
 	}
-	s.statExplaining = false
-	s.statExplain = msg.plan
-	s.statExplainErr = msg.err
-	s.statExplainAnalyze = msg.analyze
+	s.stat.explaining = false
+	s.stat.explain = msg.plan
+	s.stat.explainErr = msg.err
+	s.stat.explainAnalyze = msg.analyze
 	return nil
 }
 
@@ -458,7 +458,7 @@ func (m *Model) findExplainTarget(query string) *screen {
 		if s.level != levelStatementDetail && s.level != levelStatementSamples {
 			continue
 		}
-		if s.statExplaining && s.statDetail != nil && s.statDetail.Query == query {
+		if s.stat.explaining && s.stat.detail != nil && s.stat.detail.Query == query {
 			return s
 		}
 	}

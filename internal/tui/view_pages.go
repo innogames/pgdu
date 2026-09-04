@@ -103,14 +103,21 @@ func (m *Model) renderIndexTuplesInfo(height int) string {
 	b.WriteString("    " + styleHeapToastTag.Render("pivot") + strings.Repeat(" ", 14-len("pivot")) + "  " +
 		mu("structural separator: item #1 of every non-rightmost leaf page (the high key).") + "\n")
 	b.WriteString("    " + strings.Repeat(" ", 18) +
-		mu("On internal pages every entry is a downlink, shown as ") + styleIndexSeg.Render("→ blk N") +
+		mu("On internal pages every other entry is a downlink, shown as ") + styleIndexSeg.Render("→ blk N") +
 		mu(" (the child") + "\n")
 	b.WriteString("    " + strings.Repeat(" ", 18) +
-		mu("page); ENTER descends into it to walk the tree toward the leaves.") + "\n")
+		mu("page); ENTER descends into it to walk the tree toward the leaves. Item #1 of a") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 18) +
+		mu("non-rightmost internal page is its ") + styleHeapToastTag.Render("high key") +
+		mu(" — the page's upper bound, which is why it") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 18) +
+		mu("sits out of key order at the top of the lp sort.") + "\n")
 	b.WriteString("    " + styleHeapHot.Render("posting") + strings.Repeat(" ", 14-len("posting")) + "  " +
 		mu("PG 13+ btree deduplication: one tuple packs many heap tids for one key.") + "\n")
 	b.WriteString("    " + strings.Repeat(" ", 18) +
-		mu("Shown as ") + styleHeapHot.Render("posting ×N") + mu(" — N is the packed heap-tid count.") + "\n\n")
+		mu("Shown as ") + styleHeapHot.Render("▸ posting ×N") + mu(" — N is the packed heap-tid count. Enter unfolds") + "\n")
+	b.WriteString("    " + strings.Repeat(" ", 18) +
+		mu("one ") + styleMuted.Render("·nnn") + mu(" row per packed tid (heap ctid, decoded key, Enter into the row); Enter again folds.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" columns ") + "  " +
 		mu("one row per bt_page_items entry on the chosen page") + "\n")
@@ -256,7 +263,7 @@ func relationBarStyle(r pg.Relation) lipgloss.Style {
 // be absent.
 func (m *Model) renderIndexKeyBanner(s *screen) string {
 	var lines []string
-	if line := indexKeyLine(s.indexKeyCols); line != "" {
+	if line := indexKeyLine(s.pages.indexKeyCols); line != "" {
 		lines = append(lines, line)
 	}
 	// The metapage describes the whole index, so it belongs on the page list,
@@ -264,15 +271,15 @@ func (m *Model) renderIndexKeyBanner(s *screen) string {
 	// shape (GiST has none).
 	if s.level == levelIndexPages {
 		var meta, levels string
-		switch s.index.AccessMethod {
+		switch s.pages.index.AccessMethod {
 		case "brin":
-			meta = brinMetaLine(s.brinMeta)
+			meta = brinMetaLine(s.pages.brinMeta)
 		case "gin":
-			meta = ginMetaLine(s.ginMeta)
+			meta = ginMetaLine(s.pages.ginMeta)
 		case "gist":
 			meta = "" // GiST has no metapage (block 0 is the root)
 		default:
-			meta = btreeMetaLine(s.btreeMeta)
+			meta = btreeMetaLine(s.pages.btreeMeta)
 			levels = btreeLevelsLine(s, m.width)
 		}
 		if meta != "" {
@@ -298,27 +305,27 @@ func (m *Model) renderIndexKeyBanner(s *screen) string {
 // indistinguishable from the feature not existing.
 func btreeLevelsLine(s *screen, width int) string {
 	mu := styleMuted.Render
-	if !s.btreeLevelsDone {
-		if s.btreeLevelsLoading {
+	if !s.pages.btreeLevelsDone {
+		if s.pages.btreeLevelsLoading {
 			return "  " + mu("levels: counting pages…")
 		}
 		return ""
 	}
-	if s.btreeLevelsErr != nil {
-		reason := s.btreeLevelsErr.Error()
-		if errors.Is(s.btreeLevelsErr, context.DeadlineExceeded) {
+	if s.pages.btreeLevelsErr != nil {
+		reason := s.pages.btreeLevelsErr.Error()
+		if errors.Is(s.pages.btreeLevelsErr, context.DeadlineExceeded) {
 			reason = fmt.Sprintf("timed out after %s", btreeCensusTimeout)
 		}
 		return truncateToWidth("  "+mu("levels: unavailable — "+reason), width)
 	}
-	if len(s.btreeLevels) == 0 {
+	if len(s.pages.btreeLevels) == 0 {
 		return ""
 	}
 	live := map[int32]int64{}
 	var order []int32
 	rootLevel := int32(-1)
 	var deleted, halfDead int64
-	for _, c := range s.btreeLevels {
+	for _, c := range s.pages.btreeLevels {
 		switch c.Type {
 		case "d":
 			deleted += c.Pages
@@ -403,7 +410,7 @@ func btreeMetaLine(meta *pg.BtreeMeta) string {
 // level (0 = leaf), used bytes, live/dead item counts, free %.
 func (m *Model) renderIndexPagesList(s *screen, height int) string {
 	barW := m.barWidth(s)
-	showTemp := s.pageBufs != nil
+	showTemp := s.pages.pageBufs != nil
 	return m.renderRowList(s, height, renderIndexPagesHeader(s.sort, s.sortDesc, barW, showTemp),
 		func(it item, selected bool) string {
 			p, _ := it.data.(pg.IndexPageStat)
@@ -607,17 +614,110 @@ func (m *Model) renderIndexTuplesList(s *screen, height int) string {
 	keyW := max(m.width-(colCursor+idxTupleOffColW+colGutter+
 		idxTupleLenColW+colGutter+idxTupleFlagsColW+colGutter+
 		idxTupleCtidColW+colGutter+4), 16)
-	pageType := s.indexPageType
+	pageType := s.pages.indexPageType
 	// On an internal page each entry is a downlink whose key is the *lowest*
 	// key in that child block; the block therefore covers [thisKey, nextKey).
 	// Precompute that range per item so the key column can show what range of
 	// keys lives behind each "→ blk N", rather than the bare separator key.
-	ranges := internalDownlinkRanges(s.items, pageType, s.indexKeyCols, keyW)
+	ranges := internalDownlinkRanges(s.items, pageType, s.pages.indexKeyCols, keyW)
+	hasHighKey := internalHighKey(s.items, pageType, s.pages.indexKeyCols)
 	return m.renderRowList(s, height, renderIndexTuplesHeader(s.sort, s.sortDesc, pageType),
 		func(it item, selected bool) string {
+			if mem, ok := it.data.(postingMember); ok {
+				return renderPostingMemberRow(mem, s.pages.indexKeyCols, keyW, selected)
+			}
 			t, _ := it.data.(pg.IndexTuple)
-			return renderIndexTupleRow(t, pageType, ranges[t.ItemOffset], s.indexKeyCols, keyW, selected)
+			return renderIndexTupleRow(t, pageType, idxRowOpts{
+				blockRange:  ranges[t.ItemOffset],
+				highKey:     hasHighKey && t.ItemOffset == 1,
+				postingOpen: s.pages.postingOpen[t.ItemOffset],
+			}, s.pages.indexKeyCols, keyW, selected)
 		})
+}
+
+// internalHighKey reports whether item #1 of a B-tree internal page is the
+// page's high key rather than a downlink. nbtree puts the high key at offset 1
+// of every non-rightmost page, so it sorts out of key order under the lp sort
+// and its ctid block is a copy of a sibling's downlink, not a child of this
+// page — the renderer and the drill must treat it as a bound, not a link. It's
+// the high key exactly when it carries a key and a keyless (minus-infinity)
+// downlink follows: on the rightmost page offset 1 is that keyless downlink
+// itself. Mirrors the layout rule internalDownlinkRanges applies.
+func internalHighKey(items []item, pageType string, cols []pg.IndexKeyColumn) bool {
+	if pageType != "i" {
+		return false
+	}
+	firstHasKey, keyless := false, false
+	for _, it := range items {
+		t, ok := it.data.(pg.IndexTuple)
+		if !ok {
+			continue
+		}
+		_, hasKey := pivotKeyText(t, cols)
+		if t.ItemOffset == 1 {
+			firstHasKey = hasKey
+		} else if !hasKey {
+			keyless = true
+		}
+	}
+	return firstHasKey && keyless
+}
+
+// renderPostingMemberRow draws one unpacked heap tid of a posting-list tuple,
+// indented under the parent's "posting ×N" row. The off column carries the
+// member's position in the list; len and flags stay blank because they belong
+// to the parent tuple, not to any single tid. The ctid and key columns behave
+// exactly like a singleton leaf entry's (heap projection, HOT hop). When the
+// heap row isn't visible the key falls back to the parent's raw key bytes —
+// dedup guarantees every member shares them — dimmed, with the dead tag only
+// when the parent carries LP_DEAD (which nbtree sets for the whole posting
+// list at once, never per member).
+func renderPostingMemberRow(mem postingMember, cols []pg.IndexKeyColumn, keyW int, selected bool) string {
+	cursor := selectedCursor(selected)
+	t := mem.tuple
+	off := fmt.Sprintf(" ·%03d", mem.n)
+	if selected {
+		off = styleSelected.Render(off)
+	} else {
+		off = styleMuted.Render(off)
+	}
+	var ctidLabel string
+	switch {
+	case t.Ctid == nil:
+		ctidLabel = "—"
+	case t.HotCtid != nil:
+		if hop, ok := parseCtidOffset(t.HotCtid); ok {
+			ctidLabel = *t.Ctid + styleHeapHot.Render("▸"+strconv.Itoa(int(hop)))
+		} else {
+			ctidLabel = *t.Ctid
+		}
+	default:
+		ctidLabel = *t.Ctid
+	}
+	var key string
+	switch {
+	case t.Decoded != nil:
+		key = truncateValue(t.Decoded, keyW)
+	case t.HotDecoded != nil:
+		key = truncateValue(t.HotDecoded, keyW)
+	case mem.parent.Data != nil:
+		tag, avail := "", keyW
+		if mem.parent.Dead {
+			tag, avail = styleBloat.Render("dead")+" ", keyW-5
+		}
+		if s, ok := indexKeyText(mem.parent, cols); ok {
+			key = tag + styleMuted.Render(truncateToWidth(s, avail))
+		} else {
+			key = tag + styleMuted.Render(truncateValue(mem.parent.Data, avail))
+		}
+	default:
+		key = styleMuted.Render("—")
+	}
+	return cursor + padRight(off, idxTupleOffColW) + "  " +
+		padRight("", idxTupleLenColW) + "  " +
+		padRight("", idxTupleFlagsColW) + "  " +
+		padRight(ctidLabel, idxTupleCtidColW) + "  " +
+		key
 }
 
 func renderIndexTuplesHeader(sort sortMode, sortDesc bool, pageType string) string {
@@ -635,7 +735,19 @@ func renderIndexTuplesHeader(sort sortMode, sortDesc bool, pageType string) stri
 	return styleMuted.Render(line)
 }
 
-func renderIndexTupleRow(t pg.IndexTuple, pageType, blockRange string, cols []pg.IndexKeyColumn, keyW int, selected bool) string {
+// idxRowOpts is the per-row context renderIndexTupleRow can't derive from the
+// tuple alone: blockRange is the key range an internal-page downlink covers
+// (internalDownlinkRanges); highKey marks item #1 of a non-rightmost internal
+// page (internalHighKey), rendered as the page's upper bound instead of as a
+// downlink; postingOpen says the posting tuple's members are unfolded below.
+type idxRowOpts struct {
+	blockRange  string
+	highKey     bool
+	postingOpen bool
+}
+
+func renderIndexTupleRow(t pg.IndexTuple, pageType string, o idxRowOpts, cols []pg.IndexKeyColumn, keyW int, selected bool) string {
+	blockRange, highKey := o.blockRange, o.highKey
 	cursor := selectedCursor(selected)
 	off := fmt.Sprintf("#%04d", t.ItemOffset)
 	if selected {
@@ -661,18 +773,31 @@ func renderIndexTupleRow(t pg.IndexTuple, pageType, blockRange string, cols []pg
 		// far more useful than "pivot", and it mirrors what ENTER will drill
 		// into. The leaf high-key (item #1 of a non-rightmost leaf) is a real
 		// separator with no child, so it keeps the "pivot" tag.
-		if blk, ok := parseCtidBlock(t.Ctid); ok && pageType == "i" {
+		switch blk, ok := parseCtidBlock(t.Ctid); {
+		case highKey:
+			// Its ctid block is inherited from the sibling's downlink it was
+			// copied from — printing it as "→ blk" would invite a descent into
+			// a page that isn't a child of this one.
+			ctidLabel = styleHeapToastTag.Render("high key")
+		case ok && pageType == "i":
 			ctidLabel = styleIndexSeg.Render(fmt.Sprintf("→ blk %d", blk))
-		} else {
+		default:
 			ctidLabel = styleHeapToastTag.Render("pivot")
 		}
 	case idxTuplePosting:
-		// Surface how many heap tids this one tuple packs (PG13+ dedup).
+		// Surface how many heap tids this one tuple packs (PG13+ dedup), with
+		// a fold marker when the members are loaded and Enter can unfold them.
+		label := "posting"
 		if n := postingTupleCount(t.Ctid); n > 0 {
-			ctidLabel = styleHeapHot.Render(fmt.Sprintf("posting ×%d", n))
-		} else {
-			ctidLabel = styleHeapHot.Render("posting")
+			label = fmt.Sprintf("posting ×%d", n)
 		}
+		switch {
+		case o.postingOpen:
+			label = "▾ " + label
+		case len(t.Posting) > 0:
+			label = "▸ " + label
+		}
+		ctidLabel = styleHeapHot.Render(label)
 	default:
 		switch {
 		case t.Ctid == nil:
@@ -733,6 +858,11 @@ func renderIndexTupleRow(t pg.IndexTuple, pageType, blockRange string, cols []pg
 			key = styleMuted.Render(truncateToWidth(s, keyW))
 		} else {
 			key = styleMuted.Render(truncateValue(t.Data, keyW))
+		}
+		if highKey {
+			// Phrase it in the same "lower … upper" shape as the downlink
+			// ranges below it: everything on this page sorts below this key.
+			key = styleMuted.Render("(this page)  …  ") + key
 		}
 	default:
 		key = styleMuted.Render("—")
@@ -861,12 +991,22 @@ func internalDownlinkRanges(items []item, pageType string, cols []pg.IndexKeyCol
 	side := max((keyW-5)/2, 6) // the "  …  " separator eats ~5 cols
 	clip := func(s string) string { return truncateToWidth(s, side) }
 
+	// Lay the range out as two columns: every lower bound is padded to the
+	// widest one so the "…" and the upper bounds line up down the page. Bounds
+	// vary in width ("−∞" next to "(818723281,−∞)"), and a ragged column makes
+	// it hard to scan for the block that covers a key.
+	lowers := make([]string, len(downlinks))
+	lowerW := 0
+	for i, d := range downlinks {
+		lowers[i] = "−∞"
+		if d.hasKey {
+			lowers[i] = clip(d.text)
+		}
+		lowerW = max(lowerW, displayWidth(lowers[i]))
+	}
+
 	out := make(map[int32]string, len(downlinks))
 	for i, d := range downlinks {
-		lower := "−∞"
-		if d.hasKey {
-			lower = clip(d.text)
-		}
 		upper := pageUpper
 		switch {
 		case i+1 < len(downlinks):
@@ -874,7 +1014,7 @@ func internalDownlinkRanges(items []item, pageType string, cols []pg.IndexKeyCol
 		case upper != "+∞":
 			upper = clip(upper)
 		}
-		out[d.off] = styleMuted.Render(lower + "  …  " + upper)
+		out[d.off] = styleMuted.Render(padRight(lowers[i], lowerW) + "  …  " + upper)
 	}
 	return out
 }
@@ -1119,7 +1259,7 @@ func tupleInfomaskBadges(infomask, infomask2 int32) string {
 // type (leaf/intr/del), used bytes, item count, free %, block.
 func (m *Model) renderGistPagesList(s *screen, height int) string {
 	barW := m.barWidth(s)
-	showTemp := s.pageBufs != nil
+	showTemp := s.pages.pageBufs != nil
 	return m.renderRowList(s, height, renderGistPagesHeader(s.sort, s.sortDesc, barW, showTemp),
 		func(it item, selected bool) string {
 			p, _ := it.data.(pg.GistPageStat)
@@ -1186,7 +1326,7 @@ func (m *Model) renderGistTuplesList(s *screen, height int) string {
 	keyW := max(m.width-(colCursor+idxTupleOffColW+colGutter+
 		idxTupleLenColW+colGutter+deadColW+colGutter+
 		idxTupleCtidColW+colGutter+4), 16)
-	internal := s.indexPageType == "intr"
+	internal := s.pages.indexPageType == "intr"
 	return m.renderRowList(s, height, renderGistTuplesHeader(s.sort, s.sortDesc, internal),
 		func(it item, selected bool) string {
 			t, _ := it.data.(pg.GistItem)
@@ -1262,7 +1402,7 @@ func brinMetaLine(meta *pg.BrinMeta) string {
 // used bytes, free %, block. Item counts are omitted (see BrinPageStat).
 func (m *Model) renderBrinPagesList(s *screen, height int) string {
 	barW := m.barWidth(s)
-	showTemp := s.pageBufs != nil
+	showTemp := s.pages.pageBufs != nil
 	return m.renderRowList(s, height, renderBrinPagesHeader(s.sort, s.sortDesc, barW, showTemp),
 		func(it item, selected bool) string {
 			p, _ := it.data.(pg.BrinPageStat)
@@ -1313,8 +1453,8 @@ func renderBrinPageRow(it item, p pg.BrinPageStat, barW int, selected bool, show
 // known (carried down from the page list's metapage).
 func (m *Model) renderBrinTuplesList(s *screen, height int) string {
 	ppr := int64(0)
-	if s.brinMeta != nil {
-		ppr = int64(s.brinMeta.PagesPerRange)
+	if s.pages.brinMeta != nil {
+		ppr = int64(s.pages.brinMeta.PagesPerRange)
 	}
 	const offW, blkW, attW, flagsW = 6, 18, 6, 10
 	valW := max(m.width-(colCursor+offW+colGutter+blkW+colGutter+
@@ -1427,7 +1567,7 @@ func ginPageTypeStyle(flags string) lipgloss.Style {
 // item count (maxoff), used bytes, free %, block. Only data-leaf pages drill.
 func (m *Model) renderGinPagesList(s *screen, height int) string {
 	barW := m.barWidth(s)
-	showTemp := s.pageBufs != nil
+	showTemp := s.pages.pageBufs != nil
 	return m.renderRowList(s, height, renderGinPagesHeader(s.sort, s.sortDesc, barW, showTemp),
 		func(it item, selected bool) string {
 			p, _ := it.data.(pg.GinPageStat)

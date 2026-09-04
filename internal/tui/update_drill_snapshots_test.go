@@ -28,28 +28,28 @@ func TestAppliedWindowPaths(t *testing.T) {
 		wantStart string
 		wantEnd   string
 	}{
-		{"cumulative live", screen{statCumulative: true}, snapReset, snapNow},
-		{"cumulative with frozen end", screen{statCumulative: true, statEndSnap: snapB},
+		{"cumulative live", screen{stat: stmtState{cumulative: true}}, snapReset, snapNow},
+		{"cumulative with frozen end", screen{stat: stmtState{cumulative: true, endSnap: snapB}},
 			snapReset, "/snaps/b.json.gz"},
-		{"snapshot base, live end", screen{statBaseSnap: snapA}, "/snaps/a.json.gz", snapNow},
-		{"frozen snapshot-to-snapshot diff", screen{statBaseSnap: snapA, statEndSnap: snapB},
+		{"snapshot base, live end", screen{stat: stmtState{baseSnap: snapA}}, "/snaps/a.json.gz", snapNow},
+		{"frozen snapshot-to-snapshot diff", screen{stat: stmtState{baseSnap: snapA, endSnap: snapB}},
 			"/snaps/a.json.gz", "/snaps/b.json.gz"},
 		{"base snapshot no longer listed",
-			screen{statBaseSnap: &pg.Snapshot{CapturedAt: t1.Add(time.Minute)}}, "", snapNow},
+			screen{stat: stmtState{baseSnap: &pg.Snapshot{CapturedAt: t1.Add(time.Minute)}}}, "", snapNow},
 		{"end snapshot no longer listed",
-			screen{statBaseSnap: snapA, statEndSnap: &pg.Snapshot{CapturedAt: t2.Add(time.Minute)}},
+			screen{stat: stmtState{baseSnap: snapA, endSnap: &pg.Snapshot{CapturedAt: t2.Add(time.Minute)}}},
 			"/snaps/a.json.gz", ""},
-		{"session window", screen{statSessionStart: sessionStart, statBaselineAt: sessionStart},
+		{"session window", screen{stat: stmtState{sessionStart: sessionStart, baselineAt: sessionStart}},
 			snapSession, snapNow},
 		// A fresh R re-base: baseline is neither a snapshot nor the session
 		// start, so no row can represent it.
-		{"fresh re-base", screen{statSessionStart: sessionStart, statBaselineAt: sessionStart.Add(time.Minute)},
+		{"fresh re-base", screen{stat: stmtState{sessionStart: sessionStart, baselineAt: sessionStart.Add(time.Minute)}},
 			"", snapNow},
 	}
 	m := &Model{}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			s := &screen{statSnapMetas: metas}
+			s := &screen{stat: stmtState{snapMetas: metas}}
 			start, end := m.appliedWindowPaths(&c.st, s)
 			if start != c.wantStart || end != c.wantEnd {
 				t.Errorf("appliedWindowPaths = (%q, %q), want (%q, %q)",
@@ -65,7 +65,7 @@ func TestAppliedWindowPaths(t *testing.T) {
 func TestSnapTimeOrdering(t *testing.T) {
 	t1 := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	m := &Model{}
-	s := &screen{statSnapMetas: []pg.SnapshotMeta{{Path: "/snaps/a.json.gz", CapturedAt: t1}}}
+	s := &screen{stat: stmtState{snapMetas: []pg.SnapshotMeta{{Path: "/snaps/a.json.gz", CapturedAt: t1}}}}
 
 	reset := m.snapTime(s, snapReset)
 	now := m.snapTime(s, snapNow)

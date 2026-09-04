@@ -1,4 +1,4 @@
-package pg
+package pglog
 
 import (
 	"bytes"
@@ -14,7 +14,7 @@ import (
 
 // AggOptions tunes Aggregate.
 type AggOptions struct {
-	// MaxSamples caps LogGroup.Samples so a huge window cannot pin every entry
+	// MaxSamples caps Group.Samples so a huge window cannot pin every entry
 	// through its groups. 0 means the default.
 	MaxSamples int
 }
@@ -38,17 +38,18 @@ var histBuckets = []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute
 // Aggregate fills the derived parts of r (groups, histogram, counters, covered
 // time range) from r.Entries. It is a pure function of the entries, so an
 // incremental refresh simply re-runs it.
-func Aggregate(r *LogReport, opts AggOptions) {
+func Aggregate(r *Report, opts AggOptions) {
 	maxSamples := opts.MaxSamples
 	if maxSamples <= 0 {
 		maxSamples = defaultMaxSamples
 	}
 	r.BySeverity = [numLogSeverities]int{}
 	r.ByCategory = [numLogCategories]int{}
+	r.PoolerStats = 0
 	r.Window.From, r.Window.To = time.Time{}, time.Time{}
 
-	groups := make(map[string]*LogGroup)
-	var order []*LogGroup
+	groups := make(map[string]*Group)
+	var order []*Group
 	rng := rand.New(rand.NewPCG(1, 2)) // deterministic: the same log yields the same p95
 	for i := range r.Entries {
 		e := &r.Entries[i]
@@ -65,7 +66,7 @@ func Aggregate(r *LogReport, opts AggOptions) {
 		key, title := Fingerprint(e)
 		g := groups[key]
 		if g == nil {
-			g = &LogGroup{Key: key, Title: title, Category: e.Category, Severity: e.Severity, First: e.Time, Last: e.Time}
+			g = &Group{Key: key, Title: title, Category: e.Category, Severity: e.Severity, First: e.Time, Last: e.Time}
 			groups[key] = g
 			order = append(order, g)
 		}
@@ -90,10 +91,13 @@ func Aggregate(r *LogReport, opts AggOptions) {
 		if len(e.Plan) > 0 {
 			g.Plans++
 		}
+		if e.PoolerStats != nil {
+			r.PoolerStats++
+		}
 		switch e.Category {
 		case CatSlowQuery:
 			if g.Slow == nil {
-				g.Slow = &LogSlowStats{}
+				g.Slow = &SlowStats{}
 			}
 			g.Slow.SumMs += e.DurationMs
 			if e.DurationMs > g.Slow.MaxMs {
@@ -106,7 +110,7 @@ func Aggregate(r *LogReport, opts AggOptions) {
 			}
 		case CatCheckpoint:
 			if g.Checkpoint == nil {
-				g.Checkpoint = &LogCheckpointStats{}
+				g.Checkpoint = &CheckpointStats{}
 			}
 			if cf := e.Checkpoint; cf != nil && !cf.Starting {
 				g.Checkpoint.Complete++
@@ -119,7 +123,7 @@ func Aggregate(r *LogReport, opts AggOptions) {
 			}
 		case CatTempFile:
 			if g.Temp == nil {
-				g.Temp = &LogTempStats{}
+				g.Temp = &TempStats{}
 			}
 			g.Temp.TotalBytes += e.TempBytes
 			if e.TempBytes > g.Temp.MaxBytes {
@@ -143,11 +147,42 @@ func Aggregate(r *LogReport, opts AggOptions) {
 		}
 		return order[i].Last.After(order[j].Last)
 	})
-	r.Groups = make([]LogGroup, len(order))
+	r.Groups = make([]Group, len(order))
 	for i, g := range order {
 		r.Groups[i] = *g
 	}
 	r.Hist = histogram(r.Entries, r.Window.From, r.Window.To)
+	r.Pooler = PoolerHist{}
+	if r.PoolerStats > 0 {
+		r.Pooler = poolerHistogram(r.Entries, r.Hist)
+	}
+}
+
+// poolerHistogram averages the stats lines' figures into h's buckets.
+func poolerHistogram(entries []Entry, h Histogram) PoolerHist {
+	n := len(h.Counts)
+	if n == 0 || h.Bucket <= 0 {
+		return PoolerHist{}
+	}
+	p := PoolerHist{Counts: make([]int, n)}
+	for m := range p.Sums {
+		p.Sums[m] = make([]float64, n)
+	}
+	for i := range entries {
+		e := &entries[i]
+		if e.PoolerStats == nil || e.Time.IsZero() {
+			continue
+		}
+		b := int(e.Time.Sub(h.Start) / h.Bucket)
+		if b < 0 || b >= n {
+			continue
+		}
+		p.Counts[b]++
+		for _, m := range PoolerMetrics {
+			p.Sums[m][b] += m.Value(e.PoolerStats)
+		}
+	}
+	return p
 }
 
 func percentile(res []float64, q float64) float64 {
@@ -163,9 +198,9 @@ func percentile(res []float64, q float64) float64 {
 
 // histogram buckets entries by time and severity, choosing the finest bucket
 // that keeps the sparkline within histMaxBuckets cells.
-func histogram(entries []LogEntry, from, to time.Time) LogHistogram {
+func histogram(entries []Entry, from, to time.Time) Histogram {
 	if from.IsZero() || to.IsZero() {
-		return LogHistogram{}
+		return Histogram{}
 	}
 	span := to.Sub(from)
 	bucket := histBuckets[len(histBuckets)-1]
@@ -180,7 +215,7 @@ func histogram(entries []LogEntry, from, to time.Time) LogHistogram {
 	if n <= 0 || n > histMaxBuckets+1 {
 		n = histMaxBuckets + 1
 	}
-	h := LogHistogram{Bucket: bucket, Start: start, Counts: make([][numLogSeverities]int, n)}
+	h := Histogram{Bucket: bucket, Start: start, Counts: make([][numLogSeverities]int, n)}
 	for i := range entries {
 		e := &entries[i]
 		if e.Time.IsZero() {
@@ -198,7 +233,7 @@ func histogram(entries []LogEntry, from, to time.Time) LogHistogram {
 // ── fingerprints ─────────────────────────────────────────────────────────────
 
 // Fingerprint returns the grouping key and the single-line title for e.
-func Fingerprint(e *LogEntry) (key, title string) {
+func Fingerprint(e *Entry) (key, title string) {
 	switch e.Category {
 	case CatSlowQuery:
 		if len(e.SQL) == 0 {
@@ -255,6 +290,11 @@ func Fingerprint(e *LogEntry) (key, title string) {
 			kind = before
 		}
 		return "conn|" + kind, kind
+	}
+	if e.PoolerStats != nil {
+		// The 130-char normalized line says nothing a row can't; point at the
+		// pane that renders the series instead.
+		return "pgb|stats", "stats: periodic pooler statistics (tab → pooler stats pane)"
 	}
 	norm := normalizeMessage(e.FirstLine())
 	if e.Orphan {
@@ -493,4 +533,8 @@ func isDigit(c byte) bool    { return c >= '0' && c <= '9' }
 func isHexDigit(c byte) bool { return isDigit(c) || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' }
 func isIdentByte(c byte) bool {
 	return c == '_' || isDigit(c) || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+func collapseSpaces(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }

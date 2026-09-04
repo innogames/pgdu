@@ -296,10 +296,64 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 	if err != nil {
 		return nil, err
 	}
+	if pageType == "l" || pageType == "r" {
+		fillPostingTids(ctx, pool, exprs, parent, regclass, blkno, tuples)
+	}
 	if parent != "" {
 		fillHotChains(ctx, pool, exprs, parent, tuples)
+		fillPostingHotChains(ctx, pool, exprs, parent, tuples)
 	}
 	return tuples, nil
+}
+
+// fillPostingTids attaches each posting-list tuple's member heap tids
+// (IndexTuple.Posting) on a leaf page, projected through the heap when the
+// parent table is known. Best-effort: a pageinspect too old to have the tids
+// column, or any other failure, just leaves the posting tuples collapsed to
+// their "×N" summary.
+func fillPostingTids(ctx context.Context, pool *pgxpool.Pool, exprs, parent, regclass string, blkno int32, tuples []IndexTuple) {
+	sql := sqlIndexPostingTids
+	if parent != "" {
+		sql = fmt.Sprintf(sqlIndexPostingTidsDecoded, exprs, parent)
+	}
+	byOff := make(map[int32]int, len(tuples))
+	for i, t := range tuples {
+		byOff[t.ItemOffset] = i
+	}
+	members := collectBestEffort(ctx, pool, sql, []any{regclass, blkno},
+		func(rows pgx.Rows) (IndexTuple, bool) {
+			var m IndexTuple
+			if err := rows.Scan(&m.ItemOffset, &m.Ctid, &m.Decoded); err != nil {
+				return m, false
+			}
+			return m, true
+		})
+	for _, m := range members {
+		if i, ok := byOff[m.ItemOffset]; ok {
+			tuples[i].Posting = append(tuples[i].Posting, m)
+		}
+	}
+}
+
+// fillPostingHotChains runs the HOT-redirect pass over every posting member on
+// the page in one batch (fillHotChains dedups the heap blocks, so batching
+// keeps it to one query) and writes the results back under their parents.
+func fillPostingHotChains(ctx context.Context, pool *pgxpool.Pool, exprs, parent string, tuples []IndexTuple) {
+	var flat []IndexTuple
+	for _, t := range tuples {
+		flat = append(flat, t.Posting...)
+	}
+	if len(flat) == 0 {
+		return
+	}
+	fillHotChains(ctx, pool, exprs, parent, flat)
+	k := 0
+	for i := range tuples {
+		for j := range tuples[i].Posting {
+			tuples[i].Posting[j] = flat[k]
+			k++
+		}
+	}
 }
 
 // btAltTIDOffsetBase is the lowest offset value nbtree steals for its own

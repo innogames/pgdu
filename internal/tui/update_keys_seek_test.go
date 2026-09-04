@@ -28,11 +28,9 @@ func TestSeekToKeyInternal(t *testing.T) {
 	}
 	newScreen := func() *screen {
 		return &screen{
-			level:         levelIndexTuples,
-			items:         items,
-			indexPageType: "i",
-			indexKeyCols:  []pg.IndexKeyColumn{int8Col},
-		}
+			level: levelIndexTuples,
+			items: items,
+			pages: pageState{indexPageType: "i", indexKeyCols: []pg.IndexKeyColumn{int8Col}}}
 	}
 	for _, tc := range []struct {
 		query      string
@@ -45,11 +43,11 @@ func TestSeekToKeyInternal(t *testing.T) {
 		{"100", 0, "→ #0003  (100…200)"}, // exact boundary belongs to its own downlink
 	} {
 		s := newScreen()
-		s.seekQuery = tc.query
+		s.pages.seekQuery = tc.query
 		seekToKey(s)
-		if s.cursor != tc.wantCursor || s.seekStatus != tc.wantStatus {
+		if s.cursor != tc.wantCursor || s.pages.seekStatus != tc.wantStatus {
 			t.Errorf("seek %q: cursor=%d status=%q, want cursor=%d status=%q",
-				tc.query, s.cursor, s.seekStatus, tc.wantCursor, tc.wantStatus)
+				tc.query, s.cursor, s.pages.seekStatus, tc.wantCursor, tc.wantStatus)
 		}
 	}
 }
@@ -65,11 +63,9 @@ func TestSeekToKeyLeafText(t *testing.T) {
 	}
 	newScreen := func() *screen {
 		return &screen{
-			level:         levelIndexTuples,
-			items:         items,
-			indexPageType: "l",
-			indexKeyCols:  []pg.IndexKeyColumn{textCol},
-		}
+			level: levelIndexTuples,
+			items: items,
+			pages: pageState{indexPageType: "l", indexKeyCols: []pg.IndexKeyColumn{textCol}}}
 	}
 	for _, tc := range []struct {
 		query      string
@@ -81,11 +77,11 @@ func TestSeekToKeyLeafText(t *testing.T) {
 		{"zzz", 3, "→ #0004"},   // past the last tuple → last tuple
 	} {
 		s := newScreen()
-		s.seekQuery = tc.query
+		s.pages.seekQuery = tc.query
 		seekToKey(s)
-		if s.cursor != tc.wantCursor || s.seekStatus != tc.wantStatus {
+		if s.cursor != tc.wantCursor || s.pages.seekStatus != tc.wantStatus {
 			t.Errorf("seek %q: cursor=%d status=%q, want cursor=%d status=%q",
-				tc.query, s.cursor, s.seekStatus, tc.wantCursor, tc.wantStatus)
+				tc.query, s.cursor, s.pages.seekStatus, tc.wantCursor, tc.wantStatus)
 		}
 	}
 }

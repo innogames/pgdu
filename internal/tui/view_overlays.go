@@ -44,7 +44,7 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 	case levelHeapTuples:
 		return m.renderHeapTuplesInfo(height)
 	case levelIndexPages:
-		switch s.index.AccessMethod {
+		switch s.pages.index.AccessMethod {
 		case "gist":
 			return m.renderGistInfo(height, false)
 		case "brin":
@@ -54,7 +54,7 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 		}
 		return m.renderIndexPagesInfo(height)
 	case levelIndexTuples:
-		switch s.index.AccessMethod {
+		switch s.pages.index.AccessMethod {
 		case "gist":
 			return m.renderGistInfo(height, true)
 		case "brin":
@@ -212,7 +212,7 @@ func renderLegend(s *screen) string {
 			swatch(styleGinSeg, "gin") + sep +
 			swatch(styleToastSeg, "toast")
 	case levelIndexPages:
-		switch s.index.AccessMethod {
+		switch s.pages.index.AccessMethod {
 		case "gist":
 			return "  " + swatch(styleGistSeg, "used") + sep +
 				styleMuted.Render("░ free") + sep +
@@ -247,7 +247,7 @@ func renderLegend(s *screen) string {
 		return "  " + swatch(styleBarAlt, "FPI bytes") + sep +
 			styleMuted.Render("░ no full-page image")
 	case levelIndexTuples:
-		switch s.index.AccessMethod {
+		switch s.pages.index.AccessMethod {
 		case "gist":
 			return "  " + styleLPNormal.Render("●") + " " + styleMuted.Render("leaf → heap row") + sep +
 				styleGistSeg.Render("→ blk") + " " + styleMuted.Render("downlink") + sep +
@@ -272,8 +272,8 @@ func renderLegend(s *screen) string {
 		// single heap row to project, so they show their raw hex data.
 		return "  " + styleLPNormal.Render("●") + " " + styleMuted.Render("leaf → heap row") + sep +
 			styleIndexSeg.Render("→ blk") + " " + styleMuted.Render("downlink") + sep +
-			styleHeapToastTag.Render("pivot") + " " + styleMuted.Render("high key") + sep +
-			styleHeapHot.Render("posting ×N") + " " + styleMuted.Render("packed tids") + sep +
+			styleHeapToastTag.Render("pivot") + "/" + styleHeapToastTag.Render("high key") + " " + styleMuted.Render("page bound") + sep +
+			styleHeapHot.Render("posting ×N") + " " + styleMuted.Render("packed tids, ↵ unfolds") + sep +
 			styleHeapHot.Render("▸off") + " " + styleMuted.Render("HOT hop")
 	}
 	return ""
@@ -287,14 +287,14 @@ func (m *Model) renderReindexBanner(s *screen) string {
 		return ""
 	}
 	switch {
-	case s.reindexing != "":
+	case s.reindex.running != "":
 		mu := styleMuted.Render
 		line := "  " + m.spinner.View() + " " +
-			styleSelected.Render("REINDEX") + mu(" CONCURRENTLY "+s.reindexing)
+			styleSelected.Render("REINDEX") + mu(" CONCURRENTLY "+s.reindex.running)
 		// Live progress, once pg_stat_progress_create_index starts reporting.
 		// The bar is the overall composite (reindexPctMax, monotonic across
 		// phases), not the current phase's own resetting counters.
-		if p := s.reindexProg; p != nil {
+		if p := s.reindex.prog; p != nil {
 			if p.Phase != "" {
 				label := p.Phase
 				if p.Waiting() && p.LockersTotal > 0 {
@@ -303,16 +303,16 @@ func (m *Model) renderReindexBanner(s *screen) string {
 				line += mu("  ·  " + label)
 			}
 			const barW = 48
-			pct := s.reindexPctMax
+			pct := s.reindex.pctMax
 			filled := min(int(float64(barW)*pct/100), barW)
 			line += "  " + paintBar(barW, barSegment{cells: filled, style: styleBar}) +
 				mu(fmt.Sprintf(" %.0f%%", pct))
 		}
 		return line
-	case s.pendingReindex != "":
-		return confirmBanner("REINDEX INDEX CONCURRENTLY " + s.pendingReindex)
-	case s.reindexErr != nil:
-		return "  " + styleErr.Render("reindex failed: "+s.reindexErr.Error())
+	case s.reindex.pending != "":
+		return confirmBanner("REINDEX INDEX CONCURRENTLY " + s.reindex.pending)
+	case s.reindex.err != nil:
+		return "  " + styleErr.Render("reindex failed: "+s.reindex.err.Error())
 	}
 	return ""
 }

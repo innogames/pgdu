@@ -15,7 +15,7 @@ import (
 // and the refresh cadence.
 func (m *Model) renderActivityHeader(s *screen) string {
 	mu := styleMuted.Render
-	sum := s.actSummary
+	sum := s.act.summary
 
 	var parts []string
 	label := func(n int, name string, style lipgloss.Style) string {
@@ -40,7 +40,7 @@ func (m *Model) renderActivityHeader(s *screen) string {
 	// Idle and auxiliary backends: shown inline when present in the list,
 	// otherwise reported with a leading "+" to signal they're suppressed and
 	// `v` (or the "all" filter, for idle) would reveal them.
-	idleHidden := !s.actVerbose && s.actFilter != pg.ActivityAll
+	idleHidden := !s.act.verbose && s.act.filter != pg.ActivityAll
 	if sum.Idle > 0 {
 		if idleHidden {
 			parts = append(parts, mu(fmt.Sprintf("+%d idle", sum.Idle)))
@@ -48,9 +48,9 @@ func (m *Model) renderActivityHeader(s *screen) string {
 			parts = append(parts, mu(fmt.Sprintf("%d idle", sum.Idle)))
 		}
 	}
-	if !s.actVerbose {
+	if !s.act.verbose {
 		var aux int
-		for _, r := range s.actRows {
+		for _, r := range s.act.rows {
 			if isAuxBackend(r.BackendType) {
 				aux++
 			}
@@ -79,11 +79,11 @@ func (m *Model) renderActivityHeader(s *screen) string {
 	}
 
 	// Filter mode badge.
-	filter := styleBadge.Render("filter: " + s.actFilter.Label())
+	filter := styleBadge.Render("filter: " + s.act.filter.Label())
 
 	// Verbose badge — only shown when on so the line stays short by default.
 	var verboseBadge string
-	if s.actVerbose {
+	if s.act.verbose {
 		verboseBadge = " " + styleBadge.Render("verbose: on")
 	}
 
@@ -107,19 +107,7 @@ func (m *Model) renderActivityHeader(s *screen) string {
 // tool (C on levelActivity). Same look-and-feel as renderColumnConfig for the
 // top-queries table.
 func (m *Model) renderActColumnConfig(_ *screen, height int) string {
-	m.ensureActColsInit()
-	reg := actColumnRegistry()
-	rows := make([]colCfgRow, len(reg))
-	for i, d := range reg {
-		rows[i] = colCfgRow{
-			name:      d.name,
-			desc:      d.desc,
-			on:        d.mandatory || m.actColEnabled(d.id, d.defaultOn),
-			mandatory: d.mandatory,
-		}
-	}
-	return m.renderColCfgOverlay("choose which columns the activity table shows",
-		rows, m.actColCfgCursor, height)
+	return actSpec.renderConfig(m, &m.actTable, actCtx{}, height)
 }
 
 // renderActivityInfo is the ? overlay for the Activity tool. It explains the
@@ -196,23 +184,23 @@ func (m *Model) renderActivityInfo(height int) string {
 // is rendered here for the activity-specific backend action pending state, used
 // inline in renderDiagResult.
 func activityPendingBanner(s *screen, width int) string {
-	if s.pendingBackendAction == "" {
+	if s.act.pendingAction == "" {
 		return ""
 	}
 	var action string
-	switch s.pendingBackendAction {
+	switch s.act.pendingAction {
 	case "cancel":
 		action = "cancel (SIGINT)"
 	case "terminate":
 		action = "terminate (SIGTERM)"
 	default:
-		action = s.pendingBackendAction
+		action = s.act.pendingAction
 	}
 	banner := styleErr.Render(fmt.Sprintf(
 		"  ⚠  %s backend %d — press y to confirm, any other key to cancel",
-		action, s.pendingBackendPID,
+		action, s.act.pendingPID,
 	))
-	if q := flattenQuery(s.pendingBackendQuery); q != "" {
+	if q := flattenQuery(s.act.pendingQuery); q != "" {
 		banner += "\n" + truncateToWidth(styleErr.Render("     "+q), width)
 	}
 	return banner
