@@ -606,6 +606,28 @@ func (m *Model) renderLogEntry(s *screen, height int) string {
 			b.WriteString("  " + l + "\n")
 		}
 	}
+	// planSection is the PLAN body with the same heat grading as the top-queries
+	// EXPLAIN pane: each source line is wrapped plain first (wrapPlain is
+	// rune-based, so no ANSI may enter it) and only then painted per segment —
+	// paintExplainLine is a no-op on segments without the metric block.
+	planSection := func(body []byte) {
+		if len(body) == 0 {
+			return
+		}
+		b.WriteString("\n  " + styleHeader.Render(" PLAN (auto_explain) ") + "\n")
+		plan := dedent(strings.TrimLeft(string(body), "\n"))
+		analyze := explainHasTiming(plan)
+		decided := explainDecisions(plan, analyze)
+		for i, line := range strings.Split(plan, "\n") {
+			d, ok := decided[i]
+			for _, seg := range wrapPlain(line, width) {
+				if ok {
+					seg = paintExplainLine(seg, d.style, d.boldName, analyze, d.selfPct)
+				}
+				b.WriteString("  " + seg + "\n")
+			}
+		}
+	}
 	if len(e.SQL) > 0 {
 		// Keep only the lead-in ("duration: N ms" / "execute <unnamed>:") —
 		// the SQL itself gets its own highlighted section.
@@ -617,7 +639,7 @@ func (m *Model) renderLogEntry(s *screen, height int) string {
 		}
 		section("MESSAGE", []byte(head), false)
 		section("STATEMENT", e.SQL, true)
-		section("PLAN (auto_explain)", e.Plan, false)
+		planSection(e.Plan)
 	} else {
 		section("MESSAGE", e.Message, false)
 	}

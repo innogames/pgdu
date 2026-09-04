@@ -105,14 +105,19 @@ func explainHeatStyle(frac float64) (lipgloss.Style, bool) {
 	}
 }
 
-// colorizeExplain renders a text-format EXPLAIN plan into ready-to-print lines:
-// each is clipped to the detail width first (keeping clipDetail's rune-based
-// truncation ANSI-safe), then the slow nodes get their (actual time=…)/(cost=…)
-// metric heat-coloured by self-time share, with the single worst node's name
-// bolded. When the plan has no positive root cost/time (trivial or wholly
-// "never executed"), every line renders exactly as before.
-func (m *Model) colorizeExplain(plan string, analyze bool) []string {
-	lines := strings.Split(plan, "\n")
+// explainPaint is the heat decision for one plan-node source line.
+type explainPaint struct {
+	style    lipgloss.Style
+	boldName bool
+	selfPct  float64 // node's self-time share of the whole query (analyze only)
+}
+
+// explainDecisions grades every plan node by its self-time (or self-cost) share
+// of the whole query and returns the paint decision keyed by source line index.
+// The single worst node — the bottleneck — additionally gets its name bolded.
+// When the plan has no positive root cost/time (trivial or wholly "never
+// executed") the map is empty and callers print the plan untouched.
+func explainDecisions(plan string, analyze bool) map[int]explainPaint {
 	nodes := parseExplainTree(plan, analyze)
 
 	// nodes[0] is the root (outermost plan node); its inclusive value is the
@@ -127,22 +132,34 @@ func (m *Model) colorizeExplain(plan string, analyze bool) []string {
 		}
 	}
 
-	// style decision per source line index.
-	type decision struct {
-		style    lipgloss.Style
-		boldName bool
-		selfPct  float64 // node's self-time share of the whole query (analyze only)
-	}
-	decided := make(map[int]decision)
+	decided := make(map[int]explainPaint)
 	if total > 0 {
 		for i, n := range nodes {
 			style, hot := explainHeatStyle(n.self / total)
 			if !hot {
 				continue
 			}
-			decided[n.lineIdx] = decision{style: style, boldName: i == worst, selfPct: n.self / total * 100}
+			decided[n.lineIdx] = explainPaint{style: style, boldName: i == worst, selfPct: n.self / total * 100}
 		}
 	}
+	return decided
+}
+
+// explainHasTiming reports whether a text plan carries per-node actual times —
+// auto_explain with log_timing=off (or plain EXPLAIN) only has cost estimates,
+// so the heat grading must fall back to cost.
+func explainHasTiming(plan string) bool {
+	return strings.Contains(plan, "(actual time=")
+}
+
+// colorizeExplain renders a text-format EXPLAIN plan into ready-to-print lines:
+// each is clipped to the detail width first (keeping clipDetail's rune-based
+// truncation ANSI-safe), then the slow nodes get their (actual time=…)/(cost=…)
+// metric heat-coloured by self-time share, with the single worst node's name
+// bolded.
+func (m *Model) colorizeExplain(plan string, analyze bool) []string {
+	lines := strings.Split(plan, "\n")
+	decided := explainDecisions(plan, analyze)
 
 	out := make([]string, 0, len(lines))
 	for i, line := range lines {

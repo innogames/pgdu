@@ -22,15 +22,16 @@ web server.
   progress monitor (`p`) lists every running vacuum / index build / analyze /
   cluster / copy / basebackup with its phase and percentage.
 - **Walk a B-tree level by level** — root → internal pages → leaves; `↵` on an
-  internal entry follows its downlink, leaf entries decode the key and open the
-  heap row, HOT chains are followed, `s` seeks by key. Heap pages drill into
-  tuples and a byte-level layout of the tuple header, null bitmap, and each
-  attribute.
+  internal entry follows its downlink, `↵` on a leaf entry lands in the heap
+  page with the cursor on that tuple and its byte layout open, HOT chains are
+  followed and flagged, `s` seeks by key. Heap pages drill into tuples and a
+  byte-level layout of the tuple header, null bitmap, and each attribute.
 - **Shared buffers: who owns the cache, and why** — per-relation buffered bytes,
-  cached %, hit %, dirty bytes, and a usage-count "temperature" histogram with
-  dirty and pinned buffers per band; `m` maps the whole shared-memory segment.
-- **Health triage board** — 23 checks run concurrently and land as red / yellow /
-  green; `↵` jumps straight to the offender. A system overview shows the server's
+  cached %, hit %, dirty bytes and dirty %, and a usage-count "temperature"
+  histogram with dirty and pinned buffers per band; `p` reads a hot table page
+  by page, `m` maps the whole shared-memory segment.
+- **Health triage board** — 25 checks run concurrently and land as red / yellow /
+  green; `↵` jumps straight to the offender, and the green ones unfold on demand. A system overview shows the server's
   vital signs and a `pg_settings` browser that flags non-default and
   restart-pending values.
 - **38 diagnostic queries, 11 with a runnable fix** — `↵` generates a lock-safe
@@ -45,9 +46,10 @@ web server.
   anchors for *now*, *session start*, and *since the last stats reset*. `EXPLAIN
   ANALYZE` uses the parameters `pg_qualstats` captured, or inferred ones.
 - **Log analyzer** — errors, slow queries, lock waits, checkpoints, temp files and
-  autovacuum grouped by fingerprint, sectioned by category; live tail, rotated
-  `.gz` files, and server-side reading over the connection. Reads pgbouncer's
-  own log too.
+  autovacuum grouped by fingerprint, sectioned by category; `auto_explain` plans
+  with their hot nodes heat-coloured; live tail, rotated `.gz` files, and
+  server-side reading over the connection. Reads pgbouncer's own log too, with
+  its periodic stats lines turned into a sparkline pane.
 - **PgBouncer console browser** — every instance on the host is found from
   `/proc` and `/etc/pgbouncer`, addressed by its own unix socket (several
   instances usually share one TCP port), and browsed read-only: pools with
@@ -111,7 +113,9 @@ automatically.
 `pg_qualstats` installed the sample uses constants actually seen in production;
 without it, parameters are inferred from the prepared statement and a generic
 plan is shown. `↵` again runs `EXPLAIN (ANALYZE, BUFFERS)` on read-only
-statements, `E` executes it and shows the rows, `p` browses the captured
+statements — plan nodes are heat-coloured by their share of the total time,
+with the single worst node bolded, so the bottleneck stands out without reading
+every line — `E` executes it and shows the rows, `p` browses the captured
 parameter sets, `d` describes the statement's main table, and `u` jumps to that
 table in the disk view.
 
@@ -155,16 +159,24 @@ built from `pg_ls_logdir()`. Plain stderr logs are parsed with the server's
 `log_line_prefix` (auto-detected when it doesn't fit the file); csvlog and jsonlog
 work too, as does pgbouncer's own log (`/var/log/postgresql/pgbouncer*.log` is
 listed in the picker). DETAIL / HINT / STATEMENT / CONTEXT lines are attached to their primary
-entry and `auto_explain` plans fold into their statement.
+entry and `auto_explain` plans fold into their statement, rendered with the same
+heat grading as the top-queries EXPLAIN pane: nodes that dominate the actual
+time (or, with `log_timing = off`, the cost) are coloured and the worst one is
+bolded.
 
 ![Log analyzer](docs/logs_1.png)
 
 The overview groups entries by fingerprint — errors by normalized message, slow
 statements by normalized SQL with avg / p95 / max duration — and sections them by
-category: errors, warnings, lock waits, temp-file spills, replication, slow
-queries, checkpoints, autovacuum, connections. The header carries a per-severity
-timeline histogram of the loaded window. `Tab` flips between the grouped view, a
-sortable chronological timeline, and a slow-queries pane ordered by duration; `m`
+category: errors, warnings, lock waits, temp-file spills, replication,
+checkpoints, autovacuum, connections, and — last, because it usually has the
+most distinct groups — slow queries. Column headers show the sort. The header
+carries a per-severity timeline histogram of the loaded window. `Tab` cycles the
+grouped view, a sortable chronological timeline, a slow-queries pane ordered by
+duration and, for pgbouncer logs, a **pooler stats** pane: one row per
+`stats_period` with transactions and queries per second, bytes in / out and
+transaction / query latency, cells coloured relative to the column's max and a
+sparkline per metric in the header. `m`
 toggles the category sections off for a flat count-ordered list. `/` searches, `w`
 widens the tail window (32 MiB up to the whole file), `t` starts a live tail
 that re-reads incrementally and survives rotation. `↵` drills group → entries →
@@ -196,7 +208,7 @@ humanized, clients / servers / sockets gain a reverse-DNS `hostname` next to
 `addr`, the `scram_*` key columns are never shown, `t` cycles the refresh (1s → 10s → off), `C` picks columns per
 table, `e` exports. `l` opens the instance's logfile in the log analyzer, which
 understands pgbouncer's line format (socket events under *conn*, the periodic
-`stats:` line under *other*).
+`stats:` lines in their own pooler stats pane).
 
 The tool is read-only: it never issues RELOAD, PAUSE, RESUME or KILL. The console
 login is `-U` (or `--pgbouncer-user`) and must be in `stats_users` (read-only
@@ -209,22 +221,25 @@ and drills into this tool.
 
 ### Health triage & diagnostics
 
-**Health triage** runs 23 checks concurrently — wraparound age, WAL archiver,
-replication lag, connection saturation, PgBouncer waits, checkpoint pressure,
-prepared transactions, blocked backends, long and idle-in-transaction sessions,
-replication slots, cache hit ratio, SLRU pressure, deadlocks, temp files,
-rollback ratio, sequence exhaustion, stale statistics, missing FK indexes, table
-and index bloat, invalid indexes — and boils them down to a red / yellow / green
-board sorted most-severe first. `↵` on a row drills into whatever explains it:
-the diagnostic query, the lock tree, the activity list, the system overview, or
-the pgbouncer tool.
+**Health triage** runs 25 checks concurrently — transaction-ID and multixact
+wraparound age, WAL archiver, replication lag, connection saturation, PgBouncer
+waits, checkpoint pressure, prepared transactions, extension capacity, blocked
+backends, long and idle-in-transaction sessions, replication slots, cache hit
+ratio, SLRU pressure, deadlocks, temp files, rollback ratio, sequence
+exhaustion, stale statistics, missing FK indexes, table and index bloat, invalid
+and duplicate indexes — and boils them down to a red / yellow / green board
+sorted most-severe first. Green checks collapse into one summary row; `↵` on it
+(or `v` anywhere) unfolds them so each can be read and drilled like a finding.
+`↵` on a row drills into whatever explains it: the diagnostic query, the lock
+tree, the activity list, the system overview, or the pgbouncer tool.
 
 **Diagnostics** (under *Other tools*) are 38 saved queries in six categories —
 index, table, vacuum, activity, WAL, server — with `f` to filter by category, `s`
 to show the SQL, and `C` to pick columns. Eleven of them come with a **fix**:
 index bloat, unused / duplicate / redundant / invalid indexes, CLUSTER candidates,
 table bloat, stale statistics, fillfactor, vacuum stats, and wraparound freeze
-age. `↵` on a result row generates the script for that object — only lock-safe
+age. Duplicate indexes are ranked by the bytes that dropping the extra copies
+would free. `↵` on a result row generates the script for that object — only lock-safe
 statements (`REINDEX INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `ANALYZE`,
 plain `VACUUM`; `ALTER TABLE` guarded by a 3 s `lock_timeout`; `VACUUM FULL` and
 `CLUSTER` only ever as comments) — and `y` runs it statement by statement over a
@@ -237,8 +252,9 @@ success the diagnostic reloads so you see the effect immediately.
 
 A server dashboard on one screen: version, role, uptime, connection usage split by
 state, longest transaction; commit / rollback ratio, deadlocks and conflicts;
-tuple-level write and scan activity; replication and slots; memory GUCs; autovacuum settings and transaction-ID age against
-`autovacuum_freeze_max_age`; WAL and checkpoint statistics; `pg_stat_io`; and
+tuple-level write and scan activity; replication and slots; memory GUCs;
+autovacuum settings and transaction-ID and multixact age against their
+`autovacuum_*freeze_max_age` limits; WAL and checkpoint statistics; `pg_stat_io`; and
 pending configuration changes, including settings that still need a restart. The
 top block shows **extension capacity** — how full `pg_stat_statements` /
 `pg_qualstats` and the table statistics are — with a confirmed reset (`↵`,
@@ -264,16 +280,20 @@ three bars: the host's memory (shared buffers vs. other processes vs. page cache
 vs. free), the buffer pool by relation, this database, other databases, and free,
 and a cluster-wide **temperature** histogram from buffer usage counts with dirty
 and pinned totals. Below it, one bar per relation with buffered bytes, the share
-of the table that is cached, hit ratio, **dirty bytes**, and a mean usage count
-coloured cold → hot — so a table that sits in the pool without being reused, or
-one whose pages are all dirty and hot, is obvious at a glance.
+of the table that is cached, hit ratio, **dirty bytes** and the **dirty share**
+of what is buffered (graded on fixed thresholds, since a mostly-dirty cache means
+write pressure whatever the table's size), and a mean usage count coloured
+cold → hot — so a table that sits in the pool without being reused, or one whose
+pages are all dirty and hot, is obvious at a glance.
 
 ![Shared buffers](docs/shared_buffers.png)
 
 Drill into a relation for its **buffer detail**: cache footprint, hit ratio,
 dirty bytes as a share of what is buffered, and the relation's own histogram from
 cold (evictable) to hot (frequently reused), with the dirty and pinned portion of
-each band marked. Heap, TOAST, and indexes are counted together.
+each band marked. Heap, TOAST, and indexes are counted together. From either
+screen `p` opens the table's heap pages in the page inspector, so a hot or dirty
+table can be read page by page.
 
 ![Shared buffer detail](docs/shared_buffer_details.png)
 
@@ -300,8 +320,10 @@ links. `↵` on a page lists its **index tuples**; `↵` on an entry of an inter
 page follows the downlink to the child page, so you can descend from root to a
 particular leaf one level at a time. Leaf entries are decoded against the heap
 and show the indexed key; an entry that points at a HOT-updated row is resolved
-through the redirect line pointer and marked with the hop. `s` seeks to a key
-(or, on BRIN, a heap block). GiST, GIN, and BRIN indexes open in block order
+through the redirect line pointer, marked with the hop and flagged `H`. `↵` on a
+leaf entry opens the heap page it points at with the cursor on that tuple and
+its byte layout already open, so the index → heap hop stays inside the page
+inspector. `s` seeks to a key (or, on BRIN, a heap block). GiST, GIN, and BRIN indexes open in block order
 with their own page statistics.
 
 ![Index pages](docs/pages_index.png)
@@ -403,15 +425,15 @@ Frequently used view-specific keys:
 | Key        | Where            | Action                                            |
 |------------|------------------|---------------------------------------------------|
 | `b`        | parts / activity | measure bloat / open the lock tree                |
-| `v`        | parts / activity | run VACUUM / show auxiliary backends              |
-| `p`        | activity, overview | progress monitor for running operations         |
+| `v`        | parts / activity / triage | run VACUUM / show auxiliary backends / unfold green checks |
+| `p`        | activity, overview / parts, buffers | progress monitor / open the page inspector |
 | `W`        | activity         | wait-event profiler                               |
 | `k` `x`    | activity         | cancel query / terminate backend (`y` to confirm) |
 | `S` `L` `D`| top queries      | save / browse & diff / delete snapshots           |
 | `R`        | top queries      | re-baseline the window                            |
 | `d`        | queries, logs    | describe the statement's main table               |
 | `m`        | buffers / logs   | shared-memory map / toggle log sections           |
-| `Tab`      | logs             | groups → timeline → slow queries                  |
+| `Tab`      | logs             | groups → timeline → slow queries → pooler stats   |
 | `t`        | activity, queries, logs, pgbouncer | cycle auto-refresh / live tail  |
 | `l`        | pgbouncer        | open the instance's log in the log analyzer       |
 | `s`        | diagnostics / index tuples / overview | show SQL / seek to a key / settings browser |
