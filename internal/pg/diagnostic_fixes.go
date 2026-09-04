@@ -153,11 +153,11 @@ func fixTableStmt(verb, schemaCol, tableCol string, extra ...string) func(func(s
 }
 
 // fixTableBloat is the bloat_table fix. Plain VACUUM is the only statement
-// that runs: it only marks dead space reusable, so the reclaim options stay
-// comments. pg_repack is spelled out as a ready shell line (with -d, since the
+// that runs: it only marks dead space reusable, so the reclaim option stays a
+// comment. pg_repack is spelled out as a ready shell line (with -d, since the
 // diagnostic is PerDB and the row names its database) because it is the one
-// online path; TRUNCATE is mentioned only to be ruled out — it does return the
-// file to the OS, but by deleting every row.
+// online path that returns space without losing rows; destructive options
+// such as TRUNCATE are deliberately not suggested.
 func fixTableBloat(get func(string) (string, bool)) (string, bool) {
 	tbl, ok := fixQualify(get, "schemaname", "tablename")
 	if !ok {
@@ -170,7 +170,6 @@ func fixTableBloat(get func(string) (string, bool)) (string, bool) {
 	return strings.Join([]string{
 		"VACUUM (VERBOSE) " + tbl + ";",
 		"-- " + repack,
-		"-- TRUNCATE " + tbl + "; returns the file to the OS but deletes every row",
 	}, "\n"), true
 }
 

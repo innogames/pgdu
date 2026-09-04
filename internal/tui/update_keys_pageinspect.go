@@ -10,11 +10,26 @@ import (
 
 // jumpToPageInspector opens the page-inspector view for the part under the
 // cursor on levelParts: heap → heap pages of the table, toast → heap pages of
-// the TOAST relation, index → index pages (btree/gist/brin/gin). The pushed
+// the TOAST relation, index → index pages (btree/gist/brin/gin). On the
+// shared-buffers screens it opens the heap pages of the highlighted (or
+// inspected) table, so a hot/dirty table can be read page by page. The pushed
 // screen is stamped toolPageInspect so it renders and lays out exactly as if
-// reached through the page-inspector tool; q pops back to the parts list.
+// reached through the page-inspector tool; q pops back to where it came from.
 func (m *Model) jumpToPageInspector(s *screen) tea.Cmd {
-	if s.level != levelParts {
+	switch s.level {
+	case levelBufferTables, levelBufferDetail:
+		target, ok := bufDescribeTarget(s)
+		if !ok {
+			return nil
+		}
+		// TotalBytes covers indexes and toast too; HeapBytes is cosmetic for the
+		// heap-pages view (relpages is loaded), so the same reconstruction serves.
+		t := target.table
+		t.HeapBytes = t.TotalBytes
+		m.stack = append(m.stack, heapPagesScreen(t, "heap pages"))
+		return m.loadCurrent()
+	case levelParts:
+	default:
 		return nil
 	}
 	vis := s.visibleIndexes()

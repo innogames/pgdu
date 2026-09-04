@@ -87,7 +87,7 @@ type keyMap struct {
 	// the buffer-tables level, where it's the only advertisement for the view.
 	shmemInFooter bool
 
-	// pageInspectInFooter adds the p (pages) hint on the parts level, the only
+	// pageInspectInFooter adds the p (pages) hint on the parts and buffer levels, the only
 	// place that advertises the cross-tool jump.
 	pageInspectInFooter bool
 
@@ -233,8 +233,9 @@ func (k *keyMap) applyContext(s *screen) {
 	k.Params.SetEnabled(stmtDetail)
 	k.Execute.SetEnabled(stmtDetail)
 	// v is the verbose toggle on statement detail, the VACUUM trigger on parts,
-	// and the auxiliary-backend visibility toggle on the activity table.
-	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity)
+	// the auxiliary-backend visibility toggle on the activity table and the
+	// fold/unfold of green checks on triage.
+	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity || s.level == levelTriage)
 	k.DeleteSnapshot.SetEnabled(snapshots)
 	// Install is only actionable when the screen offers an installable extension
 	// (the prompt renders its own `i` hint); keep it out of the footer otherwise.
@@ -269,11 +270,13 @@ func (k *keyMap) applyContext(s *screen) {
 	k.ShmemMap.SetEnabled(s.level == levelBufferTables)
 	k.shmemInFooter = s.level == levelBufferTables
 
-	// p jumps from a parts row into the page inspector for that object. The
-	// physical key is Params (statement detail) and Progress (dashboard/activity)
-	// elsewhere; none of those levels is levelParts, so no dispatch collision.
-	k.PageInspect.SetEnabled(s.level == levelParts)
-	k.pageInspectInFooter = s.level == levelParts
+	// p jumps from a parts row, a buffer-tables row or the buffer detail into
+	// the page inspector for that object. The physical key is Params (statement
+	// detail) and Progress (dashboard/activity) elsewhere; none of those levels
+	// overlaps, so no dispatch collision.
+	pageInspect := s.level == levelParts || s.level == levelBufferTables || s.level == levelBufferDetail
+	k.PageInspect.SetEnabled(pageInspect)
+	k.pageInspectInFooter = pageInspect
 
 	// System-overview cross-links only exist on the maintenance dashboard; gating
 	// them here keeps r/w free for reverse-sort and WAL-by-relation everywhere else.

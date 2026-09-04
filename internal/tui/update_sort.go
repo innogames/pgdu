@@ -124,6 +124,16 @@ func itemDirtyBytes(it item) (int64, bool) {
 	return st.DirtyBytes, true
 }
 
+// itemDirtyFrac is sortByDirtyPct's extractor: the dirty share of a table's
+// buffered bytes, undefined (unsortable) for tables with nothing buffered.
+func itemDirtyFrac(it item) (float64, bool) {
+	st, ok := it.data.(pg.TableBufferStat)
+	if !ok || st.BufferedBytes <= 0 {
+		return 0, false
+	}
+	return float64(st.DirtyBytes) / float64(st.BufferedBytes), true
+}
+
 // itemUsageAvg extracts a buffer-tables item's mean clock-sweep usagecount
 // (the "temp" column, 0..5). Returns (0, false) when the table has no pages
 // in shared_buffers — a temperature only exists for cached pages — so those
@@ -261,7 +271,7 @@ func validSorts(l level) []sortMode {
 	case levelSchemas:
 		return []sortMode{sortBySize, sortByTables, sortByName}
 	case levelBufferTables:
-		return []sortMode{sortBySize, sortByTotal, sortByCached, sortByHitRatio, sortByDirty, sortByTemp, sortByName}
+		return []sortMode{sortBySize, sortByTotal, sortByCached, sortByHitRatio, sortByDirty, sortByDirtyPct, sortByTemp, sortByName}
 	case levelShmem:
 		return []sortMode{sortBySize, sortByGroup, sortByName}
 	case levelHeapPages:

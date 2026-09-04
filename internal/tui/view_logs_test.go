@@ -70,8 +70,8 @@ func newLogTestModel(t *testing.T) (*Model, *screen) {
 func TestLogGroupItemsSections(t *testing.T) {
 	m, s := newLogTestModel(t)
 
-	// Signal sections first (errors, warnings, temp files), chatter last
-	// (slow queries, checkpoints); the biggest group leads its section.
+	// Signal sections first (errors, warnings, temp files), chatter last, with
+	// slow queries at the very end; the biggest group leads its section.
 	var sections []string
 	var titles []string
 	for _, it := range s.items {
@@ -82,7 +82,7 @@ func TestLogGroupItemsSections(t *testing.T) {
 			titles = append(titles, v.Title)
 		}
 	}
-	if strings.Join(sections, ",") != "errors,warnings,temp files,slow queries,checkpoints" {
+	if strings.Join(sections, ",") != "errors,warnings,temp files,checkpoints,slow queries" {
 		t.Errorf("sections = %v", sections)
 	}
 	if len(titles) != 6 || titles[0] != `duplicate key value violates unique constraint "channel_name_plugin_idx"` {

@@ -107,6 +107,17 @@ WHERE  datname NOT IN ('template0', 'template1')
 ORDER  BY 2 DESC
 LIMIT  1`
 
+	// sqlMaintMxidWraparound is the multixact counterpart: mxid_age(datminmxid)
+	// against autovacuum_multixact_freeze_max_age drives the same emergency
+	// autovacuum, and is easy to overlook because it moves independently of
+	// the XID counter (row locks shared by several transactions, FK checks).
+	sqlMaintMxidWraparound = `
+SELECT datname, mxid_age(datminmxid)
+FROM   pg_database
+WHERE  datname NOT IN ('template0', 'template1')
+ORDER  BY 2 DESC
+LIMIT  1`
+
 	// sqlMaintCheckpointer fetches the cumulative checkpoint counters from
 	// pg_stat_checkpointer (introduced in PG 15; earlier clusters get zeros
 	// via error handling). A high requested/(timed+requested) ratio signals
@@ -419,6 +430,7 @@ var maintSettingsKeys = []string{
 	"autovacuum_max_workers",
 	"autovacuum_naptime",
 	"autovacuum_freeze_max_age",
+	"autovacuum_multixact_freeze_max_age",
 	"pg_stat_statements.max",
 	"pg_stat_statements.track",
 	"pg_stat_statements.track_planning",

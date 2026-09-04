@@ -625,6 +625,9 @@ type triageState struct {
 	// gen is bumped on every (re)load; messages from an older run carry the
 	// old gen and are dropped, so a refresh mid-run never mixes two reports.
 	gen uint64
+	// showOK unfolds the green checks into one row each instead of the single
+	// collapsed summary row (Enter on that row or v toggles it).
+	showOK bool
 }
 
 // partsState: levelParts extras: bloat scan progress, the per-table maintenance stats and the armed VACUUM.

@@ -214,10 +214,15 @@ ORDER BY disk_pain DESC NULLS LAST
 // ORDER BY 1, 2
 // `
 
+// sqlDiagIndexShowDuplicate groups indexes by (table, opclasses, key columns,
+// expressions, predicate): more than one per group means fully interchangeable
+// copies. wasted_bytes is what dropping all but the largest copy would free —
+// the figure the triage check sums.
 const sqlDiagIndexShowDuplicate = `
 SELECT
     pg_size_pretty(sum(pg_relation_size(idx))::bigint) AS size,
     pg_size_pretty((array_agg(idx_size))[1]) AS index_size,
+    (sum(idx_size) - max(idx_size))::bigint AS wasted_bytes,
     (array_agg(tbl))[1] AS "table",
     (array_agg(idx))[1] AS idx1,
     (array_agg(idx))[2] AS idx2,
@@ -252,7 +257,7 @@ WITH btree_index_atts AS (
         indexclass.relname AS index_name,
         indexclass.reltuples,
         indexclass.relpages,
-        indrelid, indexrelid,
+        indrelid, indexrelid, indkey,
         indexclass.relam,
         tableclass.relname AS tablename,
         indexrelid AS index_oid
@@ -264,23 +269,39 @@ WITH btree_index_atts AS (
     WHERE pg_am.amname = 'btree' AND indexclass.relpages > 0
       AND nspname NOT IN ('pg_catalog', 'information_schema')
 ),
+-- One row per index column, resolved to the (relation, column) pair whose
+-- pg_stats row describes it: a plain key column is described by the table
+-- column it indexes (indkey[i] <> 0), an expression column by the index's own
+-- attribute (indkey[i] = 0). Resolving this via indkey instead of matching
+-- pg_get_indexdef() output against attname keeps the pg_stats join a plain
+-- equality the planner can hash; the OR/function form ran a per-row nested
+-- loop over every (index attribute × pg_stats) pair and took seconds on
+-- mid-sized catalogs. MATERIALIZED is essential: inlined, the planner sees
+-- CASE/COALESCE expressions as join keys, refuses to hash on them and falls
+-- back to the same nested loop keyed on nspname alone.
+index_stat_targets AS MATERIALIZED (
+    SELECT ia.*, ia_att.attnum AS index_attnum,
+        CASE WHEN ta.attnum IS NULL THEN ia.index_name ELSE ia.tablename END AS stat_relname,
+        coalesce(ta.attname, ia_att.attname) AS stat_attname
+    FROM btree_index_atts AS ia
+    JOIN pg_attribute AS ia_att ON ia_att.attrelid = ia.indexrelid AND ia_att.attnum > 0
+    LEFT JOIN pg_attribute AS ta ON ia.indkey[ia_att.attnum - 1] <> 0
+        AND ta.attrelid = ia.indrelid AND ta.attnum = ia.indkey[ia_att.attnum - 1]
+),
 index_item_sizes AS (
     SELECT
-        ind_atts.nspname, ind_atts.index_name,
-        ind_atts.reltuples, ind_atts.relpages, ind_atts.relam,
-        indrelid AS table_oid, index_oid,
+        t.nspname, t.index_name,
+        t.reltuples, t.relpages, t.relam,
+        t.indrelid AS table_oid, t.index_oid,
         current_setting('block_size')::numeric AS bs,
         8 AS maxalign,
         24 AS pagehdr,
-        CASE WHEN max(coalesce(pg_stats.null_frac, 0)) = 0 THEN 2 ELSE 6 END AS index_tuple_hdr,
-        sum((1 - coalesce(pg_stats.null_frac, 0)) * coalesce(pg_stats.avg_width, 1024)) AS nulldatawidth
-    FROM pg_attribute
-    JOIN btree_index_atts AS ind_atts ON pg_attribute.attrelid = ind_atts.indexrelid
-    JOIN pg_stats ON pg_stats.schemaname = ind_atts.nspname
-        AND ((pg_stats.tablename = ind_atts.tablename
-              AND pg_stats.attname = pg_catalog.pg_get_indexdef(pg_attribute.attrelid, pg_attribute.attnum, TRUE))
-          OR (pg_stats.tablename = ind_atts.index_name AND pg_stats.attname = pg_attribute.attname))
-    WHERE pg_attribute.attnum > 0
+        CASE WHEN max(coalesce(s.null_frac, 0)) = 0 THEN 2 ELSE 6 END AS index_tuple_hdr,
+        sum((1 - coalesce(s.null_frac, 0)) * coalesce(s.avg_width, 1024)) AS nulldatawidth
+    FROM index_stat_targets AS t
+    JOIN pg_stats AS s ON s.schemaname = t.nspname
+        AND s.tablename = t.stat_relname
+        AND s.attname = t.stat_attname
     GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
 ),
 index_aligned_est AS (

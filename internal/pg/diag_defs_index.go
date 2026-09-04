@@ -174,14 +174,14 @@ var diagIndex = []Diagnostic{
 		Category:    "index",
 		Description: "indexes with identical column sets (candidates for removal)",
 		SQL:         sqlDiagIndexShowDuplicate,
-		Bar:         "",
-		Sort:        "size",
+		Bar:         "wasted_bytes",
+		Sort:        "wasted_bytes",
 		Fix:         fixDropDuplicateIndex,
 		Help: `Indexes on the same table with identical key columns, operator
 			classes, expressions and predicate — fully interchangeable, so one of
 			each pair is pure write amplification and cache waste. idx1/idx2 are
 			the pair (index_size is the size of one; the size column sums the
-			pair). Keep the one backing a constraint — a primary key or UNIQUE
+			pair; wasted_bytes is what dropping the extra copies frees). Keep the one backing a constraint — a primary key or UNIQUE
 			constraint index can't be dropped directly — and drop the other with
 			DROP INDEX CONCURRENTLY. If both back constraints, drop the redundant
 			constraint instead.`,

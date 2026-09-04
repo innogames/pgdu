@@ -43,12 +43,15 @@ func (m *Model) renderBufferInfo(height int) string {
 	b.WriteString("    " + mu("a bar mostly cold means shared_buffers is bigger than the working set") + "\n")
 	b.WriteString("    " + mu("the temp column is each table's mean usage count across its cached pages") + "\n")
 	b.WriteString("    " + sw(styleDirty) + "  " + mu("dirty        pages modified in memory, not yet flushed to disk —") + "\n")
-	b.WriteString("    " + mu("                 the checkpointer/bgwriter owes a write; high = write pressure") + "\n\n")
+	b.WriteString("    " + mu("                 the checkpointer/bgwriter owes a write; high = write pressure") + "\n")
+	b.WriteString("    " + mu("dirty%       dirty ÷ buffered — the share of a table's cached pages awaiting a") + "\n")
+	b.WriteString("    " + mu("                 write; graded on fixed thresholds (≥25% yellow, ≥50% red)") + "\n\n")
 
 	b.WriteString("  " + mu("The top 10 tables by BufferedBytes each get a distinct palette hue;") + "\n")
 	b.WriteString("  " + mu("their row bar matches the slice on the shared_buffers bar above.") + "\n")
 	b.WriteString("  " + mu("Tables ranked 11+ use the default bar colour.  ") +
-		styleBadge.Render("enter") + mu(" opens a per-table breakdown.") + "\n")
+		styleBadge.Render("enter") + mu(" opens a per-table breakdown, ") +
+		styleBadge.Render("p") + mu(" its heap pages in the page inspector.") + "\n")
 
 	return padInfo(&b, height)
 }
@@ -262,7 +265,8 @@ func (m *Model) renderBufferDetailInfo(height int) string {
 	b.WriteString("    " + mu("           only evicted once it reaches 0, so count = reuse / staying power.") + "\n")
 	b.WriteString("    " + sw(styleDirty) + "  " + mu("dirty        the modified-but-unflushed slice of each band — pages the") + "\n")
 	b.WriteString("    " + mu("                 checkpointer still owes a write; lots of hot+dirty = write pressure") + "\n")
-	b.WriteString("    " + mu("each row's bar is scaled to the table's busiest band, so band sizes compare.") + "\n")
+	b.WriteString("    " + mu("each row's bar is scaled to the table's busiest band, so band sizes compare.") + "\n\n")
+	b.WriteString("  " + styleBadge.Render("p") + mu(" opens this table's heap pages in the page inspector.") + "\n")
 
 	return padInfo(&b, height)
 }

@@ -86,9 +86,11 @@ const (
 )
 
 // Categories lists categories in display order: signal first, chatter last.
+// Slow queries go at the very end: they usually carry by far the most distinct
+// groups, so anything sectioned after them would be pushed off-screen.
 var Categories = []Category{
 	CatError, CatWarning, CatLock, CatTempFile, CatReplication, CatOther,
-	CatSlowQuery, CatStatement, CatCheckpoint, CatAutovacuum, CatConnection,
+	CatStatement, CatCheckpoint, CatAutovacuum, CatConnection, CatSlowQuery,
 }
 
 func (c Category) Label() string {

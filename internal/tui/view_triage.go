@@ -42,7 +42,7 @@ func triageTargetLabel(r pg.TriageResult) string {
 
 // renderTriageList renders the one-key health report: severity-sorted rows of
 // glyph | check | detail | drill hint, with green checks collapsed into the
-// trailing summary row (see triageItems).
+// trailing summary row unless unfolded (see triageItems).
 func (m *Model) renderTriageList(s *screen, height int) string {
 	var b strings.Builder
 
@@ -73,6 +73,9 @@ func (m *Model) renderTriageList(s *screen, height int) string {
 	}
 	if n := len(s.triage.pending); n > 0 {
 		summary += styleMuted.Render(fmt.Sprintf("  ·  %d of %d checks done ", len(s.triage.results), len(s.triage.names))) + m.spinner.View()
+	}
+	if s.triage.showOK {
+		summary += "  " + styleBadge.Render("ok: shown")
 	}
 	b.WriteString("  " + summary + "\n")
 	height--
@@ -108,6 +111,12 @@ func (m *Model) renderTriageList(s *screen, height int) string {
 			hint = "  " + styleMuted.Render("↵ "+triageTargetLabel(r))
 		case triagePending:
 			glyph = m.spinner.View()
+		case triageOKSummary:
+			if s.triage.showOK {
+				hint = "  " + styleMuted.Render("↵ collapse")
+			} else {
+				hint = "  " + styleMuted.Render("↵ expand")
+			}
 		}
 		line := cursor + glyph + " " + name + "  " + styleMuted.Render(it.detail) + hint
 		b.WriteString(truncateToWidth(line, m.width) + "\n")

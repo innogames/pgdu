@@ -46,13 +46,14 @@ func barReserve(s *screen) int {
 	switch l {
 	case levelBufferTables:
 		// cursor + bar(brackets) + buffered + total + cached + hit + dirty +
-		// temp + name
+		// dirty% + temp + name
 		return colCursor + colBrackets +
 			bufColBuffered + colGutter +
 			bufColTotal + colGutter +
 			bufColCached + colGutter +
 			bufColHit + colGutter +
 			bufColDirty + colGutter +
+			bufColDirtyPct + colGutter +
 			bufColTemp + colGutter +
 			colName
 	case levelShmem:

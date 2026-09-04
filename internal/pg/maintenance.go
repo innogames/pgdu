@@ -60,6 +60,12 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 		_, _ = fmt.Sscanf(v, "%d", &info.FreezeMaxAge)
 	}
 
+	// --- multixact age ---
+	_ = pool.QueryRow(ctx, sqlMaintMxidWraparound).Scan(&info.MxidAgeDB, &info.MxidAge)
+	if v, ok := info.Settings["autovacuum_multixact_freeze_max_age"]; ok {
+		_, _ = fmt.Sscanf(v, "%d", &info.MxidFreezeMaxAge)
+	}
+
 	// --- checkpoint counters (PG15+; silently absent on older clusters) ---
 	_ = pool.QueryRow(ctx, sqlMaintCheckpointer).Scan(&info.CheckpointsTimed, &info.CheckpointsReq)
 

@@ -382,6 +382,7 @@ func (c *Client) triageChecks(db string, sh *triageShared) []triageCheck {
 
 	return []triageCheck{
 		{name: "wraparound", target: TriageTargetDiagnostic, diagKey: "wraparound_tables", dbFn: wraparoundDB, ready: sh.infoReady, run: mgrade(wraparoundGrade)},
+		m("multixact wraparound", TriageTargetMaintenance, "", mxidWraparoundGrade),
 		m("WAL archiver", TriageTargetMaintenance, "", archiverGrade),
 		m("replication lag", TriageTargetMaintenance, "", replicationGrade),
 		m("connection saturation", TriageTargetMaintenance, "", connSaturationGrade),
@@ -404,6 +405,7 @@ func (c *Client) triageChecks(db string, sh *triageShared) []triageCheck {
 		{name: "table bloat", target: TriageTargetDiagnostic, diagKey: "bloat_table", db: db, run: perDB(c.triageTableBloat)},
 		{name: "index bloat", target: TriageTargetDiagnostic, diagKey: "bloat_index", db: db, run: perDB(c.triageIndexBloat)},
 		{name: "invalid indexes", target: TriageTargetDiagnostic, diagKey: "index_invalid", db: db, run: perDB(c.triageInvalidIndexes)},
+		{name: "duplicate indexes", target: TriageTargetDiagnostic, diagKey: "index_show_duplicate", db: db, run: perDB(c.triageDuplicateIndexes)},
 	}
 }
 
@@ -418,6 +420,23 @@ func wraparoundGrade(info *MaintenanceInfo) (Severity, string, error) {
 	detail := fmt.Sprintf("oldest datfrozenxid %.0f%% of the way to a forced anti-wraparound autovacuum", pct)
 	if info.XidAgeDB != "" {
 		detail += " (in " + info.XidAgeDB + ")"
+	}
+	return sev, detail, nil
+}
+
+// mxidWraparoundGrade is the multixact sibling of wraparoundGrade: multixact
+// IDs (row locks shared by several transactions, FK checks) have their own
+// 32-bit counter and their own freeze horizon, and a lagging one forces the
+// same anti-wraparound autovacuum. Same bands as the XID check.
+func mxidWraparoundGrade(info *MaintenanceInfo) (Severity, string, error) {
+	if info.MxidFreezeMaxAge <= 0 {
+		return 0, "", errors.New("autovacuum_multixact_freeze_max_age unavailable")
+	}
+	sev := wraparoundSeverity(info.MxidAge, info.MxidFreezeMaxAge)
+	pct := 100 * float64(info.MxidAge) / float64(info.MxidFreezeMaxAge)
+	detail := fmt.Sprintf("oldest datminmxid %.0f%% of the way to a forced anti-wraparound autovacuum", pct)
+	if info.MxidAgeDB != "" {
+		detail += " (in " + info.MxidAgeDB + ")"
 	}
 	return sev, detail, nil
 }
@@ -1143,6 +1162,21 @@ func (c *Client) triageInvalidIndexes(ctx context.Context, db string) (Severity,
 	}
 	return SevCrit, fmt.Sprintf("%d index(es) left INVALID by a failed concurrent build (in %s)",
 		len(res.Rows), db), nil
+}
+
+// triageDuplicateIndexes flags fully interchangeable index copies. They cost
+// write amplification and cache, not availability, so any hit is a warning
+// sized by what dropping the extra copies would free.
+func (c *Client) triageDuplicateIndexes(ctx context.Context, db string) (Severity, string, error) {
+	res, err := c.runTriageDiag(ctx, db, "index_show_duplicate")
+	if err != nil {
+		return 0, "", err
+	}
+	if len(res.Rows) == 0 {
+		return SevOK, fmt.Sprintf("no duplicate indexes (in %s)", db), nil
+	}
+	return SevWarn, fmt.Sprintf("%d duplicate index group(s), ~%s wasted on redundant copies (in %s)",
+		len(res.Rows), humanize.Bytes(int64(diagSum(res, "wasted_bytes"))), db), nil
 }
 
 // triageStaleStats leans on the stale_statistics diagnostic's own server-side

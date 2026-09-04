@@ -359,7 +359,8 @@ func (m *Model) renderLogGroups(s *screen, height int) string {
 	}
 
 	barW := m.barWidth(s)
-	rowsH := height
+	b.WriteString(renderLogGroupsHeader(s.sort, s.sortDesc, barW) + "\n")
+	rowsH := max(height-1, 0)
 	if rowsH > 0 {
 		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
 	}
@@ -423,6 +424,18 @@ func (m *Model) renderLogGroups(s *screen, height int) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// renderLogGroupsHeader labels the groups pane's columns; the layout mirrors
+// the row assembly below (cursor, bar, count, severity, span, message).
+func renderLogGroupsHeader(sort sortMode, sortDesc bool, barW int) string {
+	// Cursor (2) + bracketed bar (barW+2) + one space, as in the rows.
+	line := strings.Repeat(" ", 2+barW+2+1) +
+		padLeft(sortMark("count", sort == sortByCount, sortDesc), logCountColW) + "  " +
+		padRight("level", logSevColW) + "  " +
+		padRight(sortMark("seen", sort == sortByLast, sortDesc), logSpanColW) + "  " +
+		sortMark("message", sort == sortByName, sortDesc) + "  [stats]"
+	return styleMuted.Render(line)
 }
 
 // logPlanBadge marks slow-query rows that carry an auto_explain plan; n > 1

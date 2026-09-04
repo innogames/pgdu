@@ -281,6 +281,7 @@ func renderMaintAutovacuum(info *pg.MaintenanceInfo) string {
 			{"max_workers", "autovacuum_max_workers"},
 			{"naptime", "autovacuum_naptime"},
 			{"freeze_max_age", "autovacuum_freeze_max_age"},
+			{"mxid_freeze_max_age", "autovacuum_multixact_freeze_max_age"},
 		} {
 			v, ok := info.Settings[guc.key]
 			if !ok {
@@ -288,27 +289,37 @@ func renderMaintAutovacuum(info *pg.MaintenanceInfo) string {
 			}
 			b.WriteString("  " + padRight(mu(guc.label), 24) + v + "\n")
 		}
-		if info.XidAge > 0 && info.FreezeMaxAge > 0 {
-			pct := float64(info.XidAge) / float64(info.FreezeMaxAge) * 100
-			pctStr := fmt1(pct) + "%"
-			var wrapStyle lipgloss.Style
-			switch {
-			case pct >= 80:
-				wrapStyle = styleErr
-			case pct >= 50:
-				wrapStyle = lipgloss.NewStyle().Foreground(colorAccent)
-			default:
-				wrapStyle = lipgloss.NewStyle().Foreground(colorOK)
-			}
-			b.WriteString("  " + padRight(mu("xid age"), 24) +
-				fmt.Sprintf("%s / %s  ", formatRows(info.XidAge), formatRows(info.FreezeMaxAge)) +
-				wrapStyle.Render(pctStr) + "\n")
-		} else if info.XidAge > 0 {
-			b.WriteString("  " + padRight(mu("xid age"), 24) + formatRows(info.XidAge) + "\n")
-		}
+		b.WriteString(freezeAgeLine("xid age", info.XidAge, info.FreezeMaxAge))
+		b.WriteString(freezeAgeLine("mxid age", info.MxidAge, info.MxidFreezeMaxAge))
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+// freezeAgeLine renders one "<label>  age / max  pct%" overview line, colouring
+// the percentage by how close the counter is to a forced anti-wraparound
+// autovacuum. Empty when the age is unknown; bare age when the max is.
+func freezeAgeLine(label string, age, maxAge int64) string {
+	mu := styleMuted.Render
+	switch {
+	case age <= 0:
+		return ""
+	case maxAge <= 0:
+		return "  " + padRight(mu(label), 24) + formatRows(age) + "\n"
+	}
+	pct := float64(age) / float64(maxAge) * 100
+	var wrapStyle lipgloss.Style
+	switch {
+	case pct >= 80:
+		wrapStyle = styleErr
+	case pct >= 50:
+		wrapStyle = lipgloss.NewStyle().Foreground(colorAccent)
+	default:
+		wrapStyle = lipgloss.NewStyle().Foreground(colorOK)
+	}
+	return "  " + padRight(mu(label), 24) +
+		fmt.Sprintf("%s / %s  ", formatRows(age), formatRows(maxAge)) +
+		wrapStyle.Render(fmt1(pct)+"%") + "\n"
 }
 
 // renderMaintWAL renders the "wal & checkpoints" section.

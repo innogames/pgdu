@@ -576,6 +576,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.act.verbose = !s.act.verbose
 			m.rebuildActivityItems(s)
 		}
+		// On triage, `v` unfolds/folds the green checks (same as Enter on the
+		// summary row, but reachable from anywhere in the list).
+		if s.level == levelTriage {
+			m.toggleTriageOK(s)
+		}
 	case key.Matches(msg, m.keys.Export):
 		// Write the current table/view to pgdu-<tool>-<datetime>.csv. Returns nil
 		// (→ a hint) on screens with nothing tabular to export.

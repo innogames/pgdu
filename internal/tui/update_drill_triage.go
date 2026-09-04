@@ -8,9 +8,12 @@ import (
 
 // drillTriage opens the screen that backs the selected triage line.
 func (m *Model) drillTriage(s *screen, cur item) tea.Cmd {
-	// Drill into the screen that backs the selected triage line. The
-	// collapsed "N checks ok" summary row carries no TriageResult and is
-	// inert.
+	// The "N checks ok" summary row folds/unfolds the green checks instead of
+	// drilling; every other check row (green included) opens its target.
+	if _, isSum := cur.data.(triageOKSummary); isSum {
+		m.toggleTriageOK(s)
+		return nil
+	}
 	r, ok := cur.data.(pg.TriageResult)
 	if !ok {
 		return nil

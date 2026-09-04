@@ -83,6 +83,10 @@ type MaintenanceInfo struct {
 	XidAge       int64  // max(age(datfrozenxid)) over pg_database
 	XidAgeDB     string // database holding that oldest datfrozenxid
 	FreezeMaxAge int64  // autovacuum_freeze_max_age from settings
+	// Multixact IDs have their own 32-bit counter and freeze horizon.
+	MxidAge          int64  // max(mxid_age(datminmxid)) over pg_database
+	MxidAgeDB        string // database holding that oldest datminmxid
+	MxidFreezeMaxAge int64  // autovacuum_multixact_freeze_max_age from settings
 
 	// Checkpoint health (pg_stat_checkpointer, PG 15+)
 	CheckpointsTimed int64

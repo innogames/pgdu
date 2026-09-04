@@ -195,20 +195,38 @@ const sqlDiagBloatTable = `
 WITH constants AS (
     SELECT current_setting('block_size')::numeric AS bs, 23 AS hdr, 8 AS ma
 ),
+-- pg_stats is a view over pg_statistic with per-row privilege checks; evaluate
+-- it exactly once. MATERIALIZED matters: inlined, the planner re-ran the whole
+-- view once per column of the anti-join below (thousands of loops, ~10 s).
+stats AS MATERIALIZED (
+    SELECT schemaname, tablename, attname, null_frac, avg_width
+    FROM pg_stats
+    WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+),
+-- Tables with at least one select-visible column lacking a pg_stats row: the
+-- width estimate would be wrong for them, so they are reported as
+-- can_estimate = false with their raw size instead. Built from pg_attribute
+-- rather than information_schema.columns, whose privilege/type/collation joins
+-- cost far more than the check needs; relkind r/p is what both that view and
+-- pg_stat_user_tables would have matched.
 no_stats AS (
-    SELECT table_schema, table_name,
-        n_live_tup::numeric AS est_rows,
-        pg_table_size(relid)::numeric AS table_size
-    FROM information_schema.columns
-    JOIN pg_stat_user_tables AS psut
-        ON table_schema = psut.schemaname AND table_name = psut.relname
-    LEFT OUTER JOIN pg_stats
-        ON table_schema = pg_stats.schemaname
-        AND table_name = pg_stats.tablename
-        AND column_name = attname
-    WHERE attname IS NULL
-      AND table_schema NOT IN ('pg_catalog', 'information_schema')
-    GROUP BY table_schema, table_name, relid, n_live_tup
+    SELECT n.nspname AS table_schema, c.relname AS table_name,
+        psut.n_live_tup::numeric AS est_rows,
+        pg_table_size(c.oid)::numeric AS table_size
+    FROM pg_class AS c
+    JOIN pg_namespace AS n ON n.oid = c.relnamespace
+    JOIN pg_stat_user_tables AS psut ON psut.relid = c.oid
+    WHERE c.relkind IN ('r', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND EXISTS (
+          SELECT 1
+          FROM pg_attribute AS a
+          WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+            AND has_column_privilege(c.oid, a.attnum, 'SELECT')
+            AND NOT EXISTS (
+                SELECT 1 FROM stats AS s
+                WHERE s.schemaname = n.nspname AND s.tablename = c.relname
+                  AND s.attname = a.attname))
 ),
 null_headers AS (
     SELECT
@@ -216,10 +234,9 @@ null_headers AS (
         SUM((1 - null_frac) * avg_width) AS datawidth,
         MAX(null_frac) AS maxfracsum,
         schemaname, tablename, hdr, ma, bs
-    FROM pg_stats CROSS JOIN constants
+    FROM stats CROSS JOIN constants
     LEFT OUTER JOIN no_stats ON schemaname = no_stats.table_schema AND tablename = no_stats.table_name
-    WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
-      AND no_stats.table_name IS NULL
+    WHERE no_stats.table_name IS NULL
       -- No EXISTS against information_schema.columns here: every pg_stats row is
       -- already an existing, privilege-visible column (that is how the pg_stats
       -- view is defined), so the check filtered nothing but forced a second full

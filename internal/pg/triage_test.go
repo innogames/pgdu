@@ -41,6 +41,31 @@ func TestWraparoundGradeNamesDatabase(t *testing.T) {
 	}
 }
 
+func TestMxidWraparoundGrade(t *testing.T) {
+	if _, _, err := mxidWraparoundGrade(&MaintenanceInfo{MxidAge: 5}); err == nil {
+		t.Errorf("missing autovacuum_multixact_freeze_max_age must degrade, not grade green")
+	}
+	tests := []struct {
+		name string
+		age  int64
+		want Severity
+	}{
+		{"quiet", 10_000_000, SevOK},
+		{"warn", 330_000_000, SevWarn},
+		{"crit", 390_000_000, SevCrit},
+	}
+	for _, tt := range tests {
+		info := &MaintenanceInfo{MxidAge: tt.age, MxidFreezeMaxAge: 400_000_000, MxidAgeDB: "un1_game"}
+		sev, detail, err := mxidWraparoundGrade(info)
+		if err != nil || sev != tt.want {
+			t.Errorf("%s: grade = %v, %v, want %v", tt.name, sev, err, tt.want)
+		}
+		if !strings.Contains(detail, "datminmxid") || !strings.HasSuffix(detail, "(in un1_game)") {
+			t.Errorf("%s: detail should mention datminmxid and the database, got %q", tt.name, detail)
+		}
+	}
+}
+
 func TestBlockedSeverity(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -435,8 +460,8 @@ func TestTriageDegradesOnFailure(t *testing.T) {
 	cancel()
 
 	results := c.Triage(ctx)
-	if len(results) != 23 {
-		t.Fatalf("Triage returned %d results, want 23", len(results))
+	if len(results) != 25 {
+		t.Fatalf("Triage returned %d results, want 25", len(results))
 	}
 	for _, r := range results {
 		if r.Check == "" {

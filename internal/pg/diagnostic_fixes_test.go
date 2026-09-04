@@ -126,7 +126,7 @@ func TestFixBuilders(t *testing.T) {
 	}))
 	if !ok || !strings.HasPrefix(sql, `VACUUM (VERBOSE) public."Events";`) ||
 		!strings.Contains(sql, `pg_repack -d game -t public."Events"`) ||
-		!strings.Contains(sql, "TRUNCATE") {
+		strings.Contains(sql, "TRUNCATE") {
 		t.Errorf("bloat: got %q, %v", sql, ok)
 	}
 

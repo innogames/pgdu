@@ -584,6 +584,7 @@ const (
 	bufColCached   = 8 // "100.0%"
 	bufColHit      = 8
 	bufColDirty    = 10 // dirty bytes — usually small or "0 B"
+	bufColDirtyPct = 7  // dirty ÷ buffered, "100.0%" (header "dirty%↓" sets the width)
 	bufColTemp     = 5  // mean usagecount, "3.2" (header "temp↓" sets the width)
 )
 
@@ -670,8 +671,10 @@ func renderBufferTotals(items []item, barW int) string {
 		hitStr = fmt.Sprintf("%.1f%%", float64(hits)/float64(hits+reads)*100)
 	}
 	tempStr := "—"
+	dirtyPctStr := "—"
 	if buffered > 0 {
 		tempStr = fmt.Sprintf("%.1f", usageWeighted/float64(buffered))
+		dirtyPctStr = fmt.Sprintf("%.1f%%", float64(dirty)/float64(buffered)*100)
 	}
 	// Cursor slot + blank bar area, then the same column layout as the rows.
 	line := "  " + strings.Repeat(" ", barW+2) + "  " +
@@ -680,6 +683,7 @@ func renderBufferTotals(items []item, barW int) string {
 		padRight(cachedStr, bufColCached) + "  " +
 		padRight(hitStr, bufColHit) + "  " +
 		padRight(humanize.Bytes(dirty), bufColDirty) + "  " +
+		padRight(dirtyPctStr, bufColDirtyPct) + "  " +
 		padRight(tempStr, bufColTemp) + "  " +
 		fmt.Sprintf("Σ %d tables", n)
 	return styleTotal.Render(line)
@@ -693,9 +697,23 @@ func renderBufferHeader(sort sortMode, sortDesc bool, barW int) string {
 		padRight(sortMark("cached", sort == sortByCached, sortDesc), bufColCached) + "  " +
 		padRight(sortMark("hit", sort == sortByHitRatio, sortDesc), bufColHit) + "  " +
 		padRight(sortMark("dirty", sort == sortByDirty, sortDesc), bufColDirty) + "  " +
+		padRight(sortMark("dirty%", sort == sortByDirtyPct, sortDesc), bufColDirtyPct) + "  " +
 		padRight(sortMark("temp", sort == sortByTemp, sortDesc), bufColTemp) + "  " +
 		sortMark("table", sort == sortByName, sortDesc)
 	return styleMuted.Render(line)
+}
+
+// dirtyPctCell renders the buffer-tables "dirty%" column: the share of the
+// table's cached pages that are modified and awaiting a flush. Unlike the
+// absolute dirty column (graded against the biggest sibling) this is graded on
+// fixed thresholds — lower is better — because a table with most of its cache
+// dirty is under write pressure regardless of how large it is.
+func dirtyPctCell(st pg.TableBufferStat) string {
+	if st.BufferedBytes <= 0 || st.DirtyBytes <= 0 {
+		return styleMuted.Render("—")
+	}
+	pct := float64(st.DirtyBytes) / float64(st.BufferedBytes) * 100
+	return bloatPercentStyle(int(pct)).Render(fmt.Sprintf("%.1f%%", pct))
 }
 
 // tempCell renders the buffer-tables "temp" column: the table's mean
@@ -971,6 +989,7 @@ func renderBufferRow(it item, st pg.TableBufferStat, maxSize, maxDirty int64, ba
 		padRight(cachedStr, bufColCached) + "  " +
 		padRight(hitStr, bufColHit) + "  " +
 		padRight(dirtyStr, bufColDirty) + "  " +
+		padRight(dirtyPctCell(st), bufColDirtyPct) + "  " +
 		padRight(tempCell(st), bufColTemp) + "  " +
 		name
 }
