@@ -26,6 +26,7 @@ type snapshotsListedMsg struct {
 	dir       string
 	metas     []pg.SnapshotMeta
 	liveReset time.Time // current pg_stat_statements stats_reset — drops invalidated snapshots
+	liveCount int       // distinct statements tracked right now — bars the live anchors (0 = unknown)
 	err       error
 }
 type snapshotBaseLoadedMsg struct {
@@ -117,10 +118,17 @@ func (m *Model) saveSnapshotCmd(db string) tea.Cmd {
 // the live counters have since outgrown (a reset between capture and now).
 func (m *Model) listSnapshotsCmd(dir, db string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
-		metas, err := pg.ListSnapshots(dir)
-		reset, _ := m.client.StatementsInfo(ctx, db) // best-effort validity filter
-		return snapshotsListedMsg{dir: dir, metas: metas, liveReset: reset, err: err}
+		return m.listSnapshots(ctx, dir, db)
 	})
+}
+
+// listSnapshots is the shared body of the list and delete commands: the
+// directory listing plus the live decorations the browser needs alongside it.
+func (m *Model) listSnapshots(ctx context.Context, dir, db string) snapshotsListedMsg {
+	metas, err := pg.ListSnapshots(dir)
+	reset, _ := m.client.StatementsInfo(ctx, db)  // best-effort validity filter
+	count, _ := m.client.StatementsCount(ctx, db) // best-effort bar for the live anchors
+	return snapshotsListedMsg{dir: dir, metas: metas, liveReset: reset, liveCount: count, err: err}
 }
 
 // loadSnapshotBaseCmd loads one snapshot to use as the live window's baseline.
@@ -158,9 +166,7 @@ func (m *Model) deleteSnapshotCmd(path, dir, db string) tea.Cmd {
 		if err := pg.DeleteSnapshot(path); err != nil {
 			return snapshotsListedMsg{dir: dir, err: err}
 		}
-		metas, err := pg.ListSnapshots(dir)
-		reset, _ := m.client.StatementsInfo(ctx, db)
-		return snapshotsListedMsg{dir: dir, metas: metas, liveReset: reset, err: err}
+		return m.listSnapshots(ctx, dir, db)
 	})
 }
 

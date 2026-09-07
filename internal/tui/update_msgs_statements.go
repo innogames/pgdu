@@ -35,23 +35,35 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 	// Best-effort "now" magnitude for the L browser's live anchor; updated every tick.
 	s.stat.liveCount = len(msg.stats)
 
+	// The very first live sample is the session anchor: the "session start" row
+	// in L restores the window from when the tool opened. Captured once,
+	// whatever base the entry picker chose — a disk snapshot or the cumulative
+	// window installs its own baseline before this load, but the session still
+	// started here — and left alone by later live re-bases (R).
+	if s.stat.sessionBaseline == nil {
+		s.stat.sessionBaseline = make(map[int64]pg.QueryStat, len(msg.stats))
+		for _, q := range msg.stats {
+			s.stat.sessionBaseline[q.QueryID] = q
+		}
+		s.stat.sessionStart = s.stat.sampledAt
+	}
+
 	// First snapshot becomes the baseline: the window opens here, so there are
 	// no deltas to show yet — the table fills in as queries run. A disk baseline
 	// (statBaseSnap) is installed before this load, so statBaseline is non-nil
 	// and we skip straight to the diff path below.
 	if s.stat.baseline == nil {
-		s.stat.baseline = make(map[int64]pg.QueryStat, len(msg.stats))
-		for _, q := range msg.stats {
-			s.stat.baseline[q.QueryID] = q
+		if s.stat.sessionStart.Equal(s.stat.sampledAt) {
+			// Session-start window: share the anchor's map rather than building
+			// the same one twice.
+			s.stat.baseline = s.stat.sessionBaseline
+		} else {
+			s.stat.baseline = make(map[int64]pg.QueryStat, len(msg.stats))
+			for _, q := range msg.stats {
+				s.stat.baseline[q.QueryID] = q
+			}
 		}
 		s.stat.baselineAt = s.stat.sampledAt
-		// Preserve this very first baseline as the session anchor: the "session
-		// start" row in L restores it even after a disk baseline replaces
-		// statBaseline. Captured once — later live re-bases (R) keep the original.
-		if s.stat.sessionBaseline == nil {
-			s.stat.sessionBaseline = s.stat.baseline
-			s.stat.sessionStart = s.stat.baselineAt
-		}
 		s.stat.rows = nil
 		s.items = s.items[:0]
 		s.stat.windowExecMs = 0
@@ -152,6 +164,7 @@ func (m *Model) onSnapshotsListed(msg snapshotsListedMsg) tea.Cmd {
 	if s == nil {
 		return nil
 	}
+	firstLoad := !s.loaded
 	s.loading = false
 	s.loaded = true
 	s.err = msg.err
@@ -180,13 +193,22 @@ func (m *Model) onSnapshotsListed(msg snapshotsListedMsg) tea.Cmd {
 	// (cumulative origin) at the bottom. The anchors use sentinel paths (@now /
 	// @session / @reset) that can't match real file paths, so metaByPath returns
 	// false for them and D (delete) is a safe no-op.
+	//
+	// The entry picker (tool just opened, nothing sampled yet) is the same list
+	// minus "now": the end is always live there, and "session start" *is* now —
+	// it becomes the first baseline the moment the pick lands, so it is listed
+	// unconditionally and barred with the live statement count.
 	items := make([]item, 0, len(metas)+3)
-	now := item{name: "now · live", snapPath: snapNow}
-	if st != nil {
-		now.size = int64(st.stat.liveCount)
+	liveCount := int64(msg.liveCount)
+	if liveCount == 0 && st != nil {
+		liveCount = int64(st.stat.liveCount)
 	}
-	items = append(items, now)
-	if st != nil && !st.stat.sessionStart.IsZero() {
+	if !s.stat.entry {
+		items = append(items, item{name: "now · live", snapPath: snapNow, size: liveCount})
+	}
+	if s.stat.entry {
+		items = append(items, item{name: "session start", snapPath: snapSession, size: liveCount})
+	} else if st != nil && !st.stat.sessionStart.IsZero() {
 		items = append(items, item{
 			name:     "session start",
 			snapPath: snapSession,
@@ -202,6 +224,11 @@ func (m *Model) onSnapshotsListed(msg snapshotsListedMsg) tea.Cmd {
 	}
 	items = append(items, item{name: "since last reset · cumulative", snapPath: snapReset})
 	s.items = items
+	s.itemsRev++ // doesn't go through applySort; invalidate the filter cache
+	// The entry picker opens on its default, the session-start window.
+	if s.stat.entry && firstLoad {
+		s.cursor = max(slices.IndexFunc(items, func(it item) bool { return it.snapPath == snapSession }), 0)
+	}
 	// Clamp the cursor: a delete (or filter) can shrink the list out from under it.
 	if s.cursor >= len(s.items) {
 		s.cursor = max(len(s.items)-1, 0)
@@ -218,7 +245,7 @@ func (m *Model) onSnapshotBaseLoaded(msg snapshotBaseLoadedMsg) tea.Cmd {
 	}
 	if msg.err != nil || msg.snap == nil {
 		m.notice = "load snapshot failed: " + errText(msg.err)
-		m.popToStatements()
+		m.abandonSnapshotPick()
 		return nil
 	}
 	st.stat.baseSnap = msg.snap
@@ -239,7 +266,7 @@ func (m *Model) onSnapshotFrozenLoaded(msg snapshotFrozenLoadedMsg) tea.Cmd {
 	}
 	if msg.err != nil || msg.end == nil {
 		m.notice = "load snapshots failed: " + errText(msg.err)
-		m.popToStatements()
+		m.abandonSnapshotPick()
 		return nil
 	}
 	if msg.cumulative {
@@ -255,7 +282,7 @@ func (m *Model) onSnapshotFrozenLoaded(msg snapshotFrozenLoadedMsg) tea.Cmd {
 	} else {
 		if msg.base == nil {
 			m.notice = "load snapshots failed: base snapshot missing"
-			m.popToStatements()
+			m.abandonSnapshotPick()
 			return nil
 		}
 		st.stat.baseSnap = msg.base
@@ -292,6 +319,16 @@ func (m *Model) popToStatements() {
 	for len(m.stack) > 1 && m.top().level != levelStatements {
 		m.stack = m.stack[:len(m.stack)-1]
 	}
+}
+
+// abandonSnapshotPick returns to the table after a snapshot pick failed to load.
+// From the entry picker there is no table to return to — it has never loaded —
+// so the browser stays up (the notice explains why) for another pick.
+func (m *Model) abandonSnapshotPick() {
+	if top := m.top(); top.level == levelSnapshots && top.stat.entry {
+		return
+	}
+	m.popToStatements()
 }
 
 func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {

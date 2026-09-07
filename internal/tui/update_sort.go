@@ -301,12 +301,10 @@ func validSorts(l level) []sortMode {
 		return []sortMode{sortBySize, sortByRecord, sortByFPI, sortByCount, sortByName}
 	case levelWALRecords:
 		return []sortMode{sortBySize, sortByFPI, sortByName}
-	case levelWALBlocks:
-		return []sortMode{sortBySize, sortByName}
+	case levelWALBlocks, levelWALRelBlocks:
+		return []sortMode{sortBySize, sortByData, sortByName}
 	case levelWALRelations:
 		return []sortMode{sortBySize, sortByFPI, sortByCount, sortByPages, sortByName}
-	case levelWALRelBlocks:
-		return []sortMode{sortBySize, sortByName}
 	case levelLogs:
 		return []sortMode{sortByCount, sortByLast, sortByName}
 	case levelLogGroup:

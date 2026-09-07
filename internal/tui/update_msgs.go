@@ -46,7 +46,7 @@ func (m *Model) onDatabasesLoaded(msg databasesLoadedMsg) tea.Cmd {
 		if s.tool == toolTools && s.diag != nil {
 			m.stack[len(m.stack)-1] = diagnosticResultScreen(s.diag, msg.dbs[0].Name, false)
 		} else {
-			m.stack[len(m.stack)-1] = databaseChildScreen(s.tool, msg.dbs[0].Name)
+			m.stack = append(m.stack[:len(m.stack)-1], databaseChildScreens(s.tool, msg.dbs[0].Name)...)
 		}
 		return m.loadCurrent()
 	}
@@ -129,7 +129,9 @@ func (m *Model) onPartsLoaded(msg partsLoadedMsg) tea.Cmd {
 		s.items = append(s.items, partToItem(p))
 	}
 	m.applySort(s)
-	if m.fetchBloat && msg.err == nil {
+	// Bloat is always measured: the pgstattuple scan starts as soon as the
+	// parts are listed and fills the bloat columns in when it lands.
+	if msg.err == nil {
 		s.parts.bloatScanning = true
 		return m.fillBloatCmd(msg.table, msg.parts)
 	}
@@ -737,14 +739,29 @@ func (m *Model) onBackendAction(msg backendActionMsg) tea.Cmd {
 	return m.loadActivityCmd(s.db, s.act.filter)
 }
 
+// onActivityStatement lands the QueryStat fetched for a backend's query in the
+// loading placeholder drillActivityStatement pushed, so the stack holds exactly
+// one detail screen (the trail shows one crumb, Back returns to activity). If
+// the user already navigated away from the placeholder, push a fresh screen
+// the way the placeholder-less path always did.
 func (m *Model) onActivityStatement(msg activityStatementMsg) tea.Cmd {
 	s := m.findLevel(levelActivity)
 	if s == nil {
 		return nil
 	}
+	top := m.top()
+	placeholder := top.level == levelStatementDetail && top.loading && top.stat.detail == nil
 	if msg.err != nil {
+		if placeholder {
+			m.stack = m.stack[:len(m.stack)-1]
+		}
 		m.notice = fmt.Sprintf("load query detail: %s", msg.err)
 		return nil
+	}
+	if placeholder {
+		top.db = msg.db
+		top.stat.detail = msg.qs
+		return m.loadCurrent()
 	}
 	next := &screen{
 		level: levelStatementDetail,

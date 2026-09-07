@@ -2,6 +2,7 @@ package cli
 
 import (
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 )
@@ -100,6 +101,35 @@ func TestTargetSocket(t *testing.T) {
 	}
 	if got := (Config{Host: "db", Port: 5432}).Target(); got != "db:5432" {
 		t.Errorf("TCP Target = %q", got)
+	}
+}
+
+func TestHostLabel(t *testing.T) {
+	local, err := os.Hostname()
+	if err != nil || local == "" {
+		local = "localhost"
+	}
+	cases := []struct {
+		cfg  Config
+		want string
+	}{
+		{Config{Host: "db", Port: 5432}, "db:5432"},
+		{Config{Host: "db"}, "db:5432"},
+		{Config{Host: "db", Port: 6432}, "db:6432"},
+		{Config{}, local},
+		{Config{Port: 5432}, local},
+		{Config{Host: "/var/run/postgresql"}, local},
+		{Config{Host: "/run/pg", Port: 6432}, local + ":6432"},
+		{Config{DSN: "postgres://u:p@h:6432/db"}, "h:6432"},
+		{Config{DSN: "postgres://u@h/db"}, "h:5432"},
+		{Config{DSN: "postgres:///db"}, local},
+		{Config{DSN: "host=h port=6432 dbname=db"}, "h:6432"},
+		{Config{DSN: "dbname=db port=6432"}, local + ":6432"},
+	}
+	for _, c := range cases {
+		if got := c.cfg.HostLabel(); got != c.want {
+			t.Errorf("HostLabel(%+v) = %q, want %q", c.cfg, got, c.want)
+		}
 	}
 }
 

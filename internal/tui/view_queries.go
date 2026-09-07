@@ -184,8 +184,10 @@ func (m *Model) renderStatementsInfo(height int) string {
 	b.WriteString("  " + styleHeader.Render(" the window ") + "  " +
 		mu("why numbers start at zero and grow") + "\n")
 	b.WriteString("    " + mu("pg_stat_statements counters are cumulative since the last reset — they have no time axis.") + "\n")
-	b.WriteString("    " + mu("pgdu snapshots them when you open this tool (the baseline) and shows the delta against it,") + "\n")
-	b.WriteString("    " + mu("so the table is everything that ran ‘since you opened it’. "+m.refreshSentence()) + "\n")
+	b.WriteString("    " + mu("pgdu shows the delta against a baseline you pick when the tool opens: ") + styleSelected.Render("session start") +
+		mu(" (the default —") + "\n")
+	b.WriteString("    " + mu("a fresh sample, so the table is everything that ran ‘since you opened it’), a saved snapshot, or") + "\n")
+	b.WriteString("    " + mu("‘since last reset’ (the raw cumulative counters). "+m.refreshSentence()) + "\n")
 	b.WriteString("    " + mu("press ") + styleBadge.Render("R") + mu(" to drop the baseline and restart the window. Stats are scoped to the current database.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" columns ") + "  " +
@@ -270,6 +272,8 @@ func (m *Model) renderStatementsInfo(height int) string {
 		styleSelected.Render("now") + mu(" (live), ") + styleSelected.Render("session start") + "\n")
 	b.WriteString("    " + mu("(the window from when you opened the tool) and ") + styleSelected.Render("since last reset") +
 		mu(" (everything since the server's last reset).") + "\n")
+	b.WriteString("    " + mu("The same browser greets you when the tool opens, minus ‘now’: Enter there picks the base of the") + "\n")
+	b.WriteString("    " + mu("live window (session start is preselected), Esc leaves the tool without loading the table.") + "\n")
 
 	return padInfo(&b, height)
 }

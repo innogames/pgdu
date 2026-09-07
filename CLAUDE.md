@@ -58,7 +58,8 @@ internal/sysmem/     # host memory stats (maintenance/system overview)
 - **Adding a new level**: type in `types*.go`, SQL in `queries*.go`, a `List*` in a new
   entity file, then a `level` value in `app.go` (+ `barReserve()` case in `layout.go`),
   a Cmd in `cmds*.go`, a handler in `update_msgs*.go`, a drill case in
-  `update_drill*.go`.
+  `update_drill*.go`, and a `case` in `crumbText()` (`view.go`) naming what the screen
+  shows.
 - **Comments explain the why**, never restate the code.
 
 ## Build / run
@@ -84,6 +85,14 @@ fails (missing/corrupt → empty).
 
 - **Tools & levels**: `levelTools` is the root menu; each `tool` value drills through its
   own `level*` chain. Both enums live in `app.go`.
+- **Breadcrumb**: `crumbs()` (`view.go`) emits exactly one crumb per stack screen — the
+  root is the host (`cli.Config.HostLabel`, never `Target()`, which keys snapshots) — so
+  Back always removes one crumb. Identity (db, schema, table, query id, rmgr, log file…)
+  lives in the trail and never on the status row. A screen whose `tool` differs from its
+  parent's gets a `tool:` prefix, the first db-scoped screen whose db the trail hasn't
+  named gets a `(db)` suffix, cluster-wide tools never show their connection db. Crumb
+  text falls back to `screen.title`, then `levelLabel`, so a loading placeholder still
+  has a crumb.
 - **`loadCurrent()` clears `extPrompt` and `installing`** on entry, so any such state set
   before the async load lands is wiped. `applySort` runs after every load, so handlers
   that patch rows later (e.g. `bloatFilledMsg`) must match by name, not index.
@@ -129,4 +138,9 @@ fails (missing/corrupt → empty).
   `@session`, `@reset` in `cmds.go`) that are never backed by a file — every path that
   loads or diffs a snapshot must special-case them. Snapshots older than the live
   `stats_reset` are filtered out, not warned about. Frozen windows (`stat.endSnap` set)
-  skip live re-sampling in `loadCurrent`/`onStatementsTick`.
+  skip live re-sampling in `loadCurrent`/`onStatementsTick`. The same browser is the
+  tool's entry screen (`stat.entry`, pushed by `databaseChildScreens` over a
+  not-yet-loaded `levelStatements`): no `@now` row, the pick is always the window's
+  start, and Back pops the unloaded table too. The session anchor is captured on the
+  first live sample whatever base was picked, so `@session` exists after a snapshot or
+  cumulative entry as well.

@@ -48,7 +48,7 @@ func (m *Model) drillIn() tea.Cmd {
 			return m.loadCurrent()
 		}
 		d := cur.data.(pg.Database)
-		m.stack = append(m.stack, databaseChildScreen(s.tool, d.Name))
+		m.stack = append(m.stack, databaseChildScreens(s.tool, d.Name)...)
 		return m.loadCurrent()
 	case levelSchemas:
 		sc := cur.data.(pg.Schema)
@@ -235,16 +235,22 @@ func diagnosticResultScreen(d *pg.Diagnostic, db string, allDBs bool) *screen {
 		diagBarCol: -1}
 }
 
-// databaseChildScreen builds the next screen when drilling into a database,
-// varying by tool. Used by drillIn and the single-database fast path in
-// onDatabasesLoaded.
-func databaseChildScreen(t tool, db string) *screen {
+// databaseChildScreens builds the screens pushed when drilling into a database,
+// varying by tool; the last one is the screen loadCurrent acts on. Used by
+// drillIn and the single-database fast path in onDatabasesLoaded.
+func databaseChildScreens(t tool, db string) []*screen {
 	if t == toolQueries {
-		// Queries has no schema/table hierarchy — drill straight to the
-		// top-queries table for the chosen database.
-		return &screen{level: levelStatements, title: "queries", tool: toolQueries, db: db}
+		// Queries has no schema/table hierarchy — the top-queries table for the
+		// chosen database comes next, but it opens behind the snapshot browser
+		// in entry mode: the table's window has no time axis of its own, so the
+		// user first picks its base (session start by default, a saved snapshot
+		// or since last reset) and the table loads only once that pick lands.
+		return []*screen{
+			{level: levelStatements, title: "queries", tool: toolQueries, db: db},
+			{level: levelSnapshots, title: "snapshots", tool: toolQueries, db: db, loading: true, stat: stmtState{entry: true}},
+		}
 	}
-	return &screen{level: levelSchemas, title: "schemas", tool: t, db: db, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
+	return []*screen{{level: levelSchemas, title: "schemas", tool: t, db: db, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}}
 }
 
 // schemaChildScreen builds the next screen when drilling into a schema, varying
@@ -266,7 +272,7 @@ func schemaChildScreen(t tool, sc pg.Schema) *screen {
 
 // loadSelectedSnapshot acts on Enter in the snapshots browser. The browser is a
 // timeline range picker: the applied window's start is the anchor a pick pairs
-// with. With no anchor (the default session window or a fresh R re-base) the
+// with. With no anchor (the entry picker, the default session window or a fresh R re-base) the
 // pick becomes the start and the end is "now" (live). With an anchor the window
 // spans the time-ordered range between anchor and pick — frozen unless the pick
 // is "now". A pick that lands as the start pops back to the table (the one-key

@@ -357,6 +357,12 @@ type stmtState struct {
 	// with items (one meta per row).
 	snapMetas []pg.SnapshotMeta
 	liveReset time.Time // live pg_stat_statements stats_reset — dates the "since last reset" anchor
+	// entry marks the browser pushed when the tool opens, before the table has
+	// ever loaded: the user picks the window's base there (session start by
+	// default, a saved snapshot, or since last reset). No window is applied yet,
+	// so the end is always "now", the "now" row is omitted and Back leaves the
+	// tool instead of exposing the still-empty table underneath.
+	entry bool
 
 	// Query-detail state (levelStatementDetail). detail is the window-delta
 	// QueryStat for the drilled-into query; sampleCall is the synthesized
@@ -819,9 +825,6 @@ type Model struct {
 	help    help.Model
 	keys    keyMap
 
-	// when true, bloat is fetched on entering the parts view.
-	fetchBloat bool
-
 	// showInfo toggles the buffer-tables info overlay (? key) — a static
 	// explainer for the server-memory and shared_buffers bars. infoOffset is the
 	// scroll position within that overlay (some references, e.g. maintenance, are
@@ -947,7 +950,8 @@ type Model struct {
 	// the browser; the next key confirms (y/Y) or cancels — mirrors pendingReindex.
 	pendingDeleteSnap string
 
-	target string // host:port for header
+	target    string // host:port; keys snapshot compatibility, so it never changes shape
+	hostLabel string // root crumb of the breadcrumb (cli.Config.HostLabel)
 
 	// vacuum holds the state for the streaming VACUUM output pane on levelParts.
 	// It is a value type so the pane's scrollWindow can update its offset in
@@ -1014,13 +1018,13 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 		spinner:         sp,
 		help:            help.New(),
 		keys:            defaultKeys(),
-		fetchBloat:      true,
 		statRefresh:     queriesRefresh,
 		activityRefresh: 2 * time.Second,
 		pgbRefresh:      2 * time.Second,
 		snapshotDir:     snapshotDir,
 		colPrefs:        colPrefs,
 		target:          client.Target(),
+		hostLabel:       client.HostLabel(),
 		logFile:         logFile,
 	}
 	// Seed in-memory column visibility from persisted selections. A partial map

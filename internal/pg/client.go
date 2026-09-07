@@ -198,6 +198,7 @@ func (c *Client) Close() {
 // DefaultDB is the initial database the user pointed pgdu at.
 func (c *Client) DefaultDB() string { return c.cfg.Database }
 func (c *Client) Target() string    { return c.cfg.Target() }
+func (c *Client) HostLabel() string { return c.cfg.HostLabel() }
 
 // ensureExtension verifies that ext is installed in db, caching a positive
 // result in ready so the probe runs at most once per database. A missing

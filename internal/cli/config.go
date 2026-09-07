@@ -246,6 +246,53 @@ func (c Config) Target() string {
 	return host + ":" + strconv.Itoa(port)
 }
 
+// HostLabel is the root crumb of the TUI breadcrumb: the machine the cluster
+// runs on, with the port when it disambiguates. Unlike Target it never reads
+// "socket" — a Unix-socket connection is to this very machine, so the local
+// hostname is the honest answer. Target stays as it is because snapshots and
+// pgbouncer instance names are keyed on it.
+func (c Config) HostLabel() string {
+	host, port := c.Host, c.Port
+	if c.DSN != "" {
+		if u, err := url.Parse(c.DSN); err == nil && u.Host != "" {
+			if u.Port() == "" {
+				return u.Host + ":5432"
+			}
+			return u.Host
+		}
+		// Keyword DSN: pick host=/port= out of it; a DSN naming neither is a
+		// socket connection like an empty --host.
+		host, port = "", 0
+		for tok := range strings.FieldsSeq(c.DSN) {
+			k, v, ok := strings.Cut(tok, "=")
+			if !ok {
+				continue
+			}
+			v = strings.Trim(v, "'")
+			switch k {
+			case "host":
+				host = v
+			case "port":
+				port, _ = strconv.Atoi(v)
+			}
+		}
+	}
+	if host == "" || strings.HasPrefix(host, "/") {
+		name, err := os.Hostname()
+		if err != nil || name == "" {
+			name = "localhost"
+		}
+		if port != 0 && port != 5432 {
+			return name + ":" + strconv.Itoa(port)
+		}
+		return name
+	}
+	if port == 0 {
+		port = 5432
+	}
+	return host + ":" + strconv.Itoa(port)
+}
+
 // defaultSnapshotDir is a single shared directory under the system temp dir
 // ($TMPDIR, or /tmp). It is deliberately NOT per-user: snapshots are meant to be
 // readable and deletable across users on the same host, so every user resolves

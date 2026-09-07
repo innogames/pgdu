@@ -15,8 +15,8 @@ web server.
 
 - **ncdu for Postgres** — databases → schemas → tables → heap / index / TOAST
   parts → columns, every level a bar scaled to bytes on disk.
-- **Maintenance where you see the problem** — measure bloat (`b`), arm a
-  `REINDEX INDEX CONCURRENTLY` on the bloated index (`↵`, `y`) and watch a live
+- **Maintenance where you see the problem** — every table opens with its bloat
+  measured; arm a `REINDEX INDEX CONCURRENTLY` on the bloated index (`↵`, `y`) and watch a live
   progress bar fed by `pg_stat_progress_create_index`; run `VACUUM (VERBOSE,
   ANALYZE)` (`v`) with the server's NOTICE output streamed into a pane. A
   progress monitor (`p`) lists every running vacuum / index build / analyze /
@@ -41,7 +41,8 @@ web server.
   read/s and write/s per backend (from `/proc`), reverse-DNS client hostname,
   `blocked_by`, inline operation progress; `b` opens the lock-blocking tree, `W` a
   wait-event profiler, `k` / `x` cancel or terminate.
-- **Top queries with time travel** — a baseline is taken when you open the view,
+- **Top queries with time travel** — opening the view asks for the window's base
+  (*session start* by default, a saved snapshot, or *since the last stats reset*),
   snapshots go to disk (`S`) and any two points can be diffed (`L`), plus virtual
   anchors for *now*, *session start*, and *since the last stats reset*. `EXPLAIN
   ANALYZE` uses the parameters `pg_qualstats` captured, or inferred ones.
@@ -50,11 +51,17 @@ web server.
   with their hot nodes heat-coloured; live tail, rotated `.gz` files, and
   server-side reading over the connection. Reads pgbouncer's own log too, with
   its periodic stats lines turned into a sparkline pane.
+- **WAL inspector down to the bytes** — the recent window by resource manager or
+  by relation (`w`); a record's block references, then the block itself: the
+  change data or full-page image decoded with `pageinspect`, the affected tuple
+  reconstructed against the table's column layout. The header shows how close
+  WAL is to forcing a checkpoint.
 - **PgBouncer console browser** — every instance on the host is found from
   `/proc` and `/etc/pgbouncer`, addressed by its own unix socket (several
   instances usually share one TCP port), and browsed read-only: pools with
   waiting clients in red, per-second stats, clients, servers, databases, users,
-  config; `l` opens the instance's log.
+  config; `l` opens the instance's log. The menu entry appears only once an
+  instance is found.
 - **Every table exports to CSV** (`e`) — whatever view you are on, filtered and
   sorted as shown, ready for a spreadsheet or an LLM.
 - PostgreSQL 17 and newer; extensions are optional and installable from inside
@@ -71,8 +78,8 @@ the top at a glance, ncdu-style.
 Drill into a relation (`↵`) to see its **parts** — the heap plus each index
 broken out separately, with dead-tuple counts and the last vacuum/analyze
 times. Index parts are labelled by access method (btree, GIN, …) and
-primary/unique. Press `b` to measure bloat with `pgstattuple`; an index above
-the bloat threshold can then be reindexed in place: `↵` arms
+primary/unique. Bloat is measured with `pgstattuple` as the view opens; an index
+above the bloat threshold can then be reindexed in place: `↵` arms
 `REINDEX INDEX CONCURRENTLY`, `y` confirms, and a progress bar tracks the build
 through its phases (including how many lockers it is waiting for). `v` runs
 `VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED)` on the table and streams every NOTICE
@@ -98,14 +105,16 @@ It reads `pg_stat_statements` and ranks statements by total time, calls, rows,
 cache-hit ratio, WAL bytes, temp usage, planning time, and more. Columns are
 configurable (`C`) and remembered across runs.
 
-The table always shows a **window**, not cumulative totals: a baseline is taken
-when the view opens and the numbers are the delta since then. `R` re-baselines,
-`t` cycles auto-refresh. `S` writes a snapshot of the raw counters to disk, and
-`L` opens a timeline browser where you pick any two points — two snapshots, a
-snapshot and *now*, the start of this session, or the server's last
-`pg_stat_statements` reset — and get the difference between them. Snapshots that
-predate a stats reset can no longer serve as a baseline and are hidden
-automatically.
+The table always shows a **window**, not cumulative totals: the numbers are the
+delta since a baseline. Opening the view asks for that baseline first — *session
+start* (preselected: a fresh sample, so the table shows what ran since you opened
+it), any saved snapshot, or *since last reset* for the raw cumulative counters —
+and Enter loads the table. `R` re-baselines, `t` cycles auto-refresh. `S` writes a
+snapshot of the raw counters to disk, and `L` reopens the timeline browser where
+you pick any two points — two snapshots, a snapshot and *now*, the start of this
+session, or the server's last `pg_stat_statements` reset — and get the difference
+between them. Snapshots that predate a stats reset can no longer serve as a
+baseline and are hidden automatically.
 
 ![Top queries](docs/top_queries.png)
 
@@ -118,6 +127,12 @@ with the single worst node bolded, so the bottleneck stands out without reading
 every line — `E` executes it and shows the rows, `p` browses the captured
 parameter sets, `d` describes the statement's main table, and `u` jumps to that
 table in the disk view.
+
+The describe panel is `\d` with statistics attached: columns, indexes with their
+size and scan counts, foreign keys, and the table's own counters. `d` again
+switches to detail mode, which adds the table's footprint in `shared_buffers`
+and tints an index yellow when it saw no scan in the last hour (a never-used
+one is already red); `p` opens the table's heap pages in the page inspector.
 
 ### Live activity
 
@@ -184,6 +199,11 @@ the full record, `j` jumps from an entry to its line in the timeline, `d`
 describes the table behind a statement or error, and `C` picks timeline columns
 (including a reverse-DNS `hostname` for the client).
 
+Inside a group, `Tab` swaps the entry list for a **parameters** table: the
+literal values inlined in each member statement — or only the first one, `$1`
+— counted and ranked, so the id every error names or the tenant whose query is
+the slow one stands out; `↵` on a value lists the entries that carried it.
+
 ### PgBouncer
 
 Finds every pgbouncer on the host without configuration: running processes in
@@ -235,7 +255,8 @@ tree, the activity list, the system overview, or the pgbouncer tool.
 
 **Diagnostics** (under *Other tools*) are 38 saved queries in six categories —
 index, table, vacuum, activity, WAL, server — with `f` to filter by category, `s`
-to show the SQL, and `C` to pick columns. Eleven of them come with a **fix**:
+to show the SQL, `C` to pick columns, and `d` to describe the object behind a
+row (in the row's own database when the query ran across all of them). Eleven of them come with a **fix**:
 index bloat, unused / duplicate / redundant / invalid indexes, CLUSTER candidates,
 table bloat, stale statistics, fillfactor, vacuum stats, and wraparound freeze
 age. Duplicate indexes are ranked by the bytes that dropping the extra copies
@@ -346,12 +367,28 @@ into the TOAST relation and reassembles the out-of-line value from its chunks.
 
 ### WAL Inspector
 
-Breaks down recently generated WAL by record type / resource manager — bytes,
-full-page images, and record counts per category — with the individual records
-and the blocks they touch listed alongside, so you can see exactly what is
-driving WAL volume.
+Puts `pg_walinspect` behind a cursor. The overview breaks the recently generated
+WAL down by resource manager — Heap, Btree, Transaction, XLOG, … — with each bar
+split into record bytes and full-page images, so write amplification from
+too-frequent checkpoints shows as a colour rather than a ratio to compute. The
+header gives the current insert / flush LSN and segment, the size of `pg_wal`,
+the lifetime `pg_stat_wal` counters, the LSN window analysed, and a **checkpoint
+bar**: WAL written since the last checkpoint's redo point against `max_wal_size`,
+with the timed / requested split and when the next timed checkpoint is due.
 
 ![WAL inspector](docs/wal_inspector.png)
+
+`w` regroups the same window **by relation** — which tables and indexes caused
+the WAL, names resolved from relfilenodes across databases. `↵` on a resource
+manager lists its records oldest first under a per-record-type summary (INSERT /
+HOT_UPDATE / LOCK …); `↵` on a record shows its **block references** — relation,
+fork, block number, and whether a page image or only change data was logged;
+`↵` once more opens the **block payload**: the change data or the full 8 KiB
+page image with its line pointers decoded by `pageinspect`, the tuple this
+record inserted / updated / deleted marked, and its column values reconstructed
+from the raw bytes against the table's current column layout. Every level
+exports (`e`). Needs `pg_walinspect` and a superuser or `pg_read_server_files`
+role; the checkpoint block needs superuser and is left out otherwise.
 
 ## Install
 
@@ -403,6 +440,13 @@ choices) from `~/.config/pgdu`.
 
 ## Keys
 
+The title line of every screen is a breadcrumb — `host ▸ tool ▸ database ▸ schema
+▸ object ▸ …` — with one crumb per screen, so `esc` always steps back exactly one
+crumb. A screen entered by jumping tools (a describe panel into the page
+inspector, a triage row into the lock tree) is prefixed with the tool it belongs
+to, and the first screen scoped to a database the trail hasn't named yet shows
+it in parentheses.
+
 Every view has its own `?` reference explaining the columns and what the numbers
 mean. Keys shared by all views:
 
@@ -424,16 +468,17 @@ Frequently used view-specific keys:
 
 | Key        | Where            | Action                                            |
 |------------|------------------|---------------------------------------------------|
-| `b`        | parts / activity | measure bloat / open the lock tree                |
+| `b`        | activity         | open the lock tree                                |
 | `v`        | parts / activity / triage | run VACUUM / show auxiliary backends / unfold green checks |
-| `p`        | activity, overview / parts, buffers | progress monitor / open the page inspector |
+| `p`        | activity, overview / parts, buffers, describe | progress monitor / open the page inspector |
 | `W`        | activity         | wait-event profiler                               |
 | `k` `x`    | activity         | cancel query / terminate backend (`y` to confirm) |
 | `S` `L` `D`| top queries      | save / browse & diff / delete snapshots           |
 | `R`        | top queries      | re-baseline the window                            |
-| `d`        | queries, logs    | describe the statement's main table               |
+| `d`        | queries, logs, diagnostics | describe the table (`d` again: detail mode) |
 | `m`        | buffers / logs   | shared-memory map / toggle log sections           |
-| `Tab`      | logs             | groups → timeline → slow queries → pooler stats   |
+| `Tab`      | logs / log group | groups → timeline → slow queries → pooler stats / entries → parameters → `$1` |
+| `w`        | WAL              | group the window by relation                      |
 | `t`        | activity, queries, logs, pgbouncer | cycle auto-refresh / live tail  |
 | `l`        | pgbouncer        | open the instance's log in the log analyzer       |
 | `s`        | diagnostics / index tuples / overview | show SQL / seek to a key / settings browser |

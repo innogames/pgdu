@@ -414,7 +414,7 @@ func (m *Model) renderWALBlocksList(s *screen, height int) string {
 func renderWALBlocksHeader(sort sortMode, sortDesc bool, barW int) string {
 	line := headerIndent(barW) +
 		padRight(sortMark("fpi", sort == sortBySize, sortDesc), walBlkFPIColW) + "  " +
-		padRight("data", walBlkDataColW) + "  " +
+		padRight(sortMark("data", sort == sortByData, sortDesc), walBlkDataColW) + "  " +
 		sortMark("block reference", sort == sortByName, sortDesc) + "  " + styleMuted.Render("· db / fpi-info")
 	return styleMuted.Render(line)
 }
