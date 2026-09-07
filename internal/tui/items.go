@@ -627,6 +627,17 @@ func itemWALPages(it item) (int64, bool) {
 	return 0, false
 }
 
+// itemWALBlockData is the sortByData extractor for a block-ref row: the
+// record's block-data bytes for that block, i.e. the actual change payload as
+// opposed to the full-page image the bar and sortBySize rank by. A block that
+// only carried a page image has 0 here and stays rankable (not undefined).
+func itemWALBlockData(it item) (int64, bool) {
+	if v, ok := it.data.(pg.WALBlockRef); ok {
+		return int64(v.BlockDataLength), true
+	}
+	return 0, false
+}
+
 func bufferStatToItem(s pg.TableBufferStat) item {
 	// detail is left empty: the per-row figures (table size, cached %, hit %)
 	// are rendered as their own columns in renderBufferList.

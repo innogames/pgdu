@@ -126,6 +126,31 @@ func TestItemWALCountAndFPI(t *testing.T) {
 	}
 }
 
+func TestItemWALBlockData(t *testing.T) {
+	if n, ok := itemWALBlockData(item{data: pg.WALBlockRef{BlockDataLength: 11}}); n != 11 || !ok {
+		t.Errorf("itemWALBlockData = (%d,%v), want (11,true)", n, ok)
+	}
+	// A pure page-image block ref has no change payload but is still ranked
+	// (0), not pushed into the "unknown" bucket below rankable rows.
+	if n, ok := itemWALBlockData(item{data: pg.WALBlockRef{FPILength: 8192}}); n != 0 || !ok {
+		t.Errorf("itemWALBlockData(fpi only) = (%d,%v), want (0,true)", n, ok)
+	}
+	if _, ok := itemWALBlockData(item{data: pg.WALRecord{}}); ok {
+		t.Error("itemWALBlockData(record) should be undefined")
+	}
+	for _, lvl := range []level{levelWALBlocks, levelWALRelBlocks} {
+		found := false
+		for _, sm := range validSorts(lvl) {
+			if sm == sortByData {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("validSorts(%v) lacks sortByData", lvl)
+		}
+	}
+}
+
 func TestSchemaDetail(t *testing.T) {
 	if got := schemaDetail(pg.Schema{TableCount: 7}); got != "7 tables" {
 		t.Errorf("schemaDetail = %q, want %q", got, "7 tables")

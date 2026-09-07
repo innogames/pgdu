@@ -18,6 +18,7 @@ const (
 	sortByFPI        // WAL: full-page-image bytes
 	sortByRecord     // WAL: record-data bytes (combined minus FPI)
 	sortByPages      // WAL: distinct pages a relation's records touched
+	sortByData       // WAL block refs: block-data bytes (the change payload, not the page image)
 	sortByDirty      // buffer-tables: dirty (modified-in-memory) bytes
 	sortByDirtyPct   // buffer-tables: dirty bytes as a share of the buffered bytes
 	sortByTemp       // buffer-tables: mean clock-sweep usagecount (0..5)
@@ -41,7 +42,7 @@ const (
 // ratio so the worst-cached tables bubble to the top.
 func (sm sortMode) defaultDesc() bool {
 	switch sm {
-	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByRecord, sortByPages, sortByDirty, sortByDirtyPct, sortByTemp, sortByBloat, sortByHeap, sortByIndex, sortByToast, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByLevel, sortByLast:
+	case sortBySize, sortByRows, sortByCached, sortByTotal, sortByDeadRatio, sortByFreeSpace, sortByCount, sortByFPI, sortByRecord, sortByPages, sortByData, sortByDirty, sortByDirtyPct, sortByTemp, sortByBloat, sortByHeap, sortByIndex, sortByToast, sortByAvgWidth, sortByTables, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByLevel, sortByLast:
 		// sortByLevel is descending so the B-tree page view opens root-first
 		// (highest btpo_level at the top), reading the tree top-down.
 		return true
@@ -82,6 +83,8 @@ func (sm sortMode) name() string {
 		return "record"
 	case sortByPages:
 		return "pages"
+	case sortByData:
+		return "data"
 	case sortByDirty:
 		return "dirty"
 	case sortByDirtyPct:
@@ -165,6 +168,8 @@ func (sm sortMode) less(a, b item) bool {
 		return lessByExtractor(a, b, itemWALRecordBytes)
 	case sortByPages:
 		return lessByExtractor(a, b, itemWALPages)
+	case sortByData:
+		return lessByExtractor(a, b, itemWALBlockData)
 	case sortByDirty:
 		return lessByExtractor(a, b, itemDirtyBytes)
 	case sortByDirtyPct:
