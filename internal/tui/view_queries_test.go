@@ -25,6 +25,7 @@ func keyMsg(s string) tea.KeyMsg {
 func renderModel(top *screen) string {
 	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil, "", "")
 	m.width, m.height = 200, 40
+	m.hostLabel = "db:5432"
 	m.stack = append(m.stack, top)
 	return m.View()
 }

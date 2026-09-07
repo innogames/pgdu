@@ -37,11 +37,26 @@ func (m *Model) renderStatementSnapshots(s *screen, height int) string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render("query snapshots") + mu("  ·  "+m.snapshotDir) + "\n")
-	b.WriteString("  " + m.renderSnapshotWindowSummary(st) + "\n")
-	b.WriteString("  " + mu("Enter picks an endpoint (older=start, newer=end) · ") +
-		styleBadge.Render("D") + mu(" delete · ") + styleBadge.Render("esc") + mu(" back") + "\n\n")
-	used := 5
+	used := 0
+	if s.stat.entry {
+		// Entry picker: nothing is applied yet, so the summary previews the window
+		// the highlighted row would open rather than describing the table's state.
+		b.WriteString("  " + styleSelected.Render("pick the window's base") + mu("  ·  "+m.snapshotDir) + "\n")
+		b.WriteString("  " + m.renderSnapshotEntrySummary(s) + "\n")
+		b.WriteString("  " + styleBadge.Render("Enter") + mu(" opens the queries table with everything since the highlighted point · ") +
+			styleBadge.Render("D") + mu(" delete · ") + styleBadge.Render("esc") + mu(" back") + "\n")
+		// Point at where new rows come from: the list only grows through S in the
+		// table, and a first-time user sees this picker before ever seeing that key.
+		b.WriteString("  " + mu("new snapshots: press ") + styleBadge.Render("S") + mu(" (shift-s) in the queries table to save the current counters here; ") +
+			styleBadge.Render("L") + mu(" reopens this browser") + "\n\n")
+		used++
+	} else {
+		b.WriteString("  " + styleSelected.Render("query snapshots") + mu("  ·  "+m.snapshotDir) + "\n")
+		b.WriteString("  " + m.renderSnapshotWindowSummary(st) + "\n")
+		b.WriteString("  " + mu("Enter picks an endpoint (older=start, newer=end) · ") +
+			styleBadge.Render("D") + mu(" delete · ") + styleBadge.Render("esc") + mu(" back") + "\n\n")
+	}
+	used += 5
 
 	if m.pendingDeleteSnap != "" {
 		b.WriteString("  " + styleErr.Render("delete this snapshot? ") + mu("press ") +
@@ -100,6 +115,9 @@ func (m *Model) renderStatementSnapshots(s *screen, height int) string {
 		case endPath:
 			tags = append(tags, styleSelected.Render("◀ end"))
 		}
+		if s.stat.entry && it.snapPath == snapSession {
+			tags = append(tags, mu("default"))
+		}
 		if !compatible {
 			tags = append(tags, styleErr.Render("other server/db"))
 		}
@@ -132,7 +150,7 @@ func (m *Model) snapshotAge(s *screen, path string, capturedAt time.Time) string
 		if st := m.findLevel(levelStatements); st != nil && !st.stat.sessionStart.IsZero() {
 			return relativeAge(time.Since(st.stat.sessionStart))
 		}
-		return "—"
+		return "now" // entry picker: the session starts when the pick lands
 	case snapReset:
 		if s.stat.liveReset.IsZero() {
 			return "—"
@@ -141,6 +159,27 @@ func (m *Model) snapshotAge(s *screen, path string, capturedAt time.Time) string
 	default:
 		return relativeAge(time.Since(capturedAt))
 	}
+}
+
+// renderSnapshotEntrySummary is the entry picker's header line: the window the
+// highlighted row would open, always ending at the live "now" since no start is
+// applied yet to pair a frozen end with.
+func (m *Model) renderSnapshotEntrySummary(s *screen) string {
+	mu := styleMuted.Render
+	start := "session start"
+	if cur, ok := s.currentItem(); ok {
+		switch cur.snapPath {
+		case snapSession:
+		case snapReset:
+			start = "since last reset"
+		default:
+			if meta, ok := metaByPath(s.stat.snapMetas, cur.snapPath); ok {
+				start = meta.CapturedAt.Local().Format("2006-01-02 15:04:05")
+			}
+		}
+	}
+	return mu("window: ") + styleSelected.Render(start) + mu(" → ") +
+		styleSelected.Render("now") + mu("  ·  live · refresh "+m.refreshLabel())
 }
 
 // renderSnapshotWindowSummary is the browser header's one-line description of

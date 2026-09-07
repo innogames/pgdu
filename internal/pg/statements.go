@@ -108,6 +108,21 @@ func (c *Client) StatementSnapshot(ctx context.Context, db string) ([]QueryStat,
 		})
 }
 
+// StatementsCount returns how many distinct statements pg_stat_statements holds
+// for db right now (see sqlStatementsDBCount). Best-effort decoration for the
+// snapshot browser's live anchors; callers treat an error as "unknown".
+func (c *Client) StatementsCount(ctx context.Context, db string) (int, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	if err := pool.QueryRow(ctx, sqlStatementsDBCount).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count pg_stat_statements in %q: %w", db, err)
+	}
+	return n, nil
+}
+
 // StatementsInfo returns the last time pg_stat_statements counters were reset
 // for db (pg_stat_statements_info, PG14+). Best-effort: a zero time with nil
 // error means the view exists but has never recorded a reset, or the read was

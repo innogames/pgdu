@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -16,9 +17,10 @@ func (m *Model) View() string {
 	b.WriteString(m.renderHeader())
 	b.WriteString("\n")
 
-	contentHeight := max(
-		// header + blank + help
-		m.height-4, 3)
+	// Three header lines, the blank above the footer, and the help row. The
+	// budget must be exact: Bubble Tea drops overflowing lines from the *top*,
+	// so one line too many hides the title/breadcrumb line, not the footer.
+	contentHeight := max(m.height-5, 3)
 
 	var rankByOID map[uint32]int
 	if s.level == levelBufferTables && (s.buf.summary != nil || s.buf.summaryErr != nil) {
@@ -364,18 +366,29 @@ func (m *Model) View() string {
 	return b.String()
 }
 
+// renderHeader draws the three fixed header lines: the pgdu chip with the
+// breadcrumb trail (and the bloat badge on the disk tool), a rule, and the
+// status row. The trail gets whatever width the chip and badge leave over.
 func (m *Model) renderHeader() string {
 	s := m.top()
-	mode := m.bloatBadge()
-	left := styleHeader.Render(" pgdu ") + " " + styleMuted.Render(m.target) + " " + mode
-	crumbs := m.breadcrumb()
-	return left + "    " + crumbs + "\n" + styleMuted.Render(strings.Repeat("─", maxInt(m.width-1, 1))) + "\n" +
+	chip := styleHeader.Render(" pgdu ")
+	badge := m.bloatBadge()
+	budget := m.width - displayWidth(chip) - 1
+	if badge != "" {
+		budget -= 2 + displayWidth(badge)
+	}
+	line := chip + " " + renderTrail(m.crumbs(), budget)
+	if badge != "" {
+		line += "  " + badge
+	}
+	return line + "\n" + styleMuted.Render(strings.Repeat("─", maxInt(m.width-1, 1))) + "\n" +
 		"  " + m.renderStatus(s)
 }
 
-// renderStatus is the one-line status row under the header: sort mode,
-// cursor position (e.g. "12/438"), current level, and a bloat-scan
-// progress indicator on the parts level.
+// renderStatus is the one-line status row under the header: sort mode, cursor
+// position (e.g. "12/438") and per-level view state — scan progress, page
+// window, LSN window, counter age, transient notice. Identity (what is being
+// looked at) belongs to the breadcrumb trail above, never here.
 func (m *Model) renderStatus(s *screen) string {
 	sortLabel := s.sort.label(s.sortDesc)
 	if s.diagCols != nil && s.diagSortCol < len(s.diagCols) {
@@ -390,28 +403,9 @@ func (m *Model) renderStatus(s *screen) string {
 	parts := []string{
 		"sort: " + sortLabel,
 		positionLabel(s),
-		"level: " + levelLabel(s.level),
-	}
-	if s.diag != nil {
-		parts = append(parts, "query: "+s.diag.Title)
-	}
-	if s.level == levelDiagnosticResult && s.diag != nil {
-		db := "all"
-		if !s.diagAllDBs {
-			if db = s.db; db == "" {
-				db = m.client.DefaultDB()
-			}
-		}
-		parts = append(parts, "db: "+db)
-	}
-	if (s.level == levelParts || s.level == levelColumns) && s.table.Name != "" {
-		parts = append(parts, "table: "+s.table.Name)
 	}
 	if bs := bloatScanLabel(s); bs != "" {
 		parts = append(parts, bs)
-	}
-	if tl := heapPageTableLabel(s); tl != "" {
-		parts = append(parts, tl)
 	}
 	if pw := heapPageWindowLabel(s); pw != "" {
 		parts = append(parts, pw)
@@ -428,20 +422,15 @@ func (m *Model) renderStatus(s *screen) string {
 	return strings.Join(parts, "  ·  ")
 }
 
-// walStatusLabel keeps the WAL context (resource manager, record LSN, window)
-// on the status row where the summary header isn't shown — i.e. on the
-// records and block-refs levels the breadcrumb gets long, so the rmgr and
-// LSN window stay visible here.
+// walStatusLabel keeps the LSN window on the status row for the WAL levels
+// whose header doesn't show it. The resource manager, record and relation are
+// crumbs; the block-detail level adds the record type, which no crumb carries.
 func walStatusLabel(s *screen) string {
 	switch s.level {
-	case levelWALRecords:
-		return "rmgr: " + s.wal.rmgr + "  ·  window: " + shortLSN(s.wal.start) + "–" + shortLSN(s.wal.end)
-	case levelWALBlocks:
-		return "rmgr: " + s.wal.rmgr + "  ·  record: " + s.wal.recLSN
-	case levelWALRelations:
-		return "window: " + shortLSN(s.wal.start) + "–" + shortLSN(s.wal.end)
-	case levelWALRelBlocks:
-		return "relation: " + s.wal.relLabel + "  ·  window: " + shortLSN(s.wal.start) + "–" + shortLSN(s.wal.end)
+	case levelWALRecords, levelWALRelations, levelWALRelBlocks:
+		if s.wal.start != "" || s.wal.end != "" {
+			return "window: " + shortLSN(s.wal.start) + "–" + shortLSN(s.wal.end)
+		}
 	case levelWALBlockDetail:
 		if b := s.wal.blockRef; b != nil {
 			return "record: " + b.StartLSN + "  ·  " + b.Rmgr + "/" + b.RecordType
@@ -463,112 +452,253 @@ func (m *Model) bloatBadge() string {
 	return styleBadge.Render("[bloat on]")
 }
 
-func (m *Model) breadcrumb() string {
-	parts := []string{"server"}
+// crumbs is the breadcrumb trail as plain text, one entry per screen on the
+// stack, so Back always removes exactly the last crumb. The root's crumb is the
+// connection host; every other screen names what it shows from live state,
+// falling back to its title and then to the level name so a crumb is never
+// empty while a placeholder is still loading.
+//
+// Two decorations keep the trail self-sufficient without adding crumbs: a
+// screen that switches tool mid-trail (describe → page inspector, triage → lock
+// tree, the single-database fast path that skips the picker) is prefixed with
+// the tool name, and the first screen scoped to a database the trail hasn't
+// named yet is suffixed with "(db)". Cluster-wide tools carry the connection
+// database only as a handle, so they never get the suffix.
+func (m *Model) crumbs() []string {
+	host := m.hostLabel
+	if host == "" {
+		if host = m.target; host == "" {
+			host = "server"
+		}
+	}
+	parts := []string{host}
+	lastDB := ""
+	var prev *screen
 	for _, sc := range m.stack {
-		switch sc.level {
-		case levelTools:
-		case levelDatabases:
-			parts = append(parts, sc.tool.Name())
-		case levelSchemas:
-			parts = append(parts, sc.db)
-		case levelTables, levelBufferTables:
-			parts = append(parts, sc.schema)
-		case levelParts:
-			parts = append(parts, sc.table.Name)
-		case levelColumns:
-			parts = append(parts, "heap")
-		case levelHeapPages:
-			parts = append(parts, sc.table.Name)
-		case levelHeapTuples:
-			parts = append(parts, fmt.Sprintf("page #%d", sc.pages.heapPageBlkno))
-		case levelTupleRow:
-			if sc.pages.toastChunkID != 0 {
-				parts = append(parts, fmt.Sprintf("chunk %d", sc.pages.toastChunkID))
-			} else {
-				parts = append(parts, "row "+sc.pages.tupleCtid)
-			}
-		case levelRelations:
-			parts = append(parts, sc.schema)
-		case levelIndexPages:
-			parts = append(parts, sc.pages.index.Name)
-		case levelIndexTuples:
-			parts = append(parts, fmt.Sprintf("page #%d", sc.pages.indexPageBlkno))
-		case levelDiagnostics:
-			parts = append(parts, "tools")
-		case levelDiagnosticResult:
-			if sc.diag != nil {
-				parts = append(parts, sc.diag.Title)
-			}
-		case levelWAL:
-			parts = append(parts, "wal")
-		case levelWALRecords:
-			parts = append(parts, sc.wal.rmgr)
-		case levelWALBlocks:
-			parts = append(parts, "rec "+shortLSN(sc.wal.recLSN))
-		case levelWALRelations:
-			parts = append(parts, "by relation")
-		case levelWALRelBlocks:
-			parts = append(parts, sc.wal.relLabel)
-		case levelWALBlockDetail:
-			if b := sc.wal.blockRef; b != nil {
-				parts = append(parts, fmt.Sprintf("blk %d @ %s", b.BlockNumber, shortLSN(b.StartLSN)))
-			}
-		case levelActivity:
-			parts = append(parts, "activity")
-		case levelStatements:
-			// The parent databases level already shows "queries" (the tool
-			// name); show the chosen database here instead of repeating it.
-			parts = append(parts, sc.db)
-		case levelStatementDetail:
-			if sc.stat.detail != nil {
-				parts = append(parts, fmt.Sprintf("query %d", sc.stat.detail.QueryID))
-			}
-		case levelStatementResult:
-			parts = append(parts, "result")
-		case levelMaintenance:
-			parts = append(parts, "system overview")
-		case levelSettings:
-			parts = append(parts, "settings")
-		case levelTriage:
-			parts = append(parts, "triage")
-		case levelWaitProfile:
-			parts = append(parts, "wait profile")
-		case levelLogFiles:
-			parts = append(parts, "logs")
-		case levelLogs:
-			if sc.log.src != nil {
-				parts = append(parts, filepath.Base(sc.log.src.Info().Path))
-			} else {
-				parts = append(parts, "logs")
-			}
-		case levelLogGroup:
-			if sc.log.paramKey != "" {
-				parts = append(parts, "parameters")
-			} else if sc.log.group != nil {
-				parts = append(parts, sc.log.group.Category.Short()+" group")
-			}
-		case levelLogEntry:
-			parts = append(parts, "entry")
-		case levelPgBouncers:
-			parts = append(parts, "pgbouncer")
-		case levelPgBouncer:
-			if sc.pgb.inst != nil {
-				parts = append(parts, sc.pgb.inst.Name)
-			}
-		case levelPgBouncerShow:
-			parts = append(parts, sc.pgb.show.spec().title)
+		if sc.level == levelTools {
+			prev = sc
+			continue
 		}
+		text, isDB := crumbText(sc, prev)
+		if text == "" {
+			text = sc.title
+		}
+		if text == "" {
+			text = levelLabel(sc.level)
+		}
+		switch {
+		case isDB:
+			lastDB = sc.db
+		case dbScopedLevel(sc.level) && sc.db != "" && sc.db != lastDB:
+			text += " (" + sc.db + ")"
+			lastDB = sc.db
+		}
+		// Progress is a cross-link reachable from activity as well as the
+		// system overview; stamping "system overview:" on it would mislead.
+		switched := prev != nil && (prev.level == levelTools || sc.tool != prev.tool) && sc.level != levelProgress
+		if switched && text != sc.tool.Name() {
+			text = sc.tool.Name() + ": " + text
+		}
+		parts = append(parts, text)
+		prev = sc
 	}
-	out := make([]string, len(parts))
-	for i, p := range parts {
-		if i == len(parts)-1 {
-			out[i] = styleCrumbActive.Render(p)
+	return parts
+}
+
+// crumbText names what a screen shows, from live state; "" defers to the
+// generic fallbacks in crumbs. isDB reports that the crumb is the database
+// itself, so the trail knows it has been named.
+func crumbText(sc, prev *screen) (text string, isDB bool) {
+	switch sc.level {
+	case levelDatabases:
+		if sc.diag != nil {
+			// Per-database diagnostic: the picker asks "which db for <query>".
+			return sc.diag.Title, false
+		}
+		return sc.tool.Name(), false
+	case levelSchemas, levelStatements:
+		return sc.db, true
+	case levelTables, levelBufferTables, levelRelations, levelTableStats:
+		return sc.schema, false
+	case levelParts, levelHeapPages:
+		return sc.table.Name, false
+	case levelColumns:
+		return "heap", false
+	case levelBufferDetail:
+		if sc.buf.detail != nil {
+			return sc.buf.detail.Name, false
+		}
+	case levelShmem:
+		return "shmem", false
+	case levelHeapTuples:
+		text = fmt.Sprintf("page #%d", sc.pages.heapPageBlkno)
+		if (prev == nil || prev.level != levelHeapPages) && sc.table.Name != "" {
+			// Index → heap hop: the crumb before is an index page, so say
+			// whose page this is.
+			text = sc.table.Name + " " + text
+		}
+		return text, false
+	case levelTupleRow:
+		if sc.pages.toastChunkID != 0 {
+			return fmt.Sprintf("chunk %d", sc.pages.toastChunkID), false
+		}
+		return "row " + sc.pages.tupleCtid, false
+	case levelIndexPages:
+		return sc.pages.index.Name, false
+	case levelIndexTuples:
+		text = fmt.Sprintf("page #%d", sc.pages.indexPageBlkno)
+		switch {
+		case sc.pages.indexPageLevel != nil:
+			text += fmt.Sprintf(" L%d", *sc.pages.indexPageLevel)
+		case sc.pages.indexPageType != "":
+			text += " " + sc.pages.indexPageType
+		}
+		return text, false
+	case levelDescribe:
+		switch {
+		case sc.desc.info != nil && sc.desc.info.Title != "":
+			return "describe " + sc.desc.info.Title, false
+		case sc.table.Name != "":
+			return "describe " + sc.table.Name, false
+		}
+		return "describe", false
+	case levelDiagnostics:
+		return "tools", false
+	case levelDiagnosticResult:
+		if prev != nil && prev.level == levelDatabases && prev.diag != nil {
+			// Reached through the database picker, whose crumb is already the
+			// diagnostic's title: this crumb is the chosen scope.
+			if sc.diagAllDBs {
+				return "all databases", false
+			}
+			return sc.db, true
+		}
+		if sc.diag != nil {
+			return sc.diag.Title, false
+		}
+	case levelWAL:
+		return "wal", false
+	case levelWALRecords:
+		return sc.wal.rmgr, false
+	case levelWALBlocks:
+		if sc.wal.recLSN != "" {
+			return "rec " + shortLSN(sc.wal.recLSN), false
+		}
+	case levelWALRelations:
+		return "by relation", false
+	case levelWALRelBlocks:
+		return sc.wal.relLabel, false
+	case levelWALBlockDetail:
+		if b := sc.wal.blockRef; b != nil {
+			return fmt.Sprintf("blk %d @ %s", b.BlockNumber, shortLSN(b.StartLSN)), false
+		}
+	case levelStatementDetail:
+		if sc.stat.detail != nil {
+			return fmt.Sprintf("query %d", sc.stat.detail.QueryID), false
+		}
+	case levelStatementSamples:
+		return "values", false
+	case levelStatementResult:
+		return "result", false
+	case levelSnapshots:
+		return "snapshots", false
+	case levelMaintenance:
+		return "system overview", false
+	case levelSettings:
+		return "settings", false
+	case levelProgress:
+		return "progress", false
+	case levelActivity:
+		return "activity", false
+	case levelLockTree:
+		return "lock tree", false
+	case levelWaitProfile:
+		return "wait profile", false
+	case levelTriage:
+		return "triage", false
+	case levelLogFiles:
+		return "logs", false
+	case levelLogs:
+		if sc.log.src != nil {
+			return filepath.Base(sc.log.src.Info().Path), false
+		}
+		return "logs", false
+	case levelLogGroup:
+		if sc.log.paramKey != "" {
+			return "parameters", false
+		}
+		if sc.log.group != nil {
+			return sc.log.group.Category.Short() + " group", false
+		}
+	case levelLogEntry:
+		return "entry", false
+	case levelPgBouncers:
+		return "pgbouncer", false
+	case levelPgBouncer:
+		if sc.pgb.inst != nil {
+			return sc.pgb.inst.Name, false
+		}
+	case levelPgBouncerShow:
+		return sc.pgb.show.spec().title, false
+	}
+	return "", false
+}
+
+// dbScopedLevel reports the levels whose content belongs to one database, so
+// the trail must name that database somewhere before or on them. Levels of
+// cluster-wide tools are deliberately absent even though their screens carry
+// the connection database.
+func dbScopedLevel(l level) bool {
+	switch l {
+	case levelParts, levelColumns, levelHeapPages, levelHeapTuples, levelTupleRow,
+		levelIndexPages, levelIndexTuples, levelDescribe, levelBufferDetail,
+		levelStatementDetail, levelStatementSamples, levelStatementResult,
+		levelDiagnosticResult:
+		return true
+	}
+	return false
+}
+
+// renderTrail styles the crumb trail and fits it into budget cells: the
+// current (last) crumb is highlighted, and when the trail is too long the
+// middle collapses into "…" so the host and the current location survive. A
+// tail that still doesn't fit is clipped rather than wrapped.
+func renderTrail(crumbs []string, budget int) string {
+	const sep = " ▸ "
+	if len(crumbs) == 0 || budget <= 0 {
+		return ""
+	}
+	width := func(cs []string) int {
+		w := displayWidth(sep) * (len(cs) - 1)
+		for _, c := range cs {
+			w += displayWidth(c)
+		}
+		return w
+	}
+	cs := slices.Clone(crumbs)
+	for width(cs) > budget && len(cs) > 2 {
+		if cs[1] != "…" {
+			cs[1] = "…"
+			continue
+		}
+		if len(cs) == 3 {
+			break
+		}
+		cs = slices.Delete(cs, 2, 3)
+	}
+	if w := width(cs); w > budget {
+		last := len(cs) - 1
+		cs[last] = clipCells(cs[last], max(budget-(w-displayWidth(cs[last])), 1))
+	}
+	out := make([]string, len(cs))
+	for i, c := range cs {
+		if i == len(cs)-1 {
+			out[i] = styleCrumbActive.Render(c)
 		} else {
-			out[i] = styleBreadcrumb.Render(p)
+			out[i] = styleBreadcrumb.Render(c)
 		}
 	}
-	return strings.Join(out, styleBreadcrumb.Render(" ▸ "))
+	return strings.Join(out, styleBreadcrumb.Render(sep))
 }
 
 func (m *Model) renderToolPicker(s *screen, height int) string {

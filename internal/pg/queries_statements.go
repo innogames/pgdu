@@ -18,6 +18,17 @@ const sqlStatementsDefaultVersion = `SELECT COALESCE(default_version, '') FROM p
 // counters smaller than the baseline and the delta meaningless.
 const sqlStatementsInfo = `SELECT stats_reset FROM pg_stat_statements_info`
 
+// sqlStatementsDBCount counts the distinct statements pg_stat_statements currently
+// tracks for this database — the size a snapshot taken right now would have.
+// The snapshot browser uses it to bar the live "now" / "session start" anchors
+// on the same scale as the saved snapshots' query counts, so it deliberately
+// skips the query-text filters of statementsQuery (a handful of rows either way).
+const sqlStatementsDBCount = `
+SELECT count(DISTINCT queryid)
+FROM   pg_stat_statements
+WHERE  dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+  AND  queryid IS NOT NULL`
+
 // sqlSampleTableColumns resolves a relation reference (schema-qualified or bare,
 // as parsed from a statement) to its schema, name and live column list, so a
 // sample-value query can be built from trusted catalog identifiers. to_regclass

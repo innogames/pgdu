@@ -131,26 +131,6 @@ func (m *Model) renderHeapTuplesInfo(height int) string {
 	return padInfo(&b, height)
 }
 
-// heapPageTableLabel reports the qualified relation name for the status line
-// on the page-inspector levels. The breadcrumb already shows it, but having
-// it on the status row keeps the relation identity visible while drilled
-// deep (per-page, per-tuple, per-row) where the breadcrumb trail gets long.
-func heapPageTableLabel(s *screen) string {
-	switch s.level {
-	case levelHeapPages, levelHeapTuples, levelTupleRow:
-		return "table: " + s.table.Qualified()
-	case levelIndexPages:
-		return "index: " + s.pages.index.Qualified()
-	case levelIndexTuples:
-		label := "index: " + s.pages.index.Qualified()
-		if s.pages.indexPageLevel != nil {
-			label += "  ·  page: L" + strconv.Itoa(int(*s.pages.indexPageLevel))
-		}
-		return label
-	}
-	return ""
-}
-
 // heapPageWindowLabel reports the currently-loaded page window for the
 // status line, e.g. "pages 0–1999 / 12345". Returns "" off-level or with no
 // page data so the status row stays terse when there's nothing to show.

@@ -640,7 +640,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Push a loading parts screen now (spinner while we resolve), then resolve
 		// the name; onDiskTableResolved fills in the table and loads its parts.
 		next := &screen{
-			level: levelParts, title: "disk usage", tool: toolDisk,
+			level: levelParts, title: "disk", tool: toolDisk,
 			db: t.db, loading: true,
 			sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 		m.stack = append(m.stack, next)
@@ -687,6 +687,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if len(m.stack) > 1 {
+			m.stack = m.stack[:len(m.stack)-1]
+		}
+		// Backing out of the entry picker leaves the tool: the top-queries table
+		// beneath it has never loaded (its window has no base yet), so landing
+		// there would only show an empty spinner.
+		if s.level == levelSnapshots && s.stat.entry && len(m.stack) > 1 && m.top().level == levelStatements && !m.top().loaded {
 			m.stack = m.stack[:len(m.stack)-1]
 		}
 	case key.Matches(msg, m.keys.Enter):
