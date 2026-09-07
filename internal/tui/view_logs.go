@@ -250,7 +250,10 @@ func (m *Model) renderLogHeader(s *screen) string {
 	}
 
 	if s.level == levelLogGroup && s.log.group != nil {
-		b.WriteString(m.renderLogGroupSummary(s.log.group) + "\n")
+		b.WriteString(m.renderLogGroupSummary(s.log.group, s.log.params == logParamsOff && s.log.paramKey == "") + "\n")
+		if line := m.renderLogParamsLine(s); line != "" {
+			b.WriteString(line + "\n")
+		}
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -266,8 +269,9 @@ func fmtPoolerMetric(m pglog.PoolerMetric, v float64) string {
 	return strconv.FormatInt(int64(v), 10)
 }
 
-// renderLogGroupSummary is the one-line stats strip for a group.
-func (m *Model) renderLogGroupSummary(g *pglog.Group) string {
+// renderLogGroupSummary is the one-line stats strip for a group. sampled says
+// the rows below are the capped Samples (the parameter views walk every member).
+func (m *Model) renderLogGroupSummary(g *pglog.Group, sampled bool) string {
 	mu := styleMuted.Render
 	parts := []string{
 		logGlyph(g.Severity) + " " + logSevStyle(g.Severity).Render(g.Severity.String()),
@@ -280,10 +284,29 @@ func (m *Model) renderLogGroupSummary(g *pglog.Group) string {
 	if g.Plans > 0 {
 		parts = append(parts, logPlanBadge(g.Plans)+mu(" — ▤ rows carry one; Enter shows it"))
 	}
-	if len(g.Samples) < g.Count {
+	if sampled && len(g.Samples) < g.Count {
 		parts = append(parts, mu(fmt.Sprintf("showing the last %d", len(g.Samples))))
 	}
 	return "  " + strings.Join(parts, mu("  ·  "))
+}
+
+// renderLogParamsLine is the second header line of a group screen in one of
+// the parameter modes: what the rows are keyed by, or which key a drill-down
+// is narrowed to. Empty on the plain entry list.
+func (m *Model) renderLogParamsLine(s *screen) string {
+	mu := styleMuted.Render
+	switch {
+	case s.log.paramKey != "":
+		key := pglog.FormatParamKey(s.log.paramKey, s.log.paramFirst)
+		return "  " + mu("parameters: ") + collapseWS(key, max(m.width-20, 20)) + mu(fmt.Sprintf("  ·  %d entries", len(s.items)))
+	case s.log.params != logParamsOff:
+		hint := "one row per distinct parameter tuple (DETAIL line, or literals inlined in the SQL)"
+		if s.log.params == logParamsFirst {
+			hint = "one row per distinct $1 — later parameters ignored"
+		}
+		return "  " + s.log.params.label() + mu(fmt.Sprintf("  ·  %d distinct  ·  %s  ·  tab cycles, Enter lists the entries", len(s.items), hint))
+	}
+	return ""
 }
 
 // logGroupStats returns the category-specific figures for a group.

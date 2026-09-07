@@ -476,6 +476,13 @@ type logState struct {
 	group *pglog.Group
 	entry *pglog.Entry
 	cols  []logColDesc
+	// params is the group screen's tab state: entries, or one row per bound
+	// parameter tuple (or per $1). paramKey narrows a group screen to the
+	// entries behind one such row (Enter on it); paramFirst records which
+	// key flavour it was built with.
+	params     logParamMode
+	paramKey   string
+	paramFirst bool
 	// hosts caches reverse-DNS results (IP → hostname) for the timeline's
 	// opt-in hostname column, filled asynchronously like actHosts.
 	hosts map[string]string
@@ -896,6 +903,12 @@ type Model struct {
 	// SHOW tables.
 	pgbTicking bool
 	pgbRefresh time.Duration
+	// pgbAvailable gates the PgBouncer entry on the root tool picker: it is
+	// hidden until discovery (fired from Init) has actually found an instance,
+	// so hosts without a pooler don't advertise a tool that can only say "no
+	// pgbouncer instance found". --pgbouncer and the triage drill bypass the
+	// menu and keep working regardless.
+	pgbAvailable bool
 
 	// logFile is the --log-file override: when set the analyzer skips the picker
 	// and opens it directly.
@@ -1034,16 +1047,17 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 	// the stack root so Back/Esc still returns to it. The root is pre-populated
 	// synchronously (toolItems is pure) since Init only loads the top screen.
 	if t, ok := toolByName(initialTool); ok {
-		root.items = toolItems()
+		root.items = toolItems(m.pgbAvailable)
 		root.loaded = true
 		m.stack = append(m.stack, m.toolEntryScreen(t))
 	}
 	return m
 }
 
-// toolItems is the static list shown on the root tool-picker screen.
-func toolItems() []item {
-	return []item{
+// toolItems is the list shown on the root tool-picker screen; pgBouncer
+// controls whether the PgBouncer entry is included (see Model.pgbAvailable).
+func toolItems(pgBouncer bool) []item {
+	items := []item{
 		{name: "Disk usage", detail: "browse tables by total relation size on disk", hasChildren: true, data: toolDisk},
 		{name: "Top queries", detail: "powa-style top queries from pg_stat_statements — calls, time, I/O; EXPLAIN and sample params on Enter", hasChildren: true, data: toolQueries},
 		{name: "Current Activity", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
@@ -1056,6 +1070,36 @@ func toolItems() []item {
 		{name: "Page inspector", detail: "drill into heap pages and tuple line pointers using pageinspect", hasChildren: true, data: toolPageInspect},
 		{name: "WAL inspector", detail: "drill into recent write-ahead-log: bytes per resource manager, records, block refs (pg_walinspect)", hasChildren: true, data: toolWAL},
 		{name: "Other Tools", detail: "run diagnostic queries — index / table / vacuum / activity / wal / server health", hasChildren: true, data: toolTools},
+	}
+	if !pgBouncer {
+		items = slices.DeleteFunc(items, func(it item) bool { return it.data == toolPgBouncer })
+	}
+	return items
+}
+
+// setPgbAvailable records that at least one pgbouncer instance exists and, if
+// the root picker is already populated, re-inserts the PgBouncer entry while
+// keeping the cursor on the tool it was on.
+func (m *Model) setPgbAvailable() {
+	if m.pgbAvailable {
+		return
+	}
+	m.pgbAvailable = true
+	root := m.stack[0]
+	if root.level != levelTools || !root.loaded {
+		return
+	}
+	var cur tool
+	if root.cursor < len(root.items) {
+		cur, _ = root.items[root.cursor].data.(tool)
+	}
+	root.items = toolItems(true)
+	root.itemsRev++ // doesn't go through applySort; invalidate the filter cache
+	for i, it := range root.items {
+		if it.data == cur {
+			root.cursor = i
+			break
+		}
 	}
 }
 
@@ -1095,7 +1139,7 @@ func diagCategories() []string {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, m.loadCurrent())
+	return tea.Batch(m.spinner.Tick, m.loadCurrent(), m.pgbAvailableCmd())
 }
 
 // --- screen-stack helpers ---

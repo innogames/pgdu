@@ -195,6 +195,9 @@ type Entry struct {
 	// Orphan marks a synthetic primary created for an attachment (DETAIL, …)
 	// whose real primary lies before the window start.
 	Orphan bool
+	// Group indexes Report.Groups (set by Aggregate) so per-group drill-downs
+	// can walk every member entry, not just the capped Samples.
+	Group int32
 
 	Message   []byte
 	Detail    []byte
@@ -323,6 +326,8 @@ type Group struct {
 	Checkpoint *CheckpointStats
 	Temp       *TempStats
 	Autovac    map[string]int // CatAutovacuum: per-table counts
+
+	ord int // position before the count sort; Aggregate uses it to remap Entry.Group
 }
 
 // Histogram counts entries per time bucket and severity for the header

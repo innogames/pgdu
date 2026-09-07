@@ -66,6 +66,7 @@ type keyMap struct {
 	LogPane      key.Binding // tab: groups → timeline → slow → groups
 	LogWindow    key.Binding // w: widen the tail window
 	LogJump      key.Binding // j: jump to this line in the chronological timeline
+	LogParams    key.Binding // tab (group screen): entries → by parameters → by $1
 
 	// PgBouncer-tool binding.
 	OpenLog key.Binding // l: open the instance's logfile in the log analyzer
@@ -75,6 +76,8 @@ type keyMap struct {
 
 	// logJumpInFooter advertises j on the entry and group-rows levels.
 	logJumpInFooter bool
+	// logParamsInFooter advertises tab (parameter grouping) on the group screen.
+	logParamsInFooter bool
 
 	// logInFooter adds the log analyzer's cluster (tab/v/f/m/w/o) to the footer;
 	// nothing else advertises those keys.
@@ -178,6 +181,7 @@ func defaultKeys() keyMap {
 		LogPane:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "groups/timeline/slow/stats")),
 		LogWindow:    key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "widen window")),
 		LogJump:      key.NewBinding(key.WithKeys("j"), key.WithHelp("j", "jump to timeline")),
+		LogParams:    key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "entries/params/$1")),
 
 		OpenLog: key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "open log")),
 	}
@@ -264,6 +268,8 @@ func (k *keyMap) applyContext(s *screen) {
 	logRow := s.level == levelLogGroup || s.level == levelLogEntry
 	k.LogJump.SetEnabled(logRow)
 	k.logJumpInFooter = logRow
+	k.LogParams.SetEnabled(s.level == levelLogGroup)
+	k.logParamsInFooter = s.level == levelLogGroup
 
 	// m opens the shared-memory map from the buffer-tables list; surface it in
 	// the footer there since nothing else advertises it.
@@ -340,6 +346,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	if k.logJumpInFooter {
 		b = append(b, k.LogJump)
 	}
+	if k.logParamsInFooter {
+		b = append(b, k.LogParams)
+	}
 	if k.toggleRefreshInFooter {
 		b = append(b, k.ToggleRefresh)
 	}
@@ -383,7 +392,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
 		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation, k.ShmemMap, k.PageInspect},
 		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.Progress, k.Settings},
-		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump, k.OpenLog},
+		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump, k.LogParams, k.OpenLog},
 		{k.Help, k.Quit},
 	}
 }

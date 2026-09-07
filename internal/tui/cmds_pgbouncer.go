@@ -36,6 +36,9 @@ type pgbShowLoadedMsg struct {
 
 type pgbTickMsg struct{}
 
+// pgbAvailableMsg answers pgbAvailableCmd; see Model.pgbAvailable.
+type pgbAvailableMsg struct{ found bool }
+
 // probePgBouncers runs the cheap per-instance probe concurrently; one wedged
 // console must not hold up the rest of the list.
 func (m *Model) probePgBouncers(ctx context.Context, insts []pg.PgBouncerInstance) []pg.PgBouncerProbe {
@@ -52,6 +55,14 @@ func (m *Model) discoverPgBouncersCmd() tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		insts := m.client.DiscoverPgBouncers(ctx)
 		return pgbDiscoveredMsg{insts: insts, probes: m.probePgBouncers(ctx, insts)}
+	})
+}
+
+// pgbAvailableCmd is the cheap startup discovery behind the root menu's
+// PgBouncer entry: no console probes, just "is there any instance at all".
+func (m *Model) pgbAvailableCmd() tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		return pgbAvailableMsg{found: len(m.client.DiscoverPgBouncers(ctx)) > 0}
 	})
 }
 

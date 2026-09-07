@@ -53,6 +53,18 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 		return m.jumpToLogEntry(logs, e), true
 	}
 
+	if s.level == levelLogGroup && key.Matches(msg, m.keys.LogParams) {
+		// Cycle entries → by parameters → by $1. Leaving the table restores the
+		// entry order; the table picks its own default in rebuildLogParamRows.
+		s.log.params = s.log.params.next()
+		if s.log.params == logParamsOff {
+			s.sort, s.sortDesc = sortByLast, true
+		}
+		m.rebuildLogChild(s)
+		s.resetCursor()
+		return nil, true
+	}
+
 	if s.level != levelLogs {
 		return nil, false
 	}

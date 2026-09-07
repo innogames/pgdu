@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"pgdu/internal/pg"
 )
@@ -54,5 +55,25 @@ func TestDescribeIndexCoverage(t *testing.T) {
 	}
 	if got := describeIndexCoverage(12.34, true); !strings.Contains(got, "~12.3%") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestDescribeIndexIdle(t *testing.T) {
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { t := now.Add(-d); return &t }
+	for _, tc := range []struct {
+		name string
+		idx  pg.DescribeIndexDef
+		want bool
+	}{
+		{"fresh", pg.DescribeIndexDef{Scans: 5, LastScan: at(35 * time.Second)}, false},
+		{"just under", pg.DescribeIndexDef{Scans: 5, LastScan: at(time.Hour - time.Second)}, false},
+		{"stale", pg.DescribeIndexDef{Scans: 5, LastScan: at(5 * time.Hour)}, true},
+		{"never scanned, flagged unused", pg.DescribeIndexDef{Scans: 0}, false},
+		{"never scanned primary", pg.DescribeIndexDef{Scans: 0, IsPrimary: true}, true},
+	} {
+		if got := describeIndexIdle(tc.idx, now); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

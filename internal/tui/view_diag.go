@@ -354,7 +354,11 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 				if idx.Clustered {
 					badges += " " + styleBadge.Render("clustered")
 				}
-				line := "    " + idx.Name + badges + "  " + mu(humanize.Bytes(idx.SizeBytes))
+				name := idx.Name
+				if s.desc.detail && describeIndexIdle(idx, d.LoadedAt) {
+					name = styleBarAlt.Render(name)
+				}
+				line := "    " + name + badges + "  " + mu(humanize.Bytes(idx.SizeBytes))
 				if s.desc.detail {
 					line += mu(" · ") + describeIndexUsage(idx, d.EstRows, d.LoadedAt)
 				}
@@ -663,6 +667,25 @@ func describeIndexUsage(idx pg.DescribeIndexDef, tableRows int64, asOf time.Time
 		parts = append(parts, mu("hit ")+gradedPercentStyle(pct).Render(fmt.Sprintf("%.1f%%", pct)))
 	}
 	return strings.Join(parts, mu(" · "))
+}
+
+// describeIndexIdleAfter is how long an index may go without a scan before the
+// describe view tints its name yellow: long enough that a quiet minute doesn't
+// flicker, short enough to catch an index only nightly jobs still touch.
+const describeIndexIdleAfter = time.Hour
+
+// describeIndexIdle reports whether an index saw no scan within
+// describeIndexIdleAfter of asOf. A never-scanned index counts as idle unless
+// describeIndexUsage already flags it red as unused, so each index carries one
+// verdict, not two.
+func describeIndexIdle(idx pg.DescribeIndexDef, asOf time.Time) bool {
+	if idx.Scans == 0 && !idx.IsPrimary && !idx.IsUnique {
+		return false
+	}
+	if idx.LastScan == nil {
+		return true
+	}
+	return asOf.Sub(*idx.LastScan) >= describeIndexIdleAfter
 }
 
 // describeIndexCoverage renders a partial index's covered share of the table,

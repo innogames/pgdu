@@ -536,3 +536,92 @@ func TestLogDurationColumnCheckpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestLogGroupParamsTable(t *testing.T) {
+	m, s := newLogTestModel(t)
+	var slow *pglog.Group
+	for _, it := range s.items {
+		if g, ok := it.data.(*pglog.Group); ok && g.Category == pglog.CatSlowQuery {
+			slow = g
+		}
+	}
+	if slow == nil {
+		t.Fatal("slow-query group not found")
+	}
+	gs := m.logGroupScreen(s, slow)
+	m.stack = append(m.stack, gs)
+	m.rebuildLogChild(gs)
+	gs.loaded = true
+
+	// Tab: entries → by parameters. The sample entries carry no DETAIL, so the
+	// literals inlined in their SQL (IN (1, 2) / IN (3)) key the rows, with the
+	// duration columns.
+	gs.log.params = gs.log.params.next()
+	m.rebuildLogChild(gs)
+	if gs.diagCols == nil || len(gs.items) != 2 {
+		t.Fatalf("param table: cols=%v rows=%d", gs.diagCols, len(gs.items))
+	}
+	if gs.diagSortCol != 1 || !gs.sortDesc {
+		t.Errorf("default sort = col %d desc=%v, want count desc", gs.diagSortCol, gs.sortDesc)
+	}
+	keys := map[string]bool{}
+	for _, it := range gs.items {
+		cells := it.data.([]pg.DiagCell)
+		keys[cells[0].Display] = true
+		if cells[1].Num != 1 || cells[2].Num != 50 {
+			t.Errorf("row = %+v", cells)
+		}
+	}
+	if !keys["1, 2"] || !keys["3"] {
+		t.Errorf("param keys = %v", keys)
+	}
+	names := make([]string, len(gs.diagCols))
+	for i, c := range gs.diagCols {
+		names[i] = c.Name
+	}
+	if got := strings.Join(names, ","); got != "parameters,count,share,total,avg,p95,max,first,last" {
+		t.Errorf("columns = %s", got)
+	}
+	hdr := stripANSI(m.renderLogHeader(gs))
+	if !strings.Contains(hdr, "by parameters") || !strings.Contains(hdr, "2 distinct") || strings.Contains(hdr, "showing the last") {
+		t.Errorf("param header:\n%s", hdr)
+	}
+	out := stripANSI(m.renderDiagResult(gs, 10))
+	if !strings.Contains(out, "1, 2") || !strings.Contains(out, "8.3s") {
+		t.Errorf("param table:\n%s", out)
+	}
+
+	// Enter on a row narrows a new group screen to that key, walking every
+	// member rather than the samples.
+	for vi, idx := range gs.visibleIndexes() {
+		if gs.items[idx].data.([]pg.DiagCell)[0].Display == "3" {
+			gs.cursor = vi
+		}
+	}
+	m.drillIn()
+	child := m.top()
+	if child == gs || child.level != levelLogGroup || child.log.paramKey != "3" {
+		t.Fatalf("drill produced %+v", child.log)
+	}
+	if len(child.items) != 1 || child.diagCols != nil {
+		t.Errorf("drill rows = %d cols=%v", len(child.items), child.diagCols)
+	}
+	if e := child.logEntryOf(child.items[0]); e == nil || e.DurationMs < 8000 {
+		t.Errorf("drill entry = %+v", e)
+	}
+	if hdr := stripANSI(m.renderLogHeader(child)); !strings.Contains(hdr, "parameters: 3") {
+		t.Errorf("drill header:\n%s", hdr)
+	}
+
+	// Tab twice more: by $1, then back to the plain entry list.
+	gs.log.params = gs.log.params.next()
+	m.rebuildLogChild(gs)
+	if gs.log.params != logParamsFirst || gs.diagCols == nil {
+		t.Errorf("second tab: %v", gs.log.params)
+	}
+	gs.log.params = gs.log.params.next()
+	m.rebuildLogChild(gs)
+	if gs.log.params != logParamsOff || gs.diagCols != nil || len(gs.items) != 2 {
+		t.Errorf("third tab: params=%v cols=%v rows=%d", gs.log.params, gs.diagCols, len(gs.items))
+	}
+}

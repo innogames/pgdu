@@ -182,6 +182,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case triageLoadedMsg:
 		return m, m.onTriageLoaded(msg)
 
+	case pgbAvailableMsg:
+		if msg.found {
+			m.setPgbAvailable()
+		}
+		return m, nil
 	case pgbDiscoveredMsg:
 		return m, m.onPgbDiscovered(msg)
 	case pgbProbedMsg:

@@ -335,7 +335,11 @@ func (m *Model) View() string {
 				b.WriteString(m.renderLogGroups(s, contentHeight))
 			}
 		case levelLogGroup:
-			b.WriteString(m.renderLogGroup(s, contentHeight))
+			if s.diagCols != nil {
+				b.WriteString(m.renderDiagResult(s, contentHeight))
+			} else {
+				b.WriteString(m.renderLogGroup(s, contentHeight))
+			}
 		case levelLogEntry:
 			b.WriteString(m.renderLogEntry(s, contentHeight))
 		case levelTableStats:
@@ -529,7 +533,9 @@ func (m *Model) breadcrumb() string {
 				parts = append(parts, "logs")
 			}
 		case levelLogGroup:
-			if sc.log.group != nil {
+			if sc.log.paramKey != "" {
+				parts = append(parts, "parameters")
+			} else if sc.log.group != nil {
 				parts = append(parts, sc.log.group.Category.Short()+" group")
 			}
 		case levelLogEntry:

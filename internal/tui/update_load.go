@@ -32,7 +32,7 @@ func (m *Model) loadCurrent() tea.Cmd {
 	}
 	switch s.level {
 	case levelTools:
-		s.items = toolItems()
+		s.items = toolItems(m.pgbAvailable)
 		s.itemsRev++ // doesn't go through applySort; invalidate the filter cache
 		s.loading = false
 		s.loaded = true

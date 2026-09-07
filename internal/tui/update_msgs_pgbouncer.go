@@ -21,6 +21,9 @@ func (m *Model) pgbShowScreen(parent *screen, show pgbShow) *screen {
 }
 
 func (m *Model) onPgbDiscovered(msg pgbDiscoveredMsg) tea.Cmd {
+	if len(msg.insts) > 0 {
+		m.setPgbAvailable()
+	}
 	s := m.findLevel(levelPgBouncers)
 	if s == nil {
 		return nil

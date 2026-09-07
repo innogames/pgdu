@@ -66,10 +66,11 @@ func Aggregate(r *Report, opts AggOptions) {
 		key, title := Fingerprint(e)
 		g := groups[key]
 		if g == nil {
-			g = &Group{Key: key, Title: title, Category: e.Category, Severity: e.Severity, First: e.Time, Last: e.Time}
+			g = &Group{Key: key, Title: title, Category: e.Category, Severity: e.Severity, First: e.Time, Last: e.Time, ord: len(order)}
 			groups[key] = g
 			order = append(order, g)
 		}
+		e.Group = int32(g.ord)
 		g.Count++
 		if e.Severity > g.Severity {
 			g.Severity = e.Severity
@@ -148,8 +149,13 @@ func Aggregate(r *Report, opts AggOptions) {
 		return order[i].Last.After(order[j].Last)
 	})
 	r.Groups = make([]Group, len(order))
+	perm := make([]int32, len(order))
 	for i, g := range order {
 		r.Groups[i] = *g
+		perm[g.ord] = int32(i)
+	}
+	for i := range r.Entries {
+		r.Entries[i].Group = perm[r.Entries[i].Group]
 	}
 	r.Hist = histogram(r.Entries, r.Window.From, r.Window.To)
 	r.Pooler = PoolerHist{}
@@ -417,7 +423,20 @@ func normalizeMessage(msg string) string {
 // `/* … */` comments are kept because ORMs put the calling method there —
 // that is the most useful grouping key in the sample logs. `--` comments are
 // dropped (line noise).
-func NormalizeSQL(sql string) string {
+func NormalizeSQL(sql string) string { return normalizeSQL(sql, nil) }
+
+// SQLLiterals returns the constants NormalizeSQL replaces with $? — quoted
+// strings, dollar-quoted strings and numbers — in source order. This is what a
+// statement's "parameters" are when the driver inlined them instead of binding.
+func SQLLiterals(sql string) []string {
+	var out []string
+	normalizeSQL(sql, func(l string) { out = append(out, l) })
+	return out
+}
+
+// normalizeSQL is NormalizeSQL with an optional sink for every literal it
+// masks, so fingerprinting and literal extraction share one tokenizer.
+func normalizeSQL(sql string, lit func(string)) string {
 	var b strings.Builder
 	b.Grow(len(sql))
 	space := func() {
@@ -468,6 +487,9 @@ func NormalizeSQL(sql string) string {
 				b.Reset()
 				b.WriteString(s[:len(s)-1])
 			}
+			if lit != nil {
+				lit(sql[i:min(j+1, len(sql))])
+			}
 			b.WriteString("$?")
 			i = j + 1
 		case ch == '$' && i+1 < len(sql) && isDigit(sql[i+1]):
@@ -492,6 +514,9 @@ func NormalizeSQL(sql string) string {
 				i++
 				continue
 			}
+			if lit != nil {
+				lit(sql[i : i+len(tag)+end+len(tag)])
+			}
 			b.WriteString("$?")
 			i += len(tag) + end + len(tag)
 		case ch == '"':
@@ -507,6 +532,9 @@ func NormalizeSQL(sql string) string {
 			j := i
 			for j < len(sql) && (isDigit(sql[j]) || sql[j] == '.' || (sql[j] == 'e' || sql[j] == 'E') && j+1 < len(sql) && (isDigit(sql[j+1]) || sql[j+1] == '-' || sql[j+1] == '+') || (sql[j] == '-' || sql[j] == '+') && j > i && (sql[j-1] == 'e' || sql[j-1] == 'E')) {
 				j++
+			}
+			if lit != nil {
+				lit(sql[i:j])
 			}
 			b.WriteString("$?")
 			i = j

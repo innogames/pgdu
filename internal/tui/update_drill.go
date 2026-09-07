@@ -137,6 +137,18 @@ func (m *Model) drillIn() tea.Cmd {
 		if e == nil {
 			return nil
 		}
+		if _, table := cur.data.([]pg.DiagCell); table {
+			// A parameter row opens the entries behind it; the key is recomputed
+			// from the row's newest entry so nothing but the entry index rides on
+			// the item.
+			first := s.log.params == logParamsFirst
+			child := m.logGroupScreen(s, s.log.group)
+			child.title = "parameters"
+			child.log.paramKey = pglog.ParamKey(e, first)
+			child.log.paramFirst = first
+			m.stack = append(m.stack, child)
+			return m.loadCurrent()
+		}
 		m.stack = append(m.stack, m.logEntryScreen(s, e))
 		return m.loadCurrent()
 	case levelTriage:

@@ -89,6 +89,39 @@ func (m *Model) logScreen(src pglog.Source) *screen {
 		sort: sortByCount, sortDesc: true}
 }
 
+// logParamMode is what the levelLogGroup screen lists: the sample entries, or
+// the group's entries aggregated by the parameters their DETAIL line logged
+// (log_parameter_max_length). The $1-only flavour is for statements whose
+// trailing parameters vary per call (timestamps, offsets), where the full tuple
+// would put every entry in its own row.
+type logParamMode int
+
+const (
+	logParamsOff   logParamMode = iota
+	logParamsAll                // one row per distinct parameter tuple
+	logParamsFirst              // one row per distinct $1
+)
+
+func (p logParamMode) next() logParamMode {
+	switch p {
+	case logParamsOff:
+		return logParamsAll
+	case logParamsAll:
+		return logParamsFirst
+	}
+	return logParamsOff
+}
+
+func (p logParamMode) label() string {
+	switch p {
+	case logParamsAll:
+		return "by parameters"
+	case logParamsFirst:
+		return "by $1"
+	}
+	return "entries"
+}
+
 // logGroupScreen is the entries-of-one-group child; it renders from the
 // parent's report, so it carries the group pointer and a back-reference via
 // findLevel(levelLogs).
@@ -460,16 +493,114 @@ func (m *Model) rebuildLogChild(s *screen) {
 			break
 		}
 	}
-	items := make([]item, 0, len(g.Samples))
-	for _, idx := range g.Samples {
-		if idx < 0 || idx >= len(r.Entries) {
-			continue
+	if s.log.params != logParamsOff {
+		m.rebuildLogParamRows(s, g)
+		return
+	}
+	s.diagCols = nil
+	var items []item
+	if s.log.paramKey != "" {
+		// A parameter drill-down lists every member with that key, walking
+		// the whole report rather than the capped Samples.
+		gi := groupIndex(r, g)
+		for i := range r.Entries {
+			e := &r.Entries[i]
+			if int(e.Group) == gi && pglog.ParamKey(e, s.log.paramFirst) == s.log.paramKey {
+				items = append(items, item{name: e.FirstLine(), data: e, logIdx: i + 1})
+			}
 		}
-		e := &r.Entries[idx]
-		items = append(items, item{name: e.FirstLine(), data: e, logIdx: idx + 1})
+	} else {
+		items = make([]item, 0, len(g.Samples))
+		for _, idx := range g.Samples {
+			if idx < 0 || idx >= len(r.Entries) {
+				continue
+			}
+			e := &r.Entries[idx]
+			items = append(items, item{name: e.FirstLine(), data: e, logIdx: idx + 1})
+		}
 	}
 	s.items = items
 	s.itemsRev++
+	m.applySort(s)
+}
+
+// groupIndex locates g in r.Groups (the value Entry.Group carries).
+func groupIndex(r *pglog.Report, g *pglog.Group) int {
+	for i := range r.Groups {
+		if &r.Groups[i] == g || r.Groups[i].Key == g.Key {
+			return i
+		}
+	}
+	return -1
+}
+
+// rebuildLogParamRows turns the group screen into a generic table with one
+// row per parameter key. Duration columns are only offered when the members
+// carry one (slow queries, lock waits); the time columns render as text whose
+// lexical order is chronological within a window. logIdx points at the row's
+// newest entry so j (jump) and Enter (drill into the key's entries) work.
+func (m *Model) rebuildLogParamRows(s *screen, g *pglog.Group) {
+	r := s.log.report
+	first := s.log.params == logParamsFirst
+	rows := pglog.GroupParams(r, groupIndex(r, g), first)
+	hasDur := false
+	for i := range rows {
+		hasDur = hasDur || rows[i].HasDur
+	}
+	cols := []pg.DiagColumn{
+		{Name: "parameters", Kind: pg.DiagText},
+		{Name: "count", Kind: pg.DiagCount},
+		{Name: "share", Kind: pg.DiagPercent},
+	}
+	if hasDur {
+		cols = append(cols,
+			pg.DiagColumn{Name: "total", Kind: pg.DiagDuration},
+			pg.DiagColumn{Name: "avg", Kind: pg.DiagDuration},
+			pg.DiagColumn{Name: "p95", Kind: pg.DiagDuration},
+			pg.DiagColumn{Name: "max", Kind: pg.DiagDuration})
+	}
+	cols = append(cols, pg.DiagColumn{Name: "first", Kind: pg.DiagText}, pg.DiagColumn{Name: "last", Kind: pg.DiagText})
+	dur := func(ms float64) pg.DiagCell {
+		return pg.DiagCell{Display: fmtAge(ms), Num: ms, HasNum: true}
+	}
+	ts := func(t time.Time) pg.DiagCell {
+		if t.IsZero() {
+			return pg.DiagCell{Display: "—"}
+		}
+		return pg.DiagCell{Display: t.Format("01-02 15:04:05")}
+	}
+	items := make([]item, 0, len(rows))
+	for i := range rows {
+		p := &rows[i]
+		share := 0.0
+		if g.Count > 0 {
+			share = 100 * float64(p.Count) / float64(g.Count)
+		}
+		cells := []pg.DiagCell{
+			{Display: collapseWS(pglog.FormatParamKey(p.Key, first), 300)},
+			{Display: fmtCount(p.Count), Num: float64(p.Count), HasNum: true},
+			{Display: fmt.Sprintf("%.1f%%", share), Num: share, HasNum: true},
+		}
+		if hasDur {
+			cells = append(cells, dur(p.SumMs), dur(p.AvgMs()), dur(p.P95Ms), dur(p.MaxMs))
+		}
+		cells = append(cells, ts(p.First), ts(p.Last))
+		parts := make([]string, len(cells))
+		for j, c := range cells {
+			parts[j] = c.Display
+		}
+		items = append(items, item{name: strings.Join(parts, " "), hasChildren: true, data: cells, logIdx: p.Sample + 1})
+	}
+	// Keep the user's column choice across refreshes; a fresh table (or one
+	// whose column set changed) opens count-descending.
+	if s.diagCols == nil || len(s.diagCols) != len(cols) {
+		s.diagSortCol, s.sortDesc = 1, true
+	}
+	s.diagCols = cols
+	s.diagBarCol = -1
+	s.items = items
+	s.itemsRev++
+	s.diagMetricsDirty = true
 	m.applySort(s)
 }
 

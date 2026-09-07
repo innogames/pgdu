@@ -113,6 +113,9 @@ fails (missing/corrupt → empty).
   child screens find it via `findLevel(levelLogs)` and are re-pointed on each refresh.
   The groups pane orders itself, so `applySort` special-cases `levelLogs` with
   `diagCols == nil`. Section header rows carry `logSection` and are inert.
+  `Entry.Group` indexes `Report.Groups` (set by `Aggregate`); use it to walk a group's
+  full membership, `Group.Samples` is capped. The group screen's tab (`log.params`)
+  swaps the entry list for a generic `diagCols` table keyed by `pglog.ParamKey`.
 - **PgBouncer**: instances on one host share a TCP port via so_reuseport, so always
   address by `unix_socket_dir/.s.PGSQL.<port>` when the socket exists. The console only
   speaks the simple protocol and rejects the pool's AfterConnect `SET`, so
