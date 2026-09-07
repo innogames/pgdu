@@ -825,9 +825,6 @@ type Model struct {
 	help    help.Model
 	keys    keyMap
 
-	// when true, bloat is fetched on entering the parts view.
-	fetchBloat bool
-
 	// showInfo toggles the buffer-tables info overlay (? key) — a static
 	// explainer for the server-memory and shared_buffers bars. infoOffset is the
 	// scroll position within that overlay (some references, e.g. maintenance, are
@@ -1021,7 +1018,6 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 		spinner:         sp,
 		help:            help.New(),
 		keys:            defaultKeys(),
-		fetchBloat:      true,
 		statRefresh:     queriesRefresh,
 		activityRefresh: 2 * time.Second,
 		pgbRefresh:      2 * time.Second,

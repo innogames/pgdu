@@ -408,8 +408,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Refresh):
 		return m, m.loadCurrent()
 	case key.Matches(msg, m.keys.LockTree):
-		// Open the blocking-chain tree over the activity table. Matched before
-		// ToggleBloat since both use "b"; LockTree is enabled only on levelActivity.
+		// Open the blocking-chain tree over the activity table; LockTree is
+		// enabled only on levelActivity.
 		if s.level == levelActivity {
 			next := &screen{
 				level: levelLockTree, title: "lock tree", tool: toolActivity,
@@ -417,8 +417,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.stack = append(m.stack, next)
 			return m, m.loadCurrent()
 		}
-	case key.Matches(msg, m.keys.ToggleBloat):
-		m.fetchBloat = !m.fetchBloat
 	case key.Matches(msg, m.keys.Install):
 		return m, m.triggerInstall(s)
 	case key.Matches(msg, m.keys.Rebaseline):

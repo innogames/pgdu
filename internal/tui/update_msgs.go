@@ -129,7 +129,9 @@ func (m *Model) onPartsLoaded(msg partsLoadedMsg) tea.Cmd {
 		s.items = append(s.items, partToItem(p))
 	}
 	m.applySort(s)
-	if m.fetchBloat && msg.err == nil {
+	// Bloat is always measured: the pgstattuple scan starts as soon as the
+	// parts are listed and fills the bloat columns in when it lands.
+	if msg.err == nil {
 		s.parts.bloatScanning = true
 		return m.fillBloatCmd(msg.table, msg.parts)
 	}

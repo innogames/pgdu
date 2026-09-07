@@ -220,7 +220,7 @@ func TestBreadcrumbTruncation(t *testing.T) {
 	if ansi.StringWidth(line) > m.width {
 		t.Errorf("header line %d cells wide, terminal is %d: %q", ansi.StringWidth(line), m.width, line)
 	}
-	if !strings.Contains(line, "db:5432 ▸ … ▸") || !strings.HasSuffix(strings.TrimRight(strings.TrimSuffix(line, "[bloat on]"), " "), "heap") {
+	if !strings.Contains(line, "db:5432 ▸ … ▸") || !strings.HasSuffix(line, "heap") {
 		t.Errorf("collapsed line = %q", line)
 	}
 	m.width = 200

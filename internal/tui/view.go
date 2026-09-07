@@ -367,20 +367,12 @@ func (m *Model) View() string {
 }
 
 // renderHeader draws the three fixed header lines: the pgdu chip with the
-// breadcrumb trail (and the bloat badge on the disk tool), a rule, and the
-// status row. The trail gets whatever width the chip and badge leave over.
+// breadcrumb trail, a rule, and the status row. The trail gets whatever
+// width the chip leaves over.
 func (m *Model) renderHeader() string {
 	s := m.top()
 	chip := styleHeader.Render(" pgdu ")
-	badge := m.bloatBadge()
-	budget := m.width - displayWidth(chip) - 1
-	if badge != "" {
-		budget -= 2 + displayWidth(badge)
-	}
-	line := chip + " " + renderTrail(m.crumbs(), budget)
-	if badge != "" {
-		line += "  " + badge
-	}
+	line := chip + " " + renderTrail(m.crumbs(), m.width-displayWidth(chip)-1)
 	return line + "\n" + styleMuted.Render(strings.Repeat("─", maxInt(m.width-1, 1))) + "\n" +
 		"  " + m.renderStatus(s)
 }
@@ -437,19 +429,6 @@ func walStatusLabel(s *screen) string {
 		}
 	}
 	return ""
-}
-
-func (m *Model) bloatBadge() string {
-	// Bloat is only meaningful on the disk tool; suppress the badge elsewhere
-	// to keep the header clean.
-	top := m.top()
-	if top.level == levelTools || top.tool != toolDisk {
-		return ""
-	}
-	if !m.fetchBloat {
-		return styleMuted.Render("[bloat off]")
-	}
-	return styleBadge.Render("[bloat on]")
 }
 
 // crumbs is the breadcrumb trail as plain text, one entry per screen on the

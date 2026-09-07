@@ -15,8 +15,8 @@ web server.
 
 - **ncdu for Postgres** — databases → schemas → tables → heap / index / TOAST
   parts → columns, every level a bar scaled to bytes on disk.
-- **Maintenance where you see the problem** — measure bloat (`b`), arm a
-  `REINDEX INDEX CONCURRENTLY` on the bloated index (`↵`, `y`) and watch a live
+- **Maintenance where you see the problem** — every table opens with its bloat
+  measured; arm a `REINDEX INDEX CONCURRENTLY` on the bloated index (`↵`, `y`) and watch a live
   progress bar fed by `pg_stat_progress_create_index`; run `VACUUM (VERBOSE,
   ANALYZE)` (`v`) with the server's NOTICE output streamed into a pane. A
   progress monitor (`p`) lists every running vacuum / index build / analyze /
@@ -78,8 +78,8 @@ the top at a glance, ncdu-style.
 Drill into a relation (`↵`) to see its **parts** — the heap plus each index
 broken out separately, with dead-tuple counts and the last vacuum/analyze
 times. Index parts are labelled by access method (btree, GIN, …) and
-primary/unique. Press `b` to measure bloat with `pgstattuple`; an index above
-the bloat threshold can then be reindexed in place: `↵` arms
+primary/unique. Bloat is measured with `pgstattuple` as the view opens; an index
+above the bloat threshold can then be reindexed in place: `↵` arms
 `REINDEX INDEX CONCURRENTLY`, `y` confirms, and a progress bar tracks the build
 through its phases (including how many lockers it is waiting for). `v` runs
 `VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED)` on the table and streams every NOTICE
@@ -468,7 +468,7 @@ Frequently used view-specific keys:
 
 | Key        | Where            | Action                                            |
 |------------|------------------|---------------------------------------------------|
-| `b`        | parts / activity | measure bloat / open the lock tree                |
+| `b`        | activity         | open the lock tree                                |
 | `v`        | parts / activity / triage | run VACUUM / show auxiliary backends / unfold green checks |
 | `p`        | activity, overview / parts, buffers, describe | progress monitor / open the page inspector |
 | `W`        | activity         | wait-event profiler                               |

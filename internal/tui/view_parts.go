@@ -272,17 +272,12 @@ func (m *Model) renderMaintPanel(s *screen) string {
 // maintReindexHint returns the per-index REINDEX hint shown beneath the vacuum
 // hint. Unlike vacuum, REINDEX has no always-visible affordance: it only arms
 // when the highlighted row is an index whose *measured* bloat exceeds
-// reindexBloatThreshold. So it silently disappears when bloat measuring is off
-// (the `b` toggle leaves hasBloat false for every row) or once an index drops
-// back under the threshold — which is why it can look like the option vanished.
-// The hint names the index when the current row qualifies and explains the
-// gate otherwise.
+// reindexBloatThreshold. So it silently disappears while the bloat scan is
+// still running or once an index drops back under the threshold — which is
+// why it can look like the option vanished. The hint names the index when the
+// current row qualifies and explains the gate otherwise.
 func (m *Model) maintReindexHint(s *screen) string {
 	mu := styleMuted.Render
-	if !m.fetchBloat {
-		return "  " + mu("hint: press ") + styleBadge.Render("b") +
-			mu(" to measure bloat — REINDEX is offered on indexes over 5% bloat")
-	}
 	if cand := reindexCandidate(s); cand != "" {
 		return "  " + mu("hint: press ") + styleBadge.Render("enter") +
 			mu(" to REINDEX "+cand+" CONCURRENTLY")

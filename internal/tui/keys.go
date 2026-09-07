@@ -12,7 +12,6 @@ type keyMap struct {
 	ShowQuery        key.Binding
 	ReverseSort      key.Binding
 	Refresh          key.Binding
-	ToggleBloat      key.Binding
 	Install          key.Binding
 	Describe         key.Binding
 	DiskUsage        key.Binding
@@ -140,7 +139,6 @@ func defaultKeys() keyMap {
 		ShowQuery:      key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "show SQL")),
 		ReverseSort:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reverse sort")),
 		Refresh:        key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "refresh")),
-		ToggleBloat:    key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "toggle bloat")),
 		Install:        key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "install extension")),
 		Describe:       key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "describe")),
 		DiskUsage:      key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "disk usage")),
@@ -388,7 +386,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Top, k.Bottom},
 		{k.Enter, k.Back},
 		{k.Filter, k.Seek, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
-		{k.Refresh, k.ToggleBloat, k.Install, k.Describe, k.DiskUsage},
+		{k.Refresh, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
 		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation, k.ShmemMap, k.PageInspect},
