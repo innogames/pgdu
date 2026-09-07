@@ -87,6 +87,8 @@ func (m *Model) drillIn() tea.Cmd {
 		return m.drillWALRecord(s, cur)
 	case levelWALRelations:
 		return m.drillWALRelation(s, cur)
+	case levelWALBlocks, levelWALRelBlocks:
+		return m.drillWALBlock(s, cur)
 	case levelStatements:
 		return m.drillStatement(s, cur)
 	case levelSnapshots:

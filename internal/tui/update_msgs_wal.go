@@ -131,3 +131,22 @@ func (m *Model) onWALRelBlocksLoaded(msg walRelBlocksLoadedMsg) tea.Cmd {
 	m.applySort(s)
 	return nil
 }
+
+func (m *Model) onWALBlockDetailLoaded(msg walBlockDetailLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelWALBlockDetail)
+	if s == nil || s.db != msg.db || s.wal.blockRef == nil ||
+		s.wal.blockRef.StartLSN != msg.ref.StartLSN || s.wal.blockRef.BlockID != msg.ref.BlockID {
+		return nil
+	}
+	if cmd, stop := settleLoad(s, msg.err, extPromptReasonWALInspect); stop {
+		return cmd
+	}
+	s.items = s.items[:0]
+	if msg.err == nil {
+		d := msg.detail
+		s.wal.detail = &d
+		s.items = append(s.items, buildWALDetailItems(d)...)
+	}
+	m.applySort(s)
+	return nil
+}

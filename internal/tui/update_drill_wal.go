@@ -58,3 +58,19 @@ func (m *Model) drillWALRelation(s *screen, cur item) tea.Cmd {
 	m.stack = append(m.stack, next)
 	return m.loadCurrent()
 }
+
+// drillWALBlock opens the payload of the highlighted block reference: what the
+// record actually wrote for that page (change data, decoded tuple, page image).
+func (m *Model) drillWALBlock(s *screen, cur item) tea.Cmd {
+	b, ok := cur.data.(pg.WALBlockRef)
+	if !ok || b.StartLSN == "" {
+		return nil
+	}
+	ref := b
+	next := &screen{
+		level: levelWALBlockDetail, title: "wal block", tool: s.tool,
+		db: s.db, wal: walState{start: s.wal.start, end: s.wal.end, rmgr: s.wal.rmgr, blockRef: &ref},
+		sort: sortByName, sortDesc: false}
+	m.stack = append(m.stack, next)
+	return m.loadCurrent()
+}

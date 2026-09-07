@@ -111,4 +111,15 @@ func TestWALSmoke(t *testing.T) {
 		t.Logf("block id=%d rel=%q(%d)/%s blk=%d tid=%s data=%d fpi=%d info=%v desc=%q",
 			b.BlockID, b.RelName, b.RelFileNode, b.ForkName(), b.BlockNumber, tid, b.BlockDataLength, b.FPILength, b.FPIInfo, b.Description)
 	}
+	// Payload of the first block ref (the Enter drill): raw change data, and
+	// the page image decoded through pageinspect when it is installed.
+	if len(blocks) > 0 {
+		d, err := c.WALBlockDetail(ctx, db, blocks[0])
+		if err != nil {
+			t.Fatalf("WALBlockDetail: %v", err)
+		}
+		t.Logf("detail xid=%s prev=%s reclen=%d main=%d data=%dB fpi=%dB relkind=%q am=%q attrs=%d hdr=%v items=%d note=%q",
+			d.Xid, d.PrevLSN, d.RecordLength, d.MainDataLength, len(d.BlockData), len(d.FPIData),
+			d.RelKind, d.RelAM, len(d.Attrs), d.PageHeader != nil, len(d.PageItems), d.DecodeNote)
+	}
 }

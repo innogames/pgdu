@@ -702,7 +702,8 @@ func (m *Model) renderWALBlocksInfo(height int) string {
 		mu("a small in-place edit (a link repointed, a flag set) logs just the change, no fpi") + "\n\n")
 
 	b.WriteString("  " + mu("A record with several block refs touched several pages atomically (e.g. an index split,") + "\n")
-	b.WriteString("  " + mu("or a heap update that also stamps the visibility map). This is a leaf view — no further drill.") + "\n")
+	b.WriteString("  " + mu("or a heap update that also stamps the visibility map). Enter opens a block's payload: the tuple bytes") + "\n")
+	b.WriteString("  " + mu("the record wrote, or the full-page image decoded into line pointers and rows.") + "\n")
 
 	return padInfo(&b, height)
 }

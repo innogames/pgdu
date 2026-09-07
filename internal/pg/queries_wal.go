@@ -188,7 +188,9 @@ WHERE  f.relid IS NOT NULL
 // It is sqlWALBlocks's body plus a relfilenode filter and a size-first order
 // ($3 = relfilenode). Requires PostgreSQL 16+.
 const sqlWALRelBlocks = `
-SELECT block_id::int,
+SELECT start_lsn::text,
+       end_lsn::text,
+       block_id::int,
        reltablespace,
        reldatabase,
        relfilenode,
@@ -295,7 +297,9 @@ ORDER  BY start_lsn
 // shared pg_database catalog (” for OID 0 / shared relations → numeric
 // fallback).
 const sqlWALBlocks = `
-SELECT block_id::int,
+SELECT start_lsn::text,
+       end_lsn::text,
+       block_id::int,
        reltablespace,
        reldatabase,
        relfilenode,
@@ -323,4 +327,110 @@ LEFT   JOIN LATERAL (
          WHERE  f.relid IS NOT NULL
        ) r ON true
 ORDER  BY block_id
+`
+
+// sqlWALBlockDetail fetches one block reference *with its payload*: the
+// per-block change data (block_data — for a heap INSERT that is the tuple
+// itself, minus the fixed 23-byte tuple header) and the full-page image
+// (block_fpi_data, already decompressed and hole-restored by pg_walinspect,
+// so it is a complete 8 KiB page). show_data=true is the only reason this
+// query exists separately from sqlWALBlocks: pulling every record's bytes into
+// a list would be prohibitively heavy, so the payload is fetched for a single
+// (record, block_id) on demand. [$1, $2) is the record's own start/end LSN,
+// $3 its block_id. Also carries the record-level fields the detail header
+// shows (xid, prev_lsn, lengths) so no second pg_get_wal_records_info call is
+// needed. Requires PostgreSQL 16+.
+const sqlWALBlockDetail = `
+SELECT start_lsn::text,
+       end_lsn::text,
+       prev_lsn::text,
+       xid::text,
+       record_length,
+       main_data_length,
+       block_id::int,
+       reltablespace,
+       reldatabase,
+       relfilenode,
+       relforknumber::int,
+       relblocknumber,
+       resource_manager,
+       record_type,
+       block_data_length,
+       block_fpi_length,
+       block_fpi_info,
+       COALESCE(description, ''),
+       block_data,
+       block_fpi_data
+FROM   pg_get_wal_block_info($1::pg_lsn, $2::pg_lsn, true)
+WHERE  block_id = $3::int
+ORDER  BY start_lsn
+LIMIT  1
+`
+
+// sqlWALRelKind resolves a (tablespace, relfilenode) pair to the relation's
+// kind and access method in the *connected* database — the guard that decides
+// whether a page image / block payload can be decoded as a heap page (relkind
+// r/t/m/p with a heap AM) or is an index page, where heap_page_items would
+// return garbage. NULL relid (dropped / other database) yields no row.
+const sqlWALRelKind = `
+SELECT c.oid, c.relkind::text, COALESCE(am.amname, '')
+FROM   pg_class c
+LEFT   JOIN pg_am am ON am.oid = c.relam
+WHERE  c.oid = pg_filenode_relation($1::oid, $2::oid)
+`
+
+// sqlWALHeapAttrs lists a heap relation's physical attribute layout — every
+// attnum > 0 including dropped columns (they still occupy space in the tuple,
+// so the walk must step over them). Same typlen/typalign/typname/typcategory
+// tuple the index-key decoder consumes, so one decoder serves both.
+const sqlWALHeapAttrs = `
+SELECT a.attnum::int,
+       a.attname::text,
+       a.attisdropped,
+       a.attlen::int,
+       a.attalign::text,
+       COALESCE(t.typname::text, ''),
+       COALESCE(t.typcategory::text, '')
+FROM   pg_attribute a
+LEFT   JOIN pg_type t ON t.oid = a.atttypid
+WHERE  a.attrelid = $1::oid
+  AND  a.attnum > 0
+ORDER  BY a.attnum
+`
+
+// sqlWALPageHeader decodes a raw page image's header with pageinspect. The
+// page's own LSN is what tells the reader whether the image predates or
+// includes this record's change (an FPI is the page *before* the change is
+// applied — the record's redo then modifies it).
+const sqlWALPageHeader = `
+SELECT lsn::text, checksum::int, flags::int, lower::int, upper::int, special::int,
+       pagesize::int, version::int, prune_xid::text
+FROM   page_header($1::bytea)
+`
+
+// sqlWALHeapPageItems is sqlHeapTuples over an in-memory page image instead of
+// get_raw_page — the same column list so scanHeapTuple can scan it.
+const sqlWALHeapPageItems = `
+SELECT lp::int, lp_off::int, lp_flags::int, lp_len::int,
+       t_xmin, t_xmax, t_field3, t_ctid::text,
+       COALESCE(t_infomask2, 0)::int, COALESCE(t_infomask, 0)::int, t_hoff::int,
+       t_bits, t_oid, t_data
+FROM   heap_page_items($1::bytea)
+ORDER  BY lp
+`
+
+// sqlWALBtreePageItems is sqlIndexTuples over an in-memory page image (the
+// bytea form of bt_page_items, PostgreSQL 13+). Same column list, so the
+// index-tuples scanner and key decoder apply unchanged.
+const sqlWALBtreePageItems = `
+SELECT itemoffset::int,
+       ctid::text,
+       itemlen::int,
+       nulls,
+       vars,
+       data,
+       COALESCE(dead, false),
+       NULL::text AS decoded
+FROM   bt_page_items($1::bytea)
+ORDER  BY itemoffset
 `

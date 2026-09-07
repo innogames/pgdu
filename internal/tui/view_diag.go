@@ -405,8 +405,11 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 		if s.desc.detail {
 			hint = " to hide details"
 		}
-		b.WriteString("\n    " + mu("press ") + styleBadge.Render("d") + mu(hint) +
-			mu("  ·  ") + styleBadge.Render("?") + mu(" what the numbers mean") + "\n")
+		b.WriteString("\n    " + mu("press ") + styleBadge.Render("d") + mu(hint))
+		if describeHasHeap(s) {
+			b.WriteString(mu("  ·  ") + styleBadge.Render("p") + mu(" inspect heap pages"))
+		}
+		b.WriteString(mu("  ·  ") + styleBadge.Render("?") + mu(" what the numbers mean") + "\n")
 
 	case pg.DescribeIndex:
 		b.WriteString("  " + styleSelected.Render(d.Title) + "\n\n")

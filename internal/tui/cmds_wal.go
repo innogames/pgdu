@@ -57,6 +57,13 @@ type walRelBlocksLoadedMsg struct {
 	err         error
 }
 
+type walBlockDetailLoadedMsg struct {
+	db     string
+	ref    pg.WALBlockRef // the (record, block_id) requested — matched against the screen
+	detail pg.WALBlockDetail
+	err    error
+}
+
 func (m *Model) loadWALOverviewCmd(db string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		start, end, err := m.client.WALWindow(ctx, db, walWindowBytes)
@@ -106,6 +113,13 @@ func (m *Model) loadWALRelationsCmd(db, start, end string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		rels, err := m.client.WALRelStats(ctx, db, start, end)
 		return walRelationsLoadedMsg{db: db, start: start, end: end, rels: rels, err: err}
+	})
+}
+
+func (m *Model) loadWALBlockDetailCmd(db string, ref pg.WALBlockRef) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		d, err := m.client.WALBlockDetail(ctx, db, ref)
+		return walBlockDetailLoadedMsg{db: db, ref: ref, detail: d, err: err}
 	})
 }
 

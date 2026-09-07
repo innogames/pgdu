@@ -16,6 +16,13 @@ func (m *Model) applySort(s *screen) {
 	// cache must rebuild. applySort runs after every load/rebuild too, so this
 	// one bump covers the common item-mutation paths.
 	s.itemsRev++
+	// The WAL block detail is a sectioned key/value dump in a fixed, meaningful
+	// order (record → block → tuple → hex → page image); sorting would shuffle
+	// hex rows into the header.
+	if s.level == levelWALBlockDetail {
+		s.clampCursor()
+		return
+	}
 	// The log groups pane orders itself (sections, then s.sort within each).
 	if s.level == levelLogs && s.diagCols == nil {
 		if s.log.report != nil {
@@ -278,7 +285,7 @@ func validSorts(l level) []sortMode {
 		return []sortMode{sortByBlkno, sortBySize, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByDeadRatio, sortByFreeSpace, sortByTemp}
 	case levelHeapTuples:
 		return []sortMode{sortByLP, sortBySize}
-	case levelTupleRow:
+	case levelTupleRow, levelWALBlockDetail:
 		return []sortMode{sortByName}
 	case levelRelations:
 		return []sortMode{sortBySize, sortByRows, sortByType, sortByName}

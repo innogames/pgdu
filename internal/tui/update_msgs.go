@@ -263,6 +263,11 @@ func (m *Model) onDescribeLoaded(msg describeLoadedMsg) tea.Cmd {
 	s.loaded = true
 	s.err = msg.err
 	s.desc.info = msg.desc
+	// The name-resolved push path leaves s.table unset; adopt the resolved
+	// table so `p` (page inspector) works on every table describe.
+	if msg.err == nil && msg.table.OID != 0 {
+		s.table = msg.table
+	}
 	// (Re)load the cache-footprint section for table describes — but only while
 	// detail mode is showing it: the plain view never scans pg_buffercache (the
 	// `d` toggle issues the first load instead). Triggering here — rather than

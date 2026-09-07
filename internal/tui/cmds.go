@@ -220,6 +220,10 @@ type describeLoadedMsg struct {
 	oid  uint32
 	desc *pg.Description
 	err  error
+	// table is the described relation for table describes (zero for indexes)
+	// so a screen pushed by name still learns the pg.Table the page-inspector
+	// jump (`p`) needs.
+	table pg.Table
 }
 type describeBuffersLoadedMsg struct {
 	db   string
@@ -525,7 +529,7 @@ func (m *Model) loadGinItemsCmd(r pg.Relation, blkno int32) tea.Cmd {
 func (m *Model) loadDescribeTableCmd(t pg.Table) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		d, err := m.client.DescribeTable(ctx, t)
-		return describeLoadedMsg{oid: t.OID, desc: d, err: err}
+		return describeLoadedMsg{oid: t.OID, desc: d, err: err, table: t}
 	})
 }
 
@@ -539,7 +543,7 @@ func (m *Model) loadDescribeTableByNameCmd(db, name string) tea.Cmd {
 			return describeLoadedMsg{err: err}
 		}
 		d, err := m.client.DescribeTable(ctx, t)
-		return describeLoadedMsg{oid: t.OID, desc: d, err: err}
+		return describeLoadedMsg{oid: t.OID, desc: d, err: err, table: t}
 	})
 }
 

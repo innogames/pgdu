@@ -107,7 +107,9 @@ fails (missing/corrupt → empty).
   (`sqlHeapTuplesPK`) and the HOT-chain hop (`fillHotChains`, `sqlHeapRedirectKeys`)
   fall back to the plain view when the catalog lookup or join fails. For index entries,
   a NULL heap projection means HOT-redirected, *not* dead — only `IndexTuple.Dead` earns
-  the `dead` tag.
+  the `dead` tag. The WAL block payload view (`pg.WALBlockDetail`, `tui/wal_detail.go`)
+  is the same shape: the record bytes are mandatory, relation kind / column layout /
+  pageinspect decode of the page image all degrade into `DecodeNote`.
 - **Log analyzer** (`internal/pglog`): `pglog.Entry` text fields are `[]byte` sub-slices of the window buffer;
   convert to string only what you render. The `levelLogs` screen owns `log.report`;
   child screens find it via `findLevel(levelLogs)` and are re-pointed on each refresh.

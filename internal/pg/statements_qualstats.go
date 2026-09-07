@@ -63,16 +63,25 @@ func (c *Client) InferParams(ctx context.Context, db, query string) ([]ParamType
 	defer conn.Release()
 
 	// A fixed name is fine: one connection, deallocated before release. Guard
-	// against a leftover from a prior aborted call on the same pooled conn.
+	// against a leftover from a prior aborted call on the same pooled conn —
+	// but only if one exists: an unconditional DEALLOCATE of a missing
+	// statement is an ERROR that lands in the server log on every call.
 	const name = "pgdu_infer_params"
-	_, _ = conn.Exec(ctx, "DEALLOCATE "+name)
+	var stale bool
+	if err := conn.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_prepared_statements WHERE name = $1)", name,
+	).Scan(&stale); err == nil && stale {
+		_, _ = conn.Exec(ctx, "DEALLOCATE "+name)
+	}
 	// EXTRACT($n FROM …) and INTERVAL $n pseudo-parameters would make PREPARE fail
 	// with a syntax error; rewrite them to bindable forms first (ordinals are
 	// preserved, so the returned ParamType ordinals still match the original $n).
 	if _, err := conn.Exec(ctx, "PREPARE "+name+" AS "+rewriteNormalizedParams(query)); err != nil {
 		return nil, fmt.Errorf("infer parameters: %w", err)
 	}
-	defer func() { _, _ = conn.Exec(ctx, "DEALLOCATE "+name) }()
+	// Deallocate even when ctx was cancelled mid-call, so the pooled conn is
+	// handed back clean and the stale-statement path above stays rare.
+	defer func() { _, _ = conn.Exec(context.WithoutCancel(ctx), "DEALLOCATE "+name) }()
 
 	var typeNames []string
 	if err := conn.QueryRow(ctx,

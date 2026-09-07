@@ -15,7 +15,7 @@ func (m *Model) hasInfoOverlay(s *screen) bool {
 	case levelBufferTables, levelBufferDetail, levelShmem,
 		levelHeapPages, levelHeapTuples,
 		levelIndexPages, levelIndexTuples,
-		levelWAL, levelWALRecords, levelWALBlocks, levelWALRelations, levelWALRelBlocks,
+		levelWAL, levelWALRecords, levelWALBlocks, levelWALRelations, levelWALRelBlocks, levelWALBlockDetail,
 		levelStatements, levelStatementDetail, levelStatementSamples, levelStatementResult, levelSnapshots,
 		levelMaintenance, levelSettings,
 		levelActivity, levelTableStats, levelWaitProfile,
@@ -69,6 +69,8 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 		return m.renderWALRecordsInfo(height)
 	case levelWALBlocks, levelWALRelBlocks:
 		return m.renderWALBlocksInfo(height)
+	case levelWALBlockDetail:
+		return m.renderWALBlockDetailInfo(height)
 	case levelWALRelations:
 		return m.renderWALRelationsInfo(height)
 	case levelStatements, levelStatementDetail, levelStatementSamples, levelStatementResult, levelSnapshots:
@@ -245,7 +247,11 @@ func renderLegend(s *screen) string {
 			swatch(styleBarAlt, "FPI bytes (full-page images)")
 	case levelWALBlocks, levelWALRelBlocks:
 		return "  " + swatch(styleBarAlt, "FPI bytes") + sep +
-			styleMuted.Render("░ no full-page image")
+			styleMuted.Render("░ no full-page image") + sep +
+			styleBadge.Render("enter") + styleMuted.Render(" payload: tuple bytes / page image")
+	case levelWALBlockDetail:
+		return "  " + styleSelected.Render("◀") + styleMuted.Render(" line pointer this record touched") + sep +
+			styleMuted.Render("values decoded from raw bytes; NULL = absent in the tuple")
 	case levelIndexTuples:
 		switch s.pages.index.AccessMethod {
 		case "gist":

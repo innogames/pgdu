@@ -166,6 +166,9 @@ func barReserve(s *screen) int {
 		return colCursor + colBrackets + walRecSizeColW + colGutter +
 			walRecFPIColW + colGutter + walRecLSNColW + colGutter +
 			colMark + colName + colDetail
+	case levelWALBlockDetail:
+		// key/value dump, no bar: cursor + key column + gutter.
+		return colCursor + walDetailKeyColW + colGutter
 	case levelWALBlocks, levelWALRelBlocks:
 		// cursor + bar(brackets) + fpi + data + name + detail
 		return colCursor + colBrackets + walBlkFPIColW + colGutter +

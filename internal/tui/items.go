@@ -554,10 +554,13 @@ func walBlockToItem(b pg.WALBlockRef) item {
 	if b.IsToast {
 		target += " (toast)"
 	}
+	// Enter opens the payload (change data / page image) — hasChildren so the
+	// row is marked drillable like every other list.
 	return item{
-		name: fmt.Sprintf("rel %s/%s blk %d", target, b.ForkName(), b.BlockNumber),
-		size: int64(b.FPILength),
-		data: b,
+		name:        fmt.Sprintf("rel %s/%s blk %d", target, b.ForkName(), b.BlockNumber),
+		size:        int64(b.FPILength),
+		hasChildren: b.StartLSN != "",
+		data:        b,
 	}
 }
 

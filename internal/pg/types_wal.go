@@ -123,6 +123,10 @@ func (r WALRecord) CombinedSize() int64 { return int64(r.RecordLength) + int64(r
 // this record carried a full-page image of the block — the dominant source
 // of WAL write amplification.
 type WALBlockRef struct {
+	// StartLSN/EndLSN are the owning record's bounds — what the detail view
+	// passes back to pg_get_wal_block_info to fetch this block's payload.
+	StartLSN        string
+	EndLSN          string
 	BlockID         int32
 	RelTablespace   uint32
 	RelDatabase     uint32

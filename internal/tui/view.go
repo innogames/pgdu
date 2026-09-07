@@ -282,6 +282,8 @@ func (m *Model) View() string {
 			// Relation block-refs reuse the per-record block-refs renderer —
 			// the payload is the same pg.WALBlockRef.
 			b.WriteString(m.renderWALBlocksList(s, contentHeight))
+		case levelWALBlockDetail:
+			b.WriteString(m.renderWALBlockDetail(s, contentHeight))
 		case levelStatements:
 			// The top-queries table is a generic diagnostic-style table.
 			b.WriteString(m.renderDiagResult(s, contentHeight))
@@ -440,6 +442,10 @@ func walStatusLabel(s *screen) string {
 		return "window: " + shortLSN(s.wal.start) + "–" + shortLSN(s.wal.end)
 	case levelWALRelBlocks:
 		return "relation: " + s.wal.relLabel + "  ·  window: " + shortLSN(s.wal.start) + "–" + shortLSN(s.wal.end)
+	case levelWALBlockDetail:
+		if b := s.wal.blockRef; b != nil {
+			return "record: " + b.StartLSN + "  ·  " + b.Rmgr + "/" + b.RecordType
+		}
 	}
 	return ""
 }
@@ -504,6 +510,10 @@ func (m *Model) breadcrumb() string {
 			parts = append(parts, "by relation")
 		case levelWALRelBlocks:
 			parts = append(parts, sc.wal.relLabel)
+		case levelWALBlockDetail:
+			if b := sc.wal.blockRef; b != nil {
+				parts = append(parts, fmt.Sprintf("blk %d @ %s", b.BlockNumber, shortLSN(b.StartLSN)))
+			}
 		case levelActivity:
 			parts = append(parts, "activity")
 		case levelStatements:

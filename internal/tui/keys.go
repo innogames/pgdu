@@ -90,7 +90,7 @@ type keyMap struct {
 	// the buffer-tables level, where it's the only advertisement for the view.
 	shmemInFooter bool
 
-	// pageInspectInFooter adds the p (pages) hint on the parts and buffer levels, the only
+	// pageInspectInFooter adds the p (pages) hint on the parts, buffer and table-describe levels, the only
 	// place that advertises the cross-tool jump.
 	pageInspectInFooter bool
 
@@ -276,11 +276,12 @@ func (k *keyMap) applyContext(s *screen) {
 	k.ShmemMap.SetEnabled(s.level == levelBufferTables)
 	k.shmemInFooter = s.level == levelBufferTables
 
-	// p jumps from a parts row, a buffer-tables row or the buffer detail into
-	// the page inspector for that object. The physical key is Params (statement
-	// detail) and Progress (dashboard/activity) elsewhere; none of those levels
-	// overlaps, so no dispatch collision.
-	pageInspect := s.level == levelParts || s.level == levelBufferTables || s.level == levelBufferDetail
+	// p jumps from a parts row, a buffer-tables row, the buffer detail or a
+	// table's describe panel into the page inspector for that object. The
+	// physical key is Params (statement detail) and Progress (dashboard/activity)
+	// elsewhere; none of those levels overlaps, so no dispatch collision.
+	pageInspect := s.level == levelParts || s.level == levelBufferTables || s.level == levelBufferDetail ||
+		describeHasHeap(s)
 	k.PageInspect.SetEnabled(pageInspect)
 	k.pageInspectInFooter = pageInspect
 

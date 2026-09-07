@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -58,6 +59,11 @@ func (c *Client) ResolveIndex(ctx context.Context, db, name string) (oid uint32,
 type MissingRelationError struct{ Name string }
 
 func (e *MissingRelationError) Error() string {
+	// Names from diagnostic rows arrive pre-quoted for to_regclass; don't
+	// wrap those in a second layer of quotes.
+	if strings.Contains(e.Name, `"`) {
+		return "no table named " + e.Name
+	}
 	return fmt.Sprintf("no table named %q", e.Name)
 }
 

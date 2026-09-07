@@ -12,7 +12,8 @@ import (
 // cursor on levelParts: heap → heap pages of the table, toast → heap pages of
 // the TOAST relation, index → index pages (btree/gist/brin/gin). On the
 // shared-buffers screens it opens the heap pages of the highlighted (or
-// inspected) table, so a hot/dirty table can be read page by page. The pushed
+// inspected) table, so a hot/dirty table can be read page by page; on a table
+// describe panel it opens the described table's heap pages. The pushed
 // screen is stamped toolPageInspect so it renders and lays out exactly as if
 // reached through the page-inspector tool; q pops back to where it came from.
 func (m *Model) jumpToPageInspector(s *screen) tea.Cmd {
@@ -27,6 +28,12 @@ func (m *Model) jumpToPageInspector(s *screen) tea.Cmd {
 		t := target.table
 		t.HeapBytes = t.TotalBytes
 		m.stack = append(m.stack, heapPagesScreen(t, "heap pages"))
+		return m.loadCurrent()
+	case levelDescribe:
+		if !describeHasHeap(s) {
+			return nil
+		}
+		m.stack = append(m.stack, heapPagesScreen(s.table, "heap pages"))
 		return m.loadCurrent()
 	case levelParts:
 	default:
@@ -89,6 +96,14 @@ func (m *Model) jumpToPageInspector(s *screen) tea.Cmd {
 	}
 	m.stack = append(m.stack, next)
 	return m.loadCurrent()
+}
+
+// describeHasHeap reports whether a describe screen shows a table whose heap
+// the page inspector can open: a loaded table describe with a resolved
+// pg.Table behind it (index describes have no heap of their own).
+func describeHasHeap(s *screen) bool {
+	return s.level == levelDescribe && s.loaded && s.desc.info != nil &&
+		s.desc.info.Kind == pg.DescribeTable && s.table.OID != 0 && s.table.OID == s.desc.info.OID
 }
 
 // heapPagesScreen is the first page-inspector window over a heap (table or

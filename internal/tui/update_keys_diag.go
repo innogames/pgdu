@@ -16,21 +16,28 @@ func diagDescribeTarget(s *screen) (descTarget, bool) {
 		// the table-shaped diagnostics expose a name column; the rest return
 		// false here and `d` is a no-op.
 		it, ok := curItem()
-		if !ok {
+		if !ok || it.diagRow <= 0 || s.diagResult == nil || it.diagRow > len(s.diagResult.Rows) {
 			return descTarget{}, false
 		}
-		cells, ok := it.data.([]pg.DiagCell)
-		if !ok {
-			return descTarget{}, false
+		// Read the full, unprojected row so a schema/table column hidden via
+		// the C picker still qualifies the name.
+		cols, cells := s.diagResult.Columns, s.diagResult.Rows[it.diagRow-1]
+		// In all-databases mode s.db is the connection's default database, not
+		// the row's; the relation only exists in the database the row came from.
+		db := s.db
+		if s.diagAllDBs {
+			if rowDB, ok := pg.DiagRowGetter(cols, cells)("database"); ok {
+				db = rowDB
+			}
 		}
 		// Prefer a table column; fall back to an index column (index-only
 		// diagnostics: unused/duplicate/redundant/index-I/O), resolved via
 		// ResolveIndex into a DescribeIndex panel.
-		if name, ok := diagDescribeName(s.diagCols, cells); ok {
-			return descTarget{byName: true, db: s.db, tableName: name}, true
+		if name, ok := diagDescribeName(cols, cells); ok {
+			return descTarget{byName: true, db: db, tableName: name}, true
 		}
-		if name, ok := diagDescribeIndexName(s.diagCols, cells); ok {
-			return descTarget{indexByName: true, db: s.db, indexName: name}, true
+		if name, ok := diagDescribeIndexName(cols, cells); ok {
+			return descTarget{indexByName: true, db: db, indexName: name}, true
 		}
 		return descTarget{}, false
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -333,6 +334,15 @@ func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 				return []string{csvInt(b.BlockID), csvUint(b.RelDatabase), csvUint(b.RelFileNode), b.RelName, b.ForkName(), csvInt(b.BlockNumber), b.Rmgr, b.RecordType, csvInt(b.BlockDataLength), csvInt(b.FPILength), strconv.FormatBool(b.IsToast), b.DBName, b.Description}
 			}, true
 
+	case levelWALBlockDetail:
+		return []string{"section", "key", "value"},
+			func(it item) []string {
+				r, ok := it.data.(walDetailRow)
+				if !ok || r.section {
+					return nil
+				}
+				return []string{"", strings.TrimSpace(r.key), stripANSI(r.value)}
+			}, true
 	case levelStatementSamples:
 		return []string{"relation", "column", "operator", "value", "position", "occurrences"},
 			func(it item) []string {

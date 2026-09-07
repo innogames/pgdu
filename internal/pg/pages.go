@@ -287,12 +287,7 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 		}
 	}
 
-	tuples, err := collect(ctx, pool, fmt.Sprintf("list index tuples in %q page %d", r.Qualified(), blkno), sql, []any{regclass, blkno},
-		func(row pgx.CollectableRow) (IndexTuple, error) {
-			var it IndexTuple
-			err := row.Scan(&it.ItemOffset, &it.Ctid, &it.ItemLen, &it.Nulls, &it.Vars, &it.Data, &it.Dead, &it.Decoded)
-			return it, err
-		})
+	tuples, err := collect(ctx, pool, fmt.Sprintf("list index tuples in %q page %d", r.Qualified(), blkno), sql, []any{regclass, blkno}, scanIndexTuple)
 	if err != nil {
 		return nil, err
 	}
@@ -304,6 +299,14 @@ func (c *Client) ListIndexTuples(ctx context.Context, r Relation, blkno int32, p
 		fillPostingHotChains(ctx, pool, exprs, parent, tuples)
 	}
 	return tuples, nil
+}
+
+// scanIndexTuple scans one bt_page_items row (sqlIndexTuples' column list) —
+// shared with the WAL page-image decode.
+func scanIndexTuple(row pgx.CollectableRow) (IndexTuple, error) {
+	var it IndexTuple
+	err := row.Scan(&it.ItemOffset, &it.Ctid, &it.ItemLen, &it.Nulls, &it.Vars, &it.Data, &it.Dead, &it.Decoded)
+	return it, err
 }
 
 // fillPostingTids attaches each posting-list tuple's member heap tids
@@ -508,13 +511,14 @@ func (c *Client) IndexKeyColumns(ctx context.Context, r Relation) ([]IndexKeyCol
 	if err != nil {
 		return nil, err
 	}
-	return collect(ctx, pool, fmt.Sprintf("index key columns for %q", r.Qualified()), sqlIndexKeyColumns, []any{r.OID},
-		func(row pgx.CollectableRow) (IndexKeyColumn, error) {
-			var k IndexKeyColumn
-			err := row.Scan(&k.Ordinal, &k.Def, &k.IsKey,
-				&k.TypLen, &k.TypAlign, &k.TypName, &k.TypCategory)
-			return k, err
-		})
+	return collect(ctx, pool, fmt.Sprintf("index key columns for %q", r.Qualified()), sqlIndexKeyColumns, []any{r.OID}, scanIndexKeyColumn)
+}
+
+func scanIndexKeyColumn(row pgx.CollectableRow) (IndexKeyColumn, error) {
+	var k IndexKeyColumn
+	err := row.Scan(&k.Ordinal, &k.Def, &k.IsKey,
+		&k.TypLen, &k.TypAlign, &k.TypName, &k.TypCategory)
+	return k, err
 }
 
 // ListHeapTuples returns the line-pointer array for one heap page, plus the

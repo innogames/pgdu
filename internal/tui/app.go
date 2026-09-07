@@ -40,6 +40,7 @@ const (
 	levelWALBlocks        // block references of one WAL record
 	levelWALRelations     // WAL window aggregated per relation (what caused the change)
 	levelWALRelBlocks     // block references of one relation across the window
+	levelWALBlockDetail   // one block reference with its payload: change data, decoded tuple, page image
 	levelStatements       // pg_stat_statements top-queries table (toolQueries)
 	levelStatementDetail  // single query: metrics, sample call, EXPLAIN
 	levelStatementSamples // captured real predicate constants (pg_qualstats) for one query
@@ -452,6 +453,11 @@ type walState struct {
 	// screen lists (its block references across the carried window).
 	relFilenode uint32
 	relLabel    string
+	// blockRef is the block reference a levelWALBlockDetail screen shows (its
+	// record LSNs + block_id key the payload fetch); detail is the loaded
+	// payload, nil until it lands.
+	blockRef *pg.WALBlockRef
+	detail   *pg.WALBlockDetail
 }
 
 // logState: Log analyzer state; the levelLogs screen owns report, children re-point to it on refresh.

@@ -210,7 +210,7 @@ func (c *Client) resolveBlockRefNames(ctx context.Context, blocks []WALBlockRef)
 func scanWALBlockRef(row pgx.CollectableRow) (WALBlockRef, error) {
 	var b WALBlockRef
 	err := row.Scan(
-		&b.BlockID, &b.RelTablespace, &b.RelDatabase, &b.RelFileNode,
+		&b.StartLSN, &b.EndLSN, &b.BlockID, &b.RelTablespace, &b.RelDatabase, &b.RelFileNode,
 		&b.ForkNumber, &b.BlockNumber, &b.Rmgr, &b.RecordType,
 		&b.BlockDataLength, &b.FPILength, &b.FPIInfo, &b.Description, &b.RelName,
 		&b.IsToast, &b.DBName,

@@ -216,6 +216,12 @@ func (m *Model) loadCurrent() tea.Cmd {
 		return m.loadWALRelationsCmd(s.db, s.wal.start, s.wal.end)
 	case levelWALRelBlocks:
 		return m.loadWALRelBlocksCmd(s.db, s.wal.start, s.wal.end, s.wal.relFilenode)
+	case levelWALBlockDetail:
+		if s.wal.blockRef == nil {
+			return nil
+		}
+		s.wal.detail = nil
+		return m.loadWALBlockDetailCmd(s.db, *s.wal.blockRef)
 	case levelStatements:
 		// Kick a snapshot and, unless one is already running, start the
 		// self-rescheduling refresh tick. The first snapshot becomes the

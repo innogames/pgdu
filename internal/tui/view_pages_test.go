@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/x/ansi"
-
 	"pgdu/internal/pg"
 )
 
@@ -109,8 +107,6 @@ func TestInternalDownlinkRangesSkipsNonInternal(t *testing.T) {
 		t.Errorf("leaf page should return nil ranges, got %v", got)
 	}
 }
-
-func stripANSI(s string) string { return ansi.Strip(s) }
 
 func TestBtreeLevelsLine(t *testing.T) {
 	const w = 120
