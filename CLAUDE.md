@@ -90,7 +90,10 @@ fails (missing/corrupt → empty).
   Back always removes one crumb. Identity (db, schema, table, query id, rmgr, log file…)
   lives in the trail and never on the status row. A screen whose `tool` differs from its
   parent's gets a `tool:` prefix, the first db-scoped screen whose db the trail hasn't
-  named gets a `(db)` suffix, cluster-wide tools never show their connection db. Crumb
+  named gets a `(db)` suffix, cluster-wide tools never show their connection db. A
+  table list that replaced the skipped single-schema picker is the db crumb; relations
+  are `schema.name` only until the trail has spelled a non-`public` schema
+  (`crumbScope.qualify`). Crumb
   text falls back to `screen.title`, then `levelLabel`, so a loading placeholder still
   has a crumb.
 - **`loadCurrent()` clears `extPrompt` and `installing`** on entry, so any such state set

@@ -442,7 +442,9 @@ func walStatusLabel(s *screen) string {
 // tree, the single-database fast path that skips the picker) is prefixed with
 // the tool name, and the first screen scoped to a database the trail hasn't
 // named yet is suffixed with "(db)". Cluster-wide tools carry the connection
-// database only as a handle, so they never get the suffix.
+// database only as a handle, so they never get the suffix. Relations read the
+// way psql prints them: bare, or "schema.name" when the trail hasn't spelled a
+// non-default schema yet (crumbScope.qualify).
 func (m *Model) crumbs() []string {
 	host := m.hostLabel
 	if host == "" {
@@ -451,14 +453,14 @@ func (m *Model) crumbs() []string {
 		}
 	}
 	parts := []string{host}
-	lastDB := ""
+	var named crumbScope
 	var prev *screen
 	for _, sc := range m.stack {
 		if sc.level == levelTools {
 			prev = sc
 			continue
 		}
-		text, isDB := crumbText(sc, prev)
+		text, names := crumbText(sc, prev, named)
 		if text == "" {
 			text = sc.title
 		}
@@ -466,11 +468,13 @@ func (m *Model) crumbs() []string {
 			text = levelLabel(sc.level)
 		}
 		switch {
-		case isDB:
-			lastDB = sc.db
-		case dbScopedLevel(sc.level) && sc.db != "" && sc.db != lastDB:
+		case names.db != "":
+			named = names
+		case dbScopedLevel(sc.level) && sc.db != "" && sc.db != named.db:
 			text += " (" + sc.db + ")"
-			lastDB = sc.db
+			named = crumbScope{db: sc.db, schema: names.schema}
+		case names.schema != "":
+			named.schema = names.schema
 		}
 		// Progress is a cross-link reachable from activity as well as the
 		// system overview; stamping "system overview:" on it would mislead.
@@ -484,46 +488,70 @@ func (m *Model) crumbs() []string {
 	return parts
 }
 
+// crumbScope is what the trail has named so far — a database and, within it, a
+// schema — so a crumb can leave out what an earlier one already says.
+type crumbScope struct{ db, schema string }
+
+// qualify names a relation the way psql prints it: bare when its schema is
+// public (the default search_path entry, so it goes without saying) or the
+// trail already names that schema in the same database, "schema.name"
+// otherwise. A schema spelled under another database doesn't count.
+func (n crumbScope) qualify(db, schema, name string) string {
+	if name == "" || schema == "" || schema == "public" || (n.db == db && n.schema == schema) {
+		return name
+	}
+	return schema + "." + name
+}
+
 // crumbText names what a screen shows, from live state; "" defers to the
-// generic fallbacks in crumbs. isDB reports that the crumb is the database
-// itself, so the trail knows it has been named.
-func crumbText(sc, prev *screen) (text string, isDB bool) {
+// generic fallbacks in crumbs. named is what the trail says so far; names
+// reports what this crumb adds — the database when the crumb is the database
+// itself, the schema when the crumb spells (or stands for) one.
+func crumbText(sc, prev *screen, named crumbScope) (text string, names crumbScope) {
 	switch sc.level {
 	case levelDatabases:
 		if sc.diag != nil {
 			// Per-database diagnostic: the picker asks "which db for <query>".
-			return sc.diag.Title, false
+			return sc.diag.Title, names
 		}
-		return sc.tool.Name(), false
+		return sc.tool.Name(), names
 	case levelSchemas, levelStatements:
-		return sc.db, true
+		return sc.db, crumbScope{db: sc.db}
 	case levelTables, levelBufferTables, levelRelations, levelTableStats:
-		return sc.schema, false
+		if sc.db != named.db {
+			// The single-schema fast path replaced the schema picker with this
+			// screen, so it stands in for the database; its schema is left to
+			// qualify the relations below it.
+			return sc.db, crumbScope{db: sc.db}
+		}
+		return sc.schema, crumbScope{schema: sc.schema}
 	case levelParts, levelHeapPages:
-		return sc.table.Name, false
+		return named.qualify(sc.db, sc.table.Schema, sc.table.Name), crumbScope{schema: sc.table.Schema}
 	case levelColumns:
-		return "heap", false
+		return "heap", names
 	case levelBufferDetail:
-		if sc.buf.detail != nil {
-			return sc.buf.detail.Name, false
+		if d := sc.buf.detail; d != nil {
+			return named.qualify(sc.db, d.Schema, d.Name), crumbScope{schema: d.Schema}
 		}
 	case levelShmem:
-		return "shmem", false
+		return "shmem", names
 	case levelHeapTuples:
 		text = fmt.Sprintf("page #%d", sc.pages.heapPageBlkno)
 		if (prev == nil || prev.level != levelHeapPages) && sc.table.Name != "" {
 			// Index → heap hop: the crumb before is an index page, so say
 			// whose page this is.
-			text = sc.table.Name + " " + text
+			text = named.qualify(sc.db, sc.table.Schema, sc.table.Name) + " " + text
+			names.schema = sc.table.Schema
 		}
-		return text, false
+		return text, names
 	case levelTupleRow:
 		if sc.pages.toastChunkID != 0 {
-			return fmt.Sprintf("chunk %d", sc.pages.toastChunkID), false
+			return fmt.Sprintf("chunk %d", sc.pages.toastChunkID), names
 		}
-		return "row " + sc.pages.tupleCtid, false
+		return "row " + sc.pages.tupleCtid, names
 	case levelIndexPages:
-		return sc.pages.index.Name, false
+		idx := sc.pages.index
+		return named.qualify(sc.db, idx.Schema, idx.Name), crumbScope{schema: idx.Schema}
 	case levelIndexTuples:
 		text = fmt.Sprintf("page #%d", sc.pages.indexPageBlkno)
 		switch {
@@ -532,101 +560,104 @@ func crumbText(sc, prev *screen) (text string, isDB bool) {
 		case sc.pages.indexPageType != "":
 			text += " " + sc.pages.indexPageType
 		}
-		return text, false
+		return text, names
 	case levelDescribe:
 		switch {
-		case sc.desc.info != nil && sc.desc.info.Title != "":
-			return "describe " + sc.desc.info.Title, false
 		case sc.table.Name != "":
-			return "describe " + sc.table.Name, false
+			// Only table describes carry the table (pushed by OID or adopted
+			// from the name-resolved load); an index describe keeps its title.
+			return "describe " + named.qualify(sc.db, sc.table.Schema, sc.table.Name), crumbScope{schema: sc.table.Schema}
+		case sc.desc.info != nil && sc.desc.info.Title != "":
+			return "describe " + sc.desc.info.Title, names
 		}
-		return "describe", false
+		return "describe", names
 	case levelDiagnostics:
-		return "tools", false
+		return "tools", names
 	case levelDiagnosticResult:
 		if prev != nil && prev.level == levelDatabases && prev.diag != nil {
 			// Reached through the database picker, whose crumb is already the
 			// diagnostic's title: this crumb is the chosen scope.
 			if sc.diagAllDBs {
-				return "all databases", false
+				return "all databases", names
 			}
-			return sc.db, true
+			return sc.db, crumbScope{db: sc.db}
 		}
 		if sc.diag != nil {
-			return sc.diag.Title, false
+			return sc.diag.Title, names
 		}
 	case levelWAL:
-		return "wal", false
+		return "wal", names
 	case levelWALRecords:
-		return sc.wal.rmgr, false
+		return sc.wal.rmgr, names
 	case levelWALBlocks:
 		if sc.wal.recLSN != "" {
-			return "rec " + shortLSN(sc.wal.recLSN), false
+			return "rec " + shortLSN(sc.wal.recLSN), names
 		}
 	case levelWALRelations:
-		return "by relation", false
+		return "by relation", names
 	case levelWALRelBlocks:
-		return sc.wal.relLabel, false
+		return sc.wal.relLabel, names
 	case levelWALBlockDetail:
 		if b := sc.wal.blockRef; b != nil {
-			return fmt.Sprintf("blk %d @ %s", b.BlockNumber, shortLSN(b.StartLSN)), false
+			return fmt.Sprintf("blk %d @ %s", b.BlockNumber, shortLSN(b.StartLSN)), names
 		}
 	case levelStatementDetail:
 		if sc.stat.detail != nil {
-			return fmt.Sprintf("query %d", sc.stat.detail.QueryID), false
+			return fmt.Sprintf("query %d", sc.stat.detail.QueryID), names
 		}
 	case levelStatementSamples:
-		return "values", false
+		return "values", names
 	case levelStatementResult:
-		return "result", false
+		return "result", names
 	case levelSnapshots:
-		return "snapshots", false
+		return "snapshots", names
 	case levelMaintenance:
-		return "system overview", false
+		return "system overview", names
 	case levelSettings:
-		return "settings", false
+		return "settings", names
 	case levelProgress:
-		return "progress", false
+		return "progress", names
 	case levelActivity:
-		return "activity", false
+		return "activity", names
 	case levelLockTree:
-		return "lock tree", false
+		return "lock tree", names
 	case levelWaitProfile:
-		return "wait profile", false
+		return "wait profile", names
 	case levelTriage:
-		return "triage", false
+		return "triage", names
 	case levelLogFiles:
-		return "logs", false
+		return "logs", names
 	case levelLogs:
 		if sc.log.src != nil {
-			return filepath.Base(sc.log.src.Info().Path), false
+			return filepath.Base(sc.log.src.Info().Path), names
 		}
-		return "logs", false
+		return "logs", names
 	case levelLogGroup:
 		if sc.log.paramKey != "" {
-			return "parameters", false
+			return "parameters", names
 		}
 		if sc.log.group != nil {
-			return sc.log.group.Category.Short() + " group", false
+			return sc.log.group.Category.Short() + " group", names
 		}
 	case levelLogEntry:
-		return "entry", false
+		return "entry", names
 	case levelPgBouncers:
-		return "pgbouncer", false
+		return "pgbouncer", names
 	case levelPgBouncer:
 		if sc.pgb.inst != nil {
-			return sc.pgb.inst.Name, false
+			return sc.pgb.inst.Name, names
 		}
 	case levelPgBouncerShow:
-		return sc.pgb.show.spec().title, false
+		return sc.pgb.show.spec().title, names
 	}
-	return "", false
+	return "", names
 }
 
 // dbScopedLevel reports the levels whose content belongs to one database, so
 // the trail must name that database somewhere before or on them. Levels of
 // cluster-wide tools are deliberately absent even though their screens carry
-// the connection database.
+// the connection database; the table lists name their database themselves
+// when the schema picker was skipped.
 func dbScopedLevel(l level) bool {
 	switch l {
 	case levelParts, levelColumns, levelHeapPages, levelHeapTuples, levelTupleRow,

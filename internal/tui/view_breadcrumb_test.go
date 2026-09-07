@@ -78,7 +78,7 @@ func TestBreadcrumbToolSwitch(t *testing.T) {
 				desc: describeState{info: &pg.Description{Title: "public.orders"}}},
 			{level: levelIndexPages, tool: toolPageInspect, db: "shop", schema: "public",
 				pages: pageState{index: pg.Relation{Schema: "public", Name: "orders_pkey"}}},
-		}, "db:5432 ▸ disk ▸ shop ▸ public ▸ orders ▸ describe public.orders ▸ pageinspect: orders_pkey"},
+		}, "db:5432 ▸ disk ▸ shop ▸ public ▸ orders ▸ describe orders ▸ pageinspect: orders_pkey"},
 		{"triage → lock tree", []*screen{
 			{level: levelTriage, tool: toolTriage, db: "postgres"},
 			{level: levelLockTree, tool: toolActivity, db: "postgres"},
@@ -191,11 +191,11 @@ func TestBreadcrumbPageInspectorCrumbs(t *testing.T) {
 		t.Errorf("trail = %q, want %q", got, want)
 	}
 	gist := &screen{level: levelIndexTuples, tool: toolPageInspect, pages: pageState{indexPageBlkno: 3, indexPageType: "leaf"}}
-	if got, _ := crumbText(gist, nil); got != "page #3 leaf" {
+	if got, _ := crumbText(gist, nil, crumbScope{}); got != "page #3 leaf" {
 		t.Errorf("gist crumb = %q", got)
 	}
 	heap := &screen{level: levelHeapTuples, table: orders, pages: pageState{heapPageBlkno: 4}}
-	if got, _ := crumbText(heap, &screen{level: levelHeapPages}); got != "page #4" {
+	if got, _ := crumbText(heap, &screen{level: levelHeapPages}, crumbScope{}); got != "page #4" {
 		t.Errorf("heap crumb under heap pages = %q", got)
 	}
 }
@@ -335,5 +335,88 @@ func TestViewFitsTerminal(t *testing.T) {
 				t.Errorf("%s: first line lost the title/trail: %q", name, first)
 			}
 		}
+	}
+}
+
+// When the single-schema fast path skips the schema picker, the table list
+// stands in for the database and relations are qualified with their schema —
+// except public, which goes without saying — until the trail has spelled it.
+func TestBreadcrumbSchemaQualifier(t *testing.T) {
+	orders := pg.Table{DB: "shop", Schema: "public", Name: "orders"}
+	appOrders := pg.Table{DB: "shop", Schema: "app", Name: "orders"}
+	pkey := pg.Relation{Schema: "app", Name: "orders_pkey"}
+	lvl := int32(2)
+	cases := []struct {
+		name  string
+		stack []*screen
+		want  string
+	}{
+		{"fast path, public", []*screen{
+			{level: levelDatabases, tool: toolDisk},
+			{level: levelTables, tool: toolDisk, db: "shop", schema: "public"},
+			{level: levelParts, tool: toolDisk, db: "shop", schema: "public", table: orders},
+			{level: levelColumns, tool: toolDisk, db: "shop", schema: "public", table: orders},
+		}, "db:5432 ▸ disk ▸ shop ▸ orders ▸ heap"},
+		{"fast path, table list alone", []*screen{
+			{level: levelDatabases, tool: toolDisk},
+			{level: levelTables, tool: toolDisk, db: "shop", schema: "app"},
+		}, "db:5432 ▸ disk ▸ shop"},
+		{"fast path, other schema", []*screen{
+			{level: levelDatabases, tool: toolDisk},
+			{level: levelTables, tool: toolDisk, db: "shop", schema: "app"},
+			{level: levelParts, tool: toolDisk, db: "shop", schema: "app", table: appOrders},
+			{level: levelColumns, tool: toolDisk, db: "shop", schema: "app", table: appOrders},
+			{level: levelDescribe, tool: toolDisk, db: "shop", schema: "app", table: appOrders},
+		}, "db:5432 ▸ disk ▸ shop ▸ app.orders ▸ heap ▸ describe orders"},
+		{"schema picked, other schema", []*screen{
+			{level: levelDatabases, tool: toolDisk},
+			{level: levelSchemas, tool: toolDisk, db: "shop"},
+			{level: levelTables, tool: toolDisk, db: "shop", schema: "app"},
+			{level: levelParts, tool: toolDisk, db: "shop", schema: "app", table: appOrders},
+		}, "db:5432 ▸ disk ▸ shop ▸ app ▸ orders"},
+		{"both pickers skipped", []*screen{
+			{level: levelTables, tool: toolDisk, db: "shop", schema: "public"},
+			{level: levelParts, tool: toolDisk, db: "shop", schema: "public", table: orders},
+		}, "db:5432 ▸ disk: shop ▸ orders"},
+		{"queries → disk parts", []*screen{
+			{level: levelDatabases, tool: toolQueries},
+			{level: levelStatements, tool: toolQueries, db: "shop"},
+			{level: levelStatementDetail, tool: toolQueries, db: "shop", stat: stmtState{detail: &pg.QueryStat{QueryID: 8123}}},
+			{level: levelParts, tool: toolDisk, db: "shop", title: "disk", table: appOrders},
+		}, "db:5432 ▸ queries ▸ shop ▸ query 8123 ▸ disk: app.orders"},
+		{"activity → describe in another db", []*screen{
+			{level: levelActivity, tool: toolActivity, db: "postgres"},
+			{level: levelDescribe, tool: toolActivity, db: "shop", title: "describe", table: appOrders},
+		}, "db:5432 ▸ activity ▸ describe app.orders (shop)"},
+		{"table overview fast path → disk parts", []*screen{
+			{level: levelDatabases, tool: toolTableStats},
+			{level: levelTableStats, tool: toolTableStats, db: "shop", schema: "public"},
+			{level: levelParts, tool: toolDisk, db: "shop", schema: "public", table: orders},
+		}, "db:5432 ▸ tables ▸ shop ▸ disk: orders"},
+		{"buffers fast path → detail", []*screen{
+			{level: levelDatabases, tool: toolBuffers},
+			{level: levelBufferTables, tool: toolBuffers, db: "shop", schema: "app"},
+			{level: levelBufferDetail, tool: toolBuffers, db: "shop", schema: "app",
+				buf: bufState{detail: &pg.TableBufferStat{DB: "shop", Schema: "app", Name: "orders"}}},
+		}, "db:5432 ▸ buffers ▸ shop ▸ app.orders"},
+		{"page inspector fast path, index → heap hop", []*screen{
+			{level: levelDatabases, tool: toolPageInspect},
+			{level: levelRelations, tool: toolPageInspect, db: "shop", schema: "app"},
+			{level: levelIndexPages, tool: toolPageInspect, db: "shop", schema: "app", pages: pageState{index: pkey}},
+			{level: levelIndexTuples, tool: toolPageInspect, db: "shop", schema: "app",
+				pages: pageState{index: pkey, indexPageBlkno: 7, indexPageLevel: &lvl}},
+			{level: levelHeapTuples, tool: toolPageInspect, db: "shop", schema: "app", table: appOrders,
+				pages: pageState{heapPageBlkno: 17}},
+		}, "db:5432 ▸ pageinspect ▸ shop ▸ app.orders_pkey ▸ page #7 L2 ▸ orders page #17"},
+	}
+	for _, c := range cases {
+		if got := trail(newTestModel(c.stack...)); got != c.want {
+			t.Errorf("%s: trail = %q, want %q", c.name, got, c.want)
+		}
+	}
+	// A loading parts placeholder in a non-default schema must not render a
+	// dangling "schema." before the table name arrives.
+	if got := (crumbScope{}).qualify("shop", "app", ""); got != "" {
+		t.Errorf("qualify with no name = %q", got)
 	}
 }
