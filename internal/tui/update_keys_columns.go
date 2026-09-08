@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"slices"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -77,4 +79,46 @@ func (m *Model) handleDiagColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 			m.saveColPrefs(diagPrefsKey(key), vis)
 		},
 	})
+}
+
+// handleTupleColumnConfigKey drives the C picker on the heap tuple list. The
+// rows are the relation's live columns (pages.tupleCols); the pick is part of
+// the tuple query's projection, so every toggle reloads the page rather than
+// re-projecting loaded rows. The picker stays open across the reload. An empty
+// pick is fine (the list falls back to its physical columns), and nothing is
+// persisted — see pageState.tuplePick.
+func (m *Model) handleTupleColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+	cols := s.pages.tupleCols
+	if len(cols) == 0 {
+		m.showTupleColumnConfig = false
+		return nil
+	}
+	var reload tea.Cmd
+	cmd := m.handleColCfgKey(msg, colCfgSpec{
+		n:      len(cols),
+		cursor: &m.tupleColCfgCursor,
+		close:  func() { m.showTupleColumnConfig = false },
+		reset: func() {
+			s.pages.tuplePick = nil // nil = the default: the primary key
+			reload = m.loadCurrent()
+		},
+		toggle: func(i int) {
+			name := cols[i].Name
+			pick := slices.Clone(s.pages.tuplePick)
+			if pick == nil {
+				pick = []string{} // an explicit pick, distinct from "default"
+			}
+			if j := slices.Index(pick, name); j >= 0 {
+				pick = slices.Delete(pick, j, j+1)
+			} else {
+				pick = append(pick, name)
+			}
+			s.pages.tuplePick = pick
+			reload = m.loadCurrent()
+		},
+	})
+	if reload != nil {
+		return reload
+	}
+	return cmd
 }

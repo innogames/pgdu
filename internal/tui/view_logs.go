@@ -282,7 +282,7 @@ func (m *Model) renderLogGroupSummary(g *pglog.Group, sampled bool) string {
 	}
 	parts = append(parts, logGroupStats(g)...)
 	if g.Plans > 0 {
-		parts = append(parts, logPlanBadge(g.Plans)+mu(" — ▤ rows carry one; Enter shows it"))
+		parts = append(parts, logPlanBadge(g.Plans)+mu(" — ▤ rows carry one; ↵ shows it"))
 	}
 	if sampled && len(g.Samples) < g.Count {
 		parts = append(parts, mu(fmt.Sprintf("showing the last %d", len(g.Samples))))
@@ -304,7 +304,7 @@ func (m *Model) renderLogParamsLine(s *screen) string {
 		if s.log.params == logParamsFirst {
 			hint = "one row per distinct $1 — later parameters ignored"
 		}
-		return "  " + s.log.params.label() + mu(fmt.Sprintf("  ·  %d distinct  ·  %s  ·  tab cycles, Enter lists the entries", len(s.items), hint))
+		return "  " + s.log.params.label() + mu(fmt.Sprintf("  ·  %d distinct  ·  %s  ·  tab cycles, ↵ lists the entries", len(s.items), hint))
 	}
 	return ""
 }
@@ -437,7 +437,7 @@ func (m *Model) renderLogGroups(s *screen, height int) string {
 			sev = logSevStyle(g.Severity).Render(sev)
 			span = mu(span)
 		}
-		line := cursor + bar + " " + count + "  " + sev + "  " + span + "  " + title
+		line := cursor + bar + " " + count + "  " + sev + "  " + span + "  " + drillMark(it.hasChildren) + title
 		if stats != "" {
 			line += "  " + mu("[") + stats + mu("]")
 		}
@@ -450,14 +450,14 @@ func (m *Model) renderLogGroups(s *screen, height int) string {
 }
 
 // renderLogGroupsHeader labels the groups pane's columns; the layout mirrors
-// the row assembly below (cursor, bar, count, severity, span, message).
+// the row assembly below (cursor, bar, count, severity, span, drill mark, message).
 func renderLogGroupsHeader(sort sortMode, sortDesc bool, barW int) string {
 	// Cursor (2) + bracketed bar (barW+2) + one space, as in the rows.
 	line := strings.Repeat(" ", 2+barW+2+1) +
 		padLeft(sortMark("count", sort == sortByCount, sortDesc), logCountColW) + "  " +
 		padRight("level", logSevColW) + "  " +
 		padRight(sortMark("seen", sort == sortByLast, sortDesc), logSpanColW) + "  " +
-		sortMark("message", sort == sortByName, sortDesc) + "  [stats]"
+		"  " + sortMark("message", sort == sortByName, sortDesc) + "  [stats]"
 	return styleMuted.Render(line)
 }
 
@@ -542,7 +542,7 @@ func (m *Model) renderLogGroup(s *screen, height int) string {
 		if selected {
 			msg = styleSelected.Render(msg)
 		}
-		line := cursor + mu(ts) + "  " + padRight(who, 28) + "  " + dur + msg + extra
+		line := cursor + drillMark(it.hasChildren) + mu(ts) + "  " + padRight(who, 28) + "  " + dur + msg + extra
 		b.WriteString(truncateToWidth(line, m.width) + "\n")
 	}
 	for i := end - s.offset; i < rowsH; i++ {

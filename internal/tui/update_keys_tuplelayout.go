@@ -6,6 +6,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
 )
 
@@ -28,7 +29,7 @@ func (m *Model) openTupleLayout(s *screen, lp int32) tea.Cmd {
 	m.showInfo = false
 	m.showTupleLayout = true
 	m.tupleLayoutCursor, m.tupleLayoutOffset = 0, 0
-	m.tupleLayoutSort, m.tupleLayoutSortDesc = tlSortOffset, false
+	m.tupleLayoutSort, m.tupleLayoutSortDesc = pageinspect.SortOffset, false
 	return m.reloadTupleAttrs(s, lp)
 }
 
@@ -111,11 +112,11 @@ func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, m.keys.Bottom):
 		m.tupleLayoutCursor = math.MaxInt32 // clamped by the renderer
 	case key.Matches(msg, m.keys.SortNext):
-		m.tupleLayoutSort = (m.tupleLayoutSort + 1) % tlSortCount
-		m.tupleLayoutSortDesc = m.tupleLayoutSort.defaultDesc()
+		m.tupleLayoutSort = (m.tupleLayoutSort + 1) % pageinspect.SortCount
+		m.tupleLayoutSortDesc = m.tupleLayoutSort.DefaultDesc()
 	case key.Matches(msg, m.keys.SortPrev):
-		m.tupleLayoutSort = (m.tupleLayoutSort + tlSortCount - 1) % tlSortCount
-		m.tupleLayoutSortDesc = m.tupleLayoutSort.defaultDesc()
+		m.tupleLayoutSort = (m.tupleLayoutSort + pageinspect.SortCount - 1) % pageinspect.SortCount
+		m.tupleLayoutSortDesc = m.tupleLayoutSort.DefaultDesc()
 	case key.Matches(msg, m.keys.ReverseSort):
 		m.tupleLayoutSortDesc = !m.tupleLayoutSortDesc
 	case key.Matches(msg, m.keys.Refresh):
@@ -128,15 +129,15 @@ func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 // the same layout+sort mapping the renderer uses (view_tuple_layout.go): the
 // cursor indexes the sorted legend, so order[cursor] gives the physical segment.
 // Reports false when there's no tuple/segment under the cursor.
-func (m *Model) tupleLayoutSegUnderCursor(s *screen) (tupleSeg, bool) {
+func (m *Model) tupleLayoutSegUnderCursor(s *screen) (pageinspect.Seg, bool) {
 	t := s.tupleByLP(s.pages.tupleAttrsLP)
 	if t == nil || len(s.pages.tupleAttrs) == 0 {
-		return tupleSeg{}, false
+		return pageinspect.Seg{}, false
 	}
-	segs, _ := computeTupleLayout(*t, s.pages.tupleAttrs)
-	order := sortedTupleSegIdx(segs, m.tupleLayoutSort, m.tupleLayoutSortDesc)
+	segs, _ := pageinspect.Layout(*t, s.pages.tupleAttrs)
+	order := pageinspect.SortedIdx(segs, m.tupleLayoutSort, m.tupleLayoutSortDesc)
 	if m.tupleLayoutCursor < 0 || m.tupleLayoutCursor >= len(order) {
-		return tupleSeg{}, false
+		return pageinspect.Seg{}, false
 	}
 	return segs[order[m.tupleLayoutCursor]], true
 }
@@ -145,10 +146,10 @@ func (m *Model) tupleLayoutSegUnderCursor(s *screen) (tupleSeg, bool) {
 // the highlighted segment is a column storing an on-disk TOAST pointer.
 func (m *Model) tupleLayoutToastUnderCursor(s *screen) (toastOID, chunkID uint32, ok bool) {
 	seg, ok := m.tupleLayoutSegUnderCursor(s)
-	if !ok || seg.kind != segColumn || seg.attr == nil {
+	if !ok || seg.Kind != pageinspect.SegColumn || seg.Attr == nil {
 		return 0, 0, false
 	}
-	chunkID, toastOID, ok = toastPointerRef(seg.attr.Value)
+	chunkID, toastOID, ok = pageinspect.ToastPointerRef(seg.Attr.Value)
 	return toastOID, chunkID, ok
 }
 

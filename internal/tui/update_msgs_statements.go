@@ -68,11 +68,10 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 		s.items = s.items[:0]
 		s.stat.windowExecMs = 0
 		descs := stmtSpec.visibleCols(&m.stmtTable, stmtCtx{trackPlanning: s.stat.trackPlanning})
+		m.defaultStatementSort(s)
 		s.stat.cols = descs
 		s.diagCols = diagColumnsFrom(descs)
 		s.diagBarCol = -1
-		m.stmtTable.sortColID = colTotalMs
-		s.sortDesc = true
 		stmtSpec.syncSort(&m.stmtTable, s, descs)
 		return nil
 	}
@@ -102,6 +101,13 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 // track_planning state — no DB round-trip. Used by every load site and by the C
 // column-config toggles so the columns, cells, footer and sort stay consistent.
 func (m *Model) rebuildStatementItems(s *screen) {
+	// First population of this screen: a baseline installed by the entry picker
+	// (cumulative, disk snapshot, frozen window) bypasses the live first-load
+	// branch above, so the default sort has to be applied here as well —
+	// otherwise the screen keeps its zero-value ascending direction.
+	if s.stat.cols == nil {
+		m.defaultStatementSort(s)
+	}
 	items, descs, windowMs, total := m.buildStatementItems(s.stat.rows, s.stat.trackPlanning)
 	s.items = items
 	s.stat.cols = descs
@@ -112,6 +118,14 @@ func (m *Model) rebuildStatementItems(s *screen) {
 	s.diagMetricsDirty = true
 	stmtSpec.syncSort(&m.stmtTable, s, descs)
 	m.applySort(s)
+}
+
+// defaultStatementSort puts a freshly opened top-queries table in its default
+// order: total_ms descending, whichever column an earlier visit left on the
+// shared stmtTable.
+func (m *Model) defaultStatementSort(s *screen) {
+	m.stmtTable.sortColID = colTotalMs
+	s.sortDesc = true
 }
 
 // onStatementsTick keeps the live window fresh. It re-samples only while the

@@ -193,7 +193,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	// offered only for read-only SELECT shapes and only once a sample call (with
 	// synthesized literals filling the $n) is available to actually run.
 	if explainable && !s.stat.explaining && pg.ReadOnlyQuery(q.Query) && s.stat.sampleCall != "" {
-		b.WriteString("    " + mu("press ") + styleBadge.Render("Enter") +
+		b.WriteString("    " + mu("press ") + styleBadge.Render("↵") +
 			mu(" to run EXPLAIN (ANALYZE, VERBOSE, BUFFERS) — ") +
 			styleErr.Render("executes the query for real") + "\n")
 		b.WriteString("    " + mu("press ") + styleBadge.Render("E") +
@@ -360,7 +360,7 @@ func (m *Model) renderStatementSamples(s *screen, height int) string {
 			}
 		}
 	} else if s.stat.detail != nil && pg.ReadOnlyQuery(s.stat.detail.Query) {
-		b.WriteString("    " + mu("press ") + styleBadge.Render("Enter") +
+		b.WriteString("    " + mu("press ") + styleBadge.Render("↵") +
 			mu(" to EXPLAIN (ANALYZE) the highlighted value — ") +
 			styleErr.Render("executes the query for real") + "\n")
 	}

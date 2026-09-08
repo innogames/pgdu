@@ -30,7 +30,7 @@ const (
 	colBrackets = 2  // "[" and "]" around the bar
 	colSize     = 12 // humanize.Bytes value + slack
 	colBloat    = 14 // " (NN% bloat)  "
-	colMark     = 2  // "+ " child indicator
+	colMark     = 2  // "↵ " drill indicator (drillMark)
 	colName     = 28 // typical relname budget
 	colDetail   = 30 // generic detail-string budget
 )
@@ -46,7 +46,7 @@ func barReserve(s *screen) int {
 	switch l {
 	case levelBufferTables:
 		// cursor + bar(brackets) + buffered + total + cached + hit + dirty +
-		// dirty% + temp + name
+		// dirty% + temp + mark + name
 		return colCursor + colBrackets +
 			bufColBuffered + colGutter +
 			bufColTotal + colGutter +
@@ -55,7 +55,7 @@ func barReserve(s *screen) int {
 			bufColDirty + colGutter +
 			bufColDirtyPct + colGutter +
 			bufColTemp + colGutter +
-			colName
+			colMark + colName
 	case levelShmem:
 		// cursor + bar(brackets) + size + share% + group + name
 		return colCursor + colBrackets +
@@ -90,15 +90,15 @@ func barReserve(s *screen) int {
 		return colCursor + colBrackets + colSize + colMark + colName + colDetail
 	case levelHeapPages:
 		// cursor + bar(brackets) + flag + used + live + R + dead + dead% +
-		// [temp] + name — temp only when buffer data loaded (pg_buffercache).
+		// [temp] + mark + name — temp only when buffer data loaded (pg_buffercache).
 		return colCursor + colBrackets + heapPageFlagColW + colGutter +
 			heapPageUsedColW + colGutter +
 			heapPageLiveColW + colGutter + heapPageRedirColW + colGutter +
 			heapPageDeadLPColW + colGutter +
-			heapPageDeadColW + colGutter + pageTempReserve(s) + heapPageNameColW
+			heapPageDeadColW + colGutter + pageTempReserve(s) + colMark + heapPageNameColW
 	case levelHeapTuples:
-		// cursor + dot + lp idx + flag word + len + xmin + xmax + ctid + slack
-		const tupleReserve = 2 + 2 + 6 + 10 + 8 + 12 + 12 + 14 + 6
+		// cursor + mark + dot + lp idx + flag word + len + xmin + xmax + ctid + slack
+		const tupleReserve = colCursor + colMark + 2 + 6 + 10 + 8 + 12 + 12 + 14 + 6
 		return tupleReserve
 	case levelTupleRow:
 		// cursor + column-name col + value gutter. The renderer prints
@@ -113,9 +113,10 @@ func barReserve(s *screen) int {
 			(relTypeColW + colGutter) +
 			colMark + colName + relParentColW
 	case levelIndexPages:
-		// Every AM gets the optional [temp] column just before the page name;
-		// it only takes space when buffer data loaded (pg_buffercache).
-		base := colCursor + colBrackets + pageTempReserve(s)
+		// Every AM gets the optional [temp] column and the drill mark just
+		// before the page name; temp only takes space when buffer data loaded
+		// (pg_buffercache).
+		base := colCursor + colBrackets + pageTempReserve(s) + colMark
 		switch s.pages.index.AccessMethod {
 		case "gist":
 			// type + used + items + free% + [temp] + page name (no tree level)
@@ -141,26 +142,28 @@ func barReserve(s *screen) int {
 				idxPageNameColW
 		}
 	case levelIndexTuples:
-		// cursor + offset + len + nulls/vars flags + ctid + key preview
-		const idxTupleReserve = 2 + 6 + 8 + 8 + idxTupleCtidColW + 4
+		// cursor + mark + offset + len + nulls/vars flags + ctid + key preview
+		const idxTupleReserve = colCursor + colMark + 6 + 8 + 8 + idxTupleCtidColW + 4
 		return idxTupleReserve
 	case levelDescribe, levelTriage, levelLogFiles, levelLogGroup, levelLogEntry,
 		levelPgBouncers, levelPgBouncer, levelPgBouncerShow:
 		// Plain-text panels — no bar drawn, so no space needs reserving.
 		return 0
 	case levelLogs:
-		// cursor + bar(brackets) + count + severity tag + time span + title
+		// cursor + bar(brackets) + count + severity tag + time span + mark + title
 		return colCursor + colBrackets + logCountColW + colGutter + logSevColW + colGutter +
-			logSpanColW + colGutter + colName
+			logSpanColW + colGutter + colMark + colName
 	case levelWaitProfile:
 		// cursor + share% + sparkline + class name + gloss text
 		return colCursor + waitPctColW + colGutter + waitSparkColW + colGutter +
 			colName + colDetail
 	case levelWAL:
-		// cursor + bar(brackets) + combined + record + fpi + count + mark + name
-		return colCursor + colBrackets + walColCombined + colGutter +
-			walColRecord + colGutter + walColFPI + colGutter +
-			walColCount + colGutter + colMark + colName
+		// The two tables share one bar width; the relation columns (combined +
+		// graded fpi + records + pages) are the wider set, so reserve for them:
+		// cursor + bar(brackets) + combined + fpi + records + pages + mark + name
+		return colCursor + colBrackets + walRelCombinedColW + colGutter +
+			walRelFPIColW + colGutter + walRelRecColW + colGutter +
+			walRelBlkColW + colGutter + colMark + colName
 	case levelWALRecords:
 		// cursor + bar(brackets) + size + fpi + lsn + mark + name + description
 		return colCursor + colBrackets + walRecSizeColW + colGutter +
@@ -170,9 +173,9 @@ func barReserve(s *screen) int {
 		// key/value dump, no bar: cursor + key column + gutter.
 		return colCursor + walDetailKeyColW + colGutter
 	case levelWALBlocks, levelWALRelBlocks:
-		// cursor + bar(brackets) + fpi + data + name + detail
+		// cursor + bar(brackets) + fpi + data + mark + name + detail
 		return colCursor + colBrackets + walBlkFPIColW + colGutter +
-			walBlkDataColW + colGutter + colName + colDetail
+			walBlkDataColW + colGutter + colMark + colName + colDetail
 	case levelProgress:
 		// cursor + bar(brackets) + command + relation + phase + done + total +
 		// pct + age + eta + user
@@ -180,11 +183,6 @@ func barReserve(s *screen) int {
 			colName + progColPhase +
 			progColDone + colGutter + progColTotal + colGutter +
 			progColPct + colGutter + progColAge + progColEta + progColUser
-	case levelWALRelations:
-		// cursor + bar(brackets) + combined + fpi + records + pages + mark + name
-		return colCursor + colBrackets + walRelCombinedColW + colGutter +
-			walRelFPIColW + colGutter + walRelRecColW + colGutter +
-			walRelBlkColW + colGutter + colMark + colName
 	}
 	return colCursor + colBrackets + colSize + colMark + colName
 }
@@ -223,14 +221,18 @@ const (
 	tupleLenColW  = 6
 	tupleXidColW  = 10
 	tupleCtidColW = 10
-	tuplePKColW   = 18
 )
 
-// tuplePKMinWidth is the narrowest terminal that still gets the tuple list's
-// pk column. The fixed columns plus the state verdict and its flag icons run
-// to ~94 cells; below that the pk column would push the row past the right
-// edge, and the physical identity (lp / ctid) is the one you can't do without.
-const tuplePKMinWidth = 96
+// Value columns on the tuple list (the picked table columns) size themselves
+// to their content between these bounds. tupleValueTail is the room kept to
+// the right of them for the state verdict and its flag icons (≈ "deleting
+// ↟HOT ◦only ⇲toast"); a column that would eat into it is dropped, because the
+// physical identity (lp / ctid / state) is the part you can't do without.
+const (
+	tupleValueColMin = 4
+	tupleValueColMax = 24
+	tupleValueTail   = 30
+)
 
 // Column widths shared by the index-pages header and rows.
 const (

@@ -1,4 +1,4 @@
-package tui
+package pageinspect
 
 import (
 	"encoding/binary"
@@ -9,12 +9,12 @@ import (
 	"pgdu/internal/pg"
 )
 
-// decodeAttrValue renders one stored, non-null attribute's raw bytes as a
+// DecodeAttrValue renders one stored, non-null attribute's raw bytes as a
 // human-readable value for the byte-layout overlay, reusing the index-key
 // byte decoder (formatFixed / formatVarlenaPayload — little-endian, same
-// caveat as decodeIndexKey). Returns "" when the bytes can't be decoded
+// caveat as DecodeIndexKey). Returns "" when the bytes can't be decoded
 // meaningfully; the renderer falls back to a hex preview then.
-func decodeAttrValue(a pg.TupleAttr) string {
+func DecodeAttrValue(a pg.TupleAttr) string {
 	switch {
 	case a.Len > 0:
 		if len(a.Value) != int(a.Len) {
@@ -144,12 +144,12 @@ func describeToastPointer(v []byte) string {
 // chunk row holds, sized so four chunk tuples fill a page.
 const toastMaxChunkSize int64 = 1996
 
-// toastPointerRef extracts the two identities an on-disk TOAST pointer carries:
+// ToastPointerRef extracts the two identities an on-disk TOAST pointer carries:
 // va_valueid (the value's chunk_id) and va_toastrelid (the OID of the TOAST
 // relation holding it). Reports false when v isn't an on-disk pointer (same
 // VARTAG_ONDISK guard as describeToastPointer) — used to turn ENTER on a
 // TOAST-pointer row into a jump to that relation's page inspector.
-func toastPointerRef(v []byte) (valueID, toastRelID uint32, ok bool) {
+func ToastPointerRef(v []byte) (valueID, toastRelID uint32, ok bool) {
 	if len(v) != toastPointerLen || v[1] != 0x12 { // VARTAG_ONDISK
 		return 0, 0, false
 	}

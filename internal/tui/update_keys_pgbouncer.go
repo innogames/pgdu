@@ -4,7 +4,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"pgdu/internal/pg"
+	"pgdu/internal/pgbouncer"
 	"pgdu/internal/pglog"
 )
 
@@ -47,7 +47,7 @@ func (m *Model) handlePgbKey(s *screen, msg tea.KeyMsg) (tea.Cmd, bool) {
 
 // pgbSelectedInstance is the instance a key acts on: the highlighted row on
 // the list, the screen's own instance below it.
-func (m *Model) pgbSelectedInstance(s *screen) *pg.PgBouncerInstance {
+func (m *Model) pgbSelectedInstance(s *screen) *pgbouncer.Instance {
 	if s.level != levelPgBouncers {
 		return s.pgb.inst
 	}

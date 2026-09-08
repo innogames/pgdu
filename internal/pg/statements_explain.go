@@ -7,6 +7,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"pgdu/internal/diagres"
 )
 
 // ExplainableQuery reports whether a normalized statement can be EXPLAINed and
@@ -131,7 +133,7 @@ func (c *Client) RunReadOnlyQuery(ctx context.Context, db, query string, maxRows
 	}
 	defer rows.Close()
 
-	cols, resultRows, truncated, err := scanDiagRows(rows, maxRows)
+	cols, resultRows, truncated, err := diagres.Scan(rows, maxRows)
 	if err != nil {
 		return nil, false, fmt.Errorf("execute query in %q: %w", db, err)
 	}

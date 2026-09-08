@@ -1,4 +1,4 @@
-package pg
+package diagres
 
 import (
 	"testing"
@@ -6,7 +6,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-func TestFormatDiagValue(t *testing.T) {
+func TestFormatValue(t *testing.T) {
 	cases := []struct {
 		name       string
 		in         any
@@ -29,16 +29,16 @@ func TestFormatDiagValue(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := formatDiagValue(c.in, DiagText)
+			got := FormatValue(c.in, KindText)
 			if got.Display != c.want || got.HasNum != c.wantHasNum || (got.HasNum && got.Num != c.wantNum) {
-				t.Errorf("formatDiagValue(%v) = %+v, want Display=%q Num=%v HasNum=%v",
+				t.Errorf("FormatValue(%v) = %+v, want Display=%q Num=%v HasNum=%v",
 					c.in, got, c.want, c.wantNum, c.wantHasNum)
 			}
 		})
 	}
 }
 
-func TestFormatDiagInterval(t *testing.T) {
+func TestFormatInterval(t *testing.T) {
 	cases := []struct {
 		name string
 		iv   pgtype.Interval
@@ -53,53 +53,53 @@ func TestFormatDiagInterval(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := formatDiagInterval(c.iv); got != c.want {
-				t.Errorf("formatDiagInterval(%+v) = %q, want %q", c.iv, got, c.want)
+			if got := formatInterval(c.iv); got != c.want {
+				t.Errorf("formatInterval(%+v) = %q, want %q", c.iv, got, c.want)
 			}
 		})
 	}
 }
 
 // A column the name heuristic left as text but whose values are pg_size_pretty
-// strings must promote to DiagBytes (not DiagInt), so its cells and Σ footer
+// strings must promote to KindBytes (not KindInt), so its cells and Σ footer
 // humanize in the same units — the fix for a footer showing a raw byte sum.
 func TestPromotedNumericKind(t *testing.T) {
 	cases := []struct {
 		in   any
-		want DiagColumnKind
+		want Kind
 	}{
-		{"306 MB", DiagBytes},
-		{"9832 kB", DiagBytes},
-		{"0 bytes", DiagBytes},
-		{"game_conversation_message", DiagInt}, // non-size string that reached the numeric-promotion path
-		{int64(42), DiagInt},
-		{3.14, DiagInt},
+		{"306 MB", KindBytes},
+		{"9832 kB", KindBytes},
+		{"0 bytes", KindBytes},
+		{"game_conversation_message", KindInt}, // non-size string that reached the numeric-promotion path
+		{int64(42), KindInt},
+		{3.14, KindInt},
 	}
 	for _, c := range cases {
-		if got := promotedNumericKind(c.in); got != c.want {
-			t.Errorf("promotedNumericKind(%v) = %v, want %v", c.in, got, c.want)
+		if got := PromotedNumericKind(c.in); got != c.want {
+			t.Errorf("PromotedNumericKind(%v) = %v, want %v", c.in, got, c.want)
 		}
 	}
 }
 
-func TestColKindFromName(t *testing.T) {
+func TestKindFromName(t *testing.T) {
 	cases := []struct {
 		name string
-		want DiagColumnKind
+		want Kind
 	}{
-		{"cache_hit_pct", DiagPercent},
-		{"dead_ratio", DiagPercent},
-		{"percent_used", DiagPercent},
-		{"total_bytes", DiagBytes},
-		// "_mb" is NOT DiagBytes: DiagBytes humanizes the value as raw bytes,
+		{"cache_hit_pct", KindPercent},
+		{"dead_ratio", KindPercent},
+		{"percent_used", KindPercent},
+		{"total_bytes", KindBytes},
+		// "_mb" is NOT KindBytes: KindBytes humanizes the value as raw bytes,
 		// so a megabyte-scaled column would be off by 1024². Queries emit raw
 		// bytes with a "bytes" suffix instead.
-		{"size_mb", DiagText},
-		{"relname", DiagText},
+		{"size_mb", KindText},
+		{"relname", KindText},
 	}
 	for _, c := range cases {
-		if got := colKindFromName(c.name); got != c.want {
-			t.Errorf("colKindFromName(%q) = %v, want %v", c.name, got, c.want)
+		if got := KindFromName(c.name); got != c.want {
+			t.Errorf("KindFromName(%q) = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

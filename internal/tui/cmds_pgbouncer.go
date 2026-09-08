@@ -8,22 +8,23 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
+	"pgdu/internal/pgbouncer"
 )
 
 type pgbDiscoveredMsg struct {
-	insts  []pg.PgBouncerInstance
-	probes []pg.PgBouncerProbe
+	insts  []pgbouncer.Instance
+	probes []pgbouncer.Probe
 }
 
 // pgbProbedMsg refreshes the instance list's health cells without re-running
 // discovery (the instance set only changes on a restart; the user can space).
 type pgbProbedMsg struct {
-	probes []pg.PgBouncerProbe
+	probes []pgbouncer.Probe
 }
 
 type pgbOverviewLoadedMsg struct {
 	key string
-	ov  *pg.PgBouncerOverview
+	ov  *pgbouncer.Overview
 	err error
 }
 
@@ -41,11 +42,11 @@ type pgbAvailableMsg struct{ found bool }
 
 // probePgBouncers runs the cheap per-instance probe concurrently; one wedged
 // console must not hold up the rest of the list.
-func (m *Model) probePgBouncers(ctx context.Context, insts []pg.PgBouncerInstance) []pg.PgBouncerProbe {
-	probes := make([]pg.PgBouncerProbe, len(insts))
+func (m *Model) probePgBouncers(ctx context.Context, insts []pgbouncer.Instance) []pgbouncer.Probe {
+	probes := make([]pgbouncer.Probe, len(insts))
 	var wg sync.WaitGroup
 	for i := range insts {
-		wg.Go(func() { probes[i] = m.client.PgBouncerProbe(ctx, insts[i]) })
+		wg.Go(func() { probes[i] = m.client.PgBouncer.Probe(ctx, insts[i]) })
 	}
 	wg.Wait()
 	return probes
@@ -66,23 +67,23 @@ func (m *Model) pgbAvailableCmd() tea.Cmd {
 	})
 }
 
-func (m *Model) probePgBouncersCmd(insts []pg.PgBouncerInstance) tea.Cmd {
+func (m *Model) probePgBouncersCmd(insts []pgbouncer.Instance) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		return pgbProbedMsg{probes: m.probePgBouncers(ctx, insts)}
 	})
 }
 
-func (m *Model) loadPgbOverviewCmd(inst pg.PgBouncerInstance) tea.Cmd {
+func (m *Model) loadPgbOverviewCmd(inst pgbouncer.Instance) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
-		ov, err := m.client.PgBouncerOverview(ctx, inst)
+		ov, err := m.client.PgBouncer.Overview(ctx, inst)
 		return pgbOverviewLoadedMsg{key: inst.Key(), ov: ov, err: err}
 	})
 }
 
-func (m *Model) loadPgbShowCmd(inst pg.PgBouncerInstance, show pgbShow) tea.Cmd {
+func (m *Model) loadPgbShowCmd(inst pgbouncer.Instance, show pgbShow) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		spec := show.spec()
-		res, err := m.client.PgBouncerShow(ctx, inst, spec.what)
+		res, err := m.client.PgBouncer.Show(ctx, inst, spec.what)
 		if err == nil {
 			applyPgbKinds(res, spec)
 			addPgbHostnames(res, m.client.ResolveAddr)

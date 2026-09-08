@@ -1,4 +1,8 @@
-package tui
+// Package pageinspect decodes the raw bytes pageinspect hands back — heap tuple
+// layouts, index keys, on-disk jsonb and TOAST pointers — into labelled
+// segments and display strings. It is pure byte decoding over pg's row types;
+// nothing here knows about the terminal.
+package pageinspect
 
 import (
 	"fmt"
@@ -9,55 +13,75 @@ import (
 	"pgdu/internal/pg"
 )
 
-// tupleSegKind classifies one contiguous byte run inside a heap tuple for the
+// SegKind classifies one contiguous byte run inside a heap tuple for the
 // byte-layout overlay.
-type tupleSegKind int
+type SegKind int
 
 const (
-	segHeaderField tupleSegKind = iota // one field of the 23 B fixed tuple header
-	segNullBitmap                      // ceil(natts/8) bitmap, present iff HEAP_HASNULL
-	segHeaderPad                       // padding between header/bitmap and t_hoff
-	segColumn                          // one attribute's stored bytes
-	segPad                             // inter-column alignment padding
-	segUnaccounted                     // bytes the walk couldn't attribute
+	SegHeaderField SegKind = iota // one field of the 23 B fixed tuple header
+	SegNullBitmap                 // ceil(natts/8) bitmap, present iff HEAP_HASNULL
+	SegHeaderPad                  // padding between header/bitmap and t_hoff
+	SegColumn                     // one attribute's stored bytes
+	SegPad                        // inter-column alignment padding
+	SegUnaccounted                // bytes the walk couldn't attribute
 )
 
-// tupleSeg is one segment of a tuple's byte layout. start is the byte offset
+// Seg is one segment of a tuple's byte layout. Start is the byte offset
 // within the tuple (0 = start of the tuple header, i.e. lp_off on the page);
-// zero-byte segments (NULLs, not-stored attrs) keep their nominal start so the
-// legend can still order them. name labels header fields; value carries the
+// zero-byte segments (NULLs, not-stored attrs) keep their nominal Start so a
+// legend can still order them. Field labels header fields; Value carries the
 // decoded content (header field values, null-bitmap bits, decoded column
 // values — "" when undecodable, the renderer falls back to hex then).
-type tupleSeg struct {
-	kind  tupleSegKind
-	attr  *pg.TupleAttr // segColumn only
-	name  string        // segHeaderField only; columns take attr.Name
-	start int
-	bytes int
-	class string
-	value string
+type Seg struct {
+	Kind  SegKind
+	Attr  *pg.TupleAttr // SegColumn only
+	Field string        // SegHeaderField only; columns take Attr.Name
+	Start int
+	Bytes int
+	Class string
+	Value string
 }
 
-// tlSort is the byte-layout overlay's own sort selector. The legend isn't a
-// screen item list, so it can't ride the shared sortMode machinery — this
-// mirrors its UX (←/→ cycle, r reverses) over the segment slice instead.
-type tlSort int
+// Name labels a segment for a legend. Structural segments get parenthesized
+// names so they read apart from real columns; a dropped column's mangled
+// catalog name is replaced wholesale.
+func (s Seg) Name() string {
+	switch s.Kind {
+	case SegHeaderField:
+		return s.Field
+	case SegNullBitmap:
+		return "(null bitmap)"
+	case SegHeaderPad, SegPad:
+		return "(pad)"
+	case SegUnaccounted:
+		return "(unaccounted)"
+	}
+	if s.Attr.Dropped {
+		return "(dropped)"
+	}
+	return s.Attr.Name
+}
+
+// SegSort is the byte-layout overlay's sort selector. The legend isn't a
+// screen item list, so it can't ride the TUI's shared sortMode machinery —
+// this mirrors its UX (←/→ cycle, r reverses) over the segment slice instead.
+type SegSort int
 
 // Declaration order is the ←/→ cycle. It matches the legend header's
 // left-to-right column order (bytes · offset · column) cyclically, rotated so
 // the zero value stays offset — the physical default openTupleLayout arms.
 const (
-	tlSortOffset tlSort = iota // physical order within the tuple (default)
-	tlSortColumn
-	tlSortBytes
-	tlSortCount // sentinel for cycling
+	SortOffset SegSort = iota // physical order within the tuple (default)
+	SortColumn
+	SortBytes
+	SortCount // sentinel for cycling
 )
 
-func (s tlSort) label() string {
+func (s SegSort) Label() string {
 	switch s {
-	case tlSortBytes:
+	case SortBytes:
 		return "bytes"
-	case tlSortColumn:
+	case SortColumn:
 		return "column"
 	default:
 		return "offset"
@@ -66,28 +90,28 @@ func (s tlSort) label() string {
 
 // defaultDesc matches the list levels' convention: sizes biggest-first,
 // everything else ascending.
-func (s tlSort) defaultDesc() bool { return s == tlSortBytes }
+func (s SegSort) DefaultDesc() bool { return s == SortBytes }
 
 // cmp is the three-way segment comparison for this sort key — on the type
 // itself so label/defaultDesc/comparison live together, like sortMode. Three-
 // way rather than a less() so descending can invert the key while equal rows
 // keep their physical order.
-func (s tlSort) cmp(a, b tupleSeg) int {
+func (s SegSort) cmp(a, b Seg) int {
 	switch s {
-	case tlSortBytes:
-		return a.bytes - b.bytes
-	case tlSortColumn:
-		return strings.Compare(tupleSegName(a), tupleSegName(b))
+	case SortBytes:
+		return a.Bytes - b.Bytes
+	case SortColumn:
+		return strings.Compare(a.Name(), b.Name())
 	default:
-		return a.start - b.start
+		return a.Start - b.Start
 	}
 }
 
-// sortedTupleSegIdx returns the legend's display order as indexes into segs.
+// SortedIdx returns the legend's display order as indexes into segs.
 // The bar always stays in physical order (it's a byte map), so sorting is a
 // projection, not a mutation. Ties keep physical order regardless of
 // direction so a reversed sort doesn't scramble equal rows.
-func sortedTupleSegIdx(segs []tupleSeg, mode tlSort, desc bool) []int {
+func SortedIdx(segs []Seg, mode SegSort, desc bool) []int {
 	order := make([]int, len(segs))
 	for i := range order {
 		order[i] = i
@@ -102,18 +126,18 @@ func sortedTupleSegIdx(segs []tupleSeg, mode tlSort, desc bool) []int {
 	return order
 }
 
-// heapTupleHeaderLen is SizeofHeapTupleHeader (offsetof t_bits) from
+// HeapTupleHeaderLen is SizeofHeapTupleHeader (offsetof t_bits) from
 // access/htup_details.h — fixed since PG 8.3.
-const heapTupleHeaderLen = 23
+const HeapTupleHeaderLen = 23
 
 // toastPointerLen is the on-disk size of a varatt_external TOAST pointer:
 // 1 B va_header + 1 B va_tag + 16 B varatt_external.
 const toastPointerLen = 18
 
-// tupleHeaderSegs breaks the fixed 23 B HeapTupleHeaderData down field by
+// headerSegs breaks the fixed 23 B HeapTupleHeaderData down field by
 // field (access/htup_details.h), each with its decoded value pulled from the
 // heap_page_items row we already hold — no byte parsing needed.
-func tupleHeaderSegs(t pg.HeapTuple) []tupleSeg {
+func headerSegs(t pg.HeapTuple) []Seg {
 	ctid, field3, hoff := "—", "—", "—"
 	if t.Ctid != nil {
 		ctid = *t.Ctid
@@ -124,21 +148,21 @@ func tupleHeaderSegs(t pg.HeapTuple) []tupleSeg {
 	if t.Hoff != nil {
 		hoff = strconv.Itoa(int(*t.Hoff))
 	}
-	return []tupleSeg{
-		{kind: segHeaderField, name: "t_xmin", start: 0, bytes: 4, class: "inserting xid", value: xidString(t.Xmin)},
-		{kind: segHeaderField, name: "t_xmax", start: 4, bytes: 4, class: "deleting/locking xid", value: xidString(t.Xmax)},
-		{kind: segHeaderField, name: "t_field3", start: 8, bytes: 4, class: "cid or xvac", value: field3},
-		{kind: segHeaderField, name: "t_ctid", start: 12, bytes: 6, class: "self / next version", value: ctid},
-		{kind: segHeaderField, name: "t_infomask2", start: 18, bytes: 2, class: "attr count + flags", value: infomask2Text(t.Infomask2)},
-		{kind: segHeaderField, name: "t_infomask", start: 20, bytes: 2, class: "flag bits", value: infomaskText(t.Infomask)},
-		{kind: segHeaderField, name: "t_hoff", start: 22, bytes: 1, class: "data starts at", value: hoff},
+	return []Seg{
+		{Kind: SegHeaderField, Field: "t_xmin", Start: 0, Bytes: 4, Class: "inserting xid", Value: XidString(t.Xmin)},
+		{Kind: SegHeaderField, Field: "t_xmax", Start: 4, Bytes: 4, Class: "deleting/locking xid", Value: XidString(t.Xmax)},
+		{Kind: SegHeaderField, Field: "t_field3", Start: 8, Bytes: 4, Class: "cid or xvac", Value: field3},
+		{Kind: SegHeaderField, Field: "t_ctid", Start: 12, Bytes: 6, Class: "self / next version", Value: ctid},
+		{Kind: SegHeaderField, Field: "t_infomask2", Start: 18, Bytes: 2, Class: "attr count + flags", Value: Infomask2Text(t.Infomask2)},
+		{Kind: SegHeaderField, Field: "t_infomask", Start: 20, Bytes: 2, Class: "flag bits", Value: InfomaskText(t.Infomask)},
+		{Kind: SegHeaderField, Field: "t_hoff", Start: 22, Bytes: 1, Class: "data starts at", Value: hoff},
 	}
 }
 
-// infomaskText renders t_infomask as hex plus the flag names that matter for
+// InfomaskText renders t_infomask as hex plus the flag names that matter for
 // reading a layout. The two xmin hint bits combine to "frozen" the same way
 // HEAP_XMIN_FROZEN does.
-func infomaskText(im int32) string {
+func InfomaskText(im int32) string {
 	var flags []string
 	switch {
 	case im&pg.HeapXminCommitted != 0 && im&pg.HeapXminInvalid != 0:
@@ -176,9 +200,9 @@ func infomaskText(im int32) string {
 	return s
 }
 
-// infomask2Text renders t_infomask2: the stored attribute count in the low
+// Infomask2Text renders t_infomask2: the stored attribute count in the low
 // bits plus the HOT flags.
-func infomask2Text(im2 int32) string {
+func Infomask2Text(im2 int32) string {
 	s := fmt.Sprintf("0x%04x · %d attrs", uint16(im2), im2&pg.HeapNattsMask2)
 	if im2&pg.HeapKeysUpdated2 != 0 {
 		s += " · keys-updated"
@@ -222,7 +246,7 @@ func classifyAttr(a pg.TupleAttr) string {
 	}
 }
 
-// computeTupleLayout reconstructs the byte layout of one NORMAL heap tuple
+// Layout reconstructs the byte layout of one NORMAL heap tuple
 // from its raw bytes plus the per-attribute split and pg_attribute metadata.
 // Padding is re-derived with the same rules heap_deform_tuple uses:
 // att_align_nominal for fixed-width types, att_align_pointer for varlena —
@@ -233,11 +257,11 @@ func classifyAttr(a pg.TupleAttr) string {
 // per-column picture can't be trusted, so the segments collapse to header +
 // one unaccounted body run and the caller should render a warning. A
 // *positive* residue (walk ended short of lp_len) keeps ok=true and surfaces
-// as an explicit trailing segUnaccounted instead.
-func computeTupleLayout(t pg.HeapTuple, attrs []pg.TupleAttr) (segs []tupleSeg, ok bool) {
+// as an explicit trailing SegUnaccounted instead.
+func Layout(t pg.HeapTuple, attrs []pg.TupleAttr) (segs []Seg, ok bool) {
 	lpLen := int(t.LPLen)
 	if t.Hoff == nil {
-		return []tupleSeg{{kind: segUnaccounted, start: 0, bytes: lpLen, class: "unaccounted"}}, false
+		return []Seg{{Kind: SegUnaccounted, Start: 0, Bytes: lpLen, Class: "unaccounted"}}, false
 	}
 	hoff := int(*t.Hoff)
 
@@ -256,8 +280,8 @@ func computeTupleLayout(t pg.HeapTuple, attrs []pg.TupleAttr) (segs []tupleSeg, 
 		}
 	}
 
-	header := tupleHeaderSegs(t)
-	at := heapTupleHeaderLen
+	header := headerSegs(t)
+	at := HeapTupleHeaderLen
 	if t.Infomask&pg.HeapHasNull != 0 {
 		bm := (natts + 7) / 8
 		bits := ""
@@ -270,19 +294,19 @@ func computeTupleLayout(t pg.HeapTuple, attrs []pg.TupleAttr) (segs []tupleSeg, 
 		if len(nullNames) > 0 {
 			bits += "  ·  null: " + strings.Join(nullNames, ", ")
 		}
-		header = append(header, tupleSeg{
-			kind: segNullBitmap, start: at, bytes: bm,
-			class: fmt.Sprintf("%d attrs, %d null", natts, len(nullNames)),
-			value: bits,
+		header = append(header, Seg{
+			Kind: SegNullBitmap, Start: at, Bytes: bm,
+			Class: fmt.Sprintf("%d attrs, %d null", natts, len(nullNames)),
+			Value: bits,
 		})
 		at += bm
 	}
 	if pad := hoff - at; pad > 0 {
-		header = append(header, tupleSeg{kind: segHeaderPad, start: at, bytes: pad, class: "align to t_hoff"})
+		header = append(header, Seg{Kind: SegHeaderPad, Start: at, Bytes: pad, Class: "align to t_hoff"})
 	} else if pad < 0 {
 		// bitmap ran past t_hoff — metadata is inconsistent, don't guess.
-		return append(tupleHeaderSegs(t), tupleSeg{
-			kind: segUnaccounted, start: heapTupleHeaderLen, bytes: lpLen - heapTupleHeaderLen, class: "unaccounted",
+		return append(headerSegs(t), Seg{
+			Kind: SegUnaccounted, Start: HeapTupleHeaderLen, Bytes: lpLen - HeapTupleHeaderLen, Class: "unaccounted",
 		}), false
 	}
 
@@ -297,10 +321,10 @@ func computeTupleLayout(t pg.HeapTuple, attrs []pg.TupleAttr) (segs []tupleSeg, 
 			// their bytes are part of the layout.
 			continue
 		case !a.Stored:
-			segs = append(segs, tupleSeg{kind: segColumn, attr: a, start: hoff + off, class: "not stored (added later)"})
+			segs = append(segs, Seg{Kind: SegColumn, Attr: a, Start: hoff + off, Class: "not stored (added later)"})
 			continue
 		case a.Value == nil:
-			segs = append(segs, tupleSeg{kind: segColumn, attr: a, start: hoff + off, class: "NULL"})
+			segs = append(segs, Seg{Kind: SegColumn, Attr: a, Start: hoff + off, Class: "NULL"})
 			continue
 		}
 
@@ -314,28 +338,36 @@ func computeTupleLayout(t pg.HeapTuple, attrs []pg.TupleAttr) (segs []tupleSeg, 
 			// alignOffset(1, x) rounds 1 up to the boundary, i.e. the
 			// boundary itself — reused for the label so the mapping isn't
 			// spelled twice.
-			segs = append(segs, tupleSeg{
-				kind: segPad, start: hoff + off, bytes: pad,
-				class: fmt.Sprintf("align %d", alignOffset(1, a.Align)),
+			segs = append(segs, Seg{
+				Kind: SegPad, Start: hoff + off, Bytes: pad,
+				Class: fmt.Sprintf("align %d", alignOffset(1, a.Align)),
 			})
 			off += pad
 		}
-		segs = append(segs, tupleSeg{
-			kind: segColumn, attr: a, start: hoff + off, bytes: len(a.Value),
-			class: classifyAttr(*a), value: decodeAttrValue(*a),
+		segs = append(segs, Seg{
+			Kind: SegColumn, Attr: a, Start: hoff + off, Bytes: len(a.Value),
+			Class: classifyAttr(*a), Value: DecodeAttrValue(*a),
 		})
 		off += len(a.Value)
 	}
 
 	switch total := hoff + off; {
 	case total > lpLen:
-		return append(header, tupleSeg{
-			kind: segUnaccounted, start: hoff, bytes: lpLen - hoff, class: "unaccounted",
+		return append(header, Seg{
+			Kind: SegUnaccounted, Start: hoff, Bytes: lpLen - hoff, Class: "unaccounted",
 		}), false
 	case total < lpLen:
-		segs = append(segs, tupleSeg{
-			kind: segUnaccounted, start: total, bytes: lpLen - total, class: "unaccounted",
+		segs = append(segs, Seg{
+			Kind: SegUnaccounted, Start: total, Bytes: lpLen - total, Class: "unaccounted",
 		})
 	}
 	return segs, true
+}
+
+// XidString renders a nullable xid, "—" when absent.
+func XidString(x *uint32) string {
+	if x == nil {
+		return "—"
+	}
+	return strconv.FormatUint(uint64(*x), 10)
 }

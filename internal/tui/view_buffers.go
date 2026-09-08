@@ -50,8 +50,8 @@ func (m *Model) renderBufferInfo(height int) string {
 	b.WriteString("  " + mu("The top 10 tables by BufferedBytes each get a distinct palette hue;") + "\n")
 	b.WriteString("  " + mu("their row bar matches the slice on the shared_buffers bar above.") + "\n")
 	b.WriteString("  " + mu("Tables ranked 11+ use the default bar colour.  ") +
-		styleBadge.Render("enter") + mu(" opens a per-table breakdown, ") +
-		styleBadge.Render("p") + mu(" its heap pages in the page inspector.") + "\n")
+		styleBadge.Render("↵") + mu(" opens a per-table breakdown, ") +
+		styleBadge.Render("p") + mu(" → its heap pages in the page inspector.") + "\n")
 
 	return padInfo(&b, height)
 }

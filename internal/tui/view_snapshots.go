@@ -43,7 +43,7 @@ func (m *Model) renderStatementSnapshots(s *screen, height int) string {
 		// the highlighted row would open rather than describing the table's state.
 		b.WriteString("  " + styleSelected.Render("pick the window's base") + mu("  ·  "+m.snapshotDir) + "\n")
 		b.WriteString("  " + m.renderSnapshotEntrySummary(s) + "\n")
-		b.WriteString("  " + styleBadge.Render("Enter") + mu(" opens the queries table with everything since the highlighted point · ") +
+		b.WriteString("  " + styleBadge.Render("↵") + mu(" opens the queries table with everything since the highlighted point · ") +
 			styleBadge.Render("D") + mu(" delete · ") + styleBadge.Render("esc") + mu(" back") + "\n")
 		// Point at where new rows come from: the list only grows through S in the
 		// table, and a first-time user sees this picker before ever seeing that key.
@@ -53,7 +53,7 @@ func (m *Model) renderStatementSnapshots(s *screen, height int) string {
 	} else {
 		b.WriteString("  " + styleSelected.Render("query snapshots") + mu("  ·  "+m.snapshotDir) + "\n")
 		b.WriteString("  " + m.renderSnapshotWindowSummary(st) + "\n")
-		b.WriteString("  " + mu("Enter picks an endpoint (older=start, newer=end) · ") +
+		b.WriteString("  " + mu("↵ picks an endpoint (older=start, newer=end) · ") +
 			styleBadge.Render("D") + mu(" delete · ") + styleBadge.Render("esc") + mu(" back") + "\n\n")
 	}
 	used += 5

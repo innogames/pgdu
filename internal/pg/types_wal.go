@@ -9,10 +9,12 @@ import (
 // WALSummary is the header snapshot for the WAL inspector overview: the
 // current write position, the segment file it lands in, wal_level, the
 // pg_wal directory's file count and size, and the cluster-wide pg_stat_wal
-// generation counters. StartLSN/EndLSN/WindowBytes describe the LSN window
-// the rmgr breakdown below was computed over. All built-in sources, so it
-// renders even without pg_walinspect — but a privilege error on pg_ls_waldir
-// / pg_stat_wal is treated as non-fatal by the caller (summary "unavailable").
+// generation counters. All built-in sources, so it renders even without
+// pg_walinspect — but a privilege error on pg_ls_waldir / pg_stat_wal is
+// treated as non-fatal by the caller (summary "unavailable"). The analysed
+// LSN window is deliberately not part of it: the summary and the rmgr
+// breakdown load independently, so the window lives on the screen state and
+// the header reads it from there.
 type WALSummary struct {
 	InsertLSN    string
 	FlushLSN     string
@@ -27,11 +29,6 @@ type WALSummary struct {
 	// to flush WAL because wal_buffers was full. Persistent growth means
 	// wal_buffers is too small.
 	StatBuffersFull int64
-
-	// Window the rmgr stats were computed over (resolved by sqlWALWindow).
-	StartLSN    string
-	EndLSN      string
-	WindowBytes int64
 }
 
 // WALCheckpointInfo is the checkpoint context shown in the WAL header: how much

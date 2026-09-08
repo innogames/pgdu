@@ -1,4 +1,4 @@
-package tui
+package pageinspect
 
 import (
 	"testing"
@@ -38,21 +38,21 @@ func buildTuple(hoff int, infomask, infomask2 int32, data []byte, residue int) p
 }
 
 // sumBytes checks the Σ invariant the overlay's footer line relies on.
-func sumBytes(segs []tupleSeg) int {
+func sumBytes(segs []Seg) int {
 	n := 0
 	for _, s := range segs {
-		n += s.bytes
+		n += s.Bytes
 	}
 	return n
 }
 
-// headerFieldBytes are the seven fixed-header field sizes computeTupleLayout
+// headerFieldBytes are the seven fixed-header field sizes Layout
 // always emits first (t_xmin … t_hoff), totalling 23 B.
 var headerFieldBytes = []int{4, 4, 4, 6, 2, 2, 1}
 
 // assertHeaderFields checks the leading header-field segments and returns the
 // remaining (bitmap/pad/column) tail for the test to inspect.
-func assertHeaderFields(t *testing.T, segs []tupleSeg) []tupleSeg {
+func assertHeaderFields(t *testing.T, segs []Seg) []Seg {
 	t.Helper()
 	if len(segs) < len(headerFieldBytes) {
 		t.Fatalf("got %d segments, want at least %d header fields: %+v", len(segs), len(headerFieldBytes), segs)
@@ -60,8 +60,8 @@ func assertHeaderFields(t *testing.T, segs []tupleSeg) []tupleSeg {
 	start := 0
 	for i, w := range headerFieldBytes {
 		s := segs[i]
-		if s.kind != segHeaderField || s.start != start || s.bytes != w {
-			t.Fatalf("header field %d = {kind:%d start:%d bytes:%d}, want start %d bytes %d", i, s.kind, s.start, s.bytes, start, w)
+		if s.Kind != SegHeaderField || s.Start != start || s.Bytes != w {
+			t.Fatalf("header field %d = {Kind:%d Start:%d Bytes:%d}, want start %d bytes %d", i, s.Kind, s.Start, s.Bytes, start, w)
 		}
 		start += w
 	}
@@ -75,29 +75,29 @@ func TestComputeTupleLayoutFixedColumns(t *testing.T) {
 	tup := buildTuple(24, 0, 2, data, 0)
 	attrs := []pg.TupleAttr{fixedAttr("a", 2, "s"), fixedAttr("b", 8, "d")}
 
-	segs, ok := computeTupleLayout(tup, attrs)
+	segs, ok := Layout(tup, attrs)
 	if !ok {
 		t.Fatal("expected trustworthy layout")
 	}
 	rest := assertHeaderFields(t, segs)
 	want := []struct {
-		kind  tupleSegKind
-		start int
-		bytes int
-		class string
+		Kind  SegKind
+		Start int
+		Bytes int
+		Class string
 	}{
-		{segHeaderPad, 23, 1, "align to t_hoff"},
-		{segColumn, 24, 2, "fixed 2 B"},
-		{segPad, 26, 6, "align 8"},
-		{segColumn, 32, 8, "fixed 8 B"},
+		{SegHeaderPad, 23, 1, "align to t_hoff"},
+		{SegColumn, 24, 2, "fixed 2 B"},
+		{SegPad, 26, 6, "align 8"},
+		{SegColumn, 32, 8, "fixed 8 B"},
 	}
 	if len(rest) != len(want) {
 		t.Fatalf("got %d body segments, want %d: %+v", len(rest), len(want), rest)
 	}
 	for i, w := range want {
 		s := rest[i]
-		if s.kind != w.kind || s.start != w.start || s.bytes != w.bytes || s.class != w.class {
-			t.Errorf("seg %d = {kind:%d start:%d bytes:%d class:%q}, want %+v", i, s.kind, s.start, s.bytes, s.class, w)
+		if s.Kind != w.Kind || s.Start != w.Start || s.Bytes != w.Bytes || s.Class != w.Class {
+			t.Errorf("seg %d = {Kind:%d Start:%d Bytes:%d Class:%q}, want %+v", i, s.Kind, s.Start, s.Bytes, s.Class, w)
 		}
 	}
 	if got := sumBytes(segs); got != int(tup.LPLen) {
@@ -113,21 +113,21 @@ func TestComputeTupleLayoutShortVarlenaUnaligned(t *testing.T) {
 	tup := buildTuple(24, 0, 2, data, 0)
 	attrs := []pg.TupleAttr{fixedAttr("a", 2, "s"), varAttr("v", short)}
 
-	segs, ok := computeTupleLayout(tup, attrs)
+	segs, ok := Layout(tup, attrs)
 	if !ok {
 		t.Fatal("expected trustworthy layout")
 	}
 	rest := assertHeaderFields(t, segs)
-	// headerPad, a, v — crucially no segPad before v.
+	// headerPad, a, v — crucially no SegPad before v.
 	if len(rest) != 3 {
 		t.Fatalf("got %d body segments, want 3: %+v", len(rest), rest)
 	}
 	v := rest[2]
-	if v.kind != segColumn || v.start != 26 || v.bytes != 4 || v.class != "varlena 1B-hdr" {
+	if v.Kind != SegColumn || v.Start != 26 || v.Bytes != 4 || v.Class != "varlena 1B-hdr" {
 		t.Errorf("varlena seg = %+v", v)
 	}
-	if v.value != "abc" {
-		t.Errorf("decoded value = %q, want \"abc\"", v.value)
+	if v.Value != "abc" {
+		t.Errorf("decoded value = %q, want \"abc\"", v.Value)
 	}
 }
 
@@ -139,7 +139,7 @@ func TestComputeTupleLayoutLongVarlenaAligned(t *testing.T) {
 	tup := buildTuple(24, 0, 2, data, 0)
 	attrs := []pg.TupleAttr{fixedAttr("a", 2, "s"), varAttr("v", long)}
 
-	segs, ok := computeTupleLayout(tup, attrs)
+	segs, ok := Layout(tup, attrs)
 	if !ok {
 		t.Fatal("expected trustworthy layout")
 	}
@@ -147,10 +147,10 @@ func TestComputeTupleLayoutLongVarlenaAligned(t *testing.T) {
 	if len(rest) != 4 {
 		t.Fatalf("got %d body segments, want 4: %+v", len(rest), rest)
 	}
-	if p := rest[2]; p.kind != segPad || p.start != 26 || p.bytes != 2 || p.class != "align 4" {
+	if p := rest[2]; p.Kind != SegPad || p.Start != 26 || p.Bytes != 2 || p.Class != "align 4" {
 		t.Errorf("pad seg = %+v", p)
 	}
-	if v := rest[3]; v.kind != segColumn || v.start != 28 || v.bytes != len(long) || v.class != "varlena 4B-hdr" {
+	if v := rest[3]; v.Kind != SegColumn || v.Start != 28 || v.Bytes != len(long) || v.Class != "varlena 4B-hdr" {
 		t.Errorf("varlena seg = %+v", v)
 	}
 }
@@ -163,7 +163,7 @@ func TestComputeTupleLayoutNullBitmapAndNulls(t *testing.T) {
 	null := pg.TupleAttr{Name: "n", TypeName: "int4", Len: 4, Align: "i", Stored: true}
 	attrs := []pg.TupleAttr{fixedAttr("a", 4, "i"), null, fixedAttr("b", 4, "i")}
 
-	segs, ok := computeTupleLayout(tup, attrs)
+	segs, ok := Layout(tup, attrs)
 	if !ok {
 		t.Fatal("expected trustworthy layout")
 	}
@@ -172,13 +172,13 @@ func TestComputeTupleLayoutNullBitmapAndNulls(t *testing.T) {
 	if len(rest) != 4 {
 		t.Fatalf("got %d body segments, want 4: %+v", len(rest), rest)
 	}
-	if bm := rest[0]; bm.kind != segNullBitmap || bm.start != 23 || bm.bytes != 1 || bm.class != "3 attrs, 1 null" {
+	if bm := rest[0]; bm.Kind != SegNullBitmap || bm.Start != 23 || bm.Bytes != 1 || bm.Class != "3 attrs, 1 null" {
 		t.Errorf("bitmap seg = %+v", bm)
 	}
-	if n := rest[2]; n.kind != segColumn || n.bytes != 0 || n.class != "NULL" {
+	if n := rest[2]; n.Kind != SegColumn || n.Bytes != 0 || n.Class != "NULL" {
 		t.Errorf("null seg = %+v", n)
 	}
-	if b := rest[3]; b.start != 28 || b.bytes != 4 {
+	if b := rest[3]; b.Start != 28 || b.Bytes != 4 {
 		t.Errorf("post-null seg = %+v", b)
 	}
 }
@@ -190,12 +190,12 @@ func TestComputeTupleLayoutNotStoredTrailingAttr(t *testing.T) {
 	added := pg.TupleAttr{Name: "later", TypeName: "int8", Len: 8, Align: "d", Stored: false}
 	attrs := []pg.TupleAttr{fixedAttr("a", 4, "i"), added}
 
-	segs, ok := computeTupleLayout(tup, attrs)
+	segs, ok := Layout(tup, attrs)
 	if !ok {
 		t.Fatal("expected trustworthy layout")
 	}
 	last := segs[len(segs)-1]
-	if last.kind != segColumn || last.bytes != 0 || last.class != "not stored (added later)" {
+	if last.Kind != SegColumn || last.Bytes != 0 || last.Class != "not stored (added later)" {
 		t.Errorf("not-stored seg = %+v", last)
 	}
 }
@@ -208,12 +208,12 @@ func TestComputeTupleLayoutToastPointer(t *testing.T) {
 	tup := buildTuple(24, pg.HeapHasExternal, 2, data, 0)
 	attrs := []pg.TupleAttr{fixedAttr("a", 4, "i"), varAttr("big", ptr)}
 
-	segs, ok := computeTupleLayout(tup, attrs)
+	segs, ok := Layout(tup, attrs)
 	if !ok {
 		t.Fatal("expected trustworthy layout")
 	}
 	last := segs[len(segs)-1]
-	if last.class != "TOAST pointer" || last.bytes != 18 {
+	if last.Class != "TOAST pointer" || last.Bytes != 18 {
 		t.Errorf("toast seg = %+v", last)
 	}
 }
@@ -224,12 +224,12 @@ func TestComputeTupleLayoutResidueAndOverrun(t *testing.T) {
 
 	// 5 B the walk can't explain → explicit unaccounted tail, still ok.
 	tup := buildTuple(24, 0, 1, data, 5)
-	segs, ok := computeTupleLayout(tup, attrs)
+	segs, ok := Layout(tup, attrs)
 	if !ok {
 		t.Fatal("residue should stay trustworthy")
 	}
 	last := segs[len(segs)-1]
-	if last.kind != segUnaccounted || last.start != 28 || last.bytes != 5 {
+	if last.Kind != SegUnaccounted || last.Start != 28 || last.Bytes != 5 {
 		t.Errorf("residue seg = %+v", last)
 	}
 	if got := sumBytes(segs); got != int(tup.LPLen) {
@@ -239,20 +239,20 @@ func TestComputeTupleLayoutResidueAndOverrun(t *testing.T) {
 	// Walk overruns lp_len → fallback: per-column picture dropped.
 	tup = buildTuple(24, 0, 1, data, 0)
 	tup.LPLen = 26
-	segs, ok = computeTupleLayout(tup, attrs)
+	segs, ok = Layout(tup, attrs)
 	if ok {
 		t.Fatal("overrun must not be trustworthy")
 	}
 	last = segs[len(segs)-1]
-	if last.kind != segUnaccounted {
+	if last.Kind != SegUnaccounted {
 		t.Errorf("fallback tail = %+v", last)
 	}
 
 	// Missing t_hoff → single unaccounted run.
 	tup = buildTuple(24, 0, 1, data, 0)
 	tup.Hoff = nil
-	segs, ok = computeTupleLayout(tup, attrs)
-	if ok || len(segs) != 1 || segs[0].kind != segUnaccounted || segs[0].bytes != int(tup.LPLen) {
+	segs, ok = Layout(tup, attrs)
+	if ok || len(segs) != 1 || segs[0].Kind != SegUnaccounted || segs[0].Bytes != int(tup.LPLen) {
 		t.Errorf("nil hoff fallback = ok:%v %+v", ok, segs)
 	}
 }
@@ -265,12 +265,12 @@ func TestComputeTupleLayoutDroppedWithoutBytesHidden(t *testing.T) {
 	dropped := pg.TupleAttr{Name: "........pg.dropped.2........", Dropped: true, Len: -1, Align: "i", Stored: true}
 	attrs := []pg.TupleAttr{fixedAttr("a", 4, "i"), dropped}
 
-	segs, ok := computeTupleLayout(tup, attrs)
+	segs, ok := Layout(tup, attrs)
 	if !ok {
 		t.Fatal("expected trustworthy layout")
 	}
 	for _, sg := range segs {
-		if sg.kind == segColumn && sg.attr.Dropped {
+		if sg.Kind == SegColumn && sg.Attr.Dropped {
 			t.Errorf("dropped 0 B column should be hidden: %+v", sg)
 		}
 	}
@@ -280,21 +280,21 @@ func TestComputeTupleLayoutDroppedWithoutBytesHidden(t *testing.T) {
 }
 
 func TestSortedTupleSegIdx(t *testing.T) {
-	segs := []tupleSeg{
-		{kind: segColumn, attr: &pg.TupleAttr{Name: "b"}, start: 0, bytes: 8},
-		{kind: segColumn, attr: &pg.TupleAttr{Name: "a"}, start: 8, bytes: 2},
-		{kind: segColumn, attr: &pg.TupleAttr{Name: "c"}, start: 10, bytes: 8},
+	segs := []Seg{
+		{Kind: SegColumn, Attr: &pg.TupleAttr{Name: "b"}, Start: 0, Bytes: 8},
+		{Kind: SegColumn, Attr: &pg.TupleAttr{Name: "a"}, Start: 8, Bytes: 2},
+		{Kind: SegColumn, Attr: &pg.TupleAttr{Name: "c"}, Start: 10, Bytes: 8},
 	}
 
-	if got := sortedTupleSegIdx(segs, tlSortOffset, false); got[0] != 0 || got[1] != 1 || got[2] != 2 {
+	if got := SortedIdx(segs, SortOffset, false); got[0] != 0 || got[1] != 1 || got[2] != 2 {
 		t.Errorf("offset asc = %v, want [0 1 2]", got)
 	}
-	if got := sortedTupleSegIdx(segs, tlSortColumn, false); got[0] != 1 || got[1] != 0 || got[2] != 2 {
+	if got := SortedIdx(segs, SortColumn, false); got[0] != 1 || got[1] != 0 || got[2] != 2 {
 		t.Errorf("column asc = %v, want [1 0 2]", got)
 	}
 	// bytes desc: the two 8 B segments tie — physical order must survive the
 	// reversed direction.
-	if got := sortedTupleSegIdx(segs, tlSortBytes, true); got[0] != 0 || got[1] != 2 || got[2] != 1 {
+	if got := SortedIdx(segs, SortBytes, true); got[0] != 0 || got[1] != 2 || got[2] != 1 {
 		t.Errorf("bytes desc = %v, want [0 2 1]", got)
 	}
 }

@@ -150,7 +150,7 @@ func (m *Model) renderPartsTotals(s *screen) string {
 		breakdown = append(breakdown, "toast "+humanize.Bytes(toast))
 	}
 	// Cursor slot + blank bar area, then the same column layout as the rows
-	// (size, bloat bytes, bloat %, blank type column, childMark slot).
+	// (size, bloat bytes, bloat %, blank type column, drillMark slot).
 	line := "  " + strings.Repeat(" ", m.barWidth(s)+2) + "  " +
 		padRight(humanize.Bytes(total), 10) + "  " +
 		bloatCols +

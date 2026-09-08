@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -142,15 +143,24 @@ func (m *Model) onToastValueLoaded(msg toastValueLoadedMsg) tea.Cmd {
 
 func (m *Model) onHeapTuplesLoaded(msg heapTuplesLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelHeapTuples)
-	if s == nil || s.table.OID != msg.tableOID || s.pages.heapPageBlkno != msg.blkno {
+	// A pick toggled again while this load ran makes it stale: the newer load
+	// is on its way with the current pick.
+	if s == nil || s.table.OID != msg.tableOID || s.pages.heapPageBlkno != msg.blkno || !slices.Equal(msg.pick, s.pages.tuplePick) {
 		return nil
 	}
 	if cmd, stop := settleLoad(s, msg.err, extPromptReasonPageInspect); stop {
 		return cmd
 	}
-	s.pages.tuplePKCols = msg.pkCols
+	s.pages.tuplePKCols = msg.page.PKCols
+	s.pages.tupleCols = msg.page.Columns
+	s.pages.tupleShown = msg.page.Shown
+	if s.pages.tupleCols != nil {
+		// Materialise the server-resolved pick (default → the PK names, unknown
+		// names gone) so the picker's checkboxes show what is on screen.
+		s.pages.tuplePick = msg.page.ShownNames()
+	}
 	s.items = s.items[:0]
-	for _, t := range msg.tuples {
+	for _, t := range msg.page.Tuples {
 		s.items = append(s.items, heapTupleToItem(t))
 	}
 	m.applySort(s)
@@ -288,6 +298,20 @@ func (m *Model) rebuildIndexTupleItems(s *screen) {
 		}
 		for i, mem := range t.Posting {
 			s.items = append(s.items, postingMemberToItem(t, i+1, mem))
+		}
+	}
+	// On an internal page every entry is a downlink Enter descends, except the
+	// high key at offset 1 (drillIndexTuple's gate). indexTupleToItem can't see
+	// the page role — it flags by heap projection, which downlinks never have —
+	// so the drill indicator is fixed up here where the role is known.
+	if s.pages.indexPageType == "i" {
+		highKey := internalHighKey(s.items, "i", s.pages.indexKeyCols)
+		for i := range s.items {
+			t, ok := s.items[i].data.(pg.IndexTuple)
+			if !ok {
+				continue
+			}
+			s.items[i].hasChildren = !highKey || t.ItemOffset != 1
 		}
 	}
 	m.applySort(s)

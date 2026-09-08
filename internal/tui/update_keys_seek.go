@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
 )
 
@@ -146,7 +147,7 @@ func seekTargets(s *screen) []seekTarget {
 		if !ok {
 			continue
 		}
-		leading, hasKey := leadingKeyValue(t, cols)
+		leading, hasKey := pageinspect.LeadingKeyValue(t, cols)
 		if t.ItemOffset == 1 && hasKey && classifyIndexTuple(t, pageType) == idxTuplePivot {
 			continue // page high key — the page's own upper bound, not a child range
 		}
@@ -188,7 +189,7 @@ func seekToKey(s *screen) {
 			chosen = i // minus-infinity child: covers everything below the first key
 			continue
 		}
-		if keyValueLess(q, e.leading) {
+		if pageinspect.KeyValueLess(q, e.leading) {
 			break // e is past the query — the previous target covers it
 		}
 		chosen = i

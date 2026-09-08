@@ -63,6 +63,66 @@ type HeapTuple struct {
 	// snapshot lives at this ctid — a dead, aborted or not-yet-committed tuple
 	// still occupies the page but has no key you could look up.
 	PK *string
+
+	// Vals and Raws carry the shown table columns (HeapPageTuples.Shown, same
+	// order) in two provenances. Vals is the text of each column as the visible
+	// row projects it through the session's snapshot: a nil slice means no
+	// visible row lives at this ctid, a nil element a SQL NULL. Raws is the
+	// column's on-page bytes from heap_page_item_attrs, present for every
+	// NORMAL line pointer whatever its visibility — the only way to read a
+	// dead or aborted version — with a nil element for NULL / not stored.
+	// Both are nil when the query fell back to the plain line-pointer list.
+	Vals []*string
+	Raws [][]byte
+}
+
+// HeapColumn is one live (non-dropped) column of a heap relation, the unit the
+// tuple list's column picker offers. Len/Align/TypName/TypCategory are the
+// same pg_attribute/pg_type facts TupleAttr carries, so the picked column's
+// on-page bytes decode through the same byte→value path (see Attr).
+type HeapColumn struct {
+	Attnum      int32
+	Name        string
+	TypeName    string // format_type output
+	Len         int32  // attlen: >0 fixed, -1 varlena, -2 cstring
+	Align       string // attalign: "c"/"s"/"i"/"d"
+	TypName     string
+	TypCategory string
+	PK          bool // part of the primary key
+}
+
+// Attr pairs the column's metadata with one tuple's raw bytes for it, in the
+// shape the pageinspect decoder consumes. Enum labels are not resolved on
+// this path (the visible-row text carries them); a raw enum decodes to its
+// pg_enum OID.
+func (c HeapColumn) Attr(raw []byte) TupleAttr {
+	return TupleAttr{
+		Attnum: c.Attnum, Name: c.Name, TypeName: c.TypeName,
+		Len: c.Len, Align: c.Align, Stored: true,
+		TypName: c.TypName, TypCategory: c.TypCategory,
+		Value: raw,
+	}
+}
+
+// HeapPageTuples is one heap page's line-pointer list plus the column context
+// the tuples' Vals/Raws were projected with. Columns is every live column of
+// the relation in attnum order (nil for TOAST relations and when the catalog
+// lookup failed); Shown indexes Columns for the picked set, in Columns order;
+// PKCols names the primary key in key order (nil when there is none).
+type HeapPageTuples struct {
+	Tuples  []HeapTuple
+	Columns []HeapColumn
+	Shown   []int
+	PKCols  []string
+}
+
+// ShownNames returns the picked columns' names, Columns order.
+func (p HeapPageTuples) ShownNames() []string {
+	names := make([]string, 0, len(p.Shown))
+	for _, i := range p.Shown {
+		names = append(names, p.Columns[i].Name)
+	}
+	return names
 }
 
 // Line-pointer flag values from src/include/storage/itemid.h.

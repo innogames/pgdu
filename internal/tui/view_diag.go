@@ -204,11 +204,11 @@ func (m *Model) renderDiagnosticInfo(s *screen, height int) string {
 			kb("←/→", "sort column") + mu("  ·  ") + kb("r", "reverse") + "\n")
 		b.WriteString("    " + kb("/", "filter rows") + mu("  ·  ") + kb("e", "export csv"))
 		if d.Fix != nil {
-			b.WriteString(mu("  ·  ") + kb("enter", "suggested fix (↵ again + y runs it)"))
+			b.WriteString(mu("  ·  ") + kb("↵", "suggested fix (↵ again + y runs it)"))
 		}
 		b.WriteString("\n")
 	} else {
-		b.WriteString("    " + kb("enter", "run") + mu("  ·  ") + kb("s", "preview SQL") + mu("  ·  ") +
+		b.WriteString("    " + kb("↵", "run") + mu("  ·  ") + kb("s", "preview SQL") + mu("  ·  ") +
 			kb("f", "cycle category") + mu("  ·  ") + kb("/", "filter") + "\n")
 	}
 
@@ -407,7 +407,8 @@ func (m *Model) renderDescribe(s *screen, height int) string {
 		}
 		b.WriteString("\n    " + mu("press ") + styleBadge.Render("d") + mu(hint))
 		if describeHasHeap(s) {
-			b.WriteString(mu("  ·  ") + styleBadge.Render("p") + mu(" inspect heap pages"))
+			b.WriteString(mu("  ·  ") + styleBadge.Render("p") + mu(" → heap pages") +
+				mu("  ·  ") + styleBadge.Render("t") + mu(" → top queries touching this table"))
 		}
 		b.WriteString(mu("  ·  ") + styleBadge.Render("?") + mu(" what the numbers mean") + "\n")
 
@@ -908,7 +909,7 @@ func (m *Model) renderDiagnosticList(s *screen, height int) string {
 		if it.detail != "" {
 			detail = "  " + styleMuted.Render(it.detail)
 		}
-		b.WriteString(cursor + badge + "  " + name + "  " + fix + detail + "\n")
+		b.WriteString(cursor + drillMark(it.hasChildren) + badge + "  " + name + "  " + fix + detail + "\n")
 	}
 	for i := end - s.offset; i < rowsH; i++ {
 		b.WriteString("\n")
@@ -1068,6 +1069,14 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 	nCols := len(cols)
 	barCol := s.diagBarCol
 
+	// The drill indicator gets a slot right after the cursor only when some row
+	// would paint it; leaf tables (diagnostic and query results, pgbouncer SHOW)
+	// keep the two cells for their columns.
+	markW := 0
+	if anyDrillable(s.items) {
+		markW = colMark
+	}
+
 	// Determine bar column type up front — needed in the colW computation below.
 	barKind := pg.DiagText
 	if barCol >= 0 && barCol < nCols {
@@ -1090,7 +1099,7 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 	// every truncated column (left to right), not just the last one, so a short
 	// trailing column doesn't strand the space a wide middle column needs.
 	if barCol < 0 && nCols > 0 {
-		used := 2 // cursor
+		used := colCursor + markW
 		for _, w := range colW {
 			used += w + colGutter
 		}
@@ -1120,7 +1129,7 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 	// Reserve: 2 (cursor) + sum(colW + 2 gutter) for all cols + 2 (bar brackets) for bar col.
 	// The bar col contributes both barW+brackets and colW[barCol]+gutter, but we
 	// solve for barW so we subtract colW[barCol]+gutter separately.
-	fixedW := 2 // cursor
+	fixedW := colCursor + markW
 	for i, w := range colW {
 		fixedW += w + colGutter
 		if i == barCol {
@@ -1170,7 +1179,7 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 	}
 
 	var hdr strings.Builder
-	hdr.WriteString(strings.Repeat(" ", 2)) // cursor placeholder
+	hdr.WriteString(strings.Repeat(" ", colCursor+markW)) // cursor + drill-mark placeholder
 	for i, c := range cols {
 		if i == barCol {
 			// Bar area: [barW chars] + gutter + number column (colW[i]).
@@ -1202,13 +1211,11 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 		row, ok := it.data.([]pg.DiagCell)
 		selected := vi == s.cursor
 
-		cursor := "  "
-		if selected {
-			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▶ ")
-		}
-
 		var line strings.Builder
-		line.WriteString(cursor)
+		line.WriteString(selectedCursor(selected))
+		if markW > 0 {
+			line.WriteString(drillMark(it.hasChildren))
+		}
 
 		if !ok {
 			line.WriteString("\n")
@@ -1358,7 +1365,7 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 	// total is each column's max — grading would paint it solid red).
 	if s.diagTotalRow != nil {
 		var line strings.Builder
-		line.WriteString("  ") // cursor placeholder, no ▶
+		line.WriteString(strings.Repeat(" ", colCursor+markW)) // cursor + mark placeholder, no ▶
 		for i := range nCols {
 			var cell pg.DiagCell
 			if i < len(s.diagTotalRow) {

@@ -9,7 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"pgdu/internal/diagres"
 	"pgdu/internal/humanize"
+	"pgdu/internal/pgbouncer"
 )
 
 // Severity grades one triage check: green / yellow / red.
@@ -673,20 +675,20 @@ func (c *Client) triagePgBouncer(ctx context.Context) (Severity, string, error) 
 	if len(insts) == 0 {
 		return SevOK, "no pgbouncer instance found", nil
 	}
-	probes := make([]PgBouncerProbe, len(insts))
+	probes := make([]pgbouncer.Probe, len(insts))
 	var wg sync.WaitGroup
 	for i := range insts {
 		wg.Go(func() {
-			pctx, cancel := context.WithTimeout(ctx, pgbDialTimeout)
+			pctx, cancel := context.WithTimeout(ctx, pgbouncer.DialTimeout)
 			defer cancel()
-			probes[i] = c.PgBouncerProbe(pctx, insts[i])
+			probes[i] = c.PgBouncer.Probe(pctx, insts[i])
 		})
 	}
 	wg.Wait()
 	return worstPgBouncerProbe(insts, probes)
 }
 
-func worstPgBouncerProbe(insts []PgBouncerInstance, probes []PgBouncerProbe) (Severity, string, error) {
+func worstPgBouncerProbe(insts []pgbouncer.Instance, probes []pgbouncer.Probe) (Severity, string, error) {
 	sev := SevOK
 	detail := ""
 	reachable := 0
@@ -696,7 +698,7 @@ func worstPgBouncerProbe(insts []PgBouncerInstance, probes []PgBouncerProbe) (Se
 			if firstErr == nil {
 				firstErr = pr.Err
 				if pr.AuthErr {
-					firstErr = fmt.Errorf("%w — %s", pr.Err, PgBouncerAuthHint(insts[i], pr.User))
+					firstErr = fmt.Errorf("%w — %s", pr.Err, pgbouncer.AuthHint(insts[i], pr.User))
 				}
 			}
 			continue
@@ -1221,18 +1223,11 @@ func (c *Client) runTriageDiag(ctx context.Context, db, key string) (*DiagResult
 }
 
 // diagColIdx finds a column by name, -1 when absent.
-func diagColIdx(res *DiagResult, name string) int {
-	return colIndex(res.Columns, name)
-}
+func diagColIdx(res *DiagResult, name string) int { return res.ColIdx(name) }
 
 // diagNum reads the numeric value of row[idx], false when the column is
 // missing or the cell carries no number (NULL, text).
-func diagNum(row []DiagCell, idx int) (float64, bool) {
-	if idx < 0 || idx >= len(row) || !row[idx].HasNum {
-		return 0, false
-	}
-	return row[idx].Num, true
-}
+func diagNum(row []DiagCell, idx int) (float64, bool) { return diagres.Num(row, idx) }
 
 // diagSum totals a named column over every row; cells without a number
 // (missing column, NULL, text) contribute nothing.

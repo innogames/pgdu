@@ -34,6 +34,7 @@ func (m *Model) buildStatementItems(rows []pg.QueryStat, trackPlanning bool) ([]
 		items = append(items, item{
 			name:        flattenQuery(q.Query),
 			data:        cellsFor(descs, q, ctx),
+			hasChildren: true, // Enter → query detail
 			statQueryID: q.QueryID,
 		})
 	}
@@ -126,7 +127,7 @@ func (m *Model) renderStatementsHeader(s *screen) string {
 		line = "  " + styleHeader.Render(" queries ") + "  " +
 			styleSelected.Render(s.stat.baselineAt.Format("15:04:05")) + mu(" → ") +
 			styleSelected.Render(s.stat.sampledAt.Format("15:04:05")) +
-			mu(fmt.Sprintf("  ·  snapshot diff (frozen)  ·  %d queries  ·  R for live · Enter for detail", len(s.stat.rows)))
+			mu(fmt.Sprintf("  ·  snapshot diff (frozen)  ·  %d queries  ·  R for live · ↵ for detail", len(s.stat.rows)))
 	case s.stat.baseSnap != nil:
 		// Disk baseline, live end: the window runs from the snapshot's capture time
 		// up to the latest live sample.
@@ -134,14 +135,14 @@ func (m *Model) renderStatementsHeader(s *screen) string {
 		line = "  " + styleHeader.Render(" queries ") + "  " +
 			mu("over the last ") + styleSelected.Render(fmtDuration(elapsed)) +
 			mu(" (since "+s.stat.baselineAt.Format("2006-01-02 15:04:05")+" snapshot) · live") +
-			mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t cadence · C columns · R for live · Enter for detail",
+			mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t cadence · C columns · R for live · ↵ for detail",
 				len(s.stat.rows), m.refreshLabel()))
 	default:
 		elapsed := max(s.stat.sampledAt.Sub(s.stat.baselineAt), 0)
 		line = "  " + styleHeader.Render(" queries ") + "  " +
 			mu("over the last ") + styleSelected.Render(fmtDuration(elapsed)) +
 			mu(" (since "+s.stat.baselineAt.Format("15:04:05")+")") +
-			mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t cadence · C columns · R resets · S saves · L loads · Enter for detail",
+			mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t cadence · C columns · R resets · S saves · L loads · ↵ for detail",
 				len(s.stat.rows), m.refreshLabel()))
 	}
 	if !s.stat.trackPlanning {
@@ -236,9 +237,9 @@ func (m *Model) renderStatementsInfo(height int) string {
 	b.WriteString("    " + mu("size explorer — esc returns here. Nothing happens when the statement has no resolvable table.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" detail ") + "  " +
-		mu("press ") + styleBadge.Render("Enter") + mu(" on a row") + "\n")
+		mu("press ") + styleBadge.Render("↵") + mu(" on a row") + "\n")
 	b.WriteString("    " + mu("Shows the full text, the same metrics, a ‘sample call’ and its EXPLAIN, run automatically.") + "\n")
-	b.WriteString("    " + mu("For read-only SELECTs, ") + styleBadge.Render("Enter") +
+	b.WriteString("    " + mu("For read-only SELECTs, ") + styleBadge.Render("↵") +
 		mu(" runs EXPLAIN (ANALYZE, VERBOSE, BUFFERS) and ") + styleBadge.Render("E") +
 		mu(" executes the query and shows the result rows — both execute the query.") + "\n\n")
 
@@ -251,7 +252,7 @@ func (m *Model) renderStatementsInfo(height int) string {
 	b.WriteString("    " + mu("pg_qualstats.track_constants=on) and pgdu uses the real values it captured: the sample call") + "\n")
 	b.WriteString("    " + mu("becomes a real example and EXPLAIN sees real data. Press ") + styleBadge.Render("p") +
 		mu(" in the detail view to browse all") + "\n")
-	b.WriteString("    " + mu("captured values by frequency (the value pattern); ") + styleBadge.Render("Enter") +
+	b.WriteString("    " + mu("captured values by frequency (the value pattern); ") + styleBadge.Render("↵") +
 		mu(" there EXPLAIN-ANALYZEs the highlighted one.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" snapshots ") + "  " +
@@ -261,8 +262,8 @@ func (m *Model) renderStatementsInfo(height int) string {
 	b.WriteString("    " + mu("by default; --snapshot-dir to change). Press ") + styleBadge.Render("L") +
 		mu(" to browse saved snapshots — a timeline range picker") + "\n")
 	b.WriteString("    " + mu("whose ") + styleSelected.Render("◀ start") + mu(" / ") + styleSelected.Render("◀ end") +
-		mu(" markers show the applied window (session start → now by default). ") + styleBadge.Render("Enter") + "\n")
-	b.WriteString("    " + mu("picks an endpoint: the first pick spans ‘pick → now’ (live); with a start applied, Enter on") + "\n")
+		mu(" markers show the applied window (session start → now by default). ") + styleBadge.Render("↵") + "\n")
+	b.WriteString("    " + mu("picks an endpoint: the first pick spans ‘pick → now’ (live); with a start applied, ↵ on") + "\n")
 	b.WriteString("    " + mu("another row spans the range between the two, frozen — no re-sampling — unless an endpoint") + "\n")
 	b.WriteString("    " + mu("is ‘now’. ") + styleBadge.Render("D") + mu(" deletes a file.") + "\n")
 	b.WriteString("    " + mu("Press ") + styleBadge.Render("R") +
@@ -272,7 +273,7 @@ func (m *Model) renderStatementsInfo(height int) string {
 		styleSelected.Render("now") + mu(" (live), ") + styleSelected.Render("session start") + "\n")
 	b.WriteString("    " + mu("(the window from when you opened the tool) and ") + styleSelected.Render("since last reset") +
 		mu(" (everything since the server's last reset).") + "\n")
-	b.WriteString("    " + mu("The same browser greets you when the tool opens, minus ‘now’: Enter there picks the base of the") + "\n")
+	b.WriteString("    " + mu("The same browser greets you when the tool opens, minus ‘now’: ↵ there picks the base of the") + "\n")
 	b.WriteString("    " + mu("live window (session start is preselected), Esc leaves the tool without loading the table.") + "\n")
 
 	return padInfo(&b, height)

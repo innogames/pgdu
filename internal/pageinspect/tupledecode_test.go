@@ -1,4 +1,4 @@
-package tui
+package pageinspect
 
 import (
 	"encoding/binary"
@@ -53,7 +53,7 @@ func TestDecodeAttrValue(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := decodeAttrValue(tc.attr); got != tc.want {
+			if got := DecodeAttrValue(tc.attr); got != tc.want {
 				t.Errorf("decodeAttrValue = %q, want %q", got, tc.want)
 			}
 		})

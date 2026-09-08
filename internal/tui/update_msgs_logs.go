@@ -266,7 +266,7 @@ func (m *Model) onLogLoaded(msg logLoadedMsg) tea.Cmd {
 	} else if !msg.refresh {
 		s.resetCursor()
 		// The groups pane opens on the first real row, not a section header.
-		m.skipLogHeader(s, 1)
+		s.skipInertRow(1)
 	}
 	if top := m.top(); top != s && (top.level == levelLogGroup || top.level == levelLogEntry) {
 		m.rebuildLogChild(top)
@@ -315,27 +315,6 @@ func (s *screen) selectedLogGroup() *pglog.Group {
 	}
 	g, _ := s.items[vis[s.cursor]].data.(*pglog.Group)
 	return g
-}
-
-// skipLogHeader nudges the cursor off a section-header row in direction dir
-// (+1 down, -1 up) so ↑/↓ never rest on an inert line.
-func (m *Model) skipLogHeader(s *screen, dir int) {
-	vis := s.visibleIndexes()
-	for s.cursor >= 0 && s.cursor < len(vis) {
-		if _, hdr := s.items[vis[s.cursor]].data.(logSection); !hdr {
-			return
-		}
-		next := s.cursor + dir
-		if next < 0 || next >= len(vis) {
-			// Nothing beyond the header in that direction: bounce back.
-			dir = -dir
-			next = s.cursor + dir
-			if next < 0 || next >= len(vis) {
-				return
-			}
-		}
-		s.cursor = next
-	}
 }
 
 // rebuildLogItems regenerates the levelLogs rows for the current pane. The groups pane is ordered here (sections + per-section sort), so
@@ -465,7 +444,7 @@ func (m *Model) rebuildLogTimeline(s *screen) {
 			cells[j] = d.cell(e, ctx)
 			parts[j] = cells[j].Display
 		}
-		items = append(items, item{name: strings.Join(parts, " "), data: cells, logIdx: i + 1})
+		items = append(items, item{name: strings.Join(parts, " "), hasChildren: true, data: cells, logIdx: i + 1})
 	}
 	s.log.cols = descs
 	s.diagCols = diagColumnsFrom(descs)
@@ -506,7 +485,7 @@ func (m *Model) rebuildLogChild(s *screen) {
 		for i := range r.Entries {
 			e := &r.Entries[i]
 			if int(e.Group) == gi && pglog.ParamKey(e, s.log.paramFirst) == s.log.paramKey {
-				items = append(items, item{name: e.FirstLine(), data: e, logIdx: i + 1})
+				items = append(items, item{name: e.FirstLine(), hasChildren: true, data: e, logIdx: i + 1})
 			}
 		}
 	} else {
@@ -516,7 +495,7 @@ func (m *Model) rebuildLogChild(s *screen) {
 				continue
 			}
 			e := &r.Entries[idx]
-			items = append(items, item{name: e.FirstLine(), data: e, logIdx: idx + 1})
+			items = append(items, item{name: e.FirstLine(), hasChildren: true, data: e, logIdx: idx + 1})
 		}
 	}
 	s.items = items

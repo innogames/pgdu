@@ -1,4 +1,4 @@
-package tui
+package pageinspect
 
 import (
 	"encoding/binary"
@@ -17,7 +17,7 @@ import (
 // PostgreSQL's internal timestamp/date storage.
 const pgEpochUnix = 946684800
 
-// decodeIndexKey decodes pageinspect's space-separated hex `data` (the raw
+// DecodeIndexKey decodes pageinspect's space-separated hex `data` (the raw
 // IndexTuple key bytes, with the null bitmap already stripped by bt_page_items)
 // into a readable value, using the index's per-column physical types in `cols`.
 // It mirrors PostgreSQL's tuple deform: align each attribute by its typalign,
@@ -35,7 +35,7 @@ const pgEpochUnix = 946684800
 // Assumes a little-endian server: pageinspect returns the bytes in the server's
 // native byte order and there is no way to probe it over the wire. Every
 // production PostgreSQL platform is little-endian, matching the on-wire data.
-func decodeIndexKey(hexData string, cols []pg.IndexKeyColumn) (string, bool) {
+func DecodeIndexKey(hexData string, cols []pg.IndexKeyColumn) (string, bool) {
 	parts, complete, ok := decodeIndexKeyParts(hexData, cols)
 	if !ok {
 		return "", false
@@ -53,7 +53,7 @@ func decodeIndexKey(hexData string, cols []pg.IndexKeyColumn) (string, bool) {
 }
 
 // decodeIndexKeyParts decodes the per-column values of an index key from
-// pageinspect's hex `data` (see decodeIndexKey for the deform rules). complete
+// pageinspect's hex `data` (see DecodeIndexKey for the deform rules). complete
 // is false when not every column was consumed — pageinspect truncated the hex,
 // or a column's type/length stopped the walk; callers that join for display
 // append a "…" then. ok is false only when nothing at all decoded (empty data —
@@ -76,7 +76,7 @@ func decodeIndexKeyParts(hexData string, cols []pg.IndexKeyColumn) (parts []stri
 			complete = false // suffix-truncated separator: fewer attrs than cols
 			break
 		}
-		s, next, decodeOK := decodeIndexColumn(b, off, c)
+		s, next, decodeOK := DecodeIndexColumn(b, off, c)
 		if !decodeOK {
 			complete = false
 			break
@@ -90,7 +90,7 @@ func decodeIndexKeyParts(hexData string, cols []pg.IndexKeyColumn) (parts []stri
 	return parts, complete, true
 }
 
-// decodeIndexKeyPivot decodes a suffix-truncated pivot key: nbtree kept only
+// DecodeIndexKeyPivot decodes a suffix-truncated pivot key: nbtree kept only
 // the first natts attributes (enough to separate the two children at the split
 // point) and dropped the rest, which _bt_compare treats as minus infinity. The
 // stored attributes decode normally and each dropped one renders as −∞ —
@@ -101,7 +101,7 @@ func decodeIndexKeyParts(hexData string, cols []pg.IndexKeyColumn) (parts []stri
 // includes leftover bytes past the stored attributes that aren't pure MAXALIGN
 // zero padding — then natts wasn't a real attribute count (the ctid was a
 // genuine heap pointer whose offset merely looked small).
-func decodeIndexKeyPivot(hexData string, cols []pg.IndexKeyColumn, natts int) (string, bool) {
+func DecodeIndexKeyPivot(hexData string, cols []pg.IndexKeyColumn, natts int) (string, bool) {
 	if natts <= 0 || natts >= len(cols) {
 		return "", false
 	}
@@ -112,7 +112,7 @@ func decodeIndexKeyPivot(hexData string, cols []pg.IndexKeyColumn, natts int) (s
 	parts := make([]string, 0, len(cols))
 	off := 0
 	for _, c := range cols[:natts] {
-		s, next, ok := decodeIndexColumn(b, off, c)
+		s, next, ok := DecodeIndexColumn(b, off, c)
 		if !ok {
 			return "", false
 		}
@@ -133,11 +133,11 @@ func decodeIndexKeyPivot(hexData string, cols []pg.IndexKeyColumn, natts int) (s
 	return "(" + strings.Join(parts, ",") + ")", true
 }
 
-// decodeIndexColumn decodes one attribute starting at absolute offset off within
+// DecodeIndexColumn decodes one attribute starting at absolute offset off within
 // b (absolute because alignment padding is computed from the tuple-data start).
 // Returns the formatted value and the offset just past it, or ok == false when
 // the value can't be sized/read (caller stops the walk).
-func decodeIndexColumn(b []byte, off int, c pg.IndexKeyColumn) (string, int, bool) {
+func DecodeIndexColumn(b []byte, off int, c pg.IndexKeyColumn) (string, int, bool) {
 	switch {
 	case c.TypLen > 0:
 		off = alignOffset(off, c.TypAlign)
@@ -425,12 +425,12 @@ func hexString(b []byte) string {
 	return "\\x" + hex.EncodeToString(b)
 }
 
-// leadingKeyValue decodes just the index's first key column from a tuple's raw
+// LeadingKeyValue decodes just the index's first key column from a tuple's raw
 // bytes — the value the seek feature compares against. It uses the raw bytes (not
 // the heap-projected Decoded) so leaf and internal pages yield the same leading
 // column consistently. Reports false for an absent/empty key (the minus-infinity
 // downlink) or when no column type is known.
-func leadingKeyValue(t pg.IndexTuple, cols []pg.IndexKeyColumn) (string, bool) {
+func LeadingKeyValue(t pg.IndexTuple, cols []pg.IndexKeyColumn) (string, bool) {
 	if t.Data == nil {
 		return "", false
 	}
@@ -441,13 +441,13 @@ func leadingKeyValue(t pg.IndexTuple, cols []pg.IndexKeyColumn) (string, bool) {
 	return parts[0], true
 }
 
-// keyValueLess orders two decoded key values the way the seek scan needs: as
+// KeyValueLess orders two decoded key values the way the seek scan needs: as
 // numbers when both parse (so "100" > "99"), otherwise byte-wise as text. This
 // matches the decoder's output — ints/oids compare numerically, while text and
 // ISO-formatted dates/timestamps compare lexicographically (ISO sorts correctly).
 // Text uses C/byte order, which can differ from a non-C index collation, so a
 // seek on a collated text key may land a few rows off.
-func keyValueLess(a, b string) bool {
+func KeyValueLess(a, b string) bool {
 	if ai, aerr := strconv.ParseInt(a, 10, 64); aerr == nil {
 		if bi, berr := strconv.ParseInt(b, 10, 64); berr == nil {
 			return ai < bi

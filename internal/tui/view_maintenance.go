@@ -88,11 +88,11 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 		full.WriteString(hintLine + "\n")
 	}
 	full.WriteString("  " + mu("↑↓ select capacity row  ·  ↵ reset  ·  ") +
-		styleBadge.Render("s") + mu(" settings  ·  ") +
-		styleBadge.Render("a") + mu(" activity  ·  ") +
-		styleBadge.Render("w") + mu(" wal  ·  ") +
-		styleBadge.Render("r") + mu(" replication  ·  ") +
-		styleBadge.Render("p") + mu(" progress  ·  space refresh") + "\n")
+		styleBadge.Render("s") + mu(" → settings  ·  ") +
+		styleBadge.Render("a") + mu(" → activity  ·  ") +
+		styleBadge.Render("w") + mu(" → wal  ·  ") +
+		styleBadge.Render("r") + mu(" → replication  ·  ") +
+		styleBadge.Render("p") + mu(" → progress  ·  space refresh") + "\n")
 	full.WriteString(body.String())
 
 	return scrollWindow(full.String(), &s.offset, height)

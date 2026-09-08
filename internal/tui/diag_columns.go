@@ -222,7 +222,7 @@ func diagFooterCells(cols []pg.DiagColumn, items []item) []pg.DiagCell {
 }
 
 // diagFormatFloatTUI renders a summed float with up to 2 decimals, trailing
-// zeros stripped (mirrors pg's diagFormatFloat, which isn't exported).
+// zeros stripped (mirrors diagres's formatFloat, which isn't exported).
 func diagFormatFloatTUI(f float64) string {
 	s := strconv.FormatFloat(f, 'f', 2, 64)
 	s = strings.TrimRight(s, "0")

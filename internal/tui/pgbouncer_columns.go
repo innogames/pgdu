@@ -6,6 +6,7 @@ import (
 
 	"pgdu/internal/humanize"
 	"pgdu/internal/pg"
+	"pgdu/internal/pgbouncer"
 )
 
 // pgbShow enumerates the console SHOW tables the tool offers. The screen at
@@ -317,7 +318,7 @@ func pgbInstanceColumns() []pg.DiagColumn {
 }
 
 // pgbInstanceState is the one-word health of an instance for the list.
-func pgbInstanceState(inst pg.PgBouncerInstance, pr pg.PgBouncerProbe) string {
+func pgbInstanceState(inst pgbouncer.Instance, pr pgbouncer.Probe) string {
 	switch {
 	case pr.Err == nil:
 		return "running"
@@ -331,13 +332,13 @@ func pgbInstanceState(inst pg.PgBouncerInstance, pr pg.PgBouncerProbe) string {
 
 // pgbInstanceItems renders instances as generic-table rows; pgbIdx points back
 // at the instance for Enter and l.
-func pgbInstanceItems(insts []pg.PgBouncerInstance, probes []pg.PgBouncerProbe) []item {
+func pgbInstanceItems(insts []pgbouncer.Instance, probes []pgbouncer.Probe) []item {
 	items := make([]item, 0, len(insts))
 	num := func(n int) pg.DiagCell {
 		return pg.DiagCell{Display: fmtCount(n), Num: float64(n), HasNum: true}
 	}
 	for i, inst := range insts {
-		var pr pg.PgBouncerProbe
+		var pr pgbouncer.Probe
 		if i < len(probes) {
 			pr = probes[i]
 		}
@@ -387,7 +388,7 @@ func pgbInstanceItems(insts []pg.PgBouncerInstance, probes []pg.PgBouncerProbe) 
 type pgbLogRow struct{}
 
 // pgbMenuItems builds the overview menu: one row per SHOW plus the logfile.
-func pgbMenuItems(inst pg.PgBouncerInstance) []item {
+func pgbMenuItems(inst pgbouncer.Instance) []item {
 	reg := pgbShowRegistry()
 	items := make([]item, 0, len(reg)+1)
 	for _, sp := range reg {

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"pgdu/internal/pg"
+	"pgdu/internal/pgbouncer"
 )
 
 // renderPgBouncers is the instance list's empty state; with instances the
@@ -30,7 +30,7 @@ func (m *Model) renderPgbListHint(s *screen) string {
 		return ""
 	}
 	mu := styleMuted.Render
-	var pr pg.PgBouncerProbe
+	var pr pgbouncer.Probe
 	if it := s.items[s.visibleIndexes()[s.cursor]]; it.pgbIdx > 0 && it.pgbIdx <= len(s.pgb.probes) {
 		pr = s.pgb.probes[it.pgbIdx-1]
 	}
@@ -43,11 +43,11 @@ func (m *Model) renderPgbListHint(s *screen) string {
 	}
 	switch {
 	case pr.AuthErr:
-		parts = append(parts, styleErr.Render("login refused: ")+mu(pg.PgBouncerAuthHint(*inst, pr.User)))
+		parts = append(parts, styleErr.Render("login refused: ")+mu(pgbouncer.AuthHint(*inst, pr.User)))
 	case pr.Err != nil:
 		parts = append(parts, styleErr.Render(oneLineErr(pr.Err)))
 	default:
-		parts = append(parts, mu("↵ browse  l log"))
+		parts = append(parts, mu("↵ browse  l → log analyzer"))
 	}
 	return "  " + strings.Join(parts, mu("  ·  "))
 }
@@ -71,8 +71,8 @@ func (m *Model) renderPgBouncerHeader(s *screen) string {
 	b.WriteString("\n")
 	if s.pgb.err != nil {
 		b.WriteString(label("error") + styleErr.Render(oneLineErr(s.pgb.err)) + "\n")
-		if pg.PgBouncerAuthHintApplies(s.pgb.err) {
-			b.WriteString(label("") + mu(pg.PgBouncerAuthHint(*inst, m.client.PgBouncerUser())) + "\n")
+		if pgbouncer.AuthHintApplies(s.pgb.err) {
+			b.WriteString(label("") + mu(pgbouncer.AuthHint(*inst, m.client.PgBouncer.User())) + "\n")
 		}
 		return b.String()
 	}
@@ -144,7 +144,7 @@ func oneLineErr(err error) string {
 // pgbTotalsLine renders pool totals with a red longest wait when clients are
 // queuing — the one number that says the pool is undersized or its servers
 // are stuck.
-func pgbTotalsLine(t pg.PgBouncerPoolTotals) string {
+func pgbTotalsLine(t pgbouncer.PoolTotals) string {
 	mu := styleMuted.Render
 	waiting := fmt.Sprintf("%d waiting", t.ClWaiting)
 	wait := mu("max wait 0")
@@ -240,7 +240,7 @@ func (m *Model) renderPgBouncerInfo(height int) string {
 	b.WriteString("    " + mu("reverse-DNS name of addr (cached per session, like the Activity tool's); scram key columns are never shown.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" keys ") + "\n")
-	b.WriteString("    " + mu("↵ drill   l open the instance's logfile in the log analyzer   t refresh cadence   C columns (SHOW tables)") + "\n")
+	b.WriteString("    " + mu("↵ open the highlighted instance / SHOW table   l → log analyzer (the instance's logfile)   t refresh cadence   C columns (SHOW tables)") + "\n")
 	b.WriteString("    " + mu("←/→ sort   r reverse   / filter   e export csv   space reload   ? this help") + "\n")
 	b.WriteString("    " + mu("The tool is read-only: it never issues RELOAD, PAUSE, RESUME or KILL.") + "\n")
 	return padInfo(&b, height)

@@ -16,7 +16,7 @@ type Diagnostic struct {
 	Sort        string // default sort column name (descending); "" falls back to Bar, then column 0 ascending
 	PerDB       bool   // true = query reads only the connected database; the TUI prompts for which database to run against (or all)
 
-	// Kinds overrides the name-heuristic column kind (colKindFromName) per
+	// Kinds overrides the name-heuristic column kind (diagres.KindFromName) per
 	// column, so a diagnostic can opt into graded rendering the suffix rules
 	// can't infer — e.g. hit ratios as DiagPercentGraded (higher is better) or
 	// dead-tuple % as DiagPercentBad (higher is worse). Keys are column names.

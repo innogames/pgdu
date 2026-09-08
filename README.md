@@ -51,8 +51,8 @@ web server.
   with their hot nodes heat-coloured; live tail, rotated `.gz` files, and
   server-side reading over the connection. Reads pgbouncer's own log too, with
   its periodic stats lines turned into a sparkline pane.
-- **WAL inspector down to the bytes** — the recent window by resource manager or
-  by relation (`w`); a record's block references, then the block itself: the
+- **WAL inspector down to the bytes** — the recent window by resource manager
+  and, beneath it, by relation; a record's block references, then the block itself: the
   change data or full-page image decoded with `pageinspect`, the affected tuple
   reconstructed against the table's column layout. The header shows how close
   WAL is to forcing a checkpoint.
@@ -353,7 +353,10 @@ Below a heap page are the raw **heap tuples**: line-pointer flags (normal / dead
 / redirect / unused), `xmin` / `xmax`, `ctid`, and the decoded `infomask` bits
 (`HEAP_ONLY`, `UPDATED`, frozen, …) — `heap_page_items` made browsable. `↵` on a
 redirect line pointer moves the cursor to its target, so repeated `↵` walks a
-HOT chain.
+HOT chain. `C` picks which of the table's own columns ride along as value
+columns (the primary key by default): a live row shows its value as the session
+sees it, while a dead, aborted or superseded tuple shows the value decoded from
+its own bytes, muted — the versions no query can reach any more.
 
 ![Tuples](docs/page_tuples.png)
 
@@ -367,23 +370,29 @@ into the TOAST relation and reassembles the out-of-line value from its chunks.
 
 ### WAL Inspector
 
-Puts `pg_walinspect` behind a cursor. The overview breaks the recently generated
-WAL down by resource manager — Heap, Btree, Transaction, XLOG, … — with each bar
-split into record bytes and full-page images, so write amplification from
-too-frequent checkpoints shows as a colour rather than a ratio to compute. The
-header gives the current insert / flush LSN and segment, the size of `pg_wal`,
-the lifetime `pg_stat_wal` counters, the LSN window analysed, and a **checkpoint
-bar**: WAL written since the last checkpoint's redo point against `max_wal_size`,
-with the timed / requested split and when the next timed checkpoint is due.
+Puts `pg_walinspect` behind a cursor. The overview stacks two tables over the
+same window. The first breaks the recently generated WAL down by resource
+manager — Heap, Btree, Transaction, XLOG, … — with each bar split into record
+bytes and full-page images, so write amplification from too-frequent checkpoints
+shows as a colour rather than a ratio to compute. Beneath it the window is
+regrouped **by relation** — which tables and indexes caused the WAL, names
+resolved from relfilenodes across databases, with how much of the window the
+block-level bytes account for. The header gives the current insert / flush LSN
+and segment, the size of `pg_wal`, the lifetime `pg_stat_wal` counters, the LSN
+window analysed (the most recent 16 MiB — every breakdown covers that window,
+not the WAL since the checkpoint), and a **checkpoint bar**: WAL written since
+the last checkpoint's redo point against `max_wal_size`, with the timed /
+requested split and when the next timed checkpoint is due. Both tables end in a
+Σ row.
 
 ![WAL inspector](docs/wal_inspector.png)
 
-`w` regroups the same window **by relation** — which tables and indexes caused
-the WAL, names resolved from relfilenodes across databases. `↵` on a resource
-manager lists its records oldest first under a per-record-type summary (INSERT /
-HOT_UPDATE / LOCK …); `↵` on a record shows its **block references** — relation,
-fork, block number, and whether a page image or only change data was logged;
-`↵` once more opens the **block payload**: the change data or the full 8 KiB
+`↵` on a resource manager lists its records oldest first under a per-record-type
+summary (INSERT / HOT_UPDATE / LOCK …); `↵` on a relation lists its block
+references across the window, FPI-heaviest first; `↵` on a record shows its
+**block references** — relation, fork, block number, and whether a page image or
+only change data was logged; `↵` once more opens the **block payload**: the
+change data or the full 8 KiB
 page image with its line pointers decoded by `pageinspect`, the tuple this
 record inserted / updated / deleted marked, and its column values reconstructed
 from the raw bytes against the table's current column layout. Every level
@@ -447,13 +456,19 @@ inspector, a triage row into the lock tree) is prefixed with the tool it belongs
 to, and the first screen scoped to a database the trail hasn't named yet shows
 it in parentheses.
 
+Rows that `↵` opens — the next level, a detail overlay, or an unfolding row —
+carry a muted `↵` in front of their name; rows without it are leaves. The footer
+names where `↵` leads on the current screen (`↵ parts`, `↵ query detail`,
+`↵ fix`), and a key hint written `→ …` (`p → pages`, `b → lock tree`) jumps to
+another view instead of acting on the one you are in.
+
 Every view has its own `?` reference explaining the columns and what the numbers
 mean. Keys shared by all views:
 
 | Key       | Action                       |
 |-----------|------------------------------|
 | `↑` `↓`   | move                         |
-| `↵`       | drill in                     |
+| `↵`       | open the highlighted row     |
 | `q`/`esc` | back                         |
 | `/`       | filter                       |
 | `←` `→`   | sort column                  |
@@ -478,8 +493,7 @@ Frequently used view-specific keys:
 | `d`        | queries, logs, diagnostics | describe the table (`d` again: detail mode) |
 | `m`        | buffers / logs   | shared-memory map / toggle log sections           |
 | `Tab`      | logs / log group | groups → timeline → slow queries → pooler stats / entries → parameters → `$1` |
-| `w`        | WAL              | group the window by relation                      |
-| `t`        | activity, queries, logs, pgbouncer | cycle auto-refresh / live tail  |
+| `t`        | activity, queries, logs, pgbouncer / describe | cycle auto-refresh / live tail / open top queries filtered to the table |
 | `l`        | pgbouncer        | open the instance's log in the log analyzer       |
 | `s`        | diagnostics / index tuples / overview | show SQL / seek to a key / settings browser |
 

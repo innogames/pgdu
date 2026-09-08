@@ -8,6 +8,16 @@ import (
 	"pgdu/internal/pg"
 )
 
+// drillWAL dispatches Enter on the WAL overview by which of its two tables the
+// row belongs to: a resource manager opens its records, a relation its block
+// references. Section rows (titles, Σ) carry neither payload and stay inert.
+func (m *Model) drillWAL(s *screen, cur item) tea.Cmd {
+	if _, ok := cur.data.(pg.WALRelStat); ok {
+		return m.drillWALRelation(s, cur)
+	}
+	return m.drillWALRmgr(s, cur)
+}
+
 // drillWALRmgr lists the records of the highlighted resource manager.
 func (m *Model) drillWALRmgr(s *screen, cur item) tea.Cmd {
 	st, ok := cur.data.(pg.WALRmgrStat)

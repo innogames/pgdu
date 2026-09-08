@@ -161,35 +161,77 @@ func TestIndexTuplePageType(t *testing.T) {
 	}
 }
 
-func TestHeapTuplesHeaderPKColumn(t *testing.T) {
-	with := stripANSI(renderHeapTuplesHeader(sortByLP, false, true))
-	if !strings.Contains(with, "pk") {
-		t.Errorf("header with pk = %q, want a pk column", with)
+func TestHeapTuplesHeaderValueColumns(t *testing.T) {
+	cols := []tupleValueCol{{pos: 0, col: pg.HeapColumn{Name: "id"}, w: 6}}
+	with := stripANSI(renderHeapTuplesHeader(sortByLP, false, cols))
+	// The header names the table column, so the value column is self-describing.
+	if !strings.Contains(with, "id") {
+		t.Errorf("header with a value column = %q, want an \"id\" column", with)
 	}
-	// pk sits between the physical address and the visibility verdict.
-	if strings.Index(with, "ctid") > strings.Index(with, "pk") ||
-		strings.Index(with, "pk") > strings.Index(with, "state") {
-		t.Errorf("header column order = %q, want ctid … pk … state", with)
+	// Value columns sit between the physical address and the visibility verdict.
+	if strings.Index(with, "ctid") > strings.Index(with, "id ") ||
+		strings.Index(with, "id ") > strings.Index(with, "state") {
+		t.Errorf("header column order = %q, want ctid … id … state", with)
 	}
-	without := stripANSI(renderHeapTuplesHeader(sortByLP, false, false))
-	if strings.Contains(without, "pk") {
-		t.Errorf("header without pk = %q, want no pk column", without)
+	without := stripANSI(renderHeapTuplesHeader(sortByLP, false, nil))
+	if strings.Contains(without, " id ") || !strings.Contains(without, "ctid") {
+		t.Errorf("header without value columns = %q, want only the physical columns", without)
 	}
 }
 
-func TestTuplePKCell(t *testing.T) {
-	pk := "42"
-	if got := stripANSI(tuplePKCell(pg.HeapTuple{PK: &pk})); got != "42" {
-		t.Errorf("pk cell = %q, want 42", got)
+func TestTupleValueCell(t *testing.T) {
+	col := tupleValueCol{pos: 0, col: pg.HeapColumn{Attnum: 1, Name: "n", Len: 4, TypName: "int4", TypCategory: "N"}, w: 8}
+	v := "42"
+	// Visible row: the SQL text, plain.
+	if got := stripANSI(tupleValueCell(pg.HeapTuple{LPFlags: pg.LPNormal, Infomask2: 1, Vals: []*string{&v}}, col)); strings.TrimSpace(got) != "42" {
+		t.Errorf("visible cell = %q, want 42", got)
 	}
-	// No visible row at this ctid (dead/aborted/uncommitted tuple).
-	if got := stripANSI(tuplePKCell(pg.HeapTuple{})); got != "—" {
-		t.Errorf("nil pk cell = %q, want —", got)
+	// Visible row holding a NULL.
+	if got := stripANSI(tupleValueCell(pg.HeapTuple{LPFlags: pg.LPNormal, Infomask2: 1, Vals: []*string{nil}}, col)); strings.TrimSpace(got) != "∅" {
+		t.Errorf("NULL cell = %q, want ∅", got)
 	}
-	// A key wider than the column is clipped, not wrapped.
-	long := strings.Repeat("x", tuplePKColW+20)
-	if got := stripANSI(tuplePKCell(pg.HeapTuple{PK: &long})); len([]rune(got)) > tuplePKColW {
-		t.Errorf("pk cell = %d cells, want <= %d", len([]rune(got)), tuplePKColW)
+	// No visible row (dead/aborted): decoded from the tuple's own bytes.
+	dead := pg.HeapTuple{LPFlags: pg.LPNormal, Infomask2: 1, Raws: [][]byte{{7, 0, 0, 0}}}
+	if got := stripANSI(tupleValueCell(dead, col)); strings.TrimSpace(got) != "7" {
+		t.Errorf("decoded cell = %q, want 7", got)
+	}
+	// A column the tuple predates (attnum beyond its natts) holds nothing.
+	dead.Infomask2 = 0
+	if got := stripANSI(tupleValueCell(dead, col)); strings.TrimSpace(got) != "—" {
+		t.Errorf("not-stored cell = %q, want —", got)
+	}
+	// Slots without a body show nothing either.
+	if got := stripANSI(tupleValueCell(pg.HeapTuple{LPFlags: pg.LPDead}, col)); strings.TrimSpace(got) != "—" {
+		t.Errorf("dead-slot cell = %q, want —", got)
+	}
+	// A value wider than the column is clipped, not wrapped.
+	long := strings.Repeat("x", 40)
+	if got := stripANSI(tupleValueCell(pg.HeapTuple{LPFlags: pg.LPNormal, Infomask2: 1, Vals: []*string{&long}}, col)); len([]rune(got)) > col.w {
+		t.Errorf("value cell = %d cells, want <= %d", len([]rune(got)), col.w)
+	}
+}
+
+func TestTupleValueLayout(t *testing.T) {
+	m := &Model{width: 200}
+	s := &screen{level: levelHeapTuples}
+	s.pages.tupleCols = []pg.HeapColumn{{Attnum: 1, Name: "id"}, {Attnum: 2, Name: "payload"}}
+	s.pages.tupleShown = []int{0, 1}
+	long := strings.Repeat("y", 60)
+	short := "1"
+	s.items = []item{{data: pg.HeapTuple{LPFlags: pg.LPNormal, Infomask2: 2, Vals: []*string{&short, &long}}}}
+
+	cols := m.tupleValueLayout(s, []int{0})
+	if len(cols) != 2 {
+		t.Fatalf("laid out %d columns, want 2", len(cols))
+	}
+	// Width follows the content, header included, within the clamp.
+	if cols[0].w != tupleValueColMin || cols[1].w != tupleValueColMax {
+		t.Errorf("widths = %d/%d, want %d/%d", cols[0].w, cols[1].w, tupleValueColMin, tupleValueColMax)
+	}
+	// A narrow terminal drops the rightmost columns rather than the state tail.
+	m.width = barReserve(s) + tupleValueTail + tupleValueColMin + 2
+	if cols := m.tupleValueLayout(s, []int{0}); len(cols) != 1 || cols[0].col.Name != "id" {
+		t.Errorf("narrow layout = %+v, want just id", cols)
 	}
 }
 
@@ -331,7 +373,7 @@ func TestPostingMemberRow(t *testing.T) {
 	pctid, mctid, key := "(0,8194)", "(599156,8)", "99695"
 	parent := pg.IndexTuple{ItemOffset: 2, ItemLen: 808, Ctid: &pctid, Data: hexText("99695")}
 	live := postingMember{parent: parent, n: 7, tuple: pg.IndexTuple{Ctid: &mctid, Decoded: &key}}
-	row := stripANSI(renderPostingMemberRow(live, nil, 60, false))
+	row := stripANSI(renderPostingMemberRow(live, nil, 60, true, false))
 	for _, want := range []string{"·007", mctid, key} {
 		if !strings.Contains(row, want) {
 			t.Errorf("row = %q, want %q", row, want)
@@ -342,12 +384,12 @@ func TestPostingMemberRow(t *testing.T) {
 	}
 
 	gone := postingMember{parent: parent, n: 8, tuple: pg.IndexTuple{Ctid: &mctid}}
-	row = stripANSI(renderPostingMemberRow(gone, nil, 60, false))
+	row = stripANSI(renderPostingMemberRow(gone, nil, 60, false, false))
 	if !strings.Contains(row, key) || strings.Contains(row, "dead") {
 		t.Errorf("row = %q, want the parent's key and no dead tag", row)
 	}
 	gone.parent.Dead = true
-	if row = stripANSI(renderPostingMemberRow(gone, nil, 60, false)); !strings.Contains(row, "dead") {
+	if row = stripANSI(renderPostingMemberRow(gone, nil, 60, false, false)); !strings.Contains(row, "dead") {
 		t.Errorf("row = %q, want a dead tag when the posting tuple is LP_DEAD", row)
 	}
 }
@@ -441,7 +483,7 @@ func TestDrillIndexLeafEntryOpensHeapTupleLayout(t *testing.T) {
 		{LP: 8, LPFlags: pg.LPNormal, Data: []byte{1}},
 		{LP: 9, LPFlags: pg.LPNormal, Ctid: &ctid9, Data: []byte{1}},
 	}
-	cmd := m.onHeapTuplesLoaded(heapTuplesLoadedMsg{tableOID: 99, blkno: 7, tuples: tuples})
+	cmd := m.onHeapTuplesLoaded(heapTuplesLoadedMsg{tableOID: 99, blkno: 7, page: pg.HeapPageTuples{Tuples: tuples}})
 	if s.cursor != 2 {
 		t.Errorf("cursor = %d, want 2 (lp 9)", s.cursor)
 	}
@@ -454,7 +496,7 @@ func TestDrillIndexLeafEntryOpensHeapTupleLayout(t *testing.T) {
 
 	// A later reload of the same page must not re-open the overlay.
 	m.closeTupleLayout(s)
-	m.onHeapTuplesLoaded(heapTuplesLoadedMsg{tableOID: 99, blkno: 7, tuples: tuples})
+	m.onHeapTuplesLoaded(heapTuplesLoadedMsg{tableOID: 99, blkno: 7, page: pg.HeapPageTuples{Tuples: tuples}})
 	if m.showTupleLayout {
 		t.Error("reload re-opened the overlay")
 	}

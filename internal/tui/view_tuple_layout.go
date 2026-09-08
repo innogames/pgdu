@@ -6,43 +6,24 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
 )
 
 // tupleSegStyle returns the bar/swatch colour for one segment. colIdx counts
-// segColumn segments only, so bar runs and legend swatches cycle the palette
+// pageinspect.SegColumn segments only, so bar runs and legend swatches cycle the palette
 // in lockstep no matter how many pads sit between them.
-func tupleSegStyle(seg tupleSeg, colIdx int) lipgloss.Style {
-	switch seg.kind {
-	case segHeaderField, segNullBitmap:
+func tupleSegStyle(seg pageinspect.Seg, colIdx int) lipgloss.Style {
+	switch seg.Kind {
+	case pageinspect.SegHeaderField, pageinspect.SegNullBitmap:
 		return styleHeapToastTag
-	case segHeaderPad, segPad:
+	case pageinspect.SegHeaderPad, pageinspect.SegPad:
 		return styleMuted
-	case segUnaccounted:
+	case pageinspect.SegUnaccounted:
 		return styleBloat
 	default:
 		return bufferSliceStyle(colIdx)
 	}
-}
-
-// tupleSegName labels a segment for the legend. Structural segments get
-// parenthesized names so they read apart from real columns; a dropped
-// column's mangled catalog name is replaced wholesale.
-func tupleSegName(seg tupleSeg) string {
-	switch seg.kind {
-	case segHeaderField:
-		return seg.name
-	case segNullBitmap:
-		return "(null bitmap)"
-	case segHeaderPad, segPad:
-		return "(pad)"
-	case segUnaccounted:
-		return "(unaccounted)"
-	}
-	if seg.attr.Dropped {
-		return "(dropped)"
-	}
-	return seg.attr.Name
 }
 
 // renderTupleLayoutInfo is the ? reference for the byte-layout overlay: what
@@ -120,9 +101,9 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 	if m.tupleLayoutSortDesc {
 		arrow = "↓"
 	}
-	title += mu("  ·  sort: "+m.tupleLayoutSort.label()+arrow) + mu("  ·  ")
+	title += mu("  ·  sort: "+m.tupleLayoutSort.Label()+arrow) + mu("  ·  ")
 	if _, _, ok := m.tupleLayoutToastUnderCursor(s); ok {
-		title += styleBadge.Render("enter") + mu(" → toast pages · ")
+		title += styleBadge.Render("↵") + mu(" → toast pages · ")
 	}
 	title += styleBadge.Render("d") + mu(" describe · ") +
 		styleBadge.Render("esc") + mu(" to dismiss · ") +
@@ -141,8 +122,8 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 		return padInfo(&b, height)
 	}
 
-	segs, trusted := computeTupleLayout(*t, s.pages.tupleAttrs)
-	order := sortedTupleSegIdx(segs, m.tupleLayoutSort, m.tupleLayoutSortDesc)
+	segs, trusted := pageinspect.Layout(*t, s.pages.tupleAttrs)
+	order := pageinspect.SortedIdx(segs, m.tupleLayoutSort, m.tupleLayoutSortDesc)
 	if m.tupleLayoutCursor >= len(order) {
 		m.tupleLayoutCursor = len(order) - 1
 	}
@@ -159,7 +140,7 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 	colIdx := 0
 	for i, sg := range segs {
 		styles[i] = tupleSegStyle(sg, colIdx)
-		if sg.kind == segColumn {
+		if sg.Kind == pageinspect.SegColumn {
 			colIdx++
 		}
 	}
@@ -169,7 +150,7 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 	barW := min(max(m.width-6, barWidthMin), barWidthMax)
 	byteCounts := make([]int, len(segs))
 	for i, sg := range segs {
-		byteCounts[i] = sg.bytes
+		byteCounts[i] = sg.Bytes
 	}
 	cells := proportionalCells(byteCounts, barW)
 	barSegs := make([]barSegment, 0, len(segs))
@@ -185,19 +166,19 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 	// Legend column widths from the data, so short tables stay tight.
 	nameW, typeW, classW := len("column"), len("type"), 0
 	for _, sg := range segs {
-		nameW = max(nameW, displayWidth(tupleSegName(sg)))
-		classW = max(classW, len(sg.class))
-		if sg.kind == segColumn {
-			typeW = max(typeW, len(sg.attr.TypeName))
+		nameW = max(nameW, displayWidth(sg.Name()))
+		classW = max(classW, len(sg.Class))
+		if sg.Kind == pageinspect.SegColumn {
+			typeW = max(typeW, len(sg.Attr.TypeName))
 		}
 	}
 	nameW, typeW = min(nameW, 28), min(typeW, 24)
 
 	atW := len("8160–8191")
 	header := "      " +
-		padRight(sortMark("bytes", m.tupleLayoutSort == tlSortBytes, m.tupleLayoutSortDesc), 7) +
-		padRight(sortMark("offset", m.tupleLayoutSort == tlSortOffset, m.tupleLayoutSortDesc), atW+2) +
-		padRight(sortMark("column", m.tupleLayoutSort == tlSortColumn, m.tupleLayoutSortDesc), nameW+2) +
+		padRight(sortMark("bytes", m.tupleLayoutSort == pageinspect.SortBytes, m.tupleLayoutSortDesc), 7) +
+		padRight(sortMark("offset", m.tupleLayoutSort == pageinspect.SortOffset, m.tupleLayoutSortDesc), atW+2) +
+		padRight(sortMark("column", m.tupleLayoutSort == pageinspect.SortColumn, m.tupleLayoutSortDesc), nameW+2) +
 		padRight("type", typeW+2) + padRight("class", classW+2) + "value"
 	b.WriteString(mu(header) + "\n")
 
@@ -215,21 +196,21 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 		sg := segs[i]
 
 		at := "—"
-		if sg.bytes > 0 {
-			at = fmt.Sprintf("%d–%d", sg.start, sg.start+sg.bytes-1)
+		if sg.Bytes > 0 {
+			at = fmt.Sprintf("%d–%d", sg.Start, sg.Start+sg.Bytes-1)
 		}
-		name := truncateToWidth(tupleSegName(sg), nameW)
+		name := truncateToWidth(sg.Name(), nameW)
 		typ := ""
-		if sg.kind == segColumn {
-			typ = truncateToWidth(sg.attr.TypeName, typeW)
+		if sg.Kind == pageinspect.SegColumn {
+			typ = truncateToWidth(sg.Attr.TypeName, typeW)
 		}
 		// The value column gets every remaining cell: the decoded value when
 		// the byte decoder managed one, otherwise a hex preview of the raw
 		// bytes ("\x" + 2 hex chars per byte + a possible ellipsis).
 		room := m.width - (6 + 7 + atW + 2 + nameW + 2 + typeW + 2 + classW + 2)
-		val := sg.value
-		if val == "" && sg.kind == segColumn && len(sg.attr.Value) > 0 {
-			val = previewBytes(sg.attr.Value, max(4, (room-3)/2))
+		val := sg.Value
+		if val == "" && sg.Kind == pageinspect.SegColumn && len(sg.Attr.Value) > 0 {
+			val = previewBytes(sg.Attr.Value, max(4, (room-3)/2))
 		}
 		val = truncateToWidth(val, max(8, room))
 
@@ -238,33 +219,33 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 		switch {
 		case rank == m.tupleLayoutCursor:
 			nameCell = styleSelected.Render(nameCell)
-		case sg.kind == segColumn:
+		case sg.Kind == pageinspect.SegColumn:
 			nameCell = styleColName.Render(nameCell)
 		default:
 			nameCell = mu(nameCell)
 		}
 
 		b.WriteString(cursor + styles[i].Render("▇") + "  " +
-			fmt.Sprintf("%4d B", sg.bytes) + "  " + padRight(at, atW) + "  " +
+			fmt.Sprintf("%4d B", sg.Bytes) + "  " + padRight(at, atW) + "  " +
 			nameCell + "  " + padRight(typ, typeW) + "  " +
-			mu(padRight(sg.class, classW)) + "  " + val + "\n")
+			mu(padRight(sg.Class, classW)) + "  " + val + "\n")
 	}
 
 	// Σ reconciliation: the walk must re-derive lp_len exactly; anything else
 	// is surfaced, never smoothed over.
 	var hdr, bitmap, pads, data, unacc int
 	for _, sg := range segs {
-		switch sg.kind {
-		case segHeaderField:
-			hdr += sg.bytes
-		case segNullBitmap:
-			bitmap += sg.bytes
-		case segHeaderPad, segPad:
-			pads += sg.bytes
-		case segColumn:
-			data += sg.bytes
-		case segUnaccounted:
-			unacc += sg.bytes
+		switch sg.Kind {
+		case pageinspect.SegHeaderField:
+			hdr += sg.Bytes
+		case pageinspect.SegNullBitmap:
+			bitmap += sg.Bytes
+		case pageinspect.SegHeaderPad, pageinspect.SegPad:
+			pads += sg.Bytes
+		case pageinspect.SegColumn:
+			data += sg.Bytes
+		case pageinspect.SegUnaccounted:
+			unacc += sg.Bytes
 		}
 	}
 	parts := []string{fmt.Sprintf("%d B header", hdr)}

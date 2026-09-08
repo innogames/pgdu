@@ -1,6 +1,6 @@
 //go:build linux
 
-package tui
+package procfs
 
 import (
 	"bufio"
@@ -9,32 +9,64 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
-// sampleAllPids reads /proc stats for each PID in pids. PIDs that have exited
-// or are unreadable (e.g. the postgres process runs as a different user and
+// ListByComm lists the running processes whose /proc/<pid>/comm equals comm.
+// Anything unreadable (other users' cwd links, pids that vanished mid-scan) is
+// skipped silently — discovery is best-effort and a partial list beats an
+// error.
+func ListByComm(comm string) []Process {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	var out []Process
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 0 {
+			continue
+		}
+		base := "/proc/" + e.Name()
+		c, err := os.ReadFile(base + "/comm")
+		if err != nil || strings.TrimSpace(string(c)) != comm {
+			continue
+		}
+		raw, err := os.ReadFile(base + "/cmdline")
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		argv := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		cwd, _ := os.Readlink(base + "/cwd")
+		out = append(out, Process{PID: pid, Argv: argv, Cwd: cwd})
+	}
+	return out
+}
+
+// Sample reads /proc stats for each PID in pids. PIDs that have exited or are
+// unreadable (e.g. the postgres process runs as a different user and
 // /proc/<pid>/status is not world-readable on this kernel) are silently skipped.
-func sampleAllPids(pids []int32) []procRaw {
+func Sample(pids []int32) []PIDStats {
 	now := time.Now()
-	out := make([]procRaw, 0, len(pids))
+	out := make([]PIDStats, 0, len(pids))
 	for _, pid := range pids {
-		if r, ok := readProcRaw(pid, now); ok {
+		if r, ok := readStats(pid, now); ok {
 			out = append(out, r)
 		}
 	}
 	return out
 }
 
-func readProcRaw(pid int32, now time.Time) (procRaw, bool) {
+func readStats(pid int32, now time.Time) (PIDStats, bool) {
 	base := fmt.Sprintf("/proc/%d/", pid)
-	r := procRaw{PID: pid, At: now, ReadBytes: -1, WriteBytes: -1}
+	r := PIDStats{PID: pid, At: now, ReadBytes: -1, WriteBytes: -1}
 
 	// RSS from /proc/<pid>/status. If this file is unreadable the process is
 	// gone or we lack permission — skip the entire PID.
 	data, err := os.ReadFile(base + "status")
 	if err != nil {
-		return procRaw{}, false
+		return PIDStats{}, false
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
@@ -100,4 +132,13 @@ func parseStatTicks(data []byte) (uint64, bool) {
 		return 0, false
 	}
 	return utime + stime, true
+}
+
+// Inode identifies a file across renames so a refresh can tell "the log grew"
+// from "the log was rotated and a new one started".
+func Inode(fi os.FileInfo) uint64 {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return st.Ino
+	}
+	return 0
 }

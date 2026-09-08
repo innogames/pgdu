@@ -37,9 +37,6 @@ type keyMap struct {
 	TerminateBackend key.Binding // x: send pg_terminate_backend (SIGTERM)
 	LockTree         key.Binding // b: open the blocking-chain lock tree
 
-	// WAL-inspector binding.
-	WALByRelation key.Binding // w: open the by-relation breakdown of the window
-
 	// Shared-buffers-tool binding.
 	ShmemMap key.Binding // m: open the shared-memory map (pg_shmem_allocations)
 
@@ -47,10 +44,18 @@ type keyMap struct {
 	// straight into that object's page-inspector view.
 	PageInspect key.Binding // p: open the page inspector for the selected part
 
+	// Describe-panel binding: open the top-queries tool for the table's database
+	// with the filter preset to the table name, so "who touches this table" is
+	// one key away from its definition. The physical key is ToggleRefresh on the
+	// live/queries levels, which are all off on levelDescribe.
+	TopQueries key.Binding // t: → top queries, filtered to the described table
+	// topQueriesInFooter advertises t on the describe panel, its only home.
+	topQueriesInFooter bool
+
 	// System-overview cross-links: jump from the maintenance dashboard into the
 	// live tools that show the detail behind a summary row. Enabled only on
-	// levelMaintenance (so they don't clash with r/reverse-sort and w/by-relation
-	// elsewhere) and dispatched before those cases.
+	// levelMaintenance (so they don't clash with r/reverse-sort and the log
+	// analyzer's w/window elsewhere) and dispatched before those cases.
 	JumpActivity    key.Binding // a: open the Activity tool
 	JumpWAL         key.Binding // w: open the WAL inspector
 	JumpReplication key.Binding // r: open the replication-slots diagnostic
@@ -124,6 +129,11 @@ type keyMap struct {
 	describeInFooter bool
 }
 
+// Help wording: a binding that opens another screen or tool reads "→ <where>"
+// (PageInspect "→ pages", LockTree "→ lock tree"); a binding that acts in place
+// (sort, filter, refresh, toggles, cancel/kill, export) names the action. The
+// footer and the ? help then tell jumps from actions at a glance; Enter's own
+// destination comes from enterLabel (keys_enter.go).
 func defaultKeys() keyMap {
 	return keyMap{
 		Up:             key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "up")),
@@ -140,16 +150,16 @@ func defaultKeys() keyMap {
 		ReverseSort:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reverse sort")),
 		Refresh:        key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "refresh")),
 		Install:        key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "install extension")),
-		Describe:       key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "describe")),
-		DiskUsage:      key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "disk usage")),
+		Describe:       key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "→ describe")),
+		DiskUsage:      key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "→ disk usage")),
 		Rebaseline:     key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "reset window")),
 		ToggleRefresh:  key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "refresh cadence")),
-		Params:         key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "captured values")),
+		Params:         key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "→ captured values")),
 		Execute:        key.NewBinding(key.WithKeys("E"), key.WithHelp("E", "execute query")),
 		Verbose:        key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "verbose")),
 		Export:         key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "export csv")),
 		SaveSnapshot:   key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "save snapshot")),
-		Snapshots:      key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "load snapshot")),
+		Snapshots:      key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "→ snapshots")),
 		DeleteSnapshot: key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete snapshot")),
 		Columns:        key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "configure columns")),
 		ResetCols:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reset to defaults")),
@@ -161,27 +171,27 @@ func defaultKeys() keyMap {
 		ActivityFilter:   key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "cycle filter")),
 		CancelBackend:    key.NewBinding(key.WithKeys("k"), key.WithHelp("k", "cancel backend")),
 		TerminateBackend: key.NewBinding(key.WithKeys("x", "ctrl+k"), key.WithHelp("x/^k", "kill backend")),
-		LockTree:         key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "lock tree")),
+		LockTree:         key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "→ lock tree")),
 
-		WALByRelation: key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "by relation")),
-		ShmemMap:      key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "memory map")),
-		PageInspect:   key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "inspect pages")),
+		ShmemMap:    key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "→ memory map")),
+		PageInspect: key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "→ pages")),
+		TopQueries:  key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "→ top queries")),
 
-		JumpActivity:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "activity")),
-		JumpWAL:         key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wal")),
-		JumpReplication: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "replication")),
-		Progress:        key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "progress")),
-		Settings:        key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "settings")),
+		JumpActivity:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "→ activity")),
+		JumpWAL:         key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "→ wal")),
+		JumpReplication: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "→ replication")),
+		Progress:        key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "→ progress")),
+		Settings:        key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "→ settings")),
 
-		WaitProfile: key.NewBinding(key.WithKeys("W"), key.WithHelp("W", "wait profile")),
+		WaitProfile: key.NewBinding(key.WithKeys("W"), key.WithHelp("W", "→ wait profile")),
 
 		LogGroupMode: key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "section mode")),
 		LogPane:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "groups/timeline/slow/stats")),
 		LogWindow:    key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "widen window")),
-		LogJump:      key.NewBinding(key.WithKeys("j"), key.WithHelp("j", "jump to timeline")),
+		LogJump:      key.NewBinding(key.WithKeys("j"), key.WithHelp("j", "→ timeline")),
 		LogParams:    key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "entries/params/$1")),
 
-		OpenLog: key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "open log")),
+		OpenLog: key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "→ log analyzer")),
 	}
 }
 
@@ -215,11 +225,14 @@ func (k *keyMap) applyContext(s *screen) {
 	k.Rebaseline.SetEnabled(stmtTable)
 	k.Snapshots.SetEnabled(stmtTable)
 	// C (Columns) is the column-config picker on the top-queries table, the
-	// activity table, the table overview and diagnostic results. The picker is
-	// hard to find without a header hint, so surface it in the footer everywhere
-	// but the top-queries table, whose header already advertises it.
-	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult || (logs && s.log.view.table()) || pgbShow)
-	k.columnsInFooter = activity || tableStats || diagResult || (logs && s.log.view.table()) || pgbShow
+	// activity table, the table overview, diagnostic results and the heap
+	// tuple list (where it picks the relation's own columns; TOAST relations
+	// have nothing worth picking). The picker is hard to find without a header
+	// hint, so surface it in the footer everywhere but the top-queries table,
+	// whose header already advertises it.
+	heapTuples := s.level == levelHeapTuples && s.table.Schema != "pg_toast"
+	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult || (logs && s.log.view.table()) || pgbShow || heapTuples)
+	k.columnsInFooter = activity || tableStats || diagResult || (logs && s.log.view.table()) || pgbShow || heapTuples
 	// t (ToggleRefresh) cycles the auto-refresh cadence on top-queries levels and
 	// on the live activity/progress levels. Surface it in the footer on the pure
 	// live monitors, whose header shows the cadence but not the key that changes
@@ -254,10 +267,6 @@ func (k *keyMap) applyContext(s *screen) {
 	k.LockTree.SetEnabled(activity)
 	k.lockTreeInFooter = activity
 
-	// w opens the by-relation WAL breakdown — only from the rmgr overview, so
-	// the physical key stays free for reuse on every other level.
-	k.WALByRelation.SetEnabled(s.level == levelWAL)
-
 	// Log analyzer cluster: m/tab/w only on the overview, o from every log level.
 	k.LogGroupMode.SetEnabled(logs)
 	k.LogPane.SetEnabled(logs)
@@ -282,9 +291,14 @@ func (k *keyMap) applyContext(s *screen) {
 		describeHasHeap(s)
 	k.PageInspect.SetEnabled(pageInspect)
 	k.pageInspectInFooter = pageInspect
+	// t opens the top-queries tool filtered to the described table. Gated to
+	// the describe panel of a table, where ToggleRefresh (the other t) is off.
+	topQueries := describeHasHeap(s)
+	k.TopQueries.SetEnabled(topQueries)
+	k.topQueriesInFooter = topQueries
 
 	// System-overview cross-links only exist on the maintenance dashboard; gating
-	// them here keeps r/w free for reverse-sort and WAL-by-relation everywhere else.
+	// them here keeps r/w free for reverse-sort and the log window everywhere else.
 	maint := s.level == levelMaintenance
 	k.JumpActivity.SetEnabled(maint)
 	k.JumpWAL.SetEnabled(maint)
@@ -306,16 +320,13 @@ func (k *keyMap) applyContext(s *screen) {
 	// via d is the only action. Drop the misleading drill/sort hints from its
 	// footer and surface d instead, so the footer matches what the level does.
 	progress := s.level == levelProgress
-	// Diagnostic result rows don't drill either: Enter opens the suggested-fix
-	// overlay where the diagnostic defines one, and is disabled (like progress)
-	// where none does, so the footer never advertises a dead key.
-	diagFix := diagResult && s.diag != nil && s.diag.Fix != nil
-	// pgbouncer SHOW rows are leaves too.
-	k.Enter.SetEnabled(!progress && !pgbShow && (!diagResult || diagFix))
-	if diagFix {
-		k.Enter.SetHelp("↵", "fix")
-	} else {
-		k.Enter.SetHelp("↵", "drill in")
+	// Enter's hint names where it leads on this level (and row), and the key is
+	// disabled outright on leaf levels and inert rows so the footer never
+	// advertises a dead key. enterLabel (keys_enter.go) is the single table.
+	label, drills := enterLabel(s)
+	k.Enter.SetEnabled(drills)
+	if drills {
+		k.Enter.SetHelp("↵", label)
 	}
 	k.SortPrev.SetEnabled(!progress)
 	k.SortNext.SetEnabled(!progress)
@@ -363,6 +374,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	if k.pageInspectInFooter {
 		b = append(b, k.PageInspect)
 	}
+	if k.topQueriesInFooter {
+		b = append(b, k.TopQueries)
+	}
 	if k.lockTreeInFooter {
 		b = append(b, k.LockTree)
 	}
@@ -389,7 +403,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Refresh, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
-		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.WALByRelation, k.ShmemMap, k.PageInspect},
+		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
 		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.Progress, k.Settings},
 		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump, k.LogParams, k.OpenLog},
 		{k.Help, k.Quit},

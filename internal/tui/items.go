@@ -56,20 +56,29 @@ func heapPageToItem(p pg.HeapPageStat) item {
 	// compare occupancy across pages without re-reading the numbers.
 	used := max(heapPageBlockSize-int64(p.FreeBytes), 0)
 	return item{
-		name: fmt.Sprintf("page #%07d", p.Blkno),
-		size: used,
-		data: p,
+		name:        fmt.Sprintf("page #%07d", p.Blkno),
+		size:        used,
+		hasChildren: true, // Enter → the page's line pointers
+		data:        p,
 	}
 }
 
 func heapTupleToItem(t pg.HeapTuple) item {
 	// The filter matches on name, and the renderer builds its own "#NNNN"
-	// label, so the primary key rides along here: typing a key value into the
-	// filter narrows a page to the line pointer holding that row.
+	// label, so the primary key and the shown column values ride along here:
+	// typing a value into the filter narrows a page to the line pointers
+	// holding it.
 	name := fmt.Sprintf("#%04d", t.LP)
 	if t.PK != nil {
 		name += " " + *t.PK
 	}
+	var nameSb75 strings.Builder
+	for _, v := range t.Vals {
+		if v != nil {
+			nameSb75.WriteString(" " + *v)
+		}
+	}
+	name += nameSb75.String()
 	// hasChildren is set only for NORMAL line pointers — DEAD/UNUSED have
 	// no row to fetch, and REDIRECT points at a target on (potentially)
 	// another page that we'd need to chase, which the row-detail view
@@ -327,9 +336,10 @@ func indexPageToItem(p pg.IndexPageStat) item {
 	// reads as "how packed is this page" at a uniform scale.
 	used := max(heapPageBlockSize-int64(p.FreeSize), 0)
 	return item{
-		name: fmt.Sprintf("page #%07d", p.Blkno),
-		size: used,
-		data: p,
+		name:        fmt.Sprintf("page #%07d", p.Blkno),
+		size:        used,
+		hasChildren: true, // Enter → the page's index tuples
+		data:        p,
 	}
 }
 
@@ -564,7 +574,7 @@ func walBlockToItem(b pg.WALBlockRef) item {
 	}
 }
 
-// walRelStatToItem builds one levelWALRelations row. size is the combined byte
+// walRelStatToItem builds one by-relation row of levelWAL. size is the combined byte
 // total (record data + FPI) so the bar scales each relation against its
 // siblings — the busiest relation tops the list ("what caused the change").
 // hasChildren is true when any record touched it, so it drills to that
@@ -586,8 +596,8 @@ func walRelStatToItem(st pg.WALRelStat) item {
 }
 
 // itemWALCount / itemWALFPI extract the record count and FPI bytes from a
-// levelWAL rmgr-stat or levelWALRelations relation-stat item. Second return is
-// false for items without that payload so they sort below rows we can rank.
+// levelWAL rmgr-stat or relation-stat item. Second return is false for items
+// without that payload so they sort below rows we can rank.
 func itemWALCount(it item) (int64, bool) {
 	switch v := it.data.(type) {
 	case pg.WALRmgrStat:
@@ -642,9 +652,10 @@ func bufferStatToItem(s pg.TableBufferStat) item {
 	// detail is left empty: the per-row figures (table size, cached %, hit %)
 	// are rendered as their own columns in renderBufferList.
 	return item{
-		name: s.Schema + "." + s.Name,
-		size: s.BufferedBytes,
-		data: s,
+		name:        s.Schema + "." + s.Name,
+		size:        s.BufferedBytes,
+		hasChildren: true, // Enter → per-table buffer detail
+		data:        s,
 	}
 }
 

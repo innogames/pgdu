@@ -3,11 +3,11 @@ package tui
 import (
 	tea "github.com/charmbracelet/bubbletea"
 
-	"pgdu/internal/pg"
+	"pgdu/internal/pgbouncer"
 )
 
 // pgbOverviewScreen is the per-instance screen: header + SHOW menu.
-func (m *Model) pgbOverviewScreen(inst pg.PgBouncerInstance) *screen {
+func (m *Model) pgbOverviewScreen(inst pgbouncer.Instance) *screen {
 	return &screen{
 		level: levelPgBouncer, title: inst.Name, tool: toolPgBouncer, db: m.client.DefaultDB(),
 		pgb: pgbState{inst: &inst}, sort: sortByName, loading: true}

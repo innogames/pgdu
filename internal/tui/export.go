@@ -101,7 +101,7 @@ func (m *Model) screenCSV(s *screen) ([]string, [][]string, bool) {
 		return header, rows, true
 	}
 
-	header, rowFn, ok := csvSchema(s.level)
+	header, rowFn, ok := csvSchema(s)
 	if !ok {
 		return nil, nil, false
 	}
@@ -118,8 +118,11 @@ func (m *Model) screenCSV(s *screen) ([]string, [][]string, bool) {
 // The row builder type-asserts item.data and returns nil when it doesn't match
 // (so a stray row never breaks the export). Header and builder are declared
 // together per case so the column order can't drift from the values.
-func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
-	switch l {
+//
+// It takes the screen, not just the level, because the heap tuple list's value
+// columns are the user's pick (screen.pages.tupleShown) rather than a fixed set.
+func csvSchema(s *screen) (header []string, row func(it item) []string, ok bool) {
+	switch s.level {
 	case levelLogs:
 		return []string{"category", "severity", "count", "first", "last", "title"},
 			func(it item) []string {
@@ -256,14 +259,29 @@ func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 	case levelHeapTuples:
 		// pk is empty both for a table without a primary key and for a line
 		// pointer whose row isn't visible to this session — lp_flags/xmax tell
-		// the two apart, so the export doesn't need a third state.
-		return []string{"lp", "lp_off", "lp_flags", "lp_len", "xmin", "xmax", "ctid", "pk", "infomask", "infomask2", "hoff", "oid", "chunk_id", "chunk_seq"},
+		// the two apart, so the export doesn't need a third state. The picked
+		// table columns follow as col:<name>, with the same visible-row-else-
+		// decoded-bytes value the list shows.
+		header := []string{"lp", "lp_off", "lp_flags", "lp_len", "xmin", "xmax", "ctid", "pk", "infomask", "infomask2", "hoff", "oid", "chunk_id", "chunk_seq"}
+		var cols []tupleValueCol
+		for pos, ci := range s.pages.tupleShown {
+			if ci >= 0 && ci < len(s.pages.tupleCols) {
+				c := s.pages.tupleCols[ci]
+				cols = append(cols, tupleValueCol{pos: pos, col: c})
+				header = append(header, "col:"+c.Name)
+			}
+		}
+		return header,
 			func(it item) []string {
 				t, ok := it.data.(pg.HeapTuple)
 				if !ok {
 					return nil
 				}
-				return []string{csvInt(t.LP), csvInt(t.LPOff), csvInt(t.LPFlags), csvInt(t.LPLen), csvUintP(t.Xmin), csvUintP(t.Xmax), csvStrP(t.Ctid), csvStrP(t.PK), csvInt(t.Infomask), csvInt(t.Infomask2), csvIntP(t.Hoff), csvUintP(t.Oid), csvUintP(t.ChunkID), csvIntP(t.ChunkSeq)}
+				row := []string{csvInt(t.LP), csvInt(t.LPOff), csvInt(t.LPFlags), csvInt(t.LPLen), csvUintP(t.Xmin), csvUintP(t.Xmax), csvStrP(t.Ctid), csvStrP(t.PK), csvInt(t.Infomask), csvInt(t.Infomask2), csvIntP(t.Hoff), csvUintP(t.Oid), csvUintP(t.ChunkID), csvIntP(t.ChunkSeq)}
+				for _, c := range cols {
+					row = append(row, tupleValueText(t, c))
+				}
+				return row
 			}, true
 
 	case levelTupleRow:
@@ -305,13 +323,18 @@ func csvSchema(l level) (header []string, row func(it item) []string, ok bool) {
 			}, true
 
 	case levelWAL:
-		return []string{"rmgr", "count", "record_bytes", "fpi_bytes", "combined_bytes"},
+		// Both tables of the overview in one file, told apart by section: rmgr
+		// rows leave db/pages empty, relation rows carry their record count
+		// under count and their block-data bytes under record_bytes.
+		return []string{"section", "name", "db", "count", "record_bytes", "fpi_bytes", "combined_bytes", "pages"},
 			func(it item) []string {
-				st, ok := it.data.(pg.WALRmgrStat)
-				if !ok {
-					return nil
+				switch v := it.data.(type) {
+				case pg.WALRmgrStat:
+					return []string{"rmgr", v.Name, "", csvInt(v.Count), csvInt(v.RecordSize), csvInt(v.FPISize), csvInt(v.CombinedSize), ""}
+				case pg.WALRelStat:
+					return []string{"relation", it.name, v.DBName, csvInt(v.RecCount), csvInt(v.DataBytes), csvInt(v.FPIBytes), csvInt(v.CombinedSize()), csvInt(v.BlockCount)}
 				}
-				return []string{st.Name, csvInt(st.Count), csvInt(st.RecordSize), csvInt(st.FPISize), csvInt(st.CombinedSize)}
+				return nil // section rows
 			}, true
 
 	case levelWALRecords:

@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"pgdu/internal/procfs"
 )
 
 // ErrNotIncremental is returned by ReadFrom on sources that cannot seek
@@ -95,7 +97,7 @@ func (s *localFileSource) Cursor(_ context.Context) *Cursor {
 	if err != nil {
 		return nil
 	}
-	return &Cursor{Inode: fileInode(fi), Size: fi.Size()}
+	return &Cursor{Inode: procfs.Inode(fi), Size: fi.Size()}
 }
 
 // lineSample is how much of a file's head is read to measure the average line

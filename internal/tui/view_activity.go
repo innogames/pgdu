@@ -140,9 +140,9 @@ func (m *Model) renderActivityInfo(height int) string {
 	b.WriteString("    " + mu("    Both require a confirmation showing the target pid and query: press y to execute, any other key to abort.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" navigation ") + "\n")
-	b.WriteString("    " + badge("↵") + mu("  drill into top-queries detail for the selected row's query_id (when available)") + "\n")
-	b.WriteString("    " + badge("b") + mu("  open the blocking-chain lock tree (who is blocking whom)") + "\n")
-	b.WriteString("    " + badge("d") + mu("  describe the main table of the selected row's query (in that backend's database)") + "\n")
+	b.WriteString("    " + badge("↵") + mu("  → query detail: the top-queries view of the selected row's query_id (when available)") + "\n")
+	b.WriteString("    " + badge("b") + mu("  → lock tree: the blocking chain (who is blocking whom)") + "\n")
+	b.WriteString("    " + badge("d") + mu("  → describe the main table of the selected row's query (in that backend's database)") + "\n")
 	b.WriteString("    " + badge("C") + mu("  configure visible columns") + "\n")
 	b.WriteString("    " + badge("←") + mu("/") + badge("→") + mu("  cycle sort column · ") +
 		badge("r") + mu(" reverse sort order") + "\n\n")

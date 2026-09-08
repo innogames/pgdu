@@ -61,30 +61,78 @@ FROM   heap_page_items(get_raw_page($1, 'main', $2::int))
 ORDER  BY lp
 `
 
-// sqlHeapTuplesPK is sqlHeapTuples plus a primary-key projection, so the tuple
-// list can name the row a line pointer holds instead of only its physical
-// address. The join mirrors sqlToastTuples: the ctid is rebuilt from the block
-// number ($2) and the line pointer, which the planner resolves as a Tid Scan —
-// a single buffer hit on a page get_raw_page already pulled in.
+// sqlHeapTuplesCols is sqlHeapTuples plus the row's logical content, so the
+// tuple list can name the row a line pointer holds instead of only its
+// physical address — in two provenances, because a page inspector's most
+// interesting tuples are the ones no query can see any more:
 //
-// Only rows visible to our snapshot join, so dead / aborted / uncommitted
-// tuples project NULL: their ctid is still on the page, but no row you could
-// SELECT lives there. The src.ctid IS NULL guard is what produces that NULL —
-// concat_ws skips NULL inputs, so a composite key would otherwise render as
-// "()" for a line pointer with no visible row.
+//   - pk / vals: the primary key and the picked columns as text, read from the
+//     live relation through this session's snapshot. The join mirrors
+//     sqlToastTuples: the ctid is rebuilt from the block number ($2) and the
+//     line pointer, which the planner resolves as a Tid Scan — a single buffer
+//     hit on a page get_raw_page already pulled in. Only rows visible to our
+//     snapshot join, so dead / aborted / uncommitted tuples project NULL (the
+//     src.ctid IS NULL guard is what produces it — concat_ws / ARRAY[] would
+//     otherwise render "()" / an all-NULL array for a line pointer with no
+//     visible row).
+//   - raws: the picked columns' on-page bytes from heap_page_item_attrs, which
+//     splits every NORMAL tuple's t_data by the relation's descriptor whatever
+//     its visibility. The two get_raw_page calls read the same buffer but are
+//     not one atomic read; the join on lp tolerates a page pruned in between
+//     (a vanished lp simply has no raws).
 //
-// The %s are the key expression (heapKeyProjection) and the quoted regclass;
-// $1 is the same regclass as text for get_raw_page, $2 the block number.
-const sqlHeapTuplesPK = `
+// The %[n]s are: 1 the key expression (heapKeyProjection, or NULL), 2 the
+// picked columns' text projections (heapColProjection), 3 their t_attrs
+// elements (heapAttrProjection), 4 the quoted regclass. $1 is the same
+// regclass as text for get_raw_page / heap_page_item_attrs, $2 the block.
+const sqlHeapTuplesCols = `
 SELECT hpi.lp::int, hpi.lp_off::int, hpi.lp_flags::int, hpi.lp_len::int,
        hpi.t_xmin, hpi.t_xmax, hpi.t_field3, hpi.t_ctid::text,
        COALESCE(hpi.t_infomask2, 0)::int, COALESCE(hpi.t_infomask, 0)::int, hpi.t_hoff::int,
        hpi.t_bits, hpi.t_oid, hpi.t_data,
-       CASE WHEN src.ctid IS NULL THEN NULL ELSE %s END AS pk
+       CASE WHEN src.ctid IS NULL THEN NULL ELSE %[1]s END                  AS pk,
+       CASE WHEN src.ctid IS NULL THEN NULL ELSE ARRAY[%[2]s]::text[] END   AS vals,
+       ARRAY[%[3]s]::bytea[]                                               AS raws
 FROM   heap_page_items(get_raw_page($1, 'main', $2::int)) hpi
-LEFT   JOIN %s src
+LEFT   JOIN heap_page_item_attrs(get_raw_page($1, 'main', $2::int), $1::regclass) hpa
+         ON hpa.lp = hpi.lp
+LEFT   JOIN %[4]s src
          ON src.ctid = ('(' || $2::text || ',' || hpi.lp::text || ')')::tid
 ORDER  BY hpi.lp
+`
+
+// sqlHeapTuplesDecode is sqlHeapTuplesCols without the relation join: the
+// fallback for a role granted pageinspect but not SELECT on the table, which
+// still gets the picked columns decoded from the page bytes. %[1]s is the
+// t_attrs projection (heapAttrProjection).
+const sqlHeapTuplesDecode = `
+SELECT hpi.lp::int, hpi.lp_off::int, hpi.lp_flags::int, hpi.lp_len::int,
+       hpi.t_xmin, hpi.t_xmax, hpi.t_field3, hpi.t_ctid::text,
+       COALESCE(hpi.t_infomask2, 0)::int, COALESCE(hpi.t_infomask, 0)::int, hpi.t_hoff::int,
+       hpi.t_bits, hpi.t_oid, hpi.t_data,
+       ARRAY[%[1]s]::bytea[] AS raws
+FROM   heap_page_items(get_raw_page($1, 'main', $2::int)) hpi
+LEFT   JOIN heap_page_item_attrs(get_raw_page($1, 'main', $2::int), $1::regclass) hpa
+         ON hpa.lp = hpi.lp
+ORDER  BY hpi.lp
+`
+
+// sqlHeapColumns lists a relation's live columns in attnum order with the
+// pg_attribute/pg_type facts the tuple list needs to offer them in its column
+// picker and decode their on-page bytes. Dropped columns are left out: they
+// have no name to pick and no type to decode with. $1 is the quoted regclass.
+const sqlHeapColumns = `
+SELECT a.attnum::int,
+       a.attname::text,
+       format_type(a.atttypid, a.atttypmod) AS type_name,
+       a.attlen::int,
+       a.attalign::text,
+       COALESCE(t.typname, '')::text        AS typname,
+       COALESCE(t.typcategory, '')::text    AS typcategory
+FROM   pg_attribute a
+LEFT   JOIN pg_type t ON t.oid = a.atttypid
+WHERE  a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped
+ORDER  BY a.attnum
 `
 
 // sqlPrimaryKeyColumns lists a relation's primary-key columns in key order.
@@ -102,10 +150,11 @@ WHERE  i.indrelid = $1::regclass
 ORDER  BY k.ord
 `
 
-// heapKeyColCap bounds each key column's text in sqlHeapTuplesPK. The pk
-// column renders 18 cells and the expanded row 120, so this is already
-// generous — its job is to stop a fat text/bytea key from shipping kilobytes
-// per line pointer (a page holds up to ~290 of them).
+// heapKeyColCap bounds each projected column's text in sqlHeapTuplesCols (key
+// columns and picked columns alike). A list cell renders at most 24 cells and
+// the expanded key line 120, so this is already generous — its job is to stop
+// a fat text/bytea column from shipping kilobytes per line pointer (a page
+// holds up to ~290 of them).
 const heapKeyColCap = "64"
 
 // sqlToastTuples mirrors sqlHeapTuples for TOAST heap pages, adding

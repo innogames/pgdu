@@ -2,6 +2,7 @@ package pg
 
 import (
 	"context"
+	"slices"
 	"testing"
 )
 
@@ -42,7 +43,8 @@ func TestIntegration_ListTupleAttrs(t *testing.T) {
 	}
 	table := Table{DB: db, Schema: "public", Name: "pgdu_xray", OID: oid}
 
-	tuples, _, err := c.ListHeapTuples(ctx, table, 0)
+	page, err := c.ListHeapTuples(ctx, table, 0, nil)
+	tuples := page.Tuples
 	if err != nil {
 		t.Fatalf("ListHeapTuples: %v", err)
 	}
@@ -82,5 +84,80 @@ func TestIntegration_ListTupleAttrs(t *testing.T) {
 	}
 	if a := attrs[0]; a.Len != 2 || a.Align != "s" || a.TypName != "int2" || len(a.Value) != 2 {
 		t.Errorf("int2 metadata mismatch: %+v", a)
+	}
+}
+
+// Exercises the tuple list's row-content projection (sqlHeapTuplesCols): the
+// default pick is the primary key, an explicit pick projects the visible row's
+// text plus every NORMAL tuple's page bytes — including the dead version an
+// UPDATE leaves behind, which only the bytes can still show. Skipped unless
+// PGDU_TEST_DSN is set (needs pageinspect + superuser).
+func TestIntegration_ListHeapTuplesColumns(t *testing.T) {
+	c, db := diagTestClient(t)
+	ctx := context.Background()
+
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS pgdu_cols`)
+	for _, sql := range []string{
+		`CREATE TABLE pgdu_cols (id int4 PRIMARY KEY, n int4, s text) WITH (autovacuum_enabled = off)`,
+		`INSERT INTO pgdu_cols VALUES (1, 10, 'one'), (2, 20, NULL)`,
+		`UPDATE pgdu_cols SET n = 11 WHERE id = 1`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS pgdu_cols`) })
+
+	var oid uint32
+	if err := pool.QueryRow(ctx, `SELECT 'pgdu_cols'::regclass::oid`).Scan(&oid); err != nil {
+		t.Fatalf("oid: %v", err)
+	}
+	table := Table{DB: db, Schema: "public", Name: "pgdu_cols", OID: oid}
+
+	page, err := c.ListHeapTuples(ctx, table, 0, nil)
+	if err != nil {
+		t.Fatalf("ListHeapTuples(default): %v", err)
+	}
+	if len(page.Columns) != 3 || !page.Columns[0].PK || page.Columns[1].PK {
+		t.Fatalf("columns = %+v, want id(pk), n, s", page.Columns)
+	}
+	if !slices.Equal(page.ShownNames(), []string{"id"}) || !slices.Equal(page.PKCols, []string{"id"}) {
+		t.Errorf("default pick shows %v (pk %v), want [id]", page.ShownNames(), page.PKCols)
+	}
+	// lp 1 is the superseded version of id=1: no visible row, bytes still there.
+	if len(page.Tuples) != 3 {
+		t.Fatalf("got %d line pointers, want 3 (two rows + one dead version): %+v", len(page.Tuples), page.Tuples)
+	}
+	old := page.Tuples[0]
+	if old.Vals != nil || old.PK != nil || len(old.Raws) != 1 || len(old.Raws[0]) != 4 {
+		t.Errorf("dead version should have no visible text but its 4 B id bytes: vals=%v pk=%v raws=%v", old.Vals, old.PK, old.Raws)
+	}
+
+	page, err = c.ListHeapTuples(ctx, table, 0, []string{"s", "n", "nope"})
+	if err != nil {
+		t.Fatalf("ListHeapTuples(pick): %v", err)
+	}
+	if !slices.Equal(page.ShownNames(), []string{"n", "s"}) {
+		t.Errorf("explicit pick shows %v, want [n s] (attnum order, unknown dropped)", page.ShownNames())
+	}
+	for _, tup := range page.Tuples {
+		if tup.PK == nil {
+			continue // the dead version
+		}
+		switch *tup.PK {
+		case "1":
+			if len(tup.Vals) != 2 || tup.Vals[0] == nil || *tup.Vals[0] != "11" || tup.Vals[1] == nil || *tup.Vals[1] != "one" {
+				t.Errorf("row 1 vals = %v, want [11 one]", tup.Vals)
+			}
+		case "2":
+			// A NULL in a visible row is a nil element, not a missing slice.
+			if len(tup.Vals) != 2 || tup.Vals[1] != nil || len(tup.Raws) != 2 || tup.Raws[1] != nil {
+				t.Errorf("row 2 should carry a NULL s in both provenances: vals=%v raws=%v", tup.Vals, tup.Raws)
+			}
+		}
 	}
 }

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -9,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"pgdu/internal/humanize"
+	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
 )
 
@@ -42,7 +44,7 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 	b.WriteString("  " + styleHeader.Render(" lp_flags ") + "  " +
 		mu("on the per-tuple drill, the coloured dot at the start of each row decodes lp_flags") + "\n")
 	b.WriteString("    " + styleLPNormal.Render("●") + "  " + mu("NORMAL    a live tuple, fully formed") + "\n")
-	b.WriteString("    " + styleLPRedirect.Render("●") + "  " + mu("REDIRECT  HOT chain hop — Enter jumps to the target lp on this page") + "\n")
+	b.WriteString("    " + styleLPRedirect.Render("●") + "  " + mu("REDIRECT  HOT chain hop — ↵ jumps to the target lp on this page") + "\n")
 	b.WriteString("    " + styleLPDead.Render("●") + "  " + mu("DEAD      reclaimable — VACUUM removes these (and their items)") + "\n")
 	b.WriteString("    " + styleLPUnused.Render("●") + "  " + mu("UNUSED    line pointer is free for reuse") + "\n\n")
 
@@ -58,7 +60,7 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 	b.WriteString("    " + mu("   the column only appears when pg_buffercache is installed; ←/→ cycles the sort onto it") + "\n\n")
 
 	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+strconv.Itoa(int(heapWindowDefault))+" pages per step).") + "\n")
-	b.WriteString("  " + mu("Within a window, j/k or arrows move the cursor; Enter drills into one page.") + "\n")
+	b.WriteString("  " + mu("Within a window, j/k or arrows move the cursor; ↵ drills into one page.") + "\n")
 
 	return padInfo(&b, height)
 }
@@ -85,10 +87,10 @@ func (m *Model) renderHeapTuplesInfo(height int) string {
 	b.WriteString("    " + padRight("xmin", 12) + mu("inserting transaction id (visible only to xacts after xmin commits)") + "\n")
 	b.WriteString("    " + padRight("xmax", 12) + mu("deleting / locking xid; 0 means \"no xmax set\" — the tuple is still live") + "\n")
 	b.WriteString("    " + padRight("ctid", 12) + mu("forward pointer: own (block,offset) for NORMAL · → #NNNN target lp for REDIRECT") + "\n")
-	b.WriteString("    " + padRight("pk", 12) + mu("primary key of the row in this slot — the logical identity behind the ctid.") + "\n")
-	b.WriteString("    " + padRight("", 12) + mu("Shown for tables that have one; the key is read through this session's") + "\n")
-	b.WriteString("    " + padRight("", 12) + mu("snapshot, so dead / aborted / uncommitted tuples read — (no row to look up).") + "\n")
-	b.WriteString("    " + padRight("", 12) + mu("The / filter matches it, so a key value jumps straight to its line pointer.") + "\n")
+	b.WriteString("    " + padRight("<column>", 12) + mu("a table column picked with C (default: the primary key) — the logical row behind the ctid.") + "\n")
+	b.WriteString("    " + padRight("", 12) + mu("Plain text is the row as this session sees it; a ") + styleMuted.Render("muted") + mu(" value was decoded from") + "\n")
+	b.WriteString("    " + padRight("", 12) + mu("the tuple's own bytes — a dead, aborted or superseded version no query can see.") + "\n")
+	b.WriteString("    " + padRight("", 12) + mu("∅ is a NULL in a visible row; — nothing to show. The / filter matches the values.") + "\n")
 	b.WriteString("    " + padRight("state", 12) + mu("visibility verdict decoded from xmin/xmax + commit bits (see below)") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" state ") + "  " +
@@ -125,7 +127,7 @@ func (m *Model) renderHeapTuplesInfo(height int) string {
 	b.WriteString("    " + padRight("layout:", 12) + mu("header vs payload bytes (split at t_hoff) with a bar, plus the page byte span") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" keys ") + "\n")
-	b.WriteString("    " + styleBadge.Render(padRight("enter", 10)) +
+	b.WriteString("    " + styleBadge.Render(padRight("↵", 10)) +
 		mu("byte-layout overlay — header fields, per-column bytes and decoded values (own ? help inside)") + "\n")
 
 	return padInfo(&b, height)
@@ -171,7 +173,7 @@ func renderHeapPagesHeader(sort sortMode, sortDesc bool, barW int, showTemp bool
 		padRight(sortMark("dead", sort == sortByDeadLP, sortDesc), heapPageDeadLPColW) + "  " +
 		padRight(sortMark("dead%", sort == sortByDeadRatio, sortDesc), heapPageDeadColW) + "  " +
 		pageTempHeaderCol(sort, sortDesc, showTemp) +
-		sortMark("page", sort == sortByBlkno, sortDesc)
+		"  " + sortMark("page", sort == sortByBlkno, sortDesc)
 	return styleMuted.Render(line)
 }
 
@@ -215,7 +217,7 @@ func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool, show
 		padRight(deadStr, heapPageDeadLPColW) + "  " +
 		padRight(deadPct, heapPageDeadColW) + "  " +
 		pageTempRowCol(it, showTemp) +
-		name
+		drillMark(it.hasChildren) + name
 }
 
 // renderHeapTuplesList draws one row per line-pointer. The selected row
@@ -231,17 +233,17 @@ func (m *Model) renderHeapTuplesList(s *screen, height int) string {
 		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
 	}
 	end := min(s.offset+rowsH, len(vis))
-	showPK := m.showTuplePK(s)
+	cols := m.tupleValueLayout(s, vis)
 
 	var b strings.Builder
-	b.WriteString(renderHeapTuplesHeader(s.sort, s.sortDesc, showPK))
+	b.WriteString(renderHeapTuplesHeader(s.sort, s.sortDesc, cols))
 	b.WriteString("\n")
 	lines := 0
 	for vi := s.offset; vi < end && lines < rowsH; vi++ {
 		it := s.items[vis[vi]]
 		t, _ := it.data.(pg.HeapTuple)
 		selected := vi == s.cursor
-		b.WriteString(renderHeapTupleHeadline(t, selected, showPK))
+		b.WriteString(renderHeapTupleHeadline(t, it.hasChildren, selected, cols))
 		b.WriteString("\n")
 		lines++
 		if selected {
@@ -261,34 +263,133 @@ func (m *Model) renderHeapTuplesList(s *screen, height int) string {
 	return b.String()
 }
 
-// showTuplePK reports whether the tuple list renders its pk column: the table
-// needs a primary key to project, and the terminal needs the room (see
-// tuplePKMinWidth — the physical columns win a fight for the last cells).
-func (m *Model) showTuplePK(s *screen) bool {
-	return len(s.pages.tuplePKCols) > 0 && m.width >= tuplePKMinWidth
+// tupleValueCol is one picked table column as the tuple list lays it out:
+// which of the tuple's Vals/Raws slots it reads (pos), its metadata, and the
+// cell width it settled on.
+type tupleValueCol struct {
+	pos int
+	col pg.HeapColumn
+	w   int
 }
 
-func renderHeapTuplesHeader(sort sortMode, sortDesc bool, showPK bool) string {
-	// Indentation matches the row: cursor (2) + "#NNNN" idx col (5) + gap.
-	// The "● " dot+space takes 2 cells before the flag-name column.
-	line := "  " + padRight(sortMark("lp", sort == sortByLP, sortDesc), 5) + "  " +
+// tupleValueLayout sizes the picked columns to their content — the widest of
+// header and cells over the visible rows, clamped to [tupleValueColMin,
+// tupleValueColMax] — and keeps them left to right while they fit between the
+// physical columns and the state tail. What doesn't fit is dropped silently;
+// the picker still lists it, a wider terminal brings it back.
+func (m *Model) tupleValueLayout(s *screen, vis []int) []tupleValueCol {
+	room := m.width - barReserve(s) - tupleValueTail
+	var out []tupleValueCol
+	for pos, ci := range s.pages.tupleShown {
+		if ci < 0 || ci >= len(s.pages.tupleCols) {
+			continue
+		}
+		c := tupleValueCol{pos: pos, col: s.pages.tupleCols[ci]}
+		w := lipgloss.Width(c.col.Name)
+		for _, idx := range vis {
+			t, ok := s.items[idx].data.(pg.HeapTuple)
+			if !ok {
+				continue
+			}
+			if cw := lipgloss.Width(tupleValueText(t, c)); cw > w {
+				w = cw
+			}
+			if w >= tupleValueColMax {
+				break
+			}
+		}
+		c.w = min(max(w, tupleValueColMin), tupleValueColMax)
+		if c.w+2 > room {
+			break
+		}
+		room -= c.w + 2
+		out = append(out, c)
+	}
+	return out
+}
+
+// tupleValueText is the unstyled cell text of one picked column for a tuple,
+// in its two provenances: the visible row's text when the session can see the
+// row, else the value decoded from the tuple's own bytes. "" means nothing to
+// show — a SQL NULL, an attribute the tuple predates, or a slot with no body.
+// tupleValueCell styles the provenance; this is the measurement input.
+func tupleValueText(t pg.HeapTuple, c tupleValueCol) string {
+	if t.Vals != nil {
+		if c.pos < len(t.Vals) && t.Vals[c.pos] != nil {
+			return flattenQuery(*t.Vals[c.pos])
+		}
+		return ""
+	}
+	raw := tupleRawValue(t, c)
+	if raw == nil {
+		return ""
+	}
+	if v := pageinspect.DecodeAttrValue(c.col.Attr(raw)); v != "" {
+		return v
+	}
+	return previewBytes(raw, tupleValueColMax)
+}
+
+// tupleRawValue returns the tuple's on-page bytes for a picked column, or nil
+// when it holds none: NULL, a slot without a body, or a column added after the
+// tuple was written (attnum beyond the tuple's own natts — heap_page_item_attrs
+// leaves those NULL too, but the natts check keeps the rule explicit).
+func tupleRawValue(t pg.HeapTuple, c tupleValueCol) []byte {
+	if t.LPFlags != pg.LPNormal || c.pos >= len(t.Raws) {
+		return nil
+	}
+	if t.Infomask2&pg.HeapNattsMask2 < c.col.Attnum {
+		return nil
+	}
+	return t.Raws[c.pos]
+}
+
+// tupleValueCell renders one picked column's cell, padded to its width. A
+// value read from the visible row is plain; one decoded from the page bytes —
+// a dead, aborted or superseded version no query can see — is muted, so the
+// two provenances tell apart at a glance. Nothing to show reads as the same
+// "—" the other columns use, and a visible row's NULL as ∅.
+func tupleValueCell(t pg.HeapTuple, c tupleValueCol) string {
+	text := tupleValueText(t, c)
+	switch {
+	case text == "" && t.Vals != nil && t.LPFlags == pg.LPNormal:
+		return padRight(styleMuted.Render("∅"), c.w)
+	case text == "":
+		return padRight(styleMuted.Render("—"), c.w)
+	case t.Vals != nil:
+		return padRight(clipCells(text, c.w), c.w)
+	default:
+		return padRight(styleMuted.Render(clipCells(text, c.w)), c.w)
+	}
+}
+
+// renderHeapTuplesHeader draws the column header; each laid-out value column
+// is labelled with the table column's name.
+func renderHeapTuplesHeader(sort sortMode, sortDesc bool, cols []tupleValueCol) string {
+	// Indentation matches the row: cursor (2) + drill mark (2) + "#NNNN" idx
+	// col (5) + gap. The "● " dot+space takes 2 cells before the flag-name column.
+	line := strings.Repeat(" ", colCursor+colMark) + padRight(sortMark("lp", sort == sortByLP, sortDesc), 5) + "  " +
 		padRight("lp_flags", 2+tupleFlagColW) + "  " +
 		padRight(sortMark("len", sort == sortBySize, sortDesc), tupleLenColW) + "  " +
 		padRight("xmin", tupleXidColW) + "  " +
 		padRight("xmax", tupleXidColW) + "  " +
 		padRight("ctid", tupleCtidColW) + "  "
-	if showPK {
-		line += padRight("pk", tuplePKColW) + "  "
+	var lineSb377 strings.Builder
+	for _, c := range cols {
+		lineSb377.WriteString(padRight(clipCells(c.col.Name, c.w), c.w) + "  ")
 	}
+	line += lineSb377.String()
 	return styleMuted.Render(line + "state")
 }
 
-func renderHeapTupleHeadline(t pg.HeapTuple, selected, showPK bool) string {
-	cursor := selectedCursor(selected)
+// drill paints the ↵ indicator (item.hasChildren: Enter opens the byte layout
+// or a TOAST row); the headline can't tell from the tuple alone.
+func renderHeapTupleHeadline(t pg.HeapTuple, drill, selected bool, cols []tupleValueCol) string {
+	cursor := selectedCursor(selected) + drillMark(drill)
 	dot, flagName := lpFlagDecoration(t.LPFlags)
 	idx := highlightName(fmt.Sprintf("#%04d", t.LP), selected)
-	xmin := xidString(t.Xmin)
-	xmax := xidString(t.Xmax)
+	xmin := pageinspect.XidString(t.Xmin)
+	xmax := pageinspect.XidString(t.Xmax)
 	ctid := "—"
 	if t.Ctid != nil {
 		ctid = *t.Ctid
@@ -311,28 +412,35 @@ func renderHeapTupleHeadline(t pg.HeapTuple, selected, showPK bool) string {
 		// which chunk object this row belongs to without drilling in.
 		chunkInfo = "  " + styleMuted.Render(fmt.Sprintf("chunk %d  seq %d", *t.ChunkID, *t.ChunkSeq))
 	}
-	pk := ""
-	if showPK {
-		pk = padRight(tuplePKCell(t), tuplePKColW) + "  "
+	values := ""
+	var valuesSb414 strings.Builder
+	for _, c := range cols {
+		valuesSb414.WriteString(tupleValueCell(t, c) + "  ")
 	}
+	values += valuesSb414.String()
 	return cursor + idx + "  " +
 		dot + " " + padRight(flagName, tupleFlagColW) + "  " +
 		padRight(strconv.Itoa(int(t.LPLen)), tupleLenColW) + "  " +
 		padRight(xmin, tupleXidColW) + "  " +
 		padRight(xmax, tupleXidColW) + "  " +
 		padRight(ctid, tupleCtidColW) + "  " +
-		pk + state + icons + chunkInfo
+		values + state + icons + chunkInfo
 }
 
-// tuplePKCell renders the primary key of the row a line pointer holds, clipped
-// to the column. A nil PK means no row visible to our snapshot lives at this
-// ctid — a dead, aborted or uncommitted tuple — which reads as the same "—"
-// the other columns use for "nothing to show here".
-func tuplePKCell(t pg.HeapTuple) string {
-	if t.PK == nil {
-		return styleMuted.Render("—")
+// renderTupleColumnConfig is the C picker over the relation's columns: one
+// checkbox row per live column, typed, with the primary-key members flagged
+// since they are the default pick.
+func (m *Model) renderTupleColumnConfig(s *screen, height int) string {
+	rows := make([]colCfgRow, 0, len(s.pages.tupleCols))
+	for _, c := range s.pages.tupleCols {
+		desc := c.TypeName
+		if c.PK {
+			desc += "  · primary key"
+		}
+		rows = append(rows, colCfgRow{name: c.Name, desc: desc, on: slices.Contains(s.pages.tuplePick, c.Name)})
 	}
-	return clipCells(flattenQuery(*t.PK), tuplePKColW)
+	return m.renderColCfgOverlay("choose which of "+s.table.Name+"'s columns the tuple list shows; each pick reloads the page",
+		rows, m.tupleColCfgCursor, height)
 }
 
 // heapTupleState collapses a line pointer's slot flag plus the tuple's
@@ -406,7 +514,8 @@ func heapTupleFlagIcons(t pg.HeapTuple) string {
 // Line pointers with no tuple body — REDIRECT/DEAD/UNUSED — get a single
 // purposeful one-liner instead of a meaningless hex dump.
 func renderHeapTupleExpand(t pg.HeapTuple, pkCols []string) []string {
-	indent := "       "
+	// Under the cursor, drill-mark and "#NNNN" columns of the headline.
+	indent := strings.Repeat(" ", colCursor+colMark+5)
 	switch t.LPFlags {
 	case pg.LPRedirect:
 		return []string{indent + styleMuted.Render("redirect → ") +
@@ -536,9 +645,9 @@ func tupleAnatomyLine(t pg.HeapTuple, indent string) string {
 		natts := int(t.Infomask2 & pg.HeapNattsMask2)
 		nullmap = (natts + 7) / 8
 	}
-	pad := max(hoff-heapTupleHeaderLen-nullmap, 0)
+	pad := max(hoff-pageinspect.HeapTupleHeaderLen-nullmap, 0)
 
-	headStr := fmt.Sprintf("%d B header", heapTupleHeaderLen)
+	headStr := fmt.Sprintf("%d B header", pageinspect.HeapTupleHeaderLen)
 	if total > 0 {
 		headStr = percentStyle(float64(data) * 100 / float64(total)).Render(headStr)
 	}
@@ -592,13 +701,6 @@ func lpFlagDecoration(flags int32) (string, string) {
 		return styleLPUnused.Render("●"), "UNUSED"
 	}
 	return styleMuted.Render("●"), "?"
-}
-
-func xidString(x *uint32) string {
-	if x == nil {
-		return "—"
-	}
-	return strconv.FormatUint(uint64(*x), 10)
 }
 
 // previewBytes formats the first N bytes of a tuple's t_data as a compact

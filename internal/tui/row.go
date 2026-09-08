@@ -141,11 +141,7 @@ func renderRow(r row) string {
 		// column width (same trick as the relations level's type column).
 		typeStr = r.typeStyle.Render(padRight(r.typeTag, partTypeColW)) + "  "
 	}
-	childMark := "  "
-	if r.hasChildren {
-		childMark = styleMuted.Render("+ ")
-	}
-	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + tableCountStr + breakdownStr + rowsStr + pagesStr + bloatStr + typeStr + childMark + name + detail
+	return cursor + bar + "  " + padRight(sizeStr, 10) + "  " + tableCountStr + breakdownStr + rowsStr + pagesStr + bloatStr + typeStr + drillMark(r.hasChildren) + name + detail
 }
 
 // rowsColW is the padded width of the rows column on the tables level.
@@ -507,6 +503,37 @@ func selectedCursor(selected bool) string {
 	return "  "
 }
 
+// styleDrillMark is the pre-rendered "↵ " drill indicator (see drillMark),
+// allocated once for the same reason as styleAccentCursor.
+var styleDrillMark = styleMuted.Render("↵ ")
+
+// drillMark returns the colMark-wide slot painted before a row's name: "↵ " when
+// Enter on that row opens another screen, an in-place overlay, or unfolds it, two
+// blanks otherwise. Every list renderer paints the indicator through here so the
+// glyph and its width cannot drift between levels. The flag it takes is
+// item.hasChildren, which is cosmetic — drillIn decides by payload type — so a
+// builder must set it to exactly what drillIn will do on that row. Rows where
+// Enter arms a confirm (REINDEX, stats reset) or acts as a picker (snapshots)
+// are not "drillable" in this sense and keep their own hint text instead.
+func drillMark(hasChildren bool) string {
+	if hasChildren {
+		return styleDrillMark
+	}
+	return "  "
+}
+
+// anyDrillable reports whether any row of a list carries the drill indicator, so
+// a table that has no dedicated mark column (renderDiagResult) can add the slot
+// only when some row would actually paint it and leaf tables keep their width.
+func anyDrillable(items []item) bool {
+	for i := range items {
+		if items[i].hasChildren {
+			return true
+		}
+	}
+	return false
+}
+
 // highlightName wraps name in styleSelected when selected; otherwise returns it
 // unchanged. Replaces the repeated inline `if selected { name = styleSelected.Render(name) }`.
 func highlightName(name string, selected bool) string {
@@ -685,7 +712,7 @@ func renderBufferTotals(items []item, barW int) string {
 		padRight(humanize.Bytes(dirty), bufColDirty) + "  " +
 		padRight(dirtyPctStr, bufColDirtyPct) + "  " +
 		padRight(tempStr, bufColTemp) + "  " +
-		fmt.Sprintf("Σ %d tables", n)
+		"  " + fmt.Sprintf("Σ %d tables", n)
 	return styleTotal.Render(line)
 }
 
@@ -699,7 +726,7 @@ func renderBufferHeader(sort sortMode, sortDesc bool, barW int) string {
 		padRight(sortMark("dirty", sort == sortByDirty, sortDesc), bufColDirty) + "  " +
 		padRight(sortMark("dirty%", sort == sortByDirtyPct, sortDesc), bufColDirtyPct) + "  " +
 		padRight(sortMark("temp", sort == sortByTemp, sortDesc), bufColTemp) + "  " +
-		sortMark("table", sort == sortByName, sortDesc)
+		"  " + sortMark("table", sort == sortByName, sortDesc)
 	return styleMuted.Render(line)
 }
 
@@ -788,7 +815,7 @@ func renderTablesHeader(s *screen, barW int) string {
 			line += padRight("bloat", 12) + "  "
 		}
 	}
-	// 2-cell placeholder for the childMark ("+ " / "  ") before the name.
+	// 2-cell placeholder for the drillMark ("↵ " / "  ") before the name.
 	line += "  " + sortMark("table", s.sort == sortByName, s.sortDesc)
 
 	return styleMuted.Render(line)
@@ -842,7 +869,7 @@ func (m *Model) renderTablesTotals(s *screen) string {
 			line += padRight(cell, 12) + "  "
 		}
 	}
-	// 2-cell childMark placeholder, then the Σ label in the name column.
+	// 2-cell drillMark placeholder, then the Σ label in the name column.
 	line += "  " + fmt.Sprintf("Σ %d tables", n)
 	return styleTotal.Render(line) + "\n"
 }
@@ -865,7 +892,7 @@ func renderPartsHeader(s *screen, barW int) string {
 			padRight(sortMark("bloat%", s.sort == sortByBloat, s.sortDesc), bloatPctColW) + "  "
 	}
 	line += padRight(sortMark("type", s.sort == sortByType, s.sortDesc), partTypeColW) + "  "
-	// 2-cell placeholder for the childMark ("+ " / "  ") before the name.
+	// 2-cell placeholder for the drillMark ("↵ " / "  ") before the name.
 	line += "  " + sortMark("name", s.sort == sortByName, s.sortDesc)
 	return styleMuted.Render(line)
 }
@@ -918,7 +945,7 @@ func partTypeStyle(p pg.Part) lipgloss.Style {
 // (databases, schemas, columns) whose rows carry only a size bar, a name, and a
 // free-form detail tail. nameLabel is the entity word shown over the name column.
 func renderGenericHeader(s *screen, barW int, nameLabel string) string {
-	// size column (10) + gap, then the 2-cell childMark placeholder before name.
+	// size column (10) + gap, then the 2-cell drillMark placeholder before name.
 	line := headerIndent(barW) +
 		padRight(sortMark("size", s.sort == sortBySize, s.sortDesc), 10) + "  " +
 		"  " + sortMark(nameLabel, s.sort == sortByName, s.sortDesc)
@@ -955,7 +982,7 @@ func (m *Model) renderSchemasTotals(s *screen) string {
 		return ""
 	}
 	// Cursor slot + blank bar area, then the same column layout as renderRow
-	// (size, tables, childMark placeholder, Σ label in the name column).
+	// (size, tables, drillMark placeholder, Σ label in the name column).
 	line := "  " + strings.Repeat(" ", m.barWidth(s)+2) + "  " +
 		padRight(humanize.Bytes(size), 10) + "  " +
 		padRight(formatRows(tables), tableCountColW) + "  " +
@@ -991,7 +1018,7 @@ func renderBufferRow(it item, st pg.TableBufferStat, maxSize, maxDirty int64, ba
 		padRight(dirtyStr, bufColDirty) + "  " +
 		padRight(dirtyPctCell(st), bufColDirtyPct) + "  " +
 		padRight(tempCell(st), bufColTemp) + "  " +
-		name
+		drillMark(it.hasChildren) + name
 }
 
 // scrollWindow renders a height-line slice of body starting at *offset, clamping

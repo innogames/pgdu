@@ -54,14 +54,6 @@ func (m *Model) View() string {
 		contentHeight -= strings.Count(stats, "\n") + 1
 	}
 
-	if s.level == levelWALRelations && (s.extPrompt == nil || !s.extPrompt.blocking) &&
-		s.loaded && s.err == nil && len(s.items) > 0 {
-		hdr := m.renderWALRelationsHeader(s)
-		b.WriteString(hdr)
-		b.WriteString("\n")
-		contentHeight -= strings.Count(hdr, "\n") + 1
-	}
-
 	if s.level == levelStatements && (s.extPrompt == nil || !s.extPrompt.blocking) {
 		hdr := m.renderStatementsHeader(s)
 		b.WriteString(hdr)
@@ -181,6 +173,8 @@ func (m *Model) View() string {
 		b.WriteString(m.renderTblColumnConfig(s, contentHeight))
 	case m.showDiagColumnConfig && (s.level == levelDiagnosticResult || s.level == levelPgBouncerShow):
 		b.WriteString(m.renderDiagColumnConfig(s, contentHeight))
+	case m.showTupleColumnConfig && s.level == levelHeapTuples:
+		b.WriteString(m.renderTupleColumnConfig(s, contentHeight))
 	case m.showTupleLayout && s.level == levelHeapTuples:
 		b.WriteString(m.renderTupleLayout(s, contentHeight))
 	case m.showDiagQuery && s.diagForShowQuery() != nil:
@@ -278,8 +272,6 @@ func (m *Model) View() string {
 			b.WriteString(m.renderWALRecordsList(s, contentHeight))
 		case levelWALBlocks:
 			b.WriteString(m.renderWALBlocksList(s, contentHeight))
-		case levelWALRelations:
-			b.WriteString(m.renderWALRelationsList(s, contentHeight))
 		case levelWALRelBlocks:
 			// Relation block-refs reuse the per-record block-refs renderer —
 			// the payload is the same pg.WALBlockRef.
@@ -419,7 +411,7 @@ func (m *Model) renderStatus(s *screen) string {
 // crumbs; the block-detail level adds the record type, which no crumb carries.
 func walStatusLabel(s *screen) string {
 	switch s.level {
-	case levelWALRecords, levelWALRelations, levelWALRelBlocks:
+	case levelWALRecords, levelWALRelBlocks:
 		if s.wal.start != "" || s.wal.end != "" {
 			return "window: " + shortLSN(s.wal.start) + "–" + shortLSN(s.wal.end)
 		}
@@ -593,8 +585,6 @@ func crumbText(sc, prev *screen, named crumbScope) (text string, names crumbScop
 		if sc.wal.recLSN != "" {
 			return "rec " + shortLSN(sc.wal.recLSN), names
 		}
-	case levelWALRelations:
-		return "by relation", names
 	case levelWALRelBlocks:
 		return sc.wal.relLabel, names
 	case levelWALBlockDetail:
@@ -722,12 +712,8 @@ func (m *Model) renderToolPicker(s *screen, height int) string {
 			cursor = styleSelected.Render("▶ ")
 			name = styleSelected.Render(name)
 		}
-		childMark := "  "
-		if it.hasChildren {
-			childMark = styleMuted.Render("+ ")
-		}
 		b.WriteString(cursor)
-		b.WriteString(childMark)
+		b.WriteString(drillMark(it.hasChildren))
 		b.WriteString(padRight(name, 20))
 		b.WriteString("  ")
 		b.WriteString(styleMuted.Render(it.detail))

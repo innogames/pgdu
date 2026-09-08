@@ -32,6 +32,16 @@ func (m *Model) applySort(s *screen) {
 		s.clampCursor()
 		return
 	}
+	// The WAL overview stacks two tables (rmgrs, then relations) with inert
+	// section rows between them; it rebuilds from the screen's stats and sorts
+	// each table by s.sort on its own. A clamp can land on the trailing Σ (the
+	// relation list shrank on refresh), so step back onto a real row.
+	if s.level == levelWAL {
+		s.items = buildWALItems(s)
+		s.clampCursor()
+		s.skipInertRow(-1)
+		return
+	}
 	if s.diagCols != nil {
 		// Generic diagnostic-table sort: compare by diagSortCol, numeric rows
 		// before text rows (HasNum=false sinks below rows with a value), then
@@ -67,17 +77,24 @@ func (m *Model) applySort(s *screen) {
 		return
 	}
 
-	less := s.sort.less
-	sort.SliceStable(s.items, func(i, j int) bool {
-		if less(s.items[i], s.items[j]) {
-			return !s.sortDesc
-		}
-		if less(s.items[j], s.items[i]) {
-			return s.sortDesc
-		}
-		return s.items[i].name < s.items[j].name
-	})
+	sortItems(s.items, s.sort, s.sortDesc)
 	s.clampCursor()
+}
+
+// sortItems orders items by mode/desc with the name as a stable tiebreaker, so
+// reversing the direction never shuffles equal rows. Shared by applySort and
+// the sectioned lists that sort each section on its own.
+func sortItems(items []item, mode sortMode, desc bool) {
+	less := mode.less
+	sort.SliceStable(items, func(i, j int) bool {
+		if less(items[i], items[j]) {
+			return !desc
+		}
+		if less(items[j], items[i]) {
+			return desc
+		}
+		return items[i].name < items[j].name
+	})
 }
 
 // itemHitRatio extracts the hit ratio from an item's payload when it carries
@@ -298,13 +315,13 @@ func validSorts(l level) []sortMode {
 	case levelIndexTuples:
 		return []sortMode{sortByLP, sortBySize}
 	case levelWAL:
-		return []sortMode{sortBySize, sortByRecord, sortByFPI, sortByCount, sortByName}
+		// One cycle for both tables: record (rmgr) and pages (relation) exist in
+		// only one of them, and leave the other in name order.
+		return []sortMode{sortBySize, sortByRecord, sortByFPI, sortByCount, sortByPages, sortByName}
 	case levelWALRecords:
 		return []sortMode{sortBySize, sortByFPI, sortByName}
 	case levelWALBlocks, levelWALRelBlocks:
 		return []sortMode{sortBySize, sortByData, sortByName}
-	case levelWALRelations:
-		return []sortMode{sortBySize, sortByFPI, sortByCount, sortByPages, sortByName}
 	case levelLogs:
 		return []sortMode{sortByCount, sortByLast, sortByName}
 	case levelLogGroup:

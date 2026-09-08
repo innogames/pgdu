@@ -202,3 +202,38 @@ func TestRenderEntryPicker(t *testing.T) {
 		t.Errorf("preview should follow the cursor:\n%s", out)
 	}
 }
+
+// A window whose baseline the entry picker installs before the first load
+// (cumulative / snapshot) must open in the same default order as the live
+// window: total_ms descending — even when an earlier visit left the shared
+// sort column set, so the syncSort fallback that also flips the direction
+// does not kick in.
+func TestStatementsEntryWindowsDefaultSortDesc(t *testing.T) {
+	stats := []pg.QueryStat{
+		{QueryID: 1, Query: "select 1", Calls: 5, TotalExecTime: 1},
+		{QueryID: 2, Query: "select 2", Calls: 7, TotalExecTime: 100},
+		{QueryID: 3, Query: "select 3", Calls: 7, TotalExecTime: 10},
+	}
+	check := func(t *testing.T, m *Model, s *screen) {
+		t.Helper()
+		if !s.sortDesc || m.stmtTable.sortColID != colTotalMs {
+			t.Fatalf("sort = %v desc=%v, want total_ms desc", m.stmtTable.sortColID, s.sortDesc)
+		}
+		if len(s.items) != 3 || s.items[0].name != "select 2" || s.items[2].name != "select 1" {
+			t.Errorf("rows not in total_ms desc order: %v", s.items)
+		}
+	}
+
+	cum := &screen{level: levelStatements, tool: toolQueries, db: "app", stat: stmtState{cumulative: true, baseline: map[int64]pg.QueryStat{}}}
+	m := newTestModel(cum)
+	m.stmtTable.sortColID = colTotalMs // left over from a previous visit
+	m.onStatementsLoaded(statementsLoadedMsg{db: "app", stats: stats})
+	check(t, m, cum)
+
+	end := &pg.Snapshot{CapturedAt: time.Now(), Stats: stats}
+	frozen := &screen{level: levelStatements, tool: toolQueries, db: "app"}
+	m = newTestModel(frozen)
+	m.stmtTable.sortColID = colTotalMs
+	m.onSnapshotFrozenLoaded(snapshotFrozenLoadedMsg{end: end, cumulative: true})
+	check(t, m, frozen)
+}

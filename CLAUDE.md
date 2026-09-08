@@ -18,8 +18,12 @@ internal/pg/         # pgx wrapper: one *pgxpool.Pool per database, lazy
   diag_defs_{cat}.go #   Diagnostics registry entries per category; diagnostic_defs.go concatenates them
   types.go, types_{domain}.go   # row structs
   {entity}.go        #   one file per entity's List*/Fill*/Probe* operations
-  pgbouncer_*.go     #   pgbouncer console: ini parser, /proc discovery, simple-protocol conns
+  pgbouncer.go       #   DiscoverPgBouncers: pgbouncer.Client.Discover + the behind-a-pooler check
   logdiscover.go     #   log file discovery (pg_current_logfile / pg_ls_logdir) + server-side LogSource
+internal/diagres/    # generic column/row result table (kinds, cells, pgx row scan) shared by pg and pgbouncer
+internal/pgbouncer/  # pgbouncer console: ini parser, discovery, simple-protocol conns (own Client, no pool)
+internal/pageinspect/# pure byte decoders over pg row types: tuple layout, index keys, jsonb, TOAST pointers
+internal/procfs/     # Linux-only host reads (/proc process list + per-PID stats, stat inode) with no-op fallbacks
 internal/pglog/      # log analyzer engine (pure Go, no pgx): parse, classify, aggregate, local/gz sources
 internal/tui/        # Bubble Tea Model/Update/View
   app.go             #   Model, screen, item, level/tool enums
@@ -100,6 +104,14 @@ fails (missing/corrupt → empty).
   before the async load lands is wiped. `applySort` runs after every load, so handlers
   that patch rows later (e.g. `bloatFilledMsg`) must match by name, not index.
 - **`screen.table` is the source of truth** at `levelParts`/`levelColumns`.
+- **One drill affordance**: `item.hasChildren` is cosmetic — `drillIn` decides by payload
+  type — and paints the muted `↵` in front of the name through `drillMark` (`row.go`), the
+  only place the glyph lives; every list renderer calls it (the generic column table adds
+  the slot only when `anyDrillable`). A builder sets the flag to exactly what `drillIn`
+  will do on that row (opens a screen or overlay, unfolds; not arm-a-confirm or pick).
+  `enterLabel` (`keys_enter.go`) names Enter's destination in the footer per level and
+  row and disables the key on leaves; cross-view key help reads `→ <where>`. Adding a
+  level or a drill means touching all three.
 - **Two-step confirm is one shared pattern**: reindex, snapshot delete, backend
   cancel/terminate, VACUUM, extension reset and diagnostic fixes all arm a `pending*`
   field on Enter; any other key cancels, `y` executes. Reuse it, don't invent a new flow.
@@ -115,13 +127,25 @@ fails (missing/corrupt → empty).
   `.pgb`, `.buf`, `.pages`, `.maintenance`, `.desc`, `.reindex`, `.tbl`, `.progress`,
   `.lock`, `.triage`, `.parts` — the `*State` types below `screen` in `app.go`); only the
   list/nav core, the load context and the generic table infra (`diag*`) are top-level.
-- **Best-effort enrichments must degrade, never break**: the tuple `pk` join
-  (`sqlHeapTuplesPK`) and the HOT-chain hop (`fillHotChains`, `sqlHeapRedirectKeys`)
-  fall back to the plain view when the catalog lookup or join fails. For index entries,
+- **Byte decoding is not UI**: tuple layout segments, index-key/jsonb/TOAST decoding live
+  in `internal/pageinspect` and return plain strings/segments; styling stays in tui.
+  `/proc` and stat(2) reads go through `internal/procfs`, never a per-package
+  `_linux.go` pair.
+- **Best-effort enrichments must degrade, never break**: the tuple row-content query
+  (`sqlHeapTuplesCols`: pk + picked columns as visible-row text and as page bytes →
+  `sqlHeapTuplesDecode` → plain `sqlHeapTuples`) and the HOT-chain hop (`fillHotChains`,
+  `sqlHeapRedirectKeys`) fall back to the plain view when the catalog lookup or join
+  fails. The tuple list's `C` pick (`pages.tuplePick`) is part of that query, so a toggle
+  reloads the page; it is deliberately not persisted. For index entries,
   a NULL heap projection means HOT-redirected, *not* dead — only `IndexTuple.Dead` earns
   the `dead` tag. The WAL block payload view (`pg.WALBlockDetail`, `tui/wal_detail.go`)
   is the same shape: the record bytes are mandatory, relation kind / column layout /
   pageinspect decode of the page image all degrade into `DecodeNote`.
+- **WAL overview is one list with two tables**: `levelWAL` owns the rmgr rows
+  (`wal.rmgrs`) and the by-relation rows (`wal.rels`, chained off the overview load
+  because the block scan needs the resolved window). `applySort` rebuilds `s.items`
+  via `buildWALItems`; its `walSectionRow` lines (Σ, title, column header, notes) are
+  inert like `logSection`, skipped by `skipInertRow`, and kept visible under a filter.
 - **Log analyzer** (`internal/pglog`): `pglog.Entry` text fields are `[]byte` sub-slices of the window buffer;
   convert to string only what you render. The `levelLogs` screen owns `log.report`;
   child screens find it via `findLevel(levelLogs)` and are re-pointed on each refresh.
@@ -130,13 +154,15 @@ fails (missing/corrupt → empty).
   `Entry.Group` indexes `Report.Groups` (set by `Aggregate`); use it to walk a group's
   full membership, `Group.Samples` is capped. The group screen's tab (`log.params`)
   swaps the entry list for a generic `diagCols` table keyed by `pglog.ParamKey`.
-- **PgBouncer**: instances on one host share a TCP port via so_reuseport, so always
-  address by `unix_socket_dir/.s.PGSQL.<port>` when the socket exists. The console only
-  speaks the simple protocol and rejects the pool's AfterConnect `SET`, so
-  `pgbouncer_conn.go` keeps one raw `pgx.Conn` per instance (never `PoolFor`), kept open
-  because pgbouncer logs every console login. `PgBouncerShow` allowlists SHOW commands;
-  keep it read-only. Results ride the diagnostic-result machinery keyed by
-  `screen.diagVisKey()`.
+- **PgBouncer** lives in `internal/pgbouncer`, reached as `pg.Client.PgBouncer`. Instances
+  on one host share a TCP port via so_reuseport, so always address by
+  `unix_socket_dir/.s.PGSQL.<port>` when the socket exists. The console only speaks the
+  simple protocol and rejects the pool's AfterConnect `SET`, so `pgbouncer.Client` keeps
+  one raw `pgx.Conn` per instance (never `PoolFor`), kept open because pgbouncer logs
+  every console login. `Show` allowlists SHOW commands; keep it read-only. Results are
+  `diagres.Result` (aliased as `pg.DiagResult`) and ride the diagnostic-result machinery
+  keyed by `screen.diagVisKey()`. Only `pg.Client.DiscoverPgBouncers` stays in pg: it
+  adds the "is my own connection behind a pooler" source, which needs the pool.
 - **Top-queries snapshots**: the `L` browser carries virtual anchors (`@now`,
   `@session`, `@reset` in `cmds.go`) that are never backed by a file — every path that
   loads or diffs a snapshot must special-case them. Snapshots older than the live

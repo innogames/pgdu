@@ -1,4 +1,4 @@
-package tui
+package pageinspect
 
 import (
 	"encoding/binary"
@@ -129,7 +129,7 @@ func TestDecodeAttrValueJsonb(t *testing.T) {
 	)
 	val := concat(le32b(uint32(4+len(container))<<2), container)
 	attr := pg.TupleAttr{Len: -1, TypName: "jsonb", TypCategory: "U", Value: val}
-	if got := decodeAttrValue(attr); got != `{"a": true}` {
+	if got := DecodeAttrValue(attr); got != `{"a": true}` {
 		t.Errorf("decodeAttrValue = %q, want %q", got, `{"a": true}`)
 	}
 }

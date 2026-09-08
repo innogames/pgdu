@@ -128,7 +128,11 @@ func (s *screen) computeVisibleIndexes() []int {
 	}
 	var out []int
 	for i, it := range s.items {
-		if s.matchFilter(it.name) {
+		// The WAL overview's section rows (titles, column header, Σ) carry no
+		// name and stay put under a filter so the narrowed rows keep their
+		// frame — and the two tables' differing columns keep their own header.
+		_, section := it.data.(walSectionRow)
+		if section || s.matchFilter(it.name) {
 			out = append(out, i)
 		}
 	}
@@ -156,6 +160,37 @@ func (s *screen) clampCursor() {
 	if s.cursor < 0 {
 		s.cursor = 0
 	}
+}
+
+// skipInertRow nudges the cursor off a section header/footer row in direction
+// dir (+1 down, -1 up) so it never rests on an inert line — the log groups
+// pane's logSection titles and the WAL overview's walSectionRow lines. It takes
+// the nearest selectable row that way, else the nearest the other way; a list
+// with none (the WAL overview before its first rmgr row) keeps the cursor. A
+// no-op when the current row is selectable, so every cursor move can call it.
+func (s *screen) skipInertRow(dir int) {
+	vis := s.visibleIndexes()
+	if s.cursor < 0 || s.cursor >= len(vis) || !inertRow(s.items[vis[s.cursor]]) {
+		return
+	}
+	for _, d := range [2]int{dir, -dir} {
+		for i := s.cursor + d; i >= 0 && i < len(vis); i += d {
+			if !inertRow(s.items[vis[i]]) {
+				s.cursor = i
+				return
+			}
+		}
+	}
+}
+
+// inertRow reports whether the cursor must never rest on it: a section header
+// or footer rather than a selectable row.
+func inertRow(it item) bool {
+	switch it.data.(type) {
+	case logSection, walSectionRow:
+		return true
+	}
+	return false
 }
 
 // resetCursor jumps the selection back to the top of the list. cursor and

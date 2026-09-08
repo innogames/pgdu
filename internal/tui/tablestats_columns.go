@@ -260,6 +260,7 @@ func (m *Model) buildTableStatItems(rows []pg.TableStat) ([]item, []tblColDesc) 
 		items[i] = item{
 			name:        strings.Join(parts, " "),
 			data:        cells,
+			hasChildren: true, // Enter → the table's disk parts
 			statQueryID: int64(r.OID),
 		}
 	}

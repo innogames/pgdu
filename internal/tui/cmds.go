@@ -104,12 +104,12 @@ type toastTargetResolvedMsg struct {
 type heapTuplesLoadedMsg struct {
 	tableOID uint32
 	blkno    int32
-	tuples   []pg.HeapTuple
+	page     pg.HeapPageTuples
 
-	// pkCols names the table's primary-key columns, in key order, that each
-	// tuple's PK value was projected from. Empty when the table has no primary
-	// key (or the catalog lookup failed) — the pk column then isn't rendered.
-	pkCols []string
+	// pick is the column pick the load was issued with (screen.pages.tuplePick
+	// at the time), so a load overtaken by a later toggle is recognised as
+	// stale and dropped.
+	pick []string
 
 	err error
 }
@@ -350,10 +350,10 @@ func (m *Model) resolveToastTargetCmd(db string, toastOID, chunkID uint32) tea.C
 	})
 }
 
-func (m *Model) loadHeapTuplesCmd(t pg.Table, blkno int32) tea.Cmd {
+func (m *Model) loadHeapTuplesCmd(t pg.Table, blkno int32, pick []string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
-		tuples, pkCols, err := m.client.ListHeapTuples(ctx, t, blkno)
-		return heapTuplesLoadedMsg{tableOID: t.OID, blkno: blkno, tuples: tuples, pkCols: pkCols, err: err}
+		page, err := m.client.ListHeapTuples(ctx, t, blkno, pick)
+		return heapTuplesLoadedMsg{tableOID: t.OID, blkno: blkno, page: page, pick: pick, err: err}
 	})
 }
 

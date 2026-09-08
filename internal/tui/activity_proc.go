@@ -1,26 +1,13 @@
 package tui
 
 import (
-	"time"
-
 	tea "github.com/charmbracelet/bubbletea"
+
+	"pgdu/internal/procfs"
 )
 
-// procRaw is one /proc sample for a single backend PID. ReadBytes and
-// WriteBytes are -1 when /proc/<pid>/io was unreadable (e.g. permission
-// denied). On non-Linux platforms sampleAllPids returns nil and no procRaw
-// values are produced.
-type procRaw struct {
-	PID        int32
-	RSSBytes   int64  // VmRSS in bytes (from /proc/<pid>/status)
-	CPUTicks   uint64 // utime+stime in USER_HZ ticks (from /proc/<pid>/stat)
-	ReadBytes  int64  // cumulative storage read_bytes (from /proc/<pid>/io); -1 = unreadable
-	WriteBytes int64  // cumulative storage write_bytes; -1 = unreadable
-	At         time.Time
-}
-
 // procDerived is the display-ready per-PID stats computed from two consecutive
-// procRaw samples. Negative values mean "not available" (first sample, platform
+// /proc samples. Negative values mean "not available" (first sample, platform
 // stub, or permission denied for I/O).
 type procDerived struct {
 	RSSBytes int64   // resident set size in bytes; 0 = unknown
@@ -31,18 +18,18 @@ type procDerived struct {
 
 // activityProcMsg delivers a fresh batch of /proc samples to the Update loop.
 type activityProcMsg struct {
-	samples []procRaw
+	samples []procfs.PIDStats
 }
 
 // sampleProcStatsCmd fires a background goroutine that reads /proc for each
-// PID. On non-Linux hosts sampleAllPids returns nil and this delivers an empty
+// PID. On non-Linux hosts procfs.Sample returns nil and this delivers an empty
 // message, which onActivityProc ignores. Returns nil when pids is empty.
 func (m *Model) sampleProcStatsCmd(pids []int32) tea.Cmd {
 	if len(pids) == 0 {
 		return nil
 	}
 	return func() tea.Msg {
-		return activityProcMsg{samples: sampleAllPids(pids)}
+		return activityProcMsg{samples: procfs.Sample(pids)}
 	}
 }
 
@@ -55,7 +42,7 @@ func (m *Model) onActivityProc(msg activityProcMsg) tea.Cmd {
 		return nil
 	}
 	if m.actProcPrev == nil {
-		m.actProcPrev = make(map[int32]procRaw, len(msg.samples))
+		m.actProcPrev = make(map[int32]procfs.PIDStats, len(msg.samples))
 	}
 	if m.actProcStats == nil {
 		m.actProcStats = make(map[int32]procDerived, len(msg.samples))

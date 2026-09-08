@@ -257,8 +257,11 @@ func (m *Model) buildActivityItems(rows []pg.ActivityRow, ctx actCtx) ([]item, [
 			parts[j] = c.Display
 		}
 		items[i] = item{
-			name:        strings.Join(parts, " "),
-			data:        cells,
+			name: strings.Join(parts, " "),
+			data: cells,
+			// Enter opens the query's top-queries detail, which needs a query_id;
+			// drillActivityStatement answers rows without one with a notice.
+			hasChildren: r.QueryID != 0,
 			statQueryID: r.QueryID, // reuse field for drill into query detail
 		}
 	}

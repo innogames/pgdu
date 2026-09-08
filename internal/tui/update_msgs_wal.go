@@ -14,12 +14,18 @@ func (m *Model) onWALOverviewLoaded(msg walOverviewLoadedMsg) tea.Cmd {
 	}
 	s.wal.start = msg.start
 	s.wal.end = msg.end
-	s.items = s.items[:0]
-	for _, st := range msg.stats {
-		s.items = append(s.items, walRmgrToItem(st))
-	}
+	s.wal.rmgrs = msg.stats
+	// The relation table is re-aggregated over this exact window, so the
+	// previous one is dropped rather than shown under a header it no longer
+	// matches; the scan is chained here because it needs the resolved LSNs.
+	s.wal.rels = nil
+	s.wal.relsErr = nil
+	s.wal.relsLoading = msg.err == nil && msg.start != "" && msg.end != ""
 	m.applySort(s)
-	return nil
+	if !s.wal.relsLoading {
+		return nil
+	}
+	return m.loadWALRelationsCmd(s.db, s.wal.start, s.wal.end)
 }
 
 func (m *Model) onWALSummaryLoaded(msg walSummaryLoadedMsg) tea.Cmd {
@@ -39,10 +45,11 @@ func (m *Model) onWALSummaryLoaded(msg walSummaryLoadedMsg) tea.Cmd {
 		s.wal.summary = nil
 		return nil
 	}
+	// The window (s.wal.start/end) is *not* copied in here: this fast built-ins
+	// read usually lands before the pg_get_wal_stats scan that resolves it, so a
+	// copy would be empty on first load and one refresh stale afterwards. The
+	// header reads the window straight off the screen state instead.
 	sum := msg.summary
-	sum.StartLSN = s.wal.start
-	sum.EndLSN = s.wal.end
-	sum.WindowBytes = walWindowBytes
 	s.wal.summary = &sum
 	s.wal.summaryErr = nil
 	return nil
@@ -98,20 +105,19 @@ func (m *Model) onWALCheckpointLoaded(msg walCheckpointLoadedMsg) tea.Cmd {
 	return nil
 }
 
+// onWALRelationsLoaded fills the by-relation table of the WAL overview. The
+// result is matched against the window the screen currently shows: a refresh
+// re-resolves the LSNs and re-chains the scan, so a late answer for the old
+// window is dropped. It never touches loaded/err — the screen settled with the
+// rmgr rows; a failure here is the relation table's alone.
 func (m *Model) onWALRelationsLoaded(msg walRelationsLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelWALRelations)
-	if s == nil || s.db != msg.db {
+	s := m.findLevel(levelWAL)
+	if s == nil || s.db != msg.db || s.wal.start != msg.start || s.wal.end != msg.end {
 		return nil
 	}
-	if cmd, stop := settleLoad(s, msg.err, extPromptReasonWALInspect); stop {
-		return cmd
-	}
-	s.wal.start = msg.start
-	s.wal.end = msg.end
-	s.items = s.items[:0]
-	for _, st := range msg.rels {
-		s.items = append(s.items, walRelStatToItem(st))
-	}
+	s.wal.relsLoading = false
+	s.wal.relsErr = msg.err
+	s.wal.rels = msg.rels
 	m.applySort(s)
 	return nil
 }

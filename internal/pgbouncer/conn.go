@@ -1,4 +1,4 @@
-package pg
+package pgbouncer
 
 import (
 	"context"
@@ -14,25 +14,47 @@ import (
 	"github.com/jackc/pgpassfile"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"pgdu/internal/cli"
+	"pgdu/internal/diagres"
 )
 
-// pgbDialTimeout bounds one console connect. The console answers instantly or
+// DialTimeout bounds one console connect. The console answers instantly or
 // not at all (a wedged single-threaded pgbouncer), so a few seconds is plenty.
-const pgbDialTimeout = 3 * time.Second
+const DialTimeout = 3 * time.Second
 
-// pgbConn is the console connection to one instance. It is kept open for the
+// Client owns the console connections to every instance pgdu talks to. It is
+// deliberately not a pg.Client: the console speaks the simple protocol only
+// and rejects the SET the pool's AfterConnect issues, so nothing here shares a
+// pgxpool.
+type Client struct {
+	cfg cli.Config
+
+	// mu guards conns. Its own mutex: a console dial can block for
+	// DialTimeout and must never stall the caller's Postgres work.
+	mu    sync.Mutex
+	conns map[string]*console
+}
+
+// New returns a Client with no connections open; instances are dialed on
+// first use.
+func New(cfg cli.Config) *Client {
+	return &Client{cfg: cfg, conns: map[string]*console{}}
+}
+
+// console is the console connection to one instance. It is kept open for the
 // life of the session: pgbouncer logs every console login and logout at LOG
 // level, so redialing on each refresh tick would spam exactly the log the
 // user then opens in the analyzer. Console connections hold no server slot.
-type pgbConn struct {
+type console struct {
 	mu   sync.Mutex
 	conn *pgx.Conn
 }
 
-// pgbShowAllowed is the set of SHOW commands the tool may issue. The console
+// showAllowed is the set of SHOW commands the tool may issue. The console
 // has no other read-only surface, and keeping this closed rules out any admin
-// verb (PAUSE, KILL, …) ever reaching pgbQuery by accident.
-var pgbShowAllowed = map[string]bool{
+// verb (PAUSE, KILL, …) ever reaching query by accident.
+var showAllowed = map[string]bool{
 	"version": true, "state": true, "lists": true, "mem": true, "config": true,
 	"databases": true, "users": true, "pools": true, "peer_pools": true, "peers": true,
 	"stats": true, "stats_totals": true, "stats_averages": true,
@@ -40,10 +62,10 @@ var pgbShowAllowed = map[string]bool{
 	"dns_hosts": true, "dns_zones": true, "fds": true,
 }
 
-// PgBouncerUser is the console login: --pgbouncer-user, else pgdu's own user.
-func (c *Client) PgBouncerUser() string { return c.pgbUser() }
+// User is the console login: --pgbouncer-user, else pgdu's own user.
+func (c *Client) User() string { return c.loginUser() }
 
-func (c *Client) pgbUser() string {
+func (c *Client) loginUser() string {
 	if u := c.cfg.PgBouncerUser; u != "" {
 		return u
 	}
@@ -56,13 +78,13 @@ func (c *Client) pgbUser() string {
 	return os.Getenv("USER")
 }
 
-// pgbPassword resolves the console password the way libpq would, which pgx
+// password resolves the console password the way libpq would, which pgx
 // does not for unix sockets: pgx looks every socket up under host "localhost",
 // whereas libpq — and therefore every hand-written or puppet-managed .pgpass on
 // a pgbouncer host — keys the entry by the socket *directory*. Order:
 // PGDU_PGBOUNCER_PASSWORD, PGPASSWORD, .pgpass by socket dir, .pgpass by
 // localhost (the pgx convention), none.
-func pgbPassword(host string, port int, unix bool, usr string) string {
+func password(host string, port int, unix bool, usr string) string {
 	if pw := os.Getenv("PGDU_PGBOUNCER_PASSWORD"); pw != "" {
 		return pw
 	}
@@ -91,15 +113,15 @@ func pgbPassword(host string, port int, unix bool, usr string) string {
 	return ""
 }
 
-// pgbConfig builds the pgx config for inst's console.
-func (c *Client) pgbConfig(inst PgBouncerInstance) (*pgx.ConnConfig, error) {
+// connConfig builds the pgx config for inst's console.
+func (c *Client) connConfig(inst Instance) (*pgx.ConnConfig, error) {
 	var cfg *pgx.ConnConfig
 	var err error
 	if inst.DSN != "" {
 		cfg, err = pgx.ParseConfig(inst.DSN)
 	} else {
 		host, port, unix := inst.Target()
-		usr := c.pgbUser()
+		usr := c.loginUser()
 		parts := []string{
 			"host=" + host,
 			"port=" + strconv.Itoa(port),
@@ -107,7 +129,7 @@ func (c *Client) pgbConfig(inst PgBouncerInstance) (*pgx.ConnConfig, error) {
 			"dbname=pgbouncer",
 			"application_name=pgdu",
 		}
-		if pw := pgbPassword(host, port, unix, usr); pw != "" {
+		if pw := password(host, port, unix, usr); pw != "" {
 			parts = append(parts, "password="+quoteConnValue(pw))
 		}
 		cfg, err = pgx.ParseConfig(strings.Join(parts, " "))
@@ -130,15 +152,15 @@ func quoteConnValue(v string) string {
 	return "'" + v + "'"
 }
 
-// pgbDial opens and sanity-checks a console connection: a real Postgres that
+// dial opens and sanity-checks a console connection: a real Postgres that
 // happens to own a database named "pgbouncer" answers SHOW VERSION with a
 // syntax error, so the check doubles as proxy detection.
-func (c *Client) pgbDial(ctx context.Context, inst PgBouncerInstance) (*pgx.Conn, string, error) {
-	cfg, err := c.pgbConfig(inst)
+func (c *Client) dial(ctx context.Context, inst Instance) (*pgx.Conn, string, error) {
+	cfg, err := c.connConfig(inst)
 	if err != nil {
 		return nil, "", err
 	}
-	dctx, cancel := context.WithTimeout(ctx, pgbDialTimeout)
+	dctx, cancel := context.WithTimeout(ctx, DialTimeout)
 	defer cancel()
 	conn, err := pgx.ConnectConfig(dctx, cfg)
 	if err != nil {
@@ -156,21 +178,21 @@ func (c *Client) pgbDial(ctx context.Context, inst PgBouncerInstance) (*pgx.Conn
 	return conn, version, nil
 }
 
-// pgbAcquire returns the cached console conn for inst, dialing on first use.
-// The returned pgbConn is locked; the caller must Unlock it.
-func (c *Client) pgbAcquire(ctx context.Context, inst PgBouncerInstance) (*pgbConn, error) {
+// acquire returns the cached console conn for inst, dialing on first use.
+// The returned console is locked; the caller must Unlock it.
+func (c *Client) acquire(ctx context.Context, inst Instance) (*console, error) {
 	key := inst.Key()
-	c.pgbMu.Lock()
-	pc, ok := c.pgbConns[key]
+	c.mu.Lock()
+	pc, ok := c.conns[key]
 	if !ok {
-		pc = &pgbConn{}
-		c.pgbConns[key] = pc
+		pc = &console{}
+		c.conns[key] = pc
 	}
-	c.pgbMu.Unlock()
+	c.mu.Unlock()
 
 	pc.mu.Lock()
 	if pc.conn == nil || pc.conn.IsClosed() {
-		conn, _, err := c.pgbDial(ctx, inst)
+		conn, _, err := c.dial(ctx, inst)
 		if err != nil {
 			pc.mu.Unlock()
 			return nil, err
@@ -180,17 +202,17 @@ func (c *Client) pgbAcquire(ctx context.Context, inst PgBouncerInstance) (*pgbCo
 	return pc, nil
 }
 
-// pgbQuery runs one SHOW on inst's console and returns the generic table. A
+// query runs one SHOW on inst's console and returns the generic table. A
 // failed query drops the cached conn and retries once on a fresh one — a
 // pgbouncer restart between two refresh ticks is the common case.
-func (c *Client) pgbQuery(ctx context.Context, inst PgBouncerInstance, sql string) (*DiagResult, error) {
+func (c *Client) query(ctx context.Context, inst Instance, sql string) (*diagres.Result, error) {
 	var lastErr error
 	for range 2 {
-		pc, err := c.pgbAcquire(ctx, inst)
+		pc, err := c.acquire(ctx, inst)
 		if err != nil {
 			return nil, fmt.Errorf("pgbouncer %s: %w", inst.Name, err)
 		}
-		res, err := pgbRun(ctx, pc.conn, sql)
+		res, err := run(ctx, pc.conn, sql)
 		if err == nil {
 			pc.mu.Unlock()
 			return res, nil
@@ -209,43 +231,43 @@ func (c *Client) pgbQuery(ctx context.Context, inst PgBouncerInstance, sql strin
 	return nil, fmt.Errorf("pgbouncer %s: %s: %w", inst.Name, sql, lastErr)
 }
 
-func pgbRun(ctx context.Context, conn *pgx.Conn, sql string) (*DiagResult, error) {
+func run(ctx context.Context, conn *pgx.Conn, sql string) (*diagres.Result, error) {
 	rows, err := conn.Query(ctx, sql)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	cols, out, _, err := scanDiagRows(rows, 0)
+	cols, out, _, err := diagres.Scan(rows, 0)
 	if err != nil {
 		return nil, err
 	}
-	return &DiagResult{Columns: cols, Rows: out, BarCol: -1, SortCol: -1}, nil
+	return &diagres.Result{Columns: cols, Rows: out, BarCol: -1, SortCol: -1}, nil
 }
 
-// PgBouncerShow runs `SHOW <what>` on inst. what must be one of the read-only
+// Show runs `SHOW <what>` on inst. what must be one of the read-only
 // SHOW commands (lower-case, e.g. "pools", "dns_hosts").
-func (c *Client) PgBouncerShow(ctx context.Context, inst PgBouncerInstance, what string) (*DiagResult, error) {
+func (c *Client) Show(ctx context.Context, inst Instance, what string) (*diagres.Result, error) {
 	what = strings.ToLower(strings.TrimSpace(what))
-	if !pgbShowAllowed[what] {
+	if !showAllowed[what] {
 		return nil, fmt.Errorf("pgbouncer: SHOW %s is not supported", what)
 	}
-	return c.pgbQuery(ctx, inst, "SHOW "+strings.ToUpper(what))
+	return c.query(ctx, inst, "SHOW "+strings.ToUpper(what))
 }
 
-// PgBouncerProbe is the cheap health read for the instance list and triage:
+// Probe is the cheap health read for the instance list and triage:
 // version plus pool totals.
-func (c *Client) PgBouncerProbe(ctx context.Context, inst PgBouncerInstance) PgBouncerProbe {
-	pr := PgBouncerProbe{User: c.pgbUser()}
-	ver, err := c.pgbQuery(ctx, inst, "SHOW VERSION")
+func (c *Client) Probe(ctx context.Context, inst Instance) Probe {
+	pr := Probe{User: c.loginUser()}
+	ver, err := c.query(ctx, inst, "SHOW VERSION")
 	if err != nil {
 		pr.Err = err
-		pr.AuthErr = isPgbAuthErr(err)
+		pr.AuthErr = isAuthErr(err)
 		return pr
 	}
 	if len(ver.Rows) > 0 && len(ver.Rows[0]) > 0 {
 		pr.Version = ver.Rows[0][0].Display
 	}
-	pools, err := c.pgbQuery(ctx, inst, "SHOW POOLS")
+	pools, err := c.query(ctx, inst, "SHOW POOLS")
 	if err != nil {
 		pr.Err = err
 		return pr
@@ -254,18 +276,18 @@ func (c *Client) PgBouncerProbe(ctx context.Context, inst PgBouncerInstance) PgB
 	return pr
 }
 
-// PgBouncerOverview reads the header data for the instance screen. VERSION is
+// Overview reads the header data for the instance screen. VERSION is
 // required; STATE (1.19+), LISTS and POOLS are best-effort.
-func (c *Client) PgBouncerOverview(ctx context.Context, inst PgBouncerInstance) (*PgBouncerOverview, error) {
-	ver, err := c.pgbQuery(ctx, inst, "SHOW VERSION")
+func (c *Client) Overview(ctx context.Context, inst Instance) (*Overview, error) {
+	ver, err := c.query(ctx, inst, "SHOW VERSION")
 	if err != nil {
 		return nil, err
 	}
-	ov := &PgBouncerOverview{}
+	ov := &Overview{}
 	if len(ver.Rows) > 0 && len(ver.Rows[0]) > 0 {
 		ov.Version = ver.Rows[0][0].Display
 	}
-	if st, err := c.pgbQuery(ctx, inst, "SHOW STATE"); err == nil {
+	if st, err := c.query(ctx, inst, "SHOW STATE"); err == nil {
 		ov.State = map[string]string{}
 		for _, r := range st.Rows {
 			if len(r) >= 2 {
@@ -273,7 +295,7 @@ func (c *Client) PgBouncerOverview(ctx context.Context, inst PgBouncerInstance) 
 			}
 		}
 	}
-	if ls, err := c.pgbQuery(ctx, inst, "SHOW LISTS"); err == nil {
+	if ls, err := c.query(ctx, inst, "SHOW LISTS"); err == nil {
 		ov.Lists = map[string]int64{}
 		for _, r := range ls.Rows {
 			if len(r) >= 2 && r[1].HasNum {
@@ -281,7 +303,7 @@ func (c *Client) PgBouncerOverview(ctx context.Context, inst PgBouncerInstance) 
 			}
 		}
 	}
-	if pools, err := c.pgbQuery(ctx, inst, "SHOW POOLS"); err == nil {
+	if pools, err := c.query(ctx, inst, "SHOW POOLS"); err == nil {
 		ov.Totals = poolTotals(pools)
 	}
 	return ov, nil
@@ -289,30 +311,30 @@ func (c *Client) PgBouncerOverview(ctx context.Context, inst PgBouncerInstance) 
 
 // poolTotals sums SHOW POOLS, skipping the console's own "pgbouncer" pool.
 // maxwait is whole seconds with the sub-second remainder in maxwait_us.
-func poolTotals(res *DiagResult) PgBouncerPoolTotals {
-	var t PgBouncerPoolTotals
+func poolTotals(res *diagres.Result) PoolTotals {
+	var t PoolTotals
 	if res == nil {
 		return t
 	}
-	dbCol := diagColIdx(res, "database")
-	clA, clW := diagColIdx(res, "cl_active"), diagColIdx(res, "cl_waiting")
-	svA, svI := diagColIdx(res, "sv_active"), diagColIdx(res, "sv_idle")
-	mw, mwUS := diagColIdx(res, "maxwait"), diagColIdx(res, "maxwait_us")
+	dbCol := res.ColIdx("database")
+	clA, clW := res.ColIdx("cl_active"), res.ColIdx("cl_waiting")
+	svA, svI := res.ColIdx("sv_active"), res.ColIdx("sv_idle")
+	mw, mwUS := res.ColIdx("maxwait"), res.ColIdx("maxwait_us")
 	for _, row := range res.Rows {
 		if dbCol >= 0 && dbCol < len(row) && row[dbCol].Display == "pgbouncer" {
 			continue
 		}
 		t.Pools++
-		n, _ := diagNum(row, clA)
+		n, _ := diagres.Num(row, clA)
 		t.ClActive += int(n)
-		n, _ = diagNum(row, clW)
+		n, _ = diagres.Num(row, clW)
 		t.ClWaiting += int(n)
-		n, _ = diagNum(row, svA)
+		n, _ = diagres.Num(row, svA)
 		t.SvActive += int(n)
-		n, _ = diagNum(row, svI)
+		n, _ = diagres.Num(row, svI)
 		t.SvIdle += int(n)
-		secs, _ := diagNum(row, mw)
-		us, _ := diagNum(row, mwUS)
+		secs, _ := diagres.Num(row, mw)
+		us, _ := diagres.Num(row, mwUS)
 		if w := secs + us/1e6; w > t.MaxWaitSec {
 			t.MaxWaitSec = w
 		}
@@ -320,15 +342,15 @@ func poolTotals(res *DiagResult) PgBouncerPoolTotals {
 	return t
 }
 
-// PgBouncerAuthHintApplies reports whether err is a rejected console login
-// (as opposed to an unreachable console), i.e. whether PgBouncerAuthHint is the
+// AuthHintApplies reports whether err is a rejected console login
+// (as opposed to an unreachable console), i.e. whether AuthHint is the
 // right thing to show next to it.
-func PgBouncerAuthHintApplies(err error) bool { return err != nil && isPgbAuthErr(err) }
+func AuthHintApplies(err error) bool { return err != nil && isAuthErr(err) }
 
-// isPgbAuthErr tells a rejected login from an unreachable console. pgbouncer
+// isAuthErr tells a rejected login from an unreachable console. pgbouncer
 // reports both password and "user not in admin_users/stats_users" failures as
 // SQLSTATE 28000/28P01 (older versions use plain text).
-func isPgbAuthErr(err error) bool {
+func isAuthErr(err error) bool {
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		if pgErr.Code == "28P01" || pgErr.Code == "28000" {
 			return true
@@ -341,9 +363,9 @@ func isPgbAuthErr(err error) bool {
 		strings.Contains(msg, "not allowed")
 }
 
-// PgBouncerAuthHint explains, for one instance, what a rejected console login
+// AuthHint explains, for one instance, what a rejected console login
 // needs — the read-only role is enough for everything this tool does.
-func PgBouncerAuthHint(inst PgBouncerInstance, usr string) string {
+func AuthHint(inst Instance, usr string) string {
 	ini := inst.IniPath
 	if ini == "" {
 		ini = "pgbouncer.ini"
@@ -363,11 +385,11 @@ func PgBouncerAuthHint(inst PgBouncerInstance, usr string) string {
 		usr, ini, auth, host, inst.Port(), usr)
 }
 
-// closePgBouncerConns is Close's share of the console connections.
-func (c *Client) closePgBouncerConns() {
-	c.pgbMu.Lock()
-	defer c.pgbMu.Unlock()
-	for _, pc := range c.pgbConns {
+// Close drops every console connection.
+func (c *Client) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, pc := range c.conns {
 		pc.mu.Lock()
 		if pc.conn != nil {
 			_ = pc.conn.Close(context.Background())
@@ -375,5 +397,5 @@ func (c *Client) closePgBouncerConns() {
 		}
 		pc.mu.Unlock()
 	}
-	c.pgbConns = map[string]*pgbConn{}
+	c.conns = map[string]*console{}
 }

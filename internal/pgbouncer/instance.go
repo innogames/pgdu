@@ -1,19 +1,20 @@
-package pg
+package pgbouncer
 
 import (
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 )
 
-// pgbDefaultPort is pgbouncer's compiled-in listen_port.
-const pgbDefaultPort = 6432
+// defaultPort is pgbouncer's compiled-in listen_port.
+const defaultPort = 6432
 
-// PgBouncerInstance is one pgbouncer process (running or merely configured)
+// Instance is one pgbouncer process (running or merely configured)
 // as seen by discovery. Fields sourced from the ini are empty when the ini was
 // unreadable — IniErr then says why, and the instance keeps whatever /proc or
 // the explicit target told us.
-type PgBouncerInstance struct {
+type Instance struct {
 	Name       string // ini basename without .ini, else host:port
 	IniPath    string
 	PID        int // 0 = not seen running
@@ -36,16 +37,16 @@ type PgBouncerInstance struct {
 }
 
 // Port is ListenPort with the pgbouncer default applied.
-func (i PgBouncerInstance) Port() int {
+func (i Instance) Port() int {
 	if i.ListenPort > 0 {
 		return i.ListenPort
 	}
-	return pgbDefaultPort
+	return defaultPort
 }
 
 // SocketPath is the unix socket this instance listens on, "" without a
 // socket dir.
-func (i PgBouncerInstance) SocketPath() string {
+func (i Instance) SocketPath() string {
 	if i.SocketDir == "" {
 		return ""
 	}
@@ -57,10 +58,10 @@ func (i PgBouncerInstance) SocketPath() string {
 // several instances on one host commonly share a TCP port via so_reuseport,
 // and then the kernel hands a TCP connect to *any* of them, so only the
 // per-instance socket addresses a specific one.
-func (i PgBouncerInstance) Target() (host string, port int, unix bool) {
+func (i Instance) Target() (host string, port int, unix bool) {
 	port = i.Port()
 	if p := i.SocketPath(); p != "" {
-		if fi, err := statSocket(p); err == nil && fi {
+		if fi, err := isSocket(p); err == nil && fi {
 			return i.SocketDir, port, true
 		}
 	}
@@ -77,7 +78,7 @@ func (i PgBouncerInstance) Target() (host string, port int, unix bool) {
 }
 
 // TargetLabel renders the connect target for a table cell.
-func (i PgBouncerInstance) TargetLabel() string {
+func (i Instance) TargetLabel() string {
 	host, port, unix := i.Target()
 	if unix {
 		return filepath.Join(host, ".s.PGSQL."+strconv.Itoa(port))
@@ -87,7 +88,7 @@ func (i PgBouncerInstance) TargetLabel() string {
 
 // Key is the dedupe identity of an instance across discovery sources: the
 // socket path when the ini names one, else the TCP endpoint, else the ini path.
-func (i PgBouncerInstance) Key() string {
+func (i Instance) Key() string {
 	if i.DSN != "" {
 		return "dsn:" + i.DSN
 	}
@@ -101,9 +102,9 @@ func (i PgBouncerInstance) Key() string {
 	return "ini:" + i.IniPath
 }
 
-// PgBouncerPoolTotals aggregates SHOW POOLS across every pool except the
+// PoolTotals aggregates SHOW POOLS across every pool except the
 // console's own "pgbouncer" pseudo-database.
-type PgBouncerPoolTotals struct {
+type PoolTotals struct {
 	ClActive   int
 	ClWaiting  int
 	SvActive   int
@@ -112,22 +113,22 @@ type PgBouncerPoolTotals struct {
 	MaxWaitSec float64
 }
 
-// PgBouncerProbe is the cheap health read done for the instance list and the
+// Probe is the cheap health read done for the instance list and the
 // triage check: version plus pool totals, or the reason neither was available.
-type PgBouncerProbe struct {
+type Probe struct {
 	Version string
-	Totals  PgBouncerPoolTotals
+	Totals  PoolTotals
 	Err     error
 	AuthErr bool   // the console rejected our login (as opposed to being unreachable)
 	User    string // login user we tried, for the hint
 }
 
-// PgBouncerOverview backs the per-instance overview screen.
-type PgBouncerOverview struct {
+// Overview backs the per-instance overview screen.
+type Overview struct {
 	Version string
 	State   map[string]string // SHOW STATE (nil when the version lacks it)
 	Lists   map[string]int64  // SHOW LISTS
-	Totals  PgBouncerPoolTotals
+	Totals  PoolTotals
 }
 
 func cutComma(s string) (before, after string, found bool) {
@@ -137,4 +138,13 @@ func cutComma(s string) (before, after string, found bool) {
 		}
 	}
 	return s, "", false
+}
+
+// isSocket reports whether path exists and is a unix socket.
+func isSocket(path string) (bool, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return fi.Mode()&os.ModeSocket != 0, nil
 }

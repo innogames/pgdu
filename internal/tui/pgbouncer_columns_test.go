@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"pgdu/internal/pg"
+	"pgdu/internal/pgbouncer"
 )
 
 func TestPgbShowRegistryComplete(t *testing.T) {
@@ -73,13 +74,13 @@ func TestApplyPgbKinds(t *testing.T) {
 }
 
 func TestPgbInstanceItemsParallelToColumns(t *testing.T) {
-	insts := []pg.PgBouncerInstance{
+	insts := []pgbouncer.Instance{
 		{Name: "pgbouncer_1", PID: 10, SocketDir: "/run/pgbouncer_1", ListenPort: 6432, Logfile: "/var/log/postgresql/pgbouncer_1.log", Reason: "/proc", PoolMode: "transaction"},
 		{Name: "pgbouncer_2", Reason: "/etc/pgbouncer", IniPath: "/etc/pgbouncer/pgbouncer_2.ini"},
 		{Name: "pgbouncer_3", PID: 12, Reason: "/proc"},
 	}
-	probes := []pg.PgBouncerProbe{
-		{Version: "PgBouncer 1.25.2", Totals: pg.PgBouncerPoolTotals{ClActive: 3, ClWaiting: 1, SvActive: 2, SvIdle: 5, Pools: 2, MaxWaitSec: 1.5}},
+	probes := []pgbouncer.Probe{
+		{Version: "PgBouncer 1.25.2", Totals: pgbouncer.PoolTotals{ClActive: 3, ClWaiting: 1, SvActive: 2, SvIdle: 5, Pools: 2, MaxWaitSec: 1.5}},
 		{Err: errors.New("dial: no such file")},
 		{Err: errors.New("SASL authentication failed"), AuthErr: true, User: "postgres"},
 	}
@@ -118,8 +119,8 @@ func TestPgbInstanceItemsParallelToColumns(t *testing.T) {
 func TestRenderPgBouncerScreens(t *testing.T) {
 	m := &Model{width: 200, height: 40, keys: defaultKeys(), pgbRefresh: 0}
 	list := &screen{level: levelPgBouncers, title: "pgbouncer", tool: toolPgBouncer, loaded: true}
-	list.pgb.insts = []pg.PgBouncerInstance{{Name: "pgbouncer_1", IniPath: "/etc/pgbouncer/pgbouncer_1.ini", SocketDir: "/var/run/pgbouncer_1", AuthFile: "/etc/pgbouncer/userlist.txt"}}
-	list.pgb.probes = []pg.PgBouncerProbe{{Err: errors.New("SASL authentication failed"), AuthErr: true, User: "postgres"}}
+	list.pgb.insts = []pgbouncer.Instance{{Name: "pgbouncer_1", IniPath: "/etc/pgbouncer/pgbouncer_1.ini", SocketDir: "/var/run/pgbouncer_1", AuthFile: "/etc/pgbouncer/userlist.txt"}}
+	list.pgb.probes = []pgbouncer.Probe{{Err: errors.New("SASL authentication failed"), AuthErr: true, User: "postgres"}}
 	list.diagCols = pgbInstanceColumns()
 	list.diagBarCol = -1
 	list.items = pgbInstanceItems(list.pgb.insts, list.pgb.probes)
@@ -139,11 +140,11 @@ func TestRenderPgBouncerScreens(t *testing.T) {
 
 	ov := &screen{level: levelPgBouncer, title: "pgbouncer_1", tool: toolPgBouncer, loaded: true, pgb: pgbState{inst: &list.pgb.insts[0]}}
 	ov.pgb.inst.PoolMode = "transaction"
-	ov.pgb.overview = &pg.PgBouncerOverview{
+	ov.pgb.overview = &pgbouncer.Overview{
 		Version: "PgBouncer 1.25.2 on x86_64-pc-linux-gnu",
 		State:   map[string]string{"active": "yes", "paused": "yes"},
 		Lists:   map[string]int64{"databases": 2, "pools": 3},
-		Totals:  pg.PgBouncerPoolTotals{Pools: 3, ClActive: 40, ClWaiting: 2, SvActive: 10, SvIdle: 6, MaxWaitSec: 4},
+		Totals:  pgbouncer.PoolTotals{Pools: 3, ClActive: 40, ClWaiting: 2, SvActive: 10, SvIdle: 6, MaxWaitSec: 4},
 	}
 	ov.items = pgbMenuItems(*ov.pgb.inst)
 	hdr := m.renderPgBouncerHeader(ov)

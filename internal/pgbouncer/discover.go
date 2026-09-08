@@ -1,7 +1,6 @@
-package pg
+package pgbouncer
 
 import (
-	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -9,74 +8,68 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"pgdu/internal/procfs"
 )
 
-// pgbProc is one running pgbouncer as read from /proc.
-type pgbProc struct {
-	PID  int
-	Argv []string
-	Cwd  string
-}
-
-// pgbDefaultIni is what pgbouncer reads when started without a config path —
+// defaultIni is what pgbouncer reads when started without a config path —
 // which it never really is, but the argv parser needs a fallback.
-const pgbDefaultIni = "/etc/pgbouncer/pgbouncer.ini"
+const defaultIni = "/etc/pgbouncer/pgbouncer.ini"
 
-// DiscoverPgBouncers lists every pgbouncer instance we can find, best-effort
+// Discover lists every pgbouncer instance we can find, best-effort
 // and deduped by Key(). Sources, in priority order (the first sighting owns the
 // Reason; later ones only fill in blanks):
 //
 //  1. explicit --pgbouncer-target values (ini path, socket dir, or host:port);
 //  2. running processes from /proc, each parsed from the ini on its command line;
 //  3. /etc/pgbouncer/*.ini for configured-but-stopped instances;
-//  4. pgdu's own connection when it evidently goes through a pooler.
+//  4. pgdu's own connection when viaPooler says it evidently goes through a
+//     pooler (pg.Client judges that from the pool's socket addresses).
 //
 // Nothing here fails: an unreadable ini leaves IniErr set, a missing /proc
 // yields nothing from that source, and so on.
-func (c *Client) DiscoverPgBouncers(ctx context.Context) []PgBouncerInstance {
-	var found []PgBouncerInstance
+func (c *Client) Discover(viaPooler bool) []Instance {
+	var found []Instance
 
 	for _, t := range c.cfg.PgBouncerTargets {
-		if inst, ok := parsePgBouncerTarget(t); ok {
+		if inst, ok := parseTarget(t); ok {
 			found = append(found, inst)
 		}
 	}
 
-	for _, p := range scanPgBouncerProcs() {
-		ini := pgbIniFromArgv(p.Argv)
+	for _, p := range procfs.ListByComm("pgbouncer") {
+		ini := iniFromArgv(p.Argv)
 		if !filepath.IsAbs(ini) && p.Cwd != "" {
 			ini = filepath.Join(p.Cwd, ini)
 		}
-		inst := PgBouncerInstance{PID: p.PID, Reason: "/proc"}
+		inst := Instance{PID: p.PID, Reason: "/proc"}
 		instanceFromIni(&inst, ini)
 		found = append(found, inst)
 	}
 
-	for _, ini := range pgbIniGlob() {
-		inst := PgBouncerInstance{Reason: "/etc/pgbouncer"}
+	for _, ini := range iniGlob() {
+		inst := Instance{Reason: "/etc/pgbouncer"}
 		instanceFromIni(&inst, ini)
 		found = append(found, inst)
 	}
 
-	if pool, err := c.PoolFor(ctx, c.DefaultDB()); err == nil && behindProxy(ctx, pool) {
-		found = append(found, PgBouncerInstance{
+	if viaPooler {
+		found = append(found, Instance{
 			Name:   c.cfg.Target(),
 			Reason: "connection target",
 			DSN:    c.cfg.BuildDSN("pgbouncer"),
 		})
 	}
 
-	return dedupePgBouncers(found)
+	return dedupe(found)
 }
 
-// dedupePgBouncers merges sightings of the same instance (same Key) and sorts
+// dedupe merges sightings of the same instance (same Key) and sorts
 // the result by name. The first sighting wins for Reason and for every field
 // it set; later sightings only fill zero fields — so /proc's PID lands on the
 // ini-derived record and an explicit target keeps its "--pgbouncer-target".
-func dedupePgBouncers(found []PgBouncerInstance) []PgBouncerInstance {
+func dedupe(found []Instance) []Instance {
 	byKey := map[string]int{}
-	var out []PgBouncerInstance
+	var out []Instance
 	for _, inst := range found {
 		k := inst.Key()
 		i, seen := byKey[k]
@@ -107,10 +100,10 @@ func dedupePgBouncers(found []PgBouncerInstance) []PgBouncerInstance {
 	return out
 }
 
-// pgbIniFromArgv extracts the config path from a pgbouncer command line:
+// iniFromArgv extracts the config path from a pgbouncer command line:
 // the first non-option argument, skipping the value-taking -u/--user. Missing
 // → pgbouncer's default path.
-func pgbIniFromArgv(argv []string) string {
+func iniFromArgv(argv []string) string {
 	for i := 1; i < len(argv); i++ {
 		a := argv[i]
 		switch {
@@ -122,18 +115,18 @@ func pgbIniFromArgv(argv []string) string {
 			return a
 		}
 	}
-	return pgbDefaultIni
+	return defaultIni
 }
 
-// parsePgBouncerTarget interprets one --pgbouncer-target value: an ini file, a
+// parseTarget interprets one --pgbouncer-target value: an ini file, a
 // unix socket directory, or host[:port]. Unrecognisable input is dropped rather
 // than surfaced — the instance list explains the accepted forms.
-func parsePgBouncerTarget(t string) (PgBouncerInstance, bool) {
+func parseTarget(t string) (Instance, bool) {
 	t = strings.TrimSpace(t)
 	if t == "" {
-		return PgBouncerInstance{}, false
+		return Instance{}, false
 	}
-	inst := PgBouncerInstance{Reason: "--pgbouncer-target"}
+	inst := Instance{Reason: "--pgbouncer-target"}
 	if strings.HasSuffix(t, ".ini") {
 		instanceFromIni(&inst, t)
 		return inst, true
@@ -150,7 +143,7 @@ func parsePgBouncerTarget(t string) (PgBouncerInstance, bool) {
 		}
 		return inst, true
 	}
-	host, port := t, pgbDefaultPort
+	host, port := t, defaultPort
 	if h, p, err := net.SplitHostPort(t); err == nil {
 		host = h
 		if n, err := strconv.Atoi(p); err == nil {
@@ -158,7 +151,7 @@ func parsePgBouncerTarget(t string) (PgBouncerInstance, bool) {
 		}
 	}
 	if host == "" {
-		return PgBouncerInstance{}, false
+		return Instance{}, false
 	}
 	inst.ListenAddr = host
 	inst.ListenPort = port
@@ -166,36 +159,9 @@ func parsePgBouncerTarget(t string) (PgBouncerInstance, bool) {
 	return inst, true
 }
 
-// behindProxy reports whether the connections in pool terminate somewhere
-// other than the Postgres backend — i.e. a pooler sits in between. It compares
-// the peer address of our own socket with the address the backend sees itself
-// on (inet_server_addr/port): a direct connection has both equal (TCP) or both
-// unix (NULL server side). Any mismatch means a proxy. Errors are treated as
-// "direct" so discovery stays silent when in doubt — dialing dbname=pgbouncer
-// against a real server logs `FATAL: database "pgbouncer" does not exist`,
-// noise in exactly the log the analyzer reads.
-func behindProxy(ctx context.Context, pool *pgxpool.Pool) bool {
-	pc, err := pool.Acquire(ctx)
-	if err != nil {
-		return false
-	}
-	defer pc.Release()
-
-	var srvAddr, srvPort *string
-	if err := pc.QueryRow(ctx,
-		"SELECT host(inet_server_addr()), inet_server_port()::text").Scan(&srvAddr, &srvPort); err != nil {
-		return false
-	}
-	remote := pc.Conn().PgConn().Conn().RemoteAddr()
-	tcp, isTCP := remote.(*net.TCPAddr)
-	if srvAddr == nil || srvPort == nil {
-		// Backend accepted us on a unix socket. Direct if we opened one too;
-		// a TCP client socket ending on a unix backend socket is a proxy.
-		return isTCP
-	}
-	if !isTCP {
-		return true
-	}
-	srvIP := net.ParseIP(*srvAddr)
-	return srvIP == nil || !srvIP.Equal(tcp.IP) || *srvPort != strconv.Itoa(tcp.Port)
+// iniGlob lists the packaged config directory for instances that are
+// configured but not running (or whose /proc entries we could not read).
+func iniGlob() []string {
+	m, _ := filepath.Glob("/etc/pgbouncer/*.ini")
+	return m
 }

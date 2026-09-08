@@ -166,6 +166,11 @@ func TestHeapPageToItem(t *testing.T) {
 	if it.name != "page #0000005" {
 		t.Errorf("name = %q, want %q", it.name, "page #0000005")
 	}
+	// Every page, buffer-table and B-tree page row drills, so each carries the ↵.
+	if !it.hasChildren || !indexPageToItem(pg.IndexPageStat{Blkno: 1}).hasChildren ||
+		!bufferStatToItem(pg.TableBufferStat{Name: "t"}).hasChildren {
+		t.Error("heap/index page and buffer rows must be flagged drillable")
+	}
 }
 
 func TestHeapTupleToItem(t *testing.T) {

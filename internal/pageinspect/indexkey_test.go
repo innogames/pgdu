@@ -1,8 +1,7 @@
-package tui
+package pageinspect
 
 import (
 	"math"
-	"strings"
 	"testing"
 
 	"pgdu/internal/pg"
@@ -115,45 +114,12 @@ func TestDecodeIndexKey(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := decodeIndexKey(tc.hex, tc.cols)
+			got, ok := DecodeIndexKey(tc.hex, tc.cols)
 			if got != tc.want || ok != tc.ok {
-				t.Errorf("decodeIndexKey(%q) = (%q, %v), want (%q, %v)",
+				t.Errorf("DecodeIndexKey(%q) = (%q, %v), want (%q, %v)",
 					tc.hex, got, ok, tc.want, tc.ok)
 			}
 		})
-	}
-}
-
-// rawBytes builds pageinspect's space-separated hex for the given bytes.
-func rawBytes(b ...byte) *string {
-	parts := make([]string, len(b))
-	for i, x := range b {
-		parts[i] = byteHex(x)
-	}
-	s := strings.Join(parts, " ")
-	return &s
-}
-
-// TestInternalDownlinkRangesTyped proves the range column decodes integer
-// separators via the key-column types rather than dumping raw hex.
-func TestInternalDownlinkRangesTyped(t *testing.T) {
-	le8 := func(v byte) *string { return rawBytes(v, 0, 0, 0, 0, 0, 0, 0) }
-	items := []item{
-		tupleItem(1, le8(44)), // high key — page upper bound
-		tupleItem(2, nil),     // minus-infinity leftmost child
-		tupleItem(3, le8(10)),
-		tupleItem(4, le8(20)),
-	}
-	got := internalDownlinkRanges(items, "i", []pg.IndexKeyColumn{int8Col}, 200)
-	want := map[int32]string{
-		2: "−∞  …  10",
-		3: "10  …  20",
-		4: "20  …  44",
-	}
-	for off, w := range want {
-		if plain := stripANSI(got[off]); plain != w {
-			t.Errorf("range for off %d = %q, want %q", off, plain, w)
-		}
 	}
 }
 
@@ -181,47 +147,12 @@ func TestDecodeIndexKeyPivot(t *testing.T) {
 		{"minus-infinity downlink", "", 0, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := decodeIndexKeyPivot(tc.hex, cols, tc.natts)
+			got, ok := DecodeIndexKeyPivot(tc.hex, cols, tc.natts)
 			if got != tc.want || ok != tc.ok {
-				t.Errorf("decodeIndexKeyPivot(%q, natts=%d) = (%q, %v), want (%q, %v)",
+				t.Errorf("DecodeIndexKeyPivot(%q, natts=%d) = (%q, %v), want (%q, %v)",
 					tc.hex, tc.natts, got, ok, tc.want, tc.ok)
 			}
 		})
-	}
-}
-
-func pivotItem(off int32, ctid string, data *string) item {
-	return item{data: pg.IndexTuple{ItemOffset: off, Ctid: &ctid, Data: data}}
-}
-
-// TestInternalDownlinkRangesTruncated proves the range column renders a
-// suffix-truncated separator (natts=1 in the downlink's ctid offset word)
-// with its dropped column as −∞, parenthesized like its full neighbours.
-func TestInternalDownlinkRangesTruncated(t *testing.T) {
-	cols := []pg.IndexKeyColumn{int4Col, textCol}
-	full := func(id byte, s string) *string {
-		b := make([]byte, 0, 5+len(s))
-		b = append(b, id, 0, 0, 0, byte((len(s)+1)<<1|1))
-		b = append(b, s...)
-		return rawBytes(b...)
-	}
-	trunc := func(id byte) *string { return rawBytes(id, 0, 0, 0, 0, 0, 0, 0) }
-	items := []item{
-		pivotItem(1, "(93,2)", full(44, "zz")), // high key — page upper bound
-		pivotItem(2, "(628,0)", nil),           // minus-infinity leftmost child
-		pivotItem(3, "(629,2)", full(10, "aa")),
-		pivotItem(4, "(630,1)", trunc(20)), // suffix-truncated: text col dropped
-	}
-	got := internalDownlinkRanges(items, "i", cols, 200)
-	want := map[int32]string{
-		2: "−∞       …  (10,aa)",
-		3: "(10,aa)  …  (20,−∞)",
-		4: "(20,−∞)  …  (44,zz)",
-	}
-	for off, w := range want {
-		if plain := stripANSI(got[off]); plain != w {
-			t.Errorf("range for off %d = %q, want %q", off, plain, w)
-		}
 	}
 }
 
@@ -256,9 +187,9 @@ func TestFormatPGTemporal(t *testing.T) {
 // decoder: 8 zero bytes of a timestamp column render as the PG epoch.
 func TestDecodeIndexKeyTimestamp(t *testing.T) {
 	tsCol := col("timestamp", "d", 8, "D")
-	got, ok := decodeIndexKey("00 00 00 00 00 00 00 00", []pg.IndexKeyColumn{tsCol})
+	got, ok := DecodeIndexKey("00 00 00 00 00 00 00 00", []pg.IndexKeyColumn{tsCol})
 	if !ok || got != "2000-01-01 00:00:00" {
-		t.Errorf("decodeIndexKey(timestamp 0) = (%q, %v), want (%q, true)",
+		t.Errorf("DecodeIndexKey(timestamp 0) = (%q, %v), want (%q, true)",
 			got, ok, "2000-01-01 00:00:00")
 	}
 }
@@ -276,8 +207,8 @@ func TestKeyValueLess(t *testing.T) {
 		{"2026-06-16 01:00:00", "2026-06-16 02:00:00", true}, // ISO timestamps sort lexicographically
 		{"3.5", "10.2", true},                                // float fallback
 	} {
-		if got := keyValueLess(tc.a, tc.b); got != tc.want {
-			t.Errorf("keyValueLess(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		if got := KeyValueLess(tc.a, tc.b); got != tc.want {
+			t.Errorf("KeyValueLess(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
 		}
 	}
 }
@@ -285,15 +216,15 @@ func TestKeyValueLess(t *testing.T) {
 func TestLeadingKeyValue(t *testing.T) {
 	// Composite (int4, text): leading value is just the int4.
 	data := "17 00 00 00 1d 6d 61 6e 75 66 61 63 74 75 72 69 6e 67"
-	got, ok := leadingKeyValue(
+	got, ok := LeadingKeyValue(
 		pg.IndexTuple{Data: &data},
 		[]pg.IndexKeyColumn{int4Col, textCol},
 	)
 	if !ok || got != "23" {
-		t.Errorf("leadingKeyValue = (%q, %v), want (\"23\", true)", got, ok)
+		t.Errorf("LeadingKeyValue = (%q, %v), want (\"23\", true)", got, ok)
 	}
 	// Minus-infinity downlink: no data, no key.
-	if _, ok := leadingKeyValue(pg.IndexTuple{}, []pg.IndexKeyColumn{int4Col}); ok {
-		t.Errorf("leadingKeyValue(no data) ok = true, want false")
+	if _, ok := LeadingKeyValue(pg.IndexTuple{}, []pg.IndexKeyColumn{int4Col}); ok {
+		t.Errorf("LeadingKeyValue(no data) ok = true, want false")
 	}
 }

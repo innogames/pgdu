@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"pgdu/internal/humanize"
+	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
 )
 
@@ -115,8 +116,8 @@ func buildWALDetailItems(d pg.WALBlockDetail) []item {
 				out = append(out, walDetailKV("t_tid", t.tid))
 				out = append(out, walDetailKV("t_info", t.info))
 			} else {
-				out = append(out, walDetailKV("t_infomask", infomaskText(int32(t.infomask))))
-				out = append(out, walDetailKV("t_infomask2", infomask2Text(int32(t.infomask2))))
+				out = append(out, walDetailKV("t_infomask", pageinspect.InfomaskText(int32(t.infomask))))
+				out = append(out, walDetailKV("t_infomask2", pageinspect.Infomask2Text(int32(t.infomask2))))
 				out = append(out, walDetailKV("t_hoff", fmt.Sprintf("%d  ·  %s attribute data", t.hoff, humanize.Bytes(int64(len(t.data))))))
 			}
 			out = append(out, walDetailColumns(t.cols, t.complete)...)
@@ -250,7 +251,7 @@ func walPageItemRow(t *pg.HeapTuple, attrs []pg.WALHeapAttr, touched bool) item 
 		parts = append(parts, fmt.Sprintf("→ lp %d", t.LPOff))
 	case pg.LPNormal:
 		parts = append(parts, padRight(humanize.Bytes(int64(t.LPLen)), 8))
-		parts = append(parts, styleMuted.Render(fmt.Sprintf("xmin %s xmax %s", xidString(t.Xmin), xidString(t.Xmax))))
+		parts = append(parts, styleMuted.Render(fmt.Sprintf("xmin %s xmax %s", pageinspect.XidString(t.Xmin), pageinspect.XidString(t.Xmax))))
 		if t.Ctid != nil {
 			parts = append(parts, styleMuted.Render("ctid "+*t.Ctid))
 		}
@@ -541,7 +542,7 @@ func decodeHeapAttr(b []byte, off int, a pg.WALHeapAttr) (string, int, bool) {
 		valueID := binary.LittleEndian.Uint32(ext[8:12])
 		return fmt.Sprintf("<toasted, %s, chunk_id %d>", humanize.Bytes(int64(rawSize)), valueID), end, true
 	}
-	return decodeIndexColumn(b, off, pg.IndexKeyColumn{
+	return pageinspect.DecodeIndexColumn(b, off, pg.IndexKeyColumn{
 		TypLen: a.TypLen, TypAlign: a.TypAlign, TypName: a.TypName, TypCategory: a.TypCategory,
 	})
 }
@@ -554,7 +555,7 @@ func hexDumpItems(b []byte) []item {
 		end := min(off+16, len(b))
 		chunk := b[off:end]
 		var hx strings.Builder
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			if i == 8 {
 				hx.WriteByte(' ')
 			}
@@ -700,7 +701,7 @@ func walIndexItemRow(t *pg.IndexTuple, cols []pg.IndexKeyColumn, touched bool) i
 		parts = append(parts, styleMuted.Render("→ heap "+*t.Ctid))
 	}
 	if t.Data != nil && len(cols) > 0 {
-		if k, ok := decodeIndexKey(*t.Data, cols); ok {
+		if k, ok := pageinspect.DecodeIndexKey(*t.Data, cols); ok {
 			parts = append(parts, k)
 		}
 	}

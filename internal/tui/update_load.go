@@ -127,7 +127,7 @@ func (m *Model) loadCurrent() tea.Cmd {
 	case levelHeapPages:
 		return m.loadHeapPagesCmd(s.table, s.pages.heapWindowStart, s.pages.heapWindowCount)
 	case levelHeapTuples:
-		return m.loadHeapTuplesCmd(s.table, s.pages.heapPageBlkno)
+		return m.loadHeapTuplesCmd(s.table, s.pages.heapPageBlkno, s.pages.tuplePick)
 	case levelTupleRow:
 		if s.pages.toastChunkID != 0 {
 			return m.loadToastValueCmd(s.table, s.pages.toastChunkID)
@@ -198,10 +198,15 @@ func (m *Model) loadCurrent() tea.Cmd {
 		}
 	case levelWAL:
 		// Clear the header cache so a Refresh re-resolves the window and
-		// re-reads the snapshot against the now-current write position.
+		// re-reads the snapshot against the now-current write position. The
+		// relation table follows the overview (onWALOverviewLoaded chains it),
+		// so it is only reset here.
 		s.wal.summary = nil
 		s.wal.summaryErr = nil
 		s.wal.checkpoint = nil
+		s.wal.rels = nil
+		s.wal.relsErr = nil
+		s.wal.relsLoading = false
 		return tea.Batch(
 			m.loadWALOverviewCmd(s.db),
 			m.loadWALSummaryCmd(s.db),
@@ -212,8 +217,6 @@ func (m *Model) loadCurrent() tea.Cmd {
 		return m.loadWALRecordsCmd(s.db, s.wal.start, s.wal.end, s.wal.rmgr)
 	case levelWALBlocks:
 		return m.loadWALBlocksCmd(s.db, s.wal.recLSN, s.wal.recEnd)
-	case levelWALRelations:
-		return m.loadWALRelationsCmd(s.db, s.wal.start, s.wal.end)
 	case levelWALRelBlocks:
 		return m.loadWALRelBlocksCmd(s.db, s.wal.start, s.wal.end, s.wal.relFilenode)
 	case levelWALBlockDetail:

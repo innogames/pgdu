@@ -47,18 +47,43 @@ func tblStatsResetLabel(s *screen) string {
 // is shown alongside the total ("12/45 of 438") so the user can tell at a
 // glance how many rows were hidden.
 func positionLabel(s *screen) string {
-	total := len(s.items)
+	total, vis, cursor := len(s.items), s.visibleLen(), s.cursor+1
+	if s.level == levelWAL || s.level == levelLogs {
+		// Section headers/footers are not positions the cursor can take, so
+		// rank it among the selectable rows only.
+		total, vis, cursor = selectablePosition(s)
+	}
 	if total == 0 {
 		return "0 items"
 	}
-	vis := s.visibleLen()
 	if vis == 0 {
 		return fmt.Sprintf("0/0 of %d", total)
 	}
 	if s.filter != "" {
-		return fmt.Sprintf("%d/%d of %d", s.cursor+1, vis, total)
+		return fmt.Sprintf("%d/%d of %d", cursor, vis, total)
 	}
-	return fmt.Sprintf("%d/%d", s.cursor+1, vis)
+	return fmt.Sprintf("%d/%d", cursor, vis)
+}
+
+// selectablePosition counts the selectable (non-inert) rows of a sectioned
+// list — all of them, the visible ones, and the cursor's 1-based rank among
+// the visible ones.
+func selectablePosition(s *screen) (total, vis, cursor int) {
+	for _, it := range s.items {
+		if !inertRow(it) {
+			total++
+		}
+	}
+	for i, idx := range s.visibleIndexes() {
+		if inertRow(s.items[idx]) {
+			continue
+		}
+		vis++
+		if i <= s.cursor {
+			cursor = vis
+		}
+	}
+	return total, vis, cursor
 }
 
 // bloatScanLabel returns a short status indicator for the bloat fetch on
@@ -139,8 +164,6 @@ func levelLabel(l level) string {
 		return "wal-records"
 	case levelWALBlocks:
 		return "wal-blocks"
-	case levelWALRelations:
-		return "wal-relations"
 	case levelWALRelBlocks:
 		return "wal-rel-blocks"
 	case levelWALBlockDetail:

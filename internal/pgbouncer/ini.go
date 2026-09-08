@@ -1,4 +1,4 @@
-package pg
+package pgbouncer
 
 import (
 	"bufio"
@@ -9,27 +9,27 @@ import (
 	"strings"
 )
 
-// pgbIni is the [pgbouncer] section of a pgbouncer.ini, keys lower-cased.
+// iniFile is the [pgbouncer] section of a pgbouncer.ini, keys lower-cased.
 // Only that section matters for discovery; [databases]/[users]/[peers] carry
 // connection strings we never need (and must not mis-parse as key = value).
-type pgbIni map[string]string
+type iniFile map[string]string
 
-// pgbIniIncludeDepth bounds %include recursion so a self-including file cannot
+// iniIncludeDepth bounds %include recursion so a self-including file cannot
 // spin discovery forever.
-const pgbIniIncludeDepth = 8
+const iniIncludeDepth = 8
 
-// parsePgBouncerIni reads path and every %include it names. A later value for
+// parseIni reads path and every %include it names. A later value for
 // the same key wins, mirroring pgbouncer's own last-one-wins semantics.
-func parsePgBouncerIni(path string) (pgbIni, error) {
-	ini := pgbIni{}
+func parseIni(path string) (iniFile, error) {
+	ini := iniFile{}
 	if err := ini.load(path, 0); err != nil {
 		return nil, err
 	}
 	return ini, nil
 }
 
-func (ini pgbIni) load(path string, depth int) error {
-	if depth > pgbIniIncludeDepth {
+func (ini iniFile) load(path string, depth int) error {
+	if depth > iniIncludeDepth {
 		return fmt.Errorf("%%include nesting too deep at %s", path)
 	}
 	f, err := os.Open(path)
@@ -93,7 +93,7 @@ func unquoteIni(v string) string {
 }
 
 // list splits a comma-separated user list, dropping blanks.
-func (ini pgbIni) list(key string) []string {
+func (ini iniFile) list(key string) []string {
 	var out []string
 	for s := range strings.SplitSeq(ini[key], ",") {
 		if s = strings.TrimSpace(s); s != "" {
@@ -103,7 +103,7 @@ func (ini pgbIni) list(key string) []string {
 	return out
 }
 
-func (ini pgbIni) intOr(key string, def int) int {
+func (ini iniFile) intOr(key string, def int) int {
 	if n, err := strconv.Atoi(strings.TrimSpace(ini[key])); err == nil {
 		return n
 	}
@@ -113,12 +113,12 @@ func (ini pgbIni) intOr(key string, def int) int {
 // instanceFromIni fills the ini-derived fields of inst. Unreadable/unparsable
 // files leave inst untouched apart from IniErr, so an instance seen in /proc
 // still lists with its PID and a hint about the missing config.
-func instanceFromIni(inst *PgBouncerInstance, path string) {
+func instanceFromIni(inst *Instance, path string) {
 	inst.IniPath = path
 	if inst.Name == "" {
 		inst.Name = strings.TrimSuffix(filepath.Base(path), ".ini")
 	}
-	ini, err := parsePgBouncerIni(path)
+	ini, err := parseIni(path)
 	if err != nil {
 		inst.IniErr = err
 		return

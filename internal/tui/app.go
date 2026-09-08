@@ -9,9 +9,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
+	"pgdu/internal/pgbouncer"
 	"pgdu/internal/pglog"
 	"pgdu/internal/prefs"
+	"pgdu/internal/procfs"
 )
 
 type level int
@@ -38,7 +41,6 @@ const (
 	levelWAL              // WAL inspector overview: per-resource-manager stats
 	levelWALRecords       // individual WAL records for one resource manager
 	levelWALBlocks        // block references of one WAL record
-	levelWALRelations     // WAL window aggregated per relation (what caused the change)
 	levelWALRelBlocks     // block references of one relation across the window
 	levelWALBlockDetail   // one block reference with its payload: change data, decoded tuple, page image
 	levelStatements       // pg_stat_statements top-queries table (toolQueries)
@@ -464,6 +466,19 @@ type walState struct {
 	// payload, nil until it lands.
 	blockRef *pg.WALBlockRef
 	detail   *pg.WALBlockDetail
+	// rmgrs and rels are the two tables the levelWAL screen stacks, both over
+	// start…end: the resource-manager rows and, beneath them, the same window
+	// re-aggregated per relation. They are the source of truth — applySort
+	// rebuilds s.items from them (buildWALItems) because the list interleaves
+	// the two tables with inert section rows that a plain sort would shuffle.
+	// The relation scan (pg_get_wal_block_info) is slower than the rmgr stats
+	// and needs the resolved window, so it is chained off the overview load:
+	// relsLoading is true in between and relsErr holds a failure of that
+	// second query alone — the rmgr rows still show.
+	rmgrs       []pg.WALRmgrStat
+	rels        []pg.WALRelStat
+	relsErr     error
+	relsLoading bool
 }
 
 // logState: Log analyzer state; the levelLogs screen owns report, children re-point to it on refresh.
@@ -508,10 +523,10 @@ type pgbState struct {
 	// result rides in diagResult like a diagnostic's. err is the last load
 	// error, rendered in the header instead of failing the screen so a paused
 	// or restarting pooler keeps its place on the stack.
-	insts       []pg.PgBouncerInstance
-	probes      []pg.PgBouncerProbe
-	inst        *pg.PgBouncerInstance
-	overview    *pg.PgBouncerOverview
+	insts       []pgbouncer.Instance
+	probes      []pgbouncer.Probe
+	inst        *pgbouncer.Instance
+	overview    *pgbouncer.Overview
 	show        pgbShow
 	err         error
 	autoDrilled bool // the single-instance auto-drill already happened once
@@ -702,10 +717,22 @@ type pageState struct {
 	focusLP int32
 
 	// tuplePKCols names the table's primary-key columns, in key order, as of
-	// the last tuple load. Non-empty enables the tuple list's pk column and
-	// names the key in the expanded row; empty means the table has no primary
-	// key, so there is nothing to project.
+	// the last tuple load. Non-empty names the key in the expanded row; empty
+	// means the table has no primary key, so there is nothing to project.
 	tuplePKCols []string
+
+	// The tuple list's table-column picker (C on levelHeapTuples). tupleCols is
+	// every live column of the relation (the picker's rows), tupleShown the
+	// indexes into it the list currently renders as value columns — both from
+	// the last load. tuplePick is what the user asked for: nil means "the
+	// default", i.e. the primary key, and is materialised to the shown names
+	// after each load so the picker reflects what the server resolved. Each
+	// toggle reloads the page, since the projection is part of the query. The
+	// pick lives here on purpose: a page inspection is a one-off look, so the
+	// choice is not persisted.
+	tupleCols  []pg.HeapColumn
+	tupleShown []int
+	tuplePick  []string
 
 	// Tuple byte-layout overlay (Enter on levelHeapTuples): the per-attribute
 	// split of the selected tuple, loaded async when the overlay opens.
@@ -857,13 +884,19 @@ type Model struct {
 	// Tuple byte-layout overlay (Enter on levelHeapTuples). The cursor walks the
 	// legend rows; the offset is the legend's scroll window start. The loaded
 	// attrs live on the screen (tupleAttrs*) — this is just the modal state.
-	// Sorting is the overlay's own (tlSort): the legend can't ride the shared
+	// Sorting is the overlay's own (pageinspect.SegSort): the legend can't ride the shared
 	// sortMode machinery since it isn't a screen item list.
 	showTupleLayout     bool
 	tupleLayoutCursor   int
 	tupleLayoutOffset   int
-	tupleLayoutSort     tlSort
+	tupleLayoutSort     pageinspect.SegSort
 	tupleLayoutSortDesc bool
+
+	// Table-column picker on the tuple list (C on levelHeapTuples). The column
+	// set is the relation's pg_attribute rows (screen.pages.tupleCols), so like
+	// the diagnostic picker it can't ride a static colTable registry.
+	showTupleColumnConfig bool
+	tupleColCfgCursor     int
 
 	// Diagnostic-result column configuration (C on levelDiagnosticResult).
 	// Diagnostic columns are dynamic (server field descriptions), so unlike the
@@ -877,7 +910,7 @@ type Model struct {
 
 	// actProcPrev holds the previous /proc sample per PID, used to compute CPU%
 	// and I/O byte-rate deltas between consecutive samples.
-	actProcPrev map[int32]procRaw
+	actProcPrev map[int32]procfs.PIDStats
 	// actProcStats holds the derived per-PID display values (RSS, CPU%, read/s,
 	// write/s) from the most recent sample pair. nil = not yet sampled.
 	actProcStats map[int32]procDerived

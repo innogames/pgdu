@@ -175,6 +175,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.showTupleLayout && s.level == levelHeapTuples {
 		return m, m.handleTupleLayoutKey(s, msg)
 	}
+	if m.showTupleColumnConfig && s.level == levelHeapTuples {
+		return m, m.handleTupleColumnConfigKey(s, msg)
+	}
 	// Diagnostic-result column-config overlay — same modal pattern, but over the
 	// result's dynamic column set instead of a static registry.
 	if m.showDiagColumnConfig && (s.level == levelDiagnosticResult || s.level == levelPgBouncerShow) {
@@ -254,9 +257,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.cursor < s.visibleLen()-1 {
 			s.cursor++
 		}
-		if s.level == levelLogs && s.log.view == logViewGroups {
-			m.skipLogHeader(s, 1) // section headers are inert; never rest on one
-		}
+		s.skipInertRow(1) // section headers/footers are inert; never rest on one
 	case key.Matches(msg, m.keys.Up):
 		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
 			s.offset = max(s.offset-1, 0)
@@ -274,9 +275,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.cursor > 0 {
 			s.cursor--
 		}
-		if s.level == levelLogs && s.log.view == logViewGroups {
-			m.skipLogHeader(s, -1)
-		}
+		s.skipInertRow(-1)
 	case key.Matches(msg, m.keys.PageDown):
 		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
 			s.offset += m.pageStep() // clamped by scrollWindow
@@ -303,6 +302,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.loadCurrent()
 		}
 		s.cursor = max(min(s.cursor+m.pageStep(), s.visibleLen()-1), 0)
+		s.skipInertRow(1)
 	case key.Matches(msg, m.keys.PageUp):
 		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
 			s.offset = max(s.offset-m.pageStep(), 0)
@@ -323,6 +323,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.loadCurrent()
 		}
 		s.cursor = max(s.cursor-m.pageStep(), 0)
+		s.skipInertRow(-1)
 	case key.Matches(msg, m.keys.Top):
 		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
 			s.offset = 0
@@ -334,6 +335,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		s.cursor = 0
+		s.skipInertRow(1)
 	case key.Matches(msg, m.keys.Bottom):
 		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
 			s.offset = math.MaxInt32 // clamped to the last screen by scrollWindow
@@ -345,6 +347,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		s.cursor = max(s.visibleLen()-1, 0)
+		s.skipInertRow(-1)
 	case key.Matches(msg, m.keys.ShowQuery):
 		// Pop up the SQL for the current diagnostic so it can be selected/copied
 		// (e.g. to run on another server). Enabled on levelDiagnosticResult (the
@@ -504,6 +507,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.showDiagColumnConfig = true
 				m.diagColCfgCursor = 0
 			}
+		case levelHeapTuples:
+			// The picker's rows are the relation's columns from the last load;
+			// none means the catalog lookup failed (or the load is still out).
+			if len(s.pages.tupleCols) == 0 {
+				m.notice = "no column metadata for this relation"
+				break
+			}
+			m.showInfo = false
+			m.showTupleColumnConfig = true
+			m.tupleColCfgCursor = 0
 		}
 	case key.Matches(msg, m.keys.ToggleRefresh):
 		// Cycle the live window's auto-refresh cadence (activity: 500ms → 1s → 2s → 5s → 10s → off).
@@ -643,18 +656,22 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 		m.stack = append(m.stack, next)
 		return m, m.resolveDiskTableCmd(t.db, t.tableName)
-	case key.Matches(msg, m.keys.WALByRelation):
-		// From the rmgr overview, open the same window grouped by relation —
-		// "what caused the change". Gated to levelWAL via applyContext; also
-		// require the window to be resolved and no blocking prompt up.
-		if s.level == levelWAL && s.loaded && (s.extPrompt == nil || !s.extPrompt.blocking) {
-			next := &screen{
-				level: levelWALRelations, title: "wal relations", tool: s.tool,
-				db: s.db, wal: walState{start: s.wal.start, end: s.wal.end},
-				sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
-			m.stack = append(m.stack, next)
-			return m, m.loadCurrent()
+	case key.Matches(msg, m.keys.TopQueries):
+		// From a table's describe panel, open the top-queries tool the way the
+		// tool's own database pick does (table behind the window picker), with
+		// the table's filter preset to the relation name so the list narrows to
+		// the statements that mention it once the window lands.
+		if !describeHasHeap(s) {
+			break
 		}
+		db := s.table.DB
+		if db == "" {
+			db = s.db
+		}
+		screens := databaseChildScreens(toolQueries, db)
+		screens[0].filter = s.table.Name
+		m.stack = append(m.stack, screens...)
+		return m, m.loadCurrent()
 	case key.Matches(msg, m.keys.ShmemMap):
 		// From the buffer-tables list, open the whole shared-memory map. Gated to
 		// levelBufferTables via applyContext; require no blocking extension prompt.

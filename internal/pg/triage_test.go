@@ -2,12 +2,14 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
 	"pgdu/internal/cli"
+	"pgdu/internal/pgbouncer"
 )
 
 func TestWraparoundSeverity(t *testing.T) {
@@ -538,5 +540,31 @@ func TestSortTriage(t *testing.T) {
 	}
 	if want := "a c b d"; strings.Join(got, " ") != want {
 		t.Errorf("SortTriage order %v, want %s", got, want)
+	}
+}
+
+func TestWorstPgBouncerProbe(t *testing.T) {
+	insts := []pgbouncer.Instance{{Name: "one"}, {Name: "two"}, {Name: "three"}}
+	probes := []pgbouncer.Probe{
+		{Totals: pgbouncer.PoolTotals{ClWaiting: 0}},
+		{Totals: pgbouncer.PoolTotals{ClWaiting: 4, MaxWaitSec: 12}},
+		{Err: errors.New("down")},
+	}
+	sev, detail, err := worstPgBouncerProbe(insts, probes)
+	if err != nil || sev != SevCrit || !strings.Contains(detail, "two") {
+		t.Errorf("got %v %q %v, want crit on instance two", sev, detail, err)
+	}
+	sev, detail, err = worstPgBouncerProbe(insts[:1], probes[:1])
+	if err != nil || sev != SevOK || !strings.Contains(detail, "1 instance") {
+		t.Errorf("all quiet: %v %q %v", sev, detail, err)
+	}
+	authInst := pgbouncer.Instance{Name: "x", IniPath: "/etc/x.ini"}
+	sev, detail, err = worstPgBouncerProbe([]pgbouncer.Instance{authInst}, []pgbouncer.Probe{{Err: errors.New("auth"), AuthErr: true, User: "postgres"}})
+	if err != nil || sev != SevOK || !strings.Contains(detail, "stats_users") || !strings.Contains(detail, "/etc/x.ini") {
+		t.Errorf("all-unreachable must stay green and carry the hint: %v %q %v", sev, detail, err)
+	}
+	sev, detail, err = worstPgBouncerProbe(insts[:1], []pgbouncer.Probe{{Err: errors.New("failed to connect to `x`:\n\tdial error")}})
+	if err != nil || sev != SevOK || !strings.Contains(detail, "console unreachable: failed to connect to `x`: dial error") {
+		t.Errorf("unreachable detail must be flattened to one line: %v %q %v", sev, detail, err)
 	}
 }

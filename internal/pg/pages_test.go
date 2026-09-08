@@ -1,6 +1,9 @@
 package pg
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestHeapKeyProjection(t *testing.T) {
 	for _, tc := range []struct {
@@ -48,6 +51,41 @@ func TestParseTidText(t *testing.T) {
 			if ok != tc.ok || blk != tc.blk || off != tc.off {
 				t.Errorf("parseTidText(%q) = (%d, %d, %v), want (%d, %d, %v)",
 					tc.in, blk, off, ok, tc.blk, tc.off, tc.ok)
+			}
+		})
+	}
+}
+
+func TestHeapColProjections(t *testing.T) {
+	if got := heapColProjection("src", nil); got != "" {
+		t.Errorf("empty pick projected %q", got)
+	}
+	want := `left(src."id"::text, 64), left(src."we""ird"::text, 64)`
+	if got := heapColProjection("src", []string{"id", `we"ird`}); got != want {
+		t.Errorf("heapColProjection = %q, want %q", got, want)
+	}
+	if got := heapAttrProjection("hpa", []int32{3, 7}); got != "hpa.t_attrs[3], hpa.t_attrs[7]" {
+		t.Errorf("heapAttrProjection = %q", got)
+	}
+}
+
+func TestResolveShown(t *testing.T) {
+	cols := []HeapColumn{{Name: "tenant_id", PK: true}, {Name: "id", PK: true}, {Name: "payload"}}
+	for _, tc := range []struct {
+		name string
+		pick []string
+		want []int
+	}{
+		// nil is the default pick: the primary key.
+		{"default", nil, []int{0, 1}},
+		// An explicit empty pick shows nothing — the user unchecked everything.
+		{"none", []string{}, nil},
+		// Attnum order wins over pick order; unknown names are dropped.
+		{"explicit", []string{"payload", "gone", "tenant_id"}, []int{0, 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveShown(cols, tc.pick); !slices.Equal(got, tc.want) {
+				t.Errorf("resolveShown(%v) = %v, want %v", tc.pick, got, tc.want)
 			}
 		})
 	}

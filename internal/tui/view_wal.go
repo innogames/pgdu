@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +33,7 @@ const (
 	walBlkDataColW = 10
 )
 
-// Column widths for the WAL by-relation view (levelWALRelations).
+// Column widths for the by-relation table of the WAL overview (levelWAL).
 const (
 	walRelCombinedColW = 11
 	walRelFPIColW      = 17 // "1023.99 MB (99%)" — fpi bytes plus its graded share
@@ -67,6 +68,35 @@ func shortLSN(lsn string) string {
 		return lo
 	}
 	return lsn
+}
+
+// lsnOffset decodes a "hi/lo" pg_lsn text into its absolute byte offset
+// (hi·2³² + lo). ok is false for anything that isn't two hex halves.
+func lsnOffset(lsn string) (uint64, bool) {
+	hi, lo, ok := strings.Cut(lsn, "/")
+	if !ok {
+		return 0, false
+	}
+	h, err := strconv.ParseUint(hi, 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	l, err := strconv.ParseUint(lo, 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	return h<<32 | l, true
+}
+
+// lsnSpan is the byte distance end − start of an LSN window; ok is false when
+// either bound is missing or malformed, or the window is inverted.
+func lsnSpan(start, end string) (int64, bool) {
+	a, okA := lsnOffset(start)
+	b, okB := lsnOffset(end)
+	if !okA || !okB || b < a {
+		return 0, false
+	}
+	return int64(b - a), true
 }
 
 // --- WAL overview header (levelWAL) ---
@@ -104,10 +134,22 @@ func (m *Model) renderWALSummary(s *screen) string {
 		dir += mu("  ·  ") + styleErr.Render(formatRows(sum.StatBuffersFull)+" wal_buffers stalls")
 	}
 
-	win := indent + mu(fmt.Sprintf("window: %s … %s  ·  last %s analysed",
-		sum.StartLSN, sum.EndLSN, humanize.Bytes(sum.WindowBytes)))
+	// The window comes off the screen state, not the summary: the two load
+	// independently and this fast built-ins read usually lands before the
+	// pg_get_wal_stats scan that resolves the range. Its size is the real LSN
+	// span rather than walWindowBytes — the clamped resolver hands back less
+	// when the older segments are already recycled.
+	win := indent + mu("window: ")
+	if s.wal.start == "" || s.wal.end == "" {
+		win += mu("not resolved")
+	} else {
+		win += mu(s.wal.start + " … " + s.wal.end)
+		if span, ok := lsnSpan(s.wal.start, s.wal.end); ok {
+			win += mu("  ·  last " + humanize.Bytes(span) + " analysed")
+		}
+	}
 	// Window FPI byte-share: the exact full-page-image fraction of the WAL in
-	// this window (summed from the rmgr breakdown already in s.items) — the
+	// this window (summed from the rmgr breakdown) — the
 	// headline write-amplification figure. Lifetime FPI/record (counts from
 	// pg_stat_wal) is a coarser cross-check; both are labelled so the byte
 	// share and the per-record ratio aren't conflated.
@@ -132,8 +174,11 @@ func (m *Model) renderWALSummary(s *screen) string {
 			const barW = 16
 			filled := min(int(float64(barW)*ratio), barW)
 			bar := paintBar(barW, barSegment{cells: filled, style: style})
+			// Say what the bytes are: this is WAL since the last checkpoint's REDO
+			// point, a much larger figure than the window broken down below, and
+			// the two were being read as the same number.
 			cpLine := indent + mu("checkpoint ") + bar + "  " +
-				humanize.Bytes(cp.BytesSinceCheckpoint) + mu(" / ") +
+				humanize.Bytes(cp.BytesSinceCheckpoint) + mu(" since last checkpoint / ") +
 				humanize.Bytes(cp.MaxWALBytes) + mu(" max_wal_size  ") +
 				style.Render(fmt1(ratio*100)+"%")
 			if !cp.CheckpointTime.IsZero() {
@@ -171,15 +216,13 @@ func (m *Model) renderWALSummary(s *screen) string {
 }
 
 // walWindowFPIShare is the full-page-image byte share of the analysed window,
-// summed from the resource-manager breakdown rows in s.items. ok is false when
-// the window carries no measured WAL yet, so the caller omits the figure.
+// summed from the resource-manager breakdown. ok is false when the window
+// carries no measured WAL yet, so the caller omits the figure.
 func walWindowFPIShare(s *screen) (float64, bool) {
 	var fpi, combined int64
-	for _, it := range s.items {
-		if st, ok := it.data.(pg.WALRmgrStat); ok {
-			fpi += st.FPISize
-			combined += st.CombinedSize
-		}
+	for _, st := range s.wal.rmgrs {
+		fpi += st.FPISize
+		combined += st.CombinedSize
 	}
 	if combined <= 0 {
 		return 0, false
@@ -226,15 +269,91 @@ func shortDuration(d time.Duration) string {
 
 // --- WAL overview list (levelWAL) ---
 
+// renderWALList draws the overview's two tables as one scrolling list (see
+// buildWALItems for the row order): the pinned header is the rmgr table's, the
+// by-relation table brings its own title and column header as rows. Each
+// table's bars scale to its own heaviest row — the rmgr totals also count
+// record headers and main data, so a shared scale would flatten the relations.
 func (m *Model) renderWALList(s *screen, height int) string {
 	vis := s.visibleIndexes()
-	maxSz := maxItemSize(s.items, vis)
 	barW := m.barWidth(s)
+	var maxRmgr, maxRel int64
+	for _, i := range vis {
+		switch s.items[i].data.(type) {
+		case pg.WALRmgrStat:
+			maxRmgr = max(maxRmgr, s.items[i].size)
+		case pg.WALRelStat:
+			maxRel = max(maxRel, s.items[i].size)
+		}
+	}
 	return m.renderRowList(s, height, renderWALHeader(s.sort, s.sortDesc, barW),
 		func(it item, selected bool) string {
-			st, _ := it.data.(pg.WALRmgrStat)
-			return renderWALRmgrRow(it, st, maxSz, barW, selected)
+			switch v := it.data.(type) {
+			case pg.WALRmgrStat:
+				return renderWALRmgrRow(it, v, maxRmgr, barW, selected)
+			case pg.WALRelStat:
+				return renderWALRelRow(it, v, maxRel, barW, selected)
+			case walSectionRow:
+				return m.renderWALSectionRow(s, v, barW)
+			}
+			return ""
 		})
+}
+
+// renderWALSectionRow draws one inert line of the overview. The rows carry only
+// their kind; the figures come off the screen's stats at draw time so the Σ
+// lines stay filter-independent like every other Σ footer.
+func (m *Model) renderWALSectionRow(s *screen, r walSectionRow, barW int) string {
+	indent := strings.Repeat(" ", 8)
+	switch r.kind {
+	case walRowRmgrTotal:
+		return renderWALRmgrTotals(s.wal.rmgrs, barW)
+	case walRowRelTitle:
+		return truncateToWidth(renderWALRelationsTitle(s), max(m.width, 1))
+	case walRowRelHeader:
+		return renderWALRelationsListHeader(s.sort, s.sortDesc, barW)
+	case walRowRelLoading:
+		return indent + m.spinner.View() + " " + styleMuted.Render("resolving relations from the window's block references…")
+	case walRowRelError:
+		return indent + styleErr.Render(r.text)
+	case walRowRelNote:
+		return indent + styleMuted.Render(r.text)
+	case walRowRelTotal:
+		return renderWALRelTotals(s.wal.rels, barW)
+	}
+	return ""
+}
+
+// renderWALRmgrTotals builds the Σ row of the rmgr table: combined, record and
+// FPI bytes plus the record count summed over every loaded row (filter-
+// independent, like the other Σ footers). Σcombined is the analysed window
+// minus WAL page headers, so it doubles as the check that the breakdown
+// accounts for the whole range. "" when no rmgr row is loaded.
+func renderWALRmgrTotals(rmgrs []pg.WALRmgrStat, barW int) string {
+	var combined, record, fpi, count int64
+	for _, st := range rmgrs {
+		combined += st.CombinedSize
+		record += st.RecordSize
+		fpi += st.FPISize
+		count += st.Count
+	}
+	n := len(rmgrs)
+	if n == 0 {
+		return ""
+	}
+	fpiStr := "—"
+	if fpi > 0 {
+		fpiStr = humanize.Bytes(fpi)
+	}
+	// Cursor slot + blank bar area, then the same column layout as the rows;
+	// the label sits in the name column behind the child-mark slot.
+	line := headerIndent(barW) +
+		padRight(humanize.Bytes(combined), walColCombined) + "  " +
+		padRight(humanize.Bytes(record), walColRecord) + "  " +
+		padRight(fpiStr, walColFPI) + "  " +
+		padRight(formatRows(count), walColCount) + "  " +
+		"  " + fmt.Sprintf("Σ %d resource managers", n)
+	return styleTotal.Render(line)
 }
 
 func renderWALHeader(sort sortMode, sortDesc bool, barW int) string {
@@ -244,10 +363,7 @@ func renderWALHeader(sort sortMode, sortDesc bool, barW int) string {
 		padRight(sortMark("fpi", sort == sortByFPI, sortDesc), walColFPI) + "  " +
 		padRight(sortMark("count", sort == sortByCount, sortDesc), walColCount) + "  " +
 		"  " + sortMark("resource manager", sort == sortByName, sortDesc)
-	// Surface the by-relation breakdown here — it's reachable only via `w`, which
-	// otherwise hides in the ? overlay / expanded help and is easy to miss.
-	hint := styleMuted.Render("  ·  ") + styleBadge.Render("w") + styleMuted.Render(" by relation")
-	return styleMuted.Render(line) + hint
+	return styleMuted.Render(line)
 }
 
 func renderWALRmgrRow(it item, st pg.WALRmgrStat, maxSize int64, barW int, selected bool) string {
@@ -257,10 +373,7 @@ func renderWALRmgrRow(it item, st pg.WALRmgrStat, maxSize int64, barW int, selec
 	if st.FPISize > 0 {
 		fpiStr = styleBarAlt.Render(humanize.Bytes(st.FPISize))
 	}
-	childMark := "  "
-	if it.hasChildren {
-		childMark = styleMuted.Render("+ ")
-	}
+	childMark := drillMark(it.hasChildren)
 	name := highlightName(it.name, selected)
 	return cursor + bar + "  " +
 		padRight(humanize.Bytes(st.CombinedSize), walColCombined) + "  " +
@@ -379,7 +492,7 @@ func renderWALRecordRow(it item, r pg.WALRecord, maxSize int64, barW int, select
 	if r.FPILength > 0 {
 		fpiStr = styleBarAlt.Render(humanize.Bytes(int64(r.FPILength)))
 	}
-	childMark := styleMuted.Render("+ ")
+	childMark := drillMark(it.hasChildren)
 	name := highlightName(r.RecordType, selected)
 	xid := ""
 	if r.Xid != "" && r.Xid != "0" {
@@ -415,7 +528,7 @@ func renderWALBlocksHeader(sort sortMode, sortDesc bool, barW int) string {
 	line := headerIndent(barW) +
 		padRight(sortMark("fpi", sort == sortBySize, sortDesc), walBlkFPIColW) + "  " +
 		padRight(sortMark("data", sort == sortByData, sortDesc), walBlkDataColW) + "  " +
-		sortMark("block reference", sort == sortByName, sortDesc) + "  " + styleMuted.Render("· db / fpi-info")
+		"  " + sortMark("block reference", sort == sortByName, sortDesc) + "  " + styleMuted.Render("· db / fpi-info")
 	return styleMuted.Render(line)
 }
 
@@ -444,67 +557,73 @@ func renderWALBlockRow(it item, blk pg.WALBlockRef, maxSize int64, barW int, sel
 	return cursor + bar + "  " +
 		padRight(fpiStr, walBlkFPIColW) + "  " +
 		padRight(styleMuted.Render(humanize.Bytes(int64(blk.BlockDataLength))), walBlkDataColW) + "  " +
-		name + detail
+		drillMark(it.hasChildren) + name + detail
 }
 
-// --- WAL by-relation view (levelWALRelations) ---
+// --- WAL by-relation table (second half of levelWAL) ---
 
-// renderWALRelationsHeader is the one-line title pinned above the by-relation
-// list: total WAL the window generated, its full-page-image share, and the
-// drill hint. Mirrors renderWALRecTypeStats's title shape.
-func (m *Model) renderWALRelationsHeader(s *screen) string {
+// renderWALRelationsTitle is the line that opens the by-relation table: the
+// block-level WAL the window's relations account for, how much of the window
+// that is, its full-page-image share, and the drill hint. While the table has
+// no rows (scan running / failed / nothing referenced) only the label shows;
+// the note row beneath it says why. Mirrors renderWALRecTypeStats's title.
+func renderWALRelationsTitle(s *screen) string {
 	mu := styleMuted.Render
+	title := "  " + styleHeader.Render(" by relation ") + "  " +
+		mu("WAL generated per table/index in this window")
 	var combined, fpi int64
-	var unresolved int
-	for _, it := range s.items {
-		if st, ok := it.data.(pg.WALRelStat); ok {
-			combined += st.CombinedSize()
-			fpi += st.FPIBytes
-			if st.RelName == "" {
-				unresolved++
-			}
-		}
+	for _, st := range s.wal.rels {
+		combined += st.CombinedSize()
+		fpi += st.FPIBytes
 	}
-	share := mu("—")
-	if combined > 0 {
-		pct := 100 * float64(fpi) / float64(combined)
-		share = gradeStyle(pct, 20, 50).Render(fmt1(pct) + "%")
+	if combined <= 0 {
+		return title
 	}
-	header := "  " + styleHeader.Render(" by relation ") + "  " +
-		mu("WAL generated per table/index in this window  ·  ") +
-		styleSelected.Render(humanize.Bytes(combined)) + mu(" total · fpi ") + share +
+	pct := 100 * float64(fpi) / float64(combined)
+	share := gradeStyle(pct, 20, 50).Render(fmt1(pct) + "%")
+	total := styleSelected.Render(humanize.Bytes(combined)) + mu(" total")
+	// Block-level bytes never add up to the whole window: record headers, main
+	// data and records without block references (COMMIT, checkpoints, …) belong
+	// to no relation. Naming the coverage stops the gap reading as lost WAL.
+	if span, ok := lsnSpan(s.wal.start, s.wal.end); ok && span > 0 {
+		total += mu(fmt.Sprintf(" · %s%% of the %s window",
+			fmt1(100*float64(combined)/float64(span)), humanize.Bytes(span)))
+	}
+	return title + mu("  ·  ") + total + mu(" · fpi ") + share +
 		mu("  ·  ") + styleBadge.Render("↵") + mu(" block refs")
-	// Other databases' names are resolved through their own pools, so what is
-	// left numeric is either dropped or in a database pgdu could not connect to.
-	// Flag it so the numeric rows don't read as a bug.
-	if unresolved > 0 {
-		header += "\n" + strings.Repeat(" ", 8) +
-			mu(fmt.Sprintf("%d shown as relfilenode N — dropped since, or pgdu cannot connect to their db (e.g. %s)",
-				unresolved, walFirstOtherDB(s)))
-	}
-	return header
 }
 
-// walFirstOtherDB returns the database name of the first relation whose name
-// didn't resolve, to seed the header hint. Falls back to "<db>" when even
-// the db name is unknown (shared catalog / dropped, reldatabase 0).
-func walFirstOtherDB(s *screen) string {
-	for _, it := range s.items {
-		if st, ok := it.data.(pg.WALRelStat); ok && st.RelName == "" && st.DBName != "" {
-			return st.DBName
+// renderWALRelTotals builds the Σ row of the by-relation table over every
+// loaded row (filter-independent, like the other Σ footers). Pages are exact —
+// relations own disjoint blocks — but a record whose block references span
+// two relations is counted once per relation, so Σrecords can exceed the
+// distinct record count of the window. "" when no relation row is loaded.
+func renderWALRelTotals(rels []pg.WALRelStat, barW int) string {
+	var combined, fpi, recs, pages int64
+	for _, st := range rels {
+		combined += st.CombinedSize()
+		fpi += st.FPIBytes
+		recs += st.RecCount
+		pages += st.BlockCount
+	}
+	n := len(rels)
+	if n == 0 {
+		return ""
+	}
+	fpiStr := "—"
+	if fpi > 0 {
+		fpiStr = humanize.Bytes(fpi)
+		if combined > 0 {
+			fpiStr = fmt.Sprintf("%s (%d%%)", humanize.Bytes(fpi), int(float64(fpi)/float64(combined)*100))
 		}
 	}
-	return "<db>"
-}
-
-func (m *Model) renderWALRelationsList(s *screen, height int) string {
-	maxSz := maxItemSize(s.items, s.visibleIndexes())
-	barW := m.barWidth(s)
-	return m.renderRowList(s, height, renderWALRelationsListHeader(s.sort, s.sortDesc, barW),
-		func(it item, selected bool) string {
-			st, _ := it.data.(pg.WALRelStat)
-			return renderWALRelRow(it, st, maxSz, barW, selected)
-		})
+	line := headerIndent(barW) +
+		padRight(humanize.Bytes(combined), walRelCombinedColW) + "  " +
+		padRight(fpiStr, walRelFPIColW) + "  " +
+		padRight(formatRows(recs), walRelRecColW) + "  " +
+		padRight(formatRows(pages), walRelBlkColW) + "  " +
+		"  " + fmt.Sprintf("Σ %d relations", n)
+	return styleTotal.Render(line)
 }
 
 func renderWALRelationsListHeader(sort sortMode, sortDesc bool, barW int) string {
@@ -531,10 +650,7 @@ func renderWALRelRow(it item, st pg.WALRelStat, maxSize int64, barW int, selecte
 			fpiStr = bloatPercentStyle(pct).Render(fmt.Sprintf("%s (%d%%)", humanize.Bytes(st.FPIBytes), pct))
 		}
 	}
-	childMark := "  "
-	if it.hasChildren {
-		childMark = styleMuted.Render("+ ")
-	}
+	childMark := drillMark(it.hasChildren)
 	name := highlightName(it.name, selected)
 	var tail []string
 	if st.DBName != "" {
@@ -597,26 +713,48 @@ func (m *Model) renderWALInfo(height int) string {
 	b.WriteString("    " + padRight("fpi", 10) + mu("bytes spent on full-page images") + "\n")
 	b.WriteString("    " + padRight("count", 10) + mu("number of WAL records this rmgr emitted in the window") + "\n")
 	b.WriteString("    " + mu("every column sorts: ") + styleBadge.Render("←") + mu("/") + styleBadge.Render("→") +
-		mu(" cycle combined → record → fpi → count → name; the header marks the active one") + "\n\n")
+		mu(" cycle combined → record → fpi → count → name; the header marks the active one") + "\n")
+	b.WriteString("    " + mu("the Σ row sums every row (filter-independent); it lands a little under the window size:") + "\n")
+	b.WriteString("    " + mu("the gap is the 24-byte header of each 8 KiB WAL page, the 8-byte alignment padding after") + "\n")
+	b.WriteString("    " + mu("every record, and the two records cut in half at the window's edges.") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" by relation ") + "  " +
+		mu("the second table: which table/index generated the WAL — \"what caused the change\"") + "\n")
+	b.WriteString("    " + mu("The same window, but pg_get_wal_block_info aggregated by the relation each block reference") + "\n")
+	b.WriteString("    " + mu("touched (relfilenode → relation via pg_filenode_relation); TOAST folds into its owning table.") + "\n")
+	b.WriteString("    " + mu("It loads after the resource managers — the block scan is the slower query.") + "\n")
+	b.WriteString("    " + padRight("combined", 10) + mu("record + FPI bytes this relation contributed to the window") + "\n")
+	b.WriteString("    " + padRight("fpi", 10) + mu("full-page-image bytes and their share — the write amplification of this relation") + "\n")
+	b.WriteString("    " + padRight("records", 10) + mu("distinct WAL records that touched the relation") + "\n")
+	b.WriteString("    " + padRight("pages", 10) + mu("distinct (fork, block) pages those records modified") + "\n")
+	b.WriteString("    " + mu("Its Σ stays below the window and the title says by how much: only block-level bytes can be") + "\n")
+	b.WriteString("    " + mu("tied to a relation — record headers, main data and records with no block reference at all") + "\n")
+	b.WriteString("    " + mu("(COMMIT, checkpoints, running-xacts) sit in the rmgr table but belong to no table.") + "\n")
+	b.WriteString("    " + mu("A relation whose relfilenode was dropped or whose db is unreachable shows the number.") + "\n")
+	b.WriteString("    " + styleBadge.Render("←") + mu("/") + styleBadge.Render("→") +
+		mu(" sort both tables at once; record (rmgr only) and pages (relation only) leave the") + "\n")
+	b.WriteString("    " + mu("other table in name order.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" header ") + "  " +
 		mu("insert/flush LSN = current write position · segment = WAL file the head sits in") + "\n")
 	b.WriteString("    " + mu("pg_wal = on-disk size & file count of the WAL directory · lifetime totals are from") + "\n")
-	b.WriteString("    " + mu("pg_stat_wal (cumulative since the last stats reset, not just the window). fpi % of") + "\n")
-	b.WriteString("    " + mu("window is the exact full-page-image byte share here; fpi/record lifetime is a coarser") + "\n")
-	b.WriteString("    " + mu("count-based cross-check. wal_buffers stalls (if shown) means wal_buffers is too small.") + "\n\n")
+	b.WriteString("    " + mu("pg_stat_wal (cumulative since the last stats reset, not just the window). window is") + "\n")
+	b.WriteString("    " + mu("the LSN range every breakdown below covers — the most recent 16 MiB, not everything") + "\n")
+	b.WriteString("    " + mu("since the checkpoint. fpi % of window is the exact full-page-image byte share here;") + "\n")
+	b.WriteString("    " + mu("fpi/record lifetime is a coarser count-based cross-check. wal_buffers stalls (if shown)") + "\n")
+	b.WriteString("    " + mu("means wal_buffers is too small.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" checkpoints ") + "  " +
 		mu("how close WAL is to forcing a size-driven checkpoint, and the cadence") + "\n")
 	b.WriteString("    " + mu("checkpoint bar = WAL since the last checkpoint's REDO point ÷ max_wal_size (at 100% a") + "\n")
-	b.WriteString("    " + mu("\"requested\" checkpoint fires). last/next = when the last one finished and the next timed") + "\n")
+	b.WriteString("    " + mu("\"requested\" checkpoint fires). That figure is not the analysed window — it is usually") + "\n")
+	b.WriteString("    " + mu("gigabytes against the window's megabytes. last/next = when the last one finished and the next timed") + "\n")
 	b.WriteString("    " + mu("one is due (checkpoint_timeout). A high requested-% means max_wal_size is too small.") + "\n")
 	b.WriteString("    " + mu("This block needs pg_control_checkpoint / pg_stat_checkpointer (superuser); it is omitted") + "\n")
 	b.WriteString("    " + mu("when unavailable — the rest of the header still renders.") + "\n\n")
 
-	b.WriteString("  " + mu("Enter drills into the individual records of the selected rmgr; ") +
-		styleBadge.Render("w") + mu(" groups the window by") + "\n")
-	b.WriteString("  " + mu("relation (which table/index caused the WAL); ") +
+	b.WriteString("  " + mu("↵ drills into the individual records of the selected rmgr, or the block references") + "\n")
+	b.WriteString("  " + mu("of the selected relation across the window (FPI-heaviest first); ") +
 		styleBadge.Render("space") + mu(" re-reads at the current LSN.") + "\n")
 	b.WriteString("  " + mu("Needs the pg_walinspect extension and a superuser / pg_read_server_files role.") + "\n")
 
@@ -653,7 +791,7 @@ func (m *Model) renderWALRecordsInfo(height int) string {
 	b.WriteString("    " + mu("total, the record / fpi byte split and a count —") + "\n")
 	b.WriteString("    " + mu("the same pg_get_wal_stats source as the overview, but per_record=true.") + "\n\n")
 
-	b.WriteString("  " + mu("Enter drills into the record's block references (which relation/page it touched).") + "\n")
+	b.WriteString("  " + mu("↵ drills into the record's block references (which relation/page it touched).") + "\n")
 	b.WriteString("  " + styleBadge.Render("←") + mu("/") + styleBadge.Render("→") + mu(" switch sort (size / fpi / type); the window is fixed to the overview's LSN range.") + "\n")
 
 	return padInfo(&b, height)
@@ -702,41 +840,8 @@ func (m *Model) renderWALBlocksInfo(height int) string {
 		mu("a small in-place edit (a link repointed, a flag set) logs just the change, no fpi") + "\n\n")
 
 	b.WriteString("  " + mu("A record with several block refs touched several pages atomically (e.g. an index split,") + "\n")
-	b.WriteString("  " + mu("or a heap update that also stamps the visibility map). Enter opens a block's payload: the tuple bytes") + "\n")
+	b.WriteString("  " + mu("or a heap update that also stamps the visibility map). ↵ opens a block's payload: the tuple bytes") + "\n")
 	b.WriteString("  " + mu("the record wrote, or the full-page image decoded into line pointers and rows.") + "\n")
-
-	return padInfo(&b, height)
-}
-
-// renderWALRelationsInfo explains the by-relation breakdown: how the window is
-// re-aggregated per table/index, what the columns mean, and how to drill.
-func (m *Model) renderWALRelationsInfo(height int) string {
-	sw := swatch
-	mu := styleMuted.Render
-	var b strings.Builder
-	infoHeader(&b, "WAL by relation reference")
-
-	b.WriteString("  " + styleHeader.Render(" this view ") + "  " +
-		mu("which table/index generated the WAL in the window — \"what caused the change\"") + "\n")
-	b.WriteString("    " + mu("The same LSN window as the overview, but pg_get_wal_block_info is aggregated by the") + "\n")
-	b.WriteString("    " + mu("relation each block reference touched (relfilenode → relation via pg_filenode_relation).") + "\n")
-	b.WriteString("    " + mu("TOAST relations are folded into their owning table. Requires PostgreSQL 16+.") + "\n\n")
-
-	b.WriteString("  " + styleHeader.Render(" the bar ") + "  " +
-		sw(styleBar) + mu(" record bytes  ·  ") + sw(styleBarAlt) +
-		mu(" FPI bytes — combined, scaled to the heaviest relation") + "\n\n")
-
-	b.WriteString("  " + styleHeader.Render(" columns ") + "  " +
-		mu("one row per relation") + "\n")
-	b.WriteString("    " + padRight("combined", 10) + mu("record + FPI bytes this relation contributed to the window") + "\n")
-	b.WriteString("    " + padRight("fpi", 10) + mu("full-page-image bytes — the write-amplification share of this relation") + "\n")
-	b.WriteString("    " + padRight("records", 10) + mu("distinct WAL records that touched the relation") + "\n")
-	b.WriteString("    " + padRight("pages", 10) + mu("distinct (fork, block) pages those records modified") + "\n")
-	b.WriteString("    " + mu("every column sorts: ") + styleBadge.Render("←") + mu("/") + styleBadge.Render("→") +
-		mu(" cycle combined → fpi → records → pages → name; the header marks the active one") + "\n\n")
-
-	b.WriteString("  " + mu("Enter drills into the relation's individual block references across the window (FPI-heaviest") + "\n")
-	b.WriteString("  " + mu("first); a relation whose relfilenode was dropped or whose db is unreachable shows the number.") + "\n")
 
 	return padInfo(&b, height)
 }

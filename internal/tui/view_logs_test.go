@@ -90,7 +90,7 @@ func TestLogGroupItemsSections(t *testing.T) {
 	}
 	// The cursor never rests on a header row.
 	s.resetCursor()
-	m.skipLogHeader(s, 1)
+	s.skipInertRow(1)
 	if _, hdr := s.items[s.visibleIndexes()[s.cursor]].data.(logSection); hdr {
 		t.Error("cursor rests on a section header")
 	}
