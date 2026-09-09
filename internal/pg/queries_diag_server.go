@@ -291,6 +291,35 @@ WHERE NOT s.cycle
 ORDER BY consumed_pct DESC NULLS LAST
 `
 
+// sqlDiagIOStats is pg_stat_io (PG16+) with the idle rows dropped and two
+// derived columns: the mean read latency (NULL until track_io_timing is on) and
+// the shared-buffers hit rate of that (backend, object, context) combination.
+// The *_time columns are cumulative milliseconds, divided to seconds like
+// database_stats does. Rows are ordered by total traffic so the busiest
+// backend/context pair leads.
+const sqlDiagIOStats = `
+SELECT
+    backend_type,
+    object,
+    context,
+    reads,
+    round((read_time / NULLIF(reads, 0))::numeric, 3) AS read_ms,
+    hits,
+    round(100.0 * hits / NULLIF(hits + reads, 0), 2) AS hit_pct,
+    writes,
+    round(write_time::numeric / 1000.0, 1) AS write_secs,
+    extends,
+    evictions,
+    reuses,
+    fsyncs,
+    round(fsync_time::numeric / 1000.0, 1) AS fsync_secs,
+    stats_reset
+FROM pg_stat_io
+WHERE COALESCE(reads, 0) + COALESCE(writes, 0) + COALESCE(hits, 0) + COALESCE(extends, 0)
+    + COALESCE(evictions, 0) + COALESCE(fsyncs, 0) > 0
+ORDER BY COALESCE(reads, 0) + COALESCE(writes, 0) + COALESCE(hits, 0) DESC
+`
+
 // sqlDiagSLRU reports the SLRU (simple LRU) cache counters — transaction status
 // (Xact), multixacts, subtransactions, notify, etc. A poor hit ratio or heavy
 // blks_read on MultiXact/Subtrans is otherwise-invisible pressure from long

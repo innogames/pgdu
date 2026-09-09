@@ -553,6 +553,11 @@ type maintState struct {
 	// info is the loaded snapshot; err is non-nil when the load failed.
 	info *pg.MaintenanceInfo
 	err  error
+	// prev is the snapshot info replaced on the last successful load, the
+	// other half of the two-sample rates (nil until the second load). It lives
+	// on the screen, not the Model, so a Back to the tool menu forgets the
+	// window and a stale sample from another db is impossible.
+	prev *pg.MaintenanceInfo
 	// cursor is the row within the extension-capacity section that ↑↓ move
 	// over (0 = pg_stat_statements, 1 = pg_qualstats, 2 = table stats, 3 = table
 	// stats · all dbs).
@@ -819,6 +824,7 @@ const (
 	extPromptReasonPgStatTuple    = "exact bloat measurements are available with pgstattuple"
 	extPromptReasonPageInspect    = "Page inspector requires the pageinspect extension"
 	extPromptReasonPageTemp       = "per-page buffer temperature is available with pg_buffercache"
+	extPromptReasonWALPageImage   = "decoding the full-page image requires the pageinspect extension"
 	extPromptReasonWALInspect     = "WAL inspector requires the pg_walinspect extension (and a superuser / pg_read_server_files role to read WAL)"
 	extPromptReasonStatStatements = "Top queries requires the pg_stat_statements extension (also needs it in shared_preload_libraries + a restart to collect)"
 	extPromptReasonQualstats      = "real EXPLAIN values are available with pg_qualstats (already in shared_preload_libraries here)"
@@ -929,6 +935,12 @@ type Model struct {
 	// activityRefresh is the Activity tool auto-refresh cadence. Cycled by the t
 	// key: 2s → 10s → off → 2s.
 	activityRefresh time.Duration
+
+	// maintTicking/maintRefresh are the system overview's auto-refresh loop,
+	// off by default (0): each tick reloads the snapshot, which is what turns the
+	// cumulative counters into per-minute rates. Cycled by t.
+	maintTicking bool
+	maintRefresh time.Duration
 
 	// statTicking is true while a self-rescheduling refresh tick is running for
 	// the top-queries tool, so re-entering levelStatements doesn't spawn a

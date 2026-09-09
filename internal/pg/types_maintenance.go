@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"pgdu/internal/sysmem"
 )
 
 // ExtCapacity describes how full a shared-memory stats extension is.
@@ -88,9 +90,41 @@ type MaintenanceInfo struct {
 	MxidAgeDB        string // database holding that oldest datminmxid
 	MxidFreezeMaxAge int64  // autovacuum_multixact_freeze_max_age from settings
 
-	// Checkpoint health (pg_stat_checkpointer, PG 15+)
-	CheckpointsTimed int64
-	CheckpointsReq   int64
+	// Checkpointer, WAL, bgwriter and per-backend-type I/O counters, each with
+	// its own HasData gate (privilege or missing view).
+	Checkpointer CheckpointerStat
+	WAL          WALStat
+	Bgwriter     BgwriterStat
+	IOSplit      IOSplitStat
+
+	// Buffer-cache occupancy (pg_buffercache_summary + usage histogram).
+	BufCache BufCacheStat
+
+	// Autovacuum saturation for the current database.
+	Autovac AutovacStat
+
+	// pg_wal on disk (pg_ls_waldir; needs pg_monitor).
+	WALDir WALDirStat
+
+	// Longest idle-in-transaction / longest running query.
+	Sess SessionStat
+
+	// SampledAt is when this snapshot was taken (client clock), the basis for
+	// the two-sample rates the overview derives between refreshes.
+	SampledAt time.Time
+
+	// Host is the local machine's memory as read by the TUI from /proc/meminfo
+	// (never by pg): only meaningful when pgdu runs on the database host, zero
+	// otherwise and the host-relative rows stay hidden.
+	Host sysmem.Info
+
+	// SettingBytes holds the memory GUCs as bytes (pg_size_bytes of the human
+	// value in Settings) so the advice rules can do arithmetic; autovacuum_work_mem
+	// keeps its -1 sentinel. Missing key = unknown.
+	SettingBytes map[string]int64
+
+	// Tuning holds the numeric GUCs the advice rules need in base units.
+	Tuning MaintTuning
 
 	// Pending configuration changes (pg_settings)
 	PendingRestart         int      // settings requiring a server restart
@@ -114,14 +148,7 @@ type MaintenanceInfo struct {
 	TempBytes int64
 	TempByDB  []TempDBStat // per-database breakdown (only DBs with temp_files > 0)
 
-	// Background writer pressure (pg_stat_bgwriter, fallback when IO has no data).
-	// BgwBuffersBackend / BgwBuffersAlloc is the fraction of buffer allocations
-	// that were served by backends writing directly (bypassing the bgwriter).
-	// A high ratio (> 10–15%) suggests max_wal_size or bgwriter tuning is needed.
-	BgwBuffersBackend int64
-	BgwBuffersAlloc   int64
-
-	// I/O statistics (pg_stat_io, PG 16+; HasData=false on older clusters).
+	// I/O statistics (pg_stat_io, all backend types summed).
 	IO IOStat
 
 	// WAL archiver status (pg_stat_archiver). ArchiveFailed > 0 is a critical
@@ -138,11 +165,6 @@ type MaintenanceInfo struct {
 	WALMaxBytes             int64     // max_wal_size in bytes (for the fill bar)
 	WALCheckpointTime       time.Time // when the last checkpoint completed
 
-	// WAL write statistics from pg_stat_wal (PG14+; zero on older clusters).
-	// WALBuffersFull > 0 means backends stalled waiting for wal_buffers space.
-	WALBytesTotal  int64
-	WALBuffersFull int64
-
 	// Replication: Replicas is filled on a primary, WalReceiver on a standby.
 	Replicas    []ReplicaStat
 	ReplSlots   []ReplSlotStat
@@ -152,18 +174,336 @@ type MaintenanceInfo struct {
 	Settings map[string]string
 }
 
+// MaintTuning holds the numeric GUCs the advice rules do arithmetic on, parsed
+// from pg_settings.setting (base units: seconds, milliseconds, pages) rather
+// than the human strings in Settings. Zero means unknown.
+type MaintTuning struct {
+	CheckpointTimeoutSecs int64
+	CheckpointCompletion  float64
+	AutovacCostDelayMs    float64 // -1 = falls back to VacuumCostDelayMs
+	VacuumCostDelayMs     float64
+	AutovacCostLimit      int64 // -1 = falls back to VacuumCostLimit
+	VacuumCostLimit       int64
+	AutovacMaxWorkers     int
+	ShmemHugePages        int64 // shared_memory_size_in_huge_pages; -1 when the platform has none
+	BgwriterLRUMaxpages   int64
+	IdleInTxnTimeoutMs    int64 // idle_in_transaction_session_timeout; 0 = disabled
+}
+
+// EffectiveAutovacCostDelayMs resolves the -1 fallback to vacuum_cost_delay.
+func (t MaintTuning) EffectiveAutovacCostDelayMs() float64 {
+	if t.AutovacCostDelayMs < 0 {
+		return t.VacuumCostDelayMs
+	}
+	return t.AutovacCostDelayMs
+}
+
+// EffectiveAutovacCostLimit resolves the -1 fallback to vacuum_cost_limit.
+func (t MaintTuning) EffectiveAutovacCostLimit() int64 {
+	if t.AutovacCostLimit < 0 {
+		return t.VacuumCostLimit
+	}
+	return t.AutovacCostLimit
+}
+
+// SessionStat is the session-hygiene view of pg_stat_activity: the worst
+// offender of each kind (an open transaction that went idle, the longest
+// running statement) and where connections come from. Zero PIDs mean none.
+type SessionStat struct {
+	IdleXactPID  int32
+	IdleXactApp  string
+	IdleXactSecs float64 // how long the oldest idle-in-transaction has been idle
+
+	LongQueryPID  int32
+	LongQueryApp  string
+	LongQuerySecs float64
+	LongQueryText string // first 60 chars
+}
+
+// BufCacheStat is the cluster-wide shared_buffers occupancy from
+// pg_buffercache_summary() plus the clock-sweep usage histogram. Installed is
+// the pg_buffercache extension probe; HasData is whether the summary was
+// readable (it needs pg_monitor), so the two degrade independently.
+type BufCacheStat struct {
+	Installed bool
+	HasData   bool
+	Used      int64
+	Unused    int64
+	Dirty     int64
+	Pinned    int64
+	UsageAvg  float64
+	// UsageCounts is the 0..5 usagecount histogram; nil when unreadable.
+	UsageCounts []BufferUsageCount
+}
+
+// DirtyFrac is Dirty/Used, 0 when the cache is empty.
+func (b BufCacheStat) DirtyFrac() float64 {
+	if b.Used <= 0 {
+		return 0
+	}
+	return float64(b.Dirty) / float64(b.Used)
+}
+
+// UsageFracs returns the share of used buffers sitting at usagecount 0–1
+// (cold, evictable) and 4–5 (hot). ok is false without a histogram.
+func (b BufCacheStat) UsageFracs() (cold, hot float64, ok bool) {
+	var total, c, h int64
+	for _, u := range b.UsageCounts {
+		total += u.Buffers
+		switch {
+		case u.Count <= 1:
+			c += u.Buffers
+		case u.Count >= 4:
+			h += u.Buffers
+		}
+	}
+	if total == 0 {
+		return 0, 0, false
+	}
+	return float64(c) / float64(total), float64(h) / float64(total), true
+}
+
+// IOSplitStat breaks pg_stat_io down by who did the I/O, restricted to
+// object = 'relation' so PG18's WAL rows don't skew the shares. Client reads
+// with their timing give the miss latency (read_time stays 0 when
+// track_io_timing is off); bulkread reads are the ring-buffer sequential scans;
+// the three write counters say who is flushing dirty buffers.
+type IOSplitStat struct {
+	HasData          bool
+	RelationReads    int64
+	ClientReads      int64
+	ClientReadTimeMs float64
+	BulkReads        int64
+	// Vacuum* is the context = 'vacuum' share: how much of the relation I/O
+	// autovacuum itself is causing.
+	VacuumReads  int64
+	VacuumWrites int64
+
+	CheckpointerWrites      int64
+	CheckpointerWriteTimeMs float64
+	BgwriterWrites          int64
+	ClientWrites            int64
+	ClientWriteTimeMs       float64
+
+	// WAL* is PG18's object = 'wal' traffic (zero on PG17): WAL writes and the
+	// fsyncs commits wait for, with their timings.
+	WALWrites      int64
+	WALWriteTimeMs float64
+	WALFsyncs      int64
+	WALFsyncTimeMs float64
+}
+
+// avgMs is time/count, ok only with timed events.
+func avgMs(timeMs float64, n int64) (float64, bool) {
+	if n <= 0 || timeMs <= 0 {
+		return 0, false
+	}
+	return timeMs / float64(n), true
+}
+
+// ClientReadLatencyMs is the mean client-backend read (cache miss) latency;
+// ok is false when there were no timed reads.
+func (s IOSplitStat) ClientReadLatencyMs() (float64, bool) {
+	return avgMs(s.ClientReadTimeMs, s.ClientReads)
+}
+
+// CheckpointerWriteLatencyMs is the mean checkpointer buffer write — the
+// storage's plain write speed under the checkpoint's paced load.
+func (s IOSplitStat) CheckpointerWriteLatencyMs() (float64, bool) {
+	return avgMs(s.CheckpointerWriteTimeMs, s.CheckpointerWrites)
+}
+
+// ClientWriteLatencyMs is the mean write a backend did itself, i.e. time a
+// query spent evicting a dirty page.
+func (s IOSplitStat) ClientWriteLatencyMs() (float64, bool) {
+	return avgMs(s.ClientWriteTimeMs, s.ClientWrites)
+}
+
+// WALFsyncLatencyMs is the mean WAL fsync (PG18+), the floor under commit
+// latency with synchronous_commit on.
+func (s IOSplitStat) WALFsyncLatencyMs() (float64, bool) {
+	return avgMs(s.WALFsyncTimeMs, s.WALFsyncs)
+}
+
+// VacuumFracs is autovacuum's share of relation reads and writes; ok is
+// false without any relation I/O.
+func (s IOSplitStat) VacuumFracs() (reads, writes float64, ok bool) {
+	totalW := s.CheckpointerWrites + s.BgwriterWrites + s.ClientWrites
+	if s.RelationReads <= 0 && totalW <= 0 {
+		return 0, 0, false
+	}
+	if s.RelationReads > 0 {
+		reads = float64(s.VacuumReads) / float64(s.RelationReads)
+	}
+	if totalW > 0 {
+		writes = float64(s.VacuumWrites) / float64(totalW)
+	}
+	return reads, writes, true
+}
+
+// ClientWriteFrac is the share of relation writes done by client backends
+// themselves rather than the checkpointer/bgwriter; ok is false with no writes.
+func (s IOSplitStat) ClientWriteFrac() (float64, bool) {
+	total := s.CheckpointerWrites + s.BgwriterWrites + s.ClientWrites
+	if total <= 0 {
+		return 0, false
+	}
+	return float64(s.ClientWrites) / float64(total), true
+}
+
+// CheckpointerStat is pg_stat_checkpointer: how many checkpoints ran, why, and
+// what they cost. StatsReset is zero when the counters were never reset.
+type CheckpointerStat struct {
+	HasData        bool
+	Timed          int64
+	Requested      int64
+	WriteTimeMs    float64
+	SyncTimeMs     float64
+	BuffersWritten int64
+	StatsReset     time.Time
+}
+
+// WALStat is pg_stat_wal plus the current write position. CurrentLSNBytes is
+// the LSN as a byte offset (replay position on a standby) so two samples can
+// be subtracted for the live WAL rate; wal_bytes only counts what this
+// server generated itself.
+type WALStat struct {
+	HasData         bool
+	Records         int64
+	FPI             int64
+	Bytes           int64
+	BuffersFull     int64
+	StatsReset      time.Time
+	CurrentLSNBytes int64
+}
+
+// FPIFrac is full-page images per WAL record; ok is false without records.
+func (w WALStat) FPIFrac() (float64, bool) {
+	if w.Records <= 0 {
+		return 0, false
+	}
+	return float64(w.FPI) / float64(w.Records), true
+}
+
+// BgwriterStat is pg_stat_bgwriter: maxwritten_clean counts the LRU sweeps
+// that stopped early because bgwriter_lru_maxpages was reached — the
+// bgwriter wanting to do more than it is allowed to.
+type BgwriterStat struct {
+	BuffersClean    int64
+	MaxwrittenClean int64
+	BuffersAlloc    int64
+}
+
+// AutovacStat is autovacuum's backlog in the current database: how many
+// workers are running right now, and how many tables already exceed their
+// vacuum threshold (dead tuples past threshold + scale_factor × rows).
+type AutovacStat struct {
+	WorkersBusy   int
+	OverThreshold int64
+	OverTop       []string // up to 3 "schema.name", most dead tuples first
+}
+
+// WALDirStat is the on-disk pg_wal footprint from pg_ls_waldir(), which needs
+// pg_monitor; HasData=false is rendered as "n/a".
+type WALDirStat struct {
+	HasData bool
+	Bytes   int64
+	Files   int64
+}
+
+// StatsWindow returns how long the cumulative counters behind reset have been
+// accumulating: since the reset, or since postmaster start when never reset.
+func (m *MaintenanceInfo) StatsWindow(reset time.Time) (time.Duration, bool) {
+	since := reset
+	if since.IsZero() {
+		since = m.StartTime
+	}
+	if since.IsZero() || m.SampledAt.IsZero() {
+		return 0, false
+	}
+	w := m.SampledAt.Sub(since)
+	if w <= 0 {
+		return 0, false
+	}
+	return w, true
+}
+
+// WALBytesPerSecSinceReset is the average WAL generation rate over the whole
+// pg_stat_wal window — the stable figure to size max_wal_size from.
+func (m *MaintenanceInfo) WALBytesPerSecSinceReset() (float64, bool) {
+	if !m.WAL.HasData {
+		return 0, false
+	}
+	w, ok := m.StatsWindow(m.WAL.StatsReset)
+	if !ok {
+		return 0, false
+	}
+	return float64(m.WAL.Bytes) / w.Seconds(), true
+}
+
+// AvgCheckpointInterval is the pg_stat_checkpointer window divided by the
+// number of checkpoints; compared to checkpoint_timeout it tells whether WAL
+// volume, not the timer, is driving checkpoints.
+func (m *MaintenanceInfo) AvgCheckpointInterval() (time.Duration, bool) {
+	total := m.Checkpointer.Timed + m.Checkpointer.Requested
+	if !m.Checkpointer.HasData || total <= 0 {
+		return 0, false
+	}
+	w, ok := m.StatsWindow(m.Checkpointer.StatsReset)
+	if !ok {
+		return 0, false
+	}
+	return w / time.Duration(total), true
+}
+
+// AvgSyncPerCheckpointMs is the mean fsync phase of a checkpoint.
+func (m *MaintenanceInfo) AvgSyncPerCheckpointMs() (float64, bool) {
+	total := m.Checkpointer.Timed + m.Checkpointer.Requested
+	if !m.Checkpointer.HasData || total <= 0 {
+		return 0, false
+	}
+	return m.Checkpointer.SyncTimeMs / float64(total), true
+}
+
+// EffectiveAutovacWorkMem resolves autovacuum_work_mem's -1 default to
+// maintenance_work_mem. ok is false when either GUC is unknown.
+func (m *MaintenanceInfo) EffectiveAutovacWorkMem() (int64, bool) {
+	v, ok := m.SettingBytes["autovacuum_work_mem"]
+	if !ok {
+		return 0, false
+	}
+	if v >= 0 {
+		return v, true
+	}
+	mw, ok := m.SettingBytes["maintenance_work_mem"]
+	return mw, ok
+}
+
+// TotalConns is the number of client connections seen by the last sample.
+func (m *MaintenanceInfo) TotalConns() int {
+	n := 0
+	for _, c := range m.ConnByState {
+		n += c
+	}
+	return n
+}
+
 // TempDBStat holds per-database temp-file usage, used in the maintenance
 // dashboard to show which database is consuming temp space.
 type TempDBStat struct {
 	DB    string
 	Files int64
 	Bytes int64
+	// StatsReset is when this database's counters were last zeroed (zero =
+	// never): a lifetime byte total only means something as a rate over it.
+	StatsReset time.Time
 }
 
 // SettingRow is one row from pg_settings for the settings browser.
 type SettingRow struct {
 	Name           string
-	Setting        string // current effective value
+	Setting        string // current effective value, raw (in Unit)
+	Display        string // the value as current_setting() formats it: "8GB", "5min"
 	Unit           string // e.g. "8kB", "ms", ""
 	Category       string // e.g. "Query Tuning / Planner Cost Constants"
 	ShortDesc      string

@@ -52,34 +52,42 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	body.WriteString(m.renderTableStatsAllRow(s, 3) + "\n")
 	body.WriteString("\n")
 
+	v := newMaintView(s)
+
 	// Wide terminals get a two-pane layout: compact "vitals" sections side by
 	// side, verbose sections (long advisory lines, bars, blocked-query text)
-	// full width below so they aren't truncated. Narrow terminals fall back to
-	// the single-column stack.
-	if m.width >= 88 {
-		// Give the left pane the larger share (it carries the long connections /
-		// sessions breakdowns) while leaving the right pane ≥48 cols for its
-		// longest line (xid age). -3 throughout is the "│ " rule + safety.
-		leftW := max(40, min(m.width-48-3, m.width*3/5))
+	// full width below so they aren't truncated. The paned sections carry
+	// annotated rows of up to ~80 cols (host memory, advice notes), so the
+	// split only pays off from 160 cols; narrower terminals stack everything.
+	// The recommendations panel closes the screen so the eye lands on it after
+	// scrolling through the sections it summarises.
+	if m.width >= 160 {
+		// Split evenly: both panes carry long rows now (connections by app and
+		// query text on the left, host memory and advice notes on the right),
+		// keeping the right pane ≥48 cols. -3 throughout is the "│ " rule + safety.
+		leftW := max(40, min(m.width-48-3, m.width/2))
 		rightW := max(20, m.width-leftW-3)
-		left := renderMaintServer(info) + renderMaintTransactions(info) + renderMaintTableActivity(info)
-		right := renderMaintMemory(info) + renderMaintAutovacuum(info) + renderMaintIO(info)
+		// Column heights are balanced by hand: server + transactions + table
+		// activity are short, so the buffer cache goes left; the settings-heavy
+		// memory + autovacuum + observability stack goes right.
+		left := renderMaintServer(v) + renderMaintTransactions(v) + renderMaintTableActivity(v) +
+			renderMaintBufferCache(v, min(20, max(leftW-overviewLabelW-14, 8)))
+		right := renderMaintMemory(v) + renderMaintAutovacuum(v) + renderMaintObservability(v)
 		body.WriteString(renderColumns(left, right, leftW, rightW))
 		body.WriteString("\n")
-		body.WriteString(renderMaintReplication(info))
-		body.WriteString(renderMaintWAL(info))
-		body.WriteString(renderMaintHealth(info))
 	} else {
-		body.WriteString(renderMaintServer(info))
-		body.WriteString(renderMaintTransactions(info))
-		body.WriteString(renderMaintTableActivity(info))
-		body.WriteString(renderMaintReplication(info))
-		body.WriteString(renderMaintMemory(info))
-		body.WriteString(renderMaintAutovacuum(info))
-		body.WriteString(renderMaintWAL(info))
-		body.WriteString(renderMaintIO(info))
-		body.WriteString(renderMaintHealth(info))
+		body.WriteString(renderMaintServer(v))
+		body.WriteString(renderMaintTransactions(v))
+		body.WriteString(renderMaintTableActivity(v))
+		body.WriteString(renderMaintBufferCache(v, 20))
+		body.WriteString(renderMaintMemory(v))
+		body.WriteString(renderMaintAutovacuum(v))
+		body.WriteString(renderMaintObservability(v))
 	}
+	body.WriteString(renderMaintReplication(v))
+	body.WriteString(renderMaintWAL(v))
+	body.WriteString(renderMaintHealth(v))
+	body.WriteString(renderMaintRecommendations(v))
 
 	hintLine := m.renderMaintHint(s)
 
@@ -87,15 +95,25 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	if hintLine != "" {
 		full.WriteString(hintLine + "\n")
 	}
-	full.WriteString("  " + mu("↑↓ select capacity row  ·  ↵ reset  ·  ") +
+	full.WriteString("  " + mu("↑↓ capacity row / scroll  ·  pgdn g G  ·  ↵ reset  ·  ") +
 		styleBadge.Render("s") + mu(" → settings  ·  ") +
 		styleBadge.Render("a") + mu(" → activity  ·  ") +
 		styleBadge.Render("w") + mu(" → wal  ·  ") +
 		styleBadge.Render("r") + mu(" → replication  ·  ") +
-		styleBadge.Render("p") + mu(" → progress  ·  space refresh") + "\n")
+		styleBadge.Render("o") + mu(" → i/o  ·  ") +
+		styleBadge.Render("p") + mu(" → progress  ·  space refresh  ·  ") +
+		styleBadge.Render("t") + mu(" auto-refresh "+m.maintRefreshLabel()) + "\n")
 	full.WriteString(body.String())
 
 	return scrollWindow(full.String(), &s.offset, height)
+}
+
+// maintRefreshLabel names the overview's auto-refresh cadence for the hint line.
+func (m *Model) maintRefreshLabel() string {
+	if m.maintRefresh <= 0 {
+		return "off"
+	}
+	return shortDuration(m.maintRefresh)
 }
 
 // renderColumns joins two pre-rendered text blocks into side-by-side panes:
@@ -268,8 +286,12 @@ func formatUptime(d time.Duration) string {
 }
 
 // fmtSecsDuration formats a duration given in seconds as a human-readable
-// string: "1h 23m 45s", "5m 12s", or "45s".
+// string: "1h 23m 45s", "5m 12s", "45s", or "<1s" for a sub-second value (a
+// query that has just started is not a 0 s query).
 func fmtSecsDuration(secs float64) string {
+	if secs > 0 && secs < 1 {
+		return "<1s"
+	}
 	d := time.Duration(secs) * time.Second
 	h := int(d.Hours())
 	m := int(d.Minutes()) % 60
@@ -350,17 +372,27 @@ func (m *Model) renderSettingsList(s *screen, height int) string {
 			valStyle = lipgloss.NewStyle()
 		}
 
+		// name | value | description | category. The value is what the user
+		// came for; the description gets whatever width is left, the category
+		// a fixed tail. Every column is truncated so a row never wraps.
+		const nameW, valW, catW = 40, 22, 28
+		val := ""
 		cat := ""
 		if ok {
-			cat = row.Category
-			if len(cat) > 28 {
-				cat = cat[:25] + "…"
+			val = row.Display
+			if val == "" {
+				val = strings.TrimSpace(row.Setting + " " + row.Unit)
 			}
+			cat = row.Category
 		}
-
-		b.WriteString(cursor + padRight(nameStyle.Render(it.name), 36) +
-			padRight(valStyle.Render(it.detail), 20) +
-			styleMuted.Render(cat) + "\n")
+		descW := m.width - 2 - nameW - valW - catW - 2
+		desc := ""
+		if descW > 8 {
+			desc = padRight(truncateToWidth(styleMuted.Render(it.detail), descW), descW) + "  "
+		}
+		b.WriteString(cursor + padRight(truncateToWidth(nameStyle.Render(it.name), nameW-1), nameW) +
+			padRight(truncateToWidth(valStyle.Render(val), valW-1), valW) +
+			desc + truncateToWidth(styleMuted.Render(cat), catW) + "\n")
 	}
 	for i := end - s.offset; i < rowsH; i++ {
 		b.WriteString("\n")
@@ -409,10 +441,46 @@ func (m *Model) renderMaintenanceInfo(height int) string {
 	b.WriteString("    " + mu("cluster, preventing autovacuum from reclaiming dead tuples. Always rollback orphaned") + "\n")
 	b.WriteString("    " + mu("prepared transactions: ROLLBACK PREPARED 'gid'.") + "\n\n")
 
-	b.WriteString("  " + styleHeader.Render(" i/o (pg_stat_io) ") + "\n")
-	b.WriteString("    " + mu("BackendFsyncs > 0 means client backends are calling fsync themselves — this happens when") + "\n")
-	b.WriteString("    " + mu("the checkpointer cannot keep up with dirty-buffer flushing. It stalls the writing query.") + "\n")
-	b.WriteString("    " + mu("Tune checkpoint_completion_target (raise toward 0.9) and/or max_wal_size.") + "\n\n")
+	b.WriteString("  " + styleHeader.Render(" host memory & huge pages ") + "\n")
+	b.WriteString("    " + mu("Host rows come from /proc/meminfo on the machine pgdu runs on, so they only mean") + "\n")
+	b.WriteString("    " + mu("something when that is the database host. 'page cache' is what effective_cache_size") + "\n")
+	b.WriteString("    " + mu("should roughly reflect (plus shared_buffers). huge_pages=try falls back to 4 kB pages") + "\n")
+	b.WriteString("    " + mu("silently when the kernel pool (vm.nr_hugepages) is empty — the 'needs N' figure is") + "\n")
+	b.WriteString("    " + mu("shared_memory_size_in_huge_pages, the pool size that lets the next start succeed.") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" buffer cache ") + "\n")
+	b.WriteString("    " + mu("occupancy/dirty come from pg_buffercache_summary(); temperature is the clock-sweep") + "\n")
+	b.WriteString("    " + mu("usagecount histogram (cold = evictable, hot = reused often). Mostly hot with no cold") + "\n")
+	b.WriteString("    " + mu("tail means the working set exceeds shared_buffers; a big cold tail means slack.") + "\n")
+	b.WriteString("    " + mu("read latency is pg_stat_io read_time/reads for client backends (needs track_io_timing):") + "\n")
+	b.WriteString("    " + mu("well under 1 ms means misses are served from the OS page cache, > 5 ms is disk.") + "\n")
+	b.WriteString("    " + mu("bulkread share is the ring-buffer context large sequential scans use; vacuum share is") + "\n")
+	b.WriteString("    " + mu("autovacuum's part of the traffic. o opens the full pg_stat_io table per backend type.") + "\n")
+	b.WriteString("    " + mu("Backend fsyncs > 0 means the checkpointer cannot keep up and queries stall on fsync.") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" counters vs rates ") + "\n")
+	b.WriteString("    " + mu("Cumulative counters carry a 'since reset …' label. Once the screen has two samples") + "\n")
+	b.WriteString("    " + mu("(space, or t for auto-refresh) per-minute rates appear next to them with the window") + "\n")
+	b.WriteString("    " + mu("they cover. A stats reset between samples discards the window rather than showing junk.") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" checkpoint sizing ") + "\n")
+	b.WriteString("    " + mu("A requested checkpoint fires when WAL since the last one reaches") + "\n")
+	b.WriteString("    " + mu("max_wal_size / (1 + checkpoint_completion_target); to let the timer win, max_wal_size") + "\n")
+	b.WriteString("    " + mu("must cover WAL rate × checkpoint_timeout × (1 + target). The suggested value uses the") + "\n")
+	b.WriteString("    " + mu("since-reset average rate. 'dirty-page writes' shows who flushes dirty buffers: the") + "\n")
+	b.WriteString("    " + mu("checkpointer and bgwriter should; backends writing means their queries waited for it") + "\n")
+	b.WriteString("    " + mu("(raise bgwriter_lru_maxpages). Full-page images are the WAL cost of frequent checkpoints.") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" observability ") + "\n")
+	b.WriteString("    " + mu("track_io_timing off leaves pg_stat_io and EXPLAIN (BUFFERS) without timings.") + "\n")
+	b.WriteString("    " + mu("pg_stat_statements.track = none keeps the extension installed but empty; a fill level") + "\n")
+	b.WriteString("    " + mu("past 90% means the least-used entries are being evicted (raise .max or reset).") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" recommendations ") + "\n")
+	b.WriteString("    " + mu("Every red/yellow note (and informational ones with a concrete change) collected worst") + "\n")
+	b.WriteString("    " + mu("first, with a copyable ALTER SYSTEM line. pg_reload_conf() applies reload-level GUCs;") + "\n")
+	b.WriteString("    " + mu("'restart required' ones wait for the next restart. sysctl lines are host-side.") + "\n")
+	b.WriteString("    " + mu("Nothing is applied by pgdu.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" pending config ") + "\n")
 	b.WriteString("    " + mu("need restart  — the setting was changed in postgresql.conf but requires a full server") + "\n")
@@ -444,19 +512,3 @@ func (m *Model) renderMaintenanceInfo(height int) string {
 
 	return padInfo(&b, height)
 }
-
-// humanizeGUCBytes converts a GUC value like "4096" (in 8-kB pages for
-// shared_buffers) or "64MB" into a human-readable bytes string. If the
-// string is already formatted with a unit suffix (kB/MB/GB/TB) it's left
-// as-is; otherwise it's treated as a plain integer and passed through
-// humanize.Bytes (which assumes bytes).
-func humanizeGUCBytes(v string) string {
-	if v == "" {
-		return v
-	}
-	// pg_settings already formats memory GUCs with a unit suffix (kB/MB/…).
-	return v
-}
-
-var _ = humanize.Bytes // used elsewhere, referenced here to keep import live
-var _ = humanizeGUCBytes

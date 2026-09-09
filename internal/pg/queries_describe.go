@@ -216,3 +216,26 @@ FROM   pg_constraint c
 WHERE  c.confrelid = $1 AND c.contype = 'f'
 ORDER  BY c.conrelid::regclass::text, c.conname
 `
+
+// sqlResolveFilenode resolves a WAL block reference's (tablespace, relfilenode)
+// pair to the relation `d` should describe. pg_filenode_relation is
+// database-local, so it runs in the relation's own database. A TOAST relation
+// hops to its owning table — that is what the WAL views name and what the
+// describe panel can show; its index stays an index. Nothing is
+// relkind-filtered here: the caller branches on relkind (table vs index) and
+// rejects the rest. NULL relid (dropped / rewritten since) yields no row.
+// $1 = reltablespace, $2 = relfilenode.
+const sqlResolveFilenode = `
+SELECT c.oid,
+       c.relkind::text,
+       n.nspname,
+       c.relname,
+       pg_total_relation_size(c.oid),
+       c.reltuples::bigint
+FROM   pg_class f
+JOIN   pg_class c ON c.oid = CASE WHEN f.relkind = 't'
+                                  THEN (SELECT o.oid FROM pg_class o WHERE o.reltoastrelid = f.oid)
+                                  ELSE f.oid END
+JOIN   pg_namespace n ON n.oid = c.relnamespace
+WHERE  f.oid = pg_filenode_relation($1::oid, $2::oid)
+`

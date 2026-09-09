@@ -224,6 +224,11 @@ type describeLoadedMsg struct {
 	// so a screen pushed by name still learns the pg.Table the page-inspector
 	// jump (`p`) needs.
 	table pg.Table
+	// db is the database the relation was found in when the name was resolved
+	// across databases (a log line without %d); empty when the caller already
+	// knew it. The describe screen adopts it so its crumb, `p` and the buffer
+	// footprint follow the relation rather than the connection database.
+	db string
 }
 type describeBuffersLoadedMsg struct {
 	db   string
@@ -536,28 +541,59 @@ func (m *Model) loadDescribeTableCmd(t pg.Table) tea.Cmd {
 // loadDescribeTableByNameCmd resolves a relation name (parsed out of a query in
 // the top-queries view) to its catalog metadata, then describes it — both in one
 // round-trip so the describe panel opens with a single Cmd like the others.
-func (m *Model) loadDescribeTableByNameCmd(db, name string) tea.Cmd {
+// anyDB widens the lookup to every database when the caller only guesses the
+// database (a log line whose prefix has no %d).
+func (m *Model) loadDescribeTableByNameCmd(db, name string, anyDB bool) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
-		t, err := m.client.ResolveTable(ctx, db, name)
+		t, err := m.resolveTable(ctx, db, name, anyDB)
 		if err != nil {
 			return describeLoadedMsg{err: err}
 		}
 		d, err := m.client.DescribeTable(ctx, t)
-		return describeLoadedMsg{oid: t.OID, desc: d, err: err, table: t}
+		return describeLoadedMsg{oid: t.OID, desc: d, err: err, table: t, db: t.DB}
 	})
 }
 
 // loadDescribeIndexByNameCmd resolves an index name (from a diagnostic result
 // row that carries only the index name) to its OID, then describes it — the
 // index analogue of loadDescribeTableByNameCmd.
-func (m *Model) loadDescribeIndexByNameCmd(db, name string) tea.Cmd {
+func (m *Model) loadDescribeIndexByNameCmd(db, name string, anyDB bool) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
-		oid, qualified, err := m.client.ResolveIndex(ctx, db, name)
+		var (
+			oid       uint32
+			qualified string
+			err       error
+		)
+		if anyDB {
+			db, oid, qualified, err = m.client.ResolveIndexAnyDB(ctx, db, name)
+		} else {
+			oid, qualified, err = m.client.ResolveIndex(ctx, db, name)
+		}
 		if err != nil {
 			return describeLoadedMsg{err: err}
 		}
 		d, err := m.client.DescribeIndex(ctx, db, oid, qualified)
-		return describeLoadedMsg{oid: oid, desc: d, err: err}
+		return describeLoadedMsg{oid: oid, desc: d, err: err, db: db}
+	})
+}
+
+// loadDescribeFilenodeCmd resolves a WAL block reference's (tablespace,
+// relfilenode) to its relation and describes it — table or index, whichever
+// the file turns out to be — in one Cmd like the by-name paths. db is the
+// relation's own database (WAL is cluster-wide, pg_filenode_relation is not);
+// the message carries it so the describe screen's crumb follows.
+func (m *Model) loadDescribeFilenodeCmd(db string, tablespace, filenode uint32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		r, err := m.client.ResolveFilenode(ctx, db, tablespace, filenode)
+		if err != nil {
+			return describeLoadedMsg{err: err}
+		}
+		if r.IsIndex {
+			d, err := m.client.DescribeIndex(ctx, db, r.IndexOID, r.IndexName)
+			return describeLoadedMsg{oid: r.IndexOID, desc: d, err: err, db: db}
+		}
+		d, err := m.client.DescribeTable(ctx, r.Table)
+		return describeLoadedMsg{oid: r.Table.OID, desc: d, err: err, table: r.Table, db: db}
 	})
 }
 
@@ -566,11 +602,21 @@ func (m *Model) loadDescribeIndexByNameCmd(db, name string) tea.Cmd {
 // disk-usage (parts) view for it. Only the resolve step runs here; a placeholder
 // parts screen is already on the stack and onDiskTableResolved fills in the
 // table and fires the parts load via loadCurrent.
-func (m *Model) resolveDiskTableCmd(db, name string) tea.Cmd {
+func (m *Model) resolveDiskTableCmd(db, name string, anyDB bool) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
-		t, err := m.client.ResolveTable(ctx, db, name)
+		t, err := m.resolveTable(ctx, db, name, anyDB)
 		return diskTableResolvedMsg{name: name, table: t, err: err}
 	})
+}
+
+// resolveTable is the one place the by-name paths pick between the single-
+// database lookup and the cross-database sweep, so describe and disk usage
+// cannot disagree about where a name lives.
+func (m *Model) resolveTable(ctx context.Context, db, name string, anyDB bool) (pg.Table, error) {
+	if anyDB {
+		return m.client.ResolveTableAnyDB(ctx, db, name)
+	}
+	return m.client.ResolveTable(ctx, db, name)
 }
 
 func (m *Model) loadDescribeIndexCmd(db string, oid uint32, name string) tea.Cmd {

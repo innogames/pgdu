@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,19 @@ func TestDescribeIndexCoverage(t *testing.T) {
 	}
 	if got := describeIndexCoverage(12.34, true); !strings.Contains(got, "~12.3%") {
 		t.Fatalf("got %q", got)
+	}
+	// The ends of the scale are tinted, the middle stays muted: the rendered
+	// value must differ from its muted rendering only at the extremes.
+	for _, tc := range []struct {
+		pct    float64
+		tinted bool
+	}{{0.2, true}, {12.34, false}, {89.9, false}, {99.0, true}} {
+		val := fmt.Sprintf("~%.1f%%", tc.pct)
+		got := describeIndexCoverage(tc.pct, true)
+		muted := styleMuted.Render("covers " + val)
+		if (got != muted) != tc.tinted {
+			t.Errorf("covers %v: tinted=%v, want %v (%q)", tc.pct, got != muted, tc.tinted, got)
+		}
 	}
 }
 

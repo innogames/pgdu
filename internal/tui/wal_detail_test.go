@@ -2,8 +2,11 @@ package tui
 
 import (
 	"encoding/binary"
+	"strings"
 	"testing"
+	"time"
 
+	"pgdu/internal/cli"
 	"pgdu/internal/pg"
 )
 
@@ -192,5 +195,37 @@ func TestDecodeWALBtreePayloadRejectsBogusSize(t *testing.T) {
 	tuples, note := decodeWALBtreePayload(d)
 	if tuples != nil || note == "" {
 		t.Fatalf("tuples=%v note=%q", tuples, note)
+	}
+}
+
+// A block detail whose page image could not be decoded for want of pageinspect
+// must surface the install affordance: the `i` hint on the screen and the note
+// row pointing at it. The record itself loaded, so the prompt must not block.
+func TestWALBlockDetailMissingPageInspectOffersInstall(t *testing.T) {
+	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil, "", "")
+	ref := pg.WALBlockRef{StartLSN: "0/10", BlockID: 0, FPILength: 8192}
+	s := &screen{level: levelWALBlockDetail, tool: toolWAL, db: "un1_game", wal: walState{blockRef: &ref}}
+	m.stack = []*screen{s}
+	d := pg.WALBlockDetail{
+		Ref:        ref,
+		FPIData:    make([]byte, 8192),
+		DecodeNote: "page image not decoded: pageinspect is not installed in un1_game",
+		PageInspectMissing: &pg.MissingExtensionError{
+			Extension: "pageinspect", DB: "un1_game", Installable: true,
+		},
+	}
+	m.onWALBlockDetailLoaded(walBlockDetailLoadedMsg{db: "un1_game", ref: ref, detail: d})
+	p := s.extPrompt
+	if p == nil || p.blocking || !p.installable || p.name != extPageInspect || p.db != "un1_game" {
+		t.Fatalf("extPrompt = %+v, want non-blocking installable pageinspect hint for un1_game", p)
+	}
+	var note string
+	for _, it := range s.items {
+		if r, ok := it.data.(walDetailRow); ok && r.key == "note" {
+			note = r.value
+		}
+	}
+	if !strings.Contains(note, "un1_game") || !strings.Contains(note, "to install pageinspect") {
+		t.Fatalf("note row = %q, want the db name and the install hint", note)
 	}
 }

@@ -147,8 +147,11 @@ func (m *Model) jumpToLogEntry(logs *screen, e *pglog.Entry) tea.Cmd {
 // logDescribeTarget resolves `d` on the log levels: the main table of the
 // statement behind the entry under the cursor (a slow query or log_statement SQL, or the
 // STATEMENT attached to an error), described in the entry's database when the
-// prefix carries %d and in the default database otherwise. On the groups pane
-// the group's newest sample stands in for the row.
+// prefix carries %d. Without %d the line names the user but not the database,
+// so the connection database is only a first guess and the lookup sweeps every
+// database (anyDB): on a host with many application databases the logged table
+// is rarely in the one pgdu happens to be connected to. On the groups pane the
+// group's newest sample stands in for the row.
 func logDescribeTarget(s *screen) (descTarget, bool) {
 	var e *pglog.Entry
 	switch s.level {
@@ -185,17 +188,17 @@ func logDescribeTarget(s *screen) (descTarget, bool) {
 	if len(sql) == 0 {
 		return descTarget{}, false
 	}
-	db := s.db
+	db, anyDB := s.db, true
 	if len(e.DB) > 0 {
-		db = string(e.DB)
+		db, anyDB = string(e.DB), false
 	}
 	if name := pg.MainTable(string(sql)); name != "" {
-		return descTarget{byName: true, db: db, tableName: name}, true
+		return descTarget{byName: true, db: db, tableName: name, anyDB: anyDB}, true
 	}
 	// DDL on an index (DROP/ALTER/REINDEX INDEX) has no table to point at, but
 	// the index itself can be described.
 	if name := pg.MainIndex(string(sql)); name != "" {
-		return descTarget{indexByName: true, db: db, indexName: name}, true
+		return descTarget{indexByName: true, db: db, indexName: name, anyDB: anyDB}, true
 	}
 	return descTarget{}, false
 }

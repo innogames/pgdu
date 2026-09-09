@@ -138,6 +138,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case maintLoadedMsg:
 		return m, m.onMaintLoaded(msg)
+	case maintTickMsg:
+		return m, m.onMaintTick()
 	case settingsLoadedMsg:
 		return m, m.onSettingsLoaded(msg)
 	case progressLoadedMsg:

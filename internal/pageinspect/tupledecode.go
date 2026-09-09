@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strconv"
+	"strings"
+	"time"
 
 	"pgdu/internal/humanize"
 	"pgdu/internal/pg"
@@ -30,7 +32,11 @@ func DecodeAttrValue(a pg.TupleAttr) string {
 			}
 			return oid
 		}
-		return formatFixed(a.Value, a.TypName)
+		v := formatFixed(a.Value, a.TypName)
+		if ts := guessUnixTime(a, v); ts != "" {
+			return ts + " (" + v + ")"
+		}
+		return v
 	case a.Len == -1:
 		return decodeInlineVarlena(a.Value, a.TypName, a.TypCategory)
 	default:
@@ -154,4 +160,40 @@ func ToastPointerRef(v []byte) (valueID, toastRelID uint32, ok bool) {
 		return 0, 0, false
 	}
 	return binary.LittleEndian.Uint32(v[10:14]), binary.LittleEndian.Uint32(v[14:18]), true
+}
+
+// Bounds for the unix-timestamp guess: 2020-01-01 .. 2100-01-01 UTC in seconds.
+// Anything below reads as an id or counter far more often than as a date, and
+// the upper bound keeps arbitrary large bigints from dressing up as dates.
+const (
+	unixGuessMin int64 = 1_577_836_800
+	unixGuessMax int64 = 4_102_444_800
+)
+
+// guessUnixTime spots integer columns that hold unix timestamps — a common
+// schema choice the type system can't tell from any other int — and renders
+// them like a real timestamp column. Best effort on two signals that must both
+// hold: the column is named like a time (timestamp, *_at, *_timestamp) and the
+// value falls in a plausible window (seconds, or for bigint also milliseconds,
+// since 2020). plain is formatFixed's rendering, parsed back rather than
+// re-decoded so the guess follows exactly what the user sees.
+func guessUnixTime(a pg.TupleAttr, plain string) string {
+	if a.TypName != "int4" && a.TypName != "int8" {
+		return ""
+	}
+	name := strings.ToLower(a.Name)
+	if name != "timestamp" && !strings.HasSuffix(name, "_at") && !strings.HasSuffix(name, "_timestamp") {
+		return ""
+	}
+	n, err := strconv.ParseInt(plain, 10, 64)
+	if err != nil {
+		return ""
+	}
+	switch {
+	case n >= unixGuessMin && n < unixGuessMax:
+		return time.Unix(n, 0).UTC().Format("2006-01-02 15:04:05")
+	case a.TypName == "int8" && n >= unixGuessMin*1000 && n < unixGuessMax*1000:
+		return time.UnixMilli(n).UTC().Format("2006-01-02 15:04:05.000")
+	}
+	return ""
 }

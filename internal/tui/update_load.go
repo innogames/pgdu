@@ -240,7 +240,7 @@ func (m *Model) loadCurrent() tea.Cmd {
 	case levelSnapshots:
 		return m.listSnapshotsCmd(m.snapshotDir, s.db)
 	case levelMaintenance:
-		return m.loadMaintenanceCmd(s.db)
+		return tea.Batch(m.armMaintTick([]tea.Cmd{m.loadMaintenanceCmd(s.db)})...)
 	case levelSettings:
 		return m.loadSettingsCmd(s.db)
 	case levelActivity:

@@ -486,8 +486,10 @@ func TestLogDescribeTarget(t *testing.T) {
 	m.rebuildLogChild(gs)
 	// Only the older duplicate-key error carries STATEMENT: INSERT INTO channel(...) …
 	gs.cursor = len(gs.items) - 1
+	// The fixture prefix carries no %d, so the connection database is only a
+	// guess and the resolve must sweep every database.
 	tgt, ok := describeTarget(gs)
-	if !ok || !tgt.byName || tgt.tableName != "channel" || tgt.db != "shop" {
+	if !ok || !tgt.byName || tgt.tableName != "channel" || tgt.db != "shop" || !tgt.anyDB {
 		t.Errorf("group row target = %+v ok=%v", tgt, ok)
 	}
 	// On the overview a group row falls back to its newest sample with a statement.
@@ -504,9 +506,16 @@ func TestLogDescribeTarget(t *testing.T) {
 	for i := range s.log.report.Entries {
 		if e := &s.log.report.Entries[i]; e.Category == pglog.CatSlowQuery {
 			es := m.logEntryScreen(gs, e)
-			if tgt, ok := describeTarget(es); !ok || tgt.tableName != "event_log" {
+			if tgt, ok := describeTarget(es); !ok || tgt.tableName != "event_log" || !tgt.anyDB {
 				t.Errorf("slow entry target = %+v ok=%v", tgt, ok)
 			}
+			// A prefix with %d pins the database; no sweep then.
+			saved := e.DB
+			e.DB = []byte("orders")
+			if tgt, ok := describeTarget(es); !ok || tgt.db != "orders" || tgt.anyDB {
+				t.Errorf("slow entry target with %%d = %+v ok=%v", tgt, ok)
+			}
+			e.DB = saved
 			break
 		}
 	}

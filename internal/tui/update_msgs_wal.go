@@ -152,6 +152,19 @@ func (m *Model) onWALBlockDetailLoaded(msg walBlockDetailLoadedMsg) tea.Cmd {
 		d := msg.detail
 		s.wal.detail = &d
 		s.items = append(s.items, buildWALDetailItems(d)...)
+		// The record loaded; only the page-image decode lacked pageinspect.
+		// Offer the install as a hint rather than a blocking prompt — the raw
+		// bytes are still worth showing — and onExtInstalled's reload then
+		// picks up the decoded page.
+		if ext := d.PageInspectMissing; ext != nil {
+			s.extPrompt = &extPrompt{
+				name:        ext.Extension,
+				db:          ext.DB,
+				installable: ext.Installable,
+				reason:      extPromptReasonWALPageImage,
+				blocking:    false,
+			}
+		}
 	}
 	m.applySort(s)
 	return nil

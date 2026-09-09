@@ -6,8 +6,15 @@ const (
 	// (e.g. "128MB" for shared_buffers, "5min" for checkpoint_timeout) instead of
 	// the raw numeric value that pg_settings.setting carries. The missing_ok flag
 	// (true) returns NULL for extension GUCs whose library isn't loaded.
+	//
+	// A GUC pgdu overrides in its own session (the pool's AfterConnect sets
+	// pg_stat_statements.track = none so pgdu's queries stay out of the stats)
+	// must show the server-wide value the users' sessions run with, which is
+	// what reset_val holds; that path only ever carries text-valued GUCs.
 	sqlMaintSettings = `
-SELECT name, COALESCE(current_setting(name, true), '')
+SELECT name,
+       COALESCE(CASE WHEN setting IS DISTINCT FROM reset_val THEN reset_val
+                     ELSE current_setting(name, true) END, '')
 FROM   pg_settings
 WHERE  name = ANY($1)
 ORDER  BY name`
@@ -118,13 +125,137 @@ WHERE  datname NOT IN ('template0', 'template1')
 ORDER  BY 2 DESC
 LIMIT  1`
 
-	// sqlMaintCheckpointer fetches the cumulative checkpoint counters from
-	// pg_stat_checkpointer (introduced in PG 15; earlier clusters get zeros
-	// via error handling). A high requested/(timed+requested) ratio signals
-	// max_wal_size pressure: WAL is filling up faster than the checkpoint interval.
+	// sqlMaintCheckpointer fetches the cumulative checkpoint counters and costs
+	// from pg_stat_checkpointer (PG17+ has the write/sync times there). A high
+	// requested/(timed+requested) ratio signals max_wal_size pressure: WAL is
+	// filling up faster than the checkpoint interval. stats_reset (NULL = never)
+	// gives the window the counters cover, for the average interval.
 	sqlMaintCheckpointer = `
-SELECT num_timed, num_requested
+SELECT num_timed,
+       num_requested,
+       COALESCE(write_time, 0)::float8,
+       COALESCE(sync_time,  0)::float8,
+       COALESCE(buffers_written, 0),
+       stats_reset
 FROM   pg_stat_checkpointer`
+
+	// sqlMaintSettingsRaw reads pg_settings.setting — the raw value in the GUC's
+	// base unit (s, ms, 8kB pages, …) — for the handful of numeric GUCs the
+	// overview does arithmetic on. Settings (sqlMaintSettings) carries the
+	// human string for display; parsing "5min" back would be silly.
+	sqlMaintSettingsRaw = `
+SELECT name, setting
+FROM   pg_settings
+WHERE  name = ANY($1)`
+
+	// sqlMaintSettingBytes converts the memory GUCs to bytes on the server side:
+	// pg_size_bytes understands every unit suffix current_setting emits, and
+	// passes autovacuum_work_mem's -1 sentinel through unchanged.
+	sqlMaintSettingBytes = `
+SELECT name, pg_size_bytes(current_setting(name))::text
+FROM   pg_settings
+WHERE  name = ANY($1)`
+
+	// sqlMaintLongestIdleXact finds the client transaction that has been idle
+	// the longest: it holds its snapshot (pinning vacuum's horizon) and its
+	// locks while doing nothing. state_change is when it went idle.
+	sqlMaintLongestIdleXact = `
+SELECT pid,
+       COALESCE(application_name, ''),
+       EXTRACT(epoch FROM now() - state_change)::float8
+FROM   pg_stat_activity
+WHERE  state = 'idle in transaction'
+  AND  backend_type = 'client backend'
+  AND  pid <> pg_backend_pid()
+ORDER  BY state_change
+LIMIT  1`
+
+	// sqlMaintLongestQuery finds the longest currently executing statement.
+	sqlMaintLongestQuery = `
+SELECT pid,
+       COALESCE(application_name, ''),
+       EXTRACT(epoch FROM now() - query_start)::float8,
+       COALESCE(left(query, 60), '')
+FROM   pg_stat_activity
+WHERE  state = 'active'
+  AND  backend_type = 'client backend'
+  AND  pid <> pg_backend_pid()
+ORDER  BY query_start
+LIMIT  1`
+
+	// sqlMaintBufSummary is pg_buffercache's cheap one-row aggregate over the
+	// buffer pool (pg_buffercache 1.4+): occupancy, dirty and pinned counts and
+	// the mean usagecount, without materialising every buffer. Needs pg_monitor.
+	sqlMaintBufSummary = `
+SELECT buffers_used, buffers_unused, buffers_dirty, buffers_pinned,
+       COALESCE(usagecount_avg, 0)::float8
+FROM   pg_buffercache_summary()`
+
+	// sqlMaintIOSplit attributes I/O to who did it and why. Client-backend
+	// reads are cache misses a query waited for, and read_time/reads their mean
+	// latency (the *_time columns stay 0 with track_io_timing off). bulkread is
+	// the ring-buffer context large sequential scans use; the vacuum context is
+	// autovacuum's share of the traffic. The three write counters show who is
+	// flushing dirty buffers: ideally the checkpointer and the bgwriter, not the
+	// backends. Relation rows are filtered per column so PG18's object = 'wal'
+	// rows (WAL writes and fsyncs, which PG18 moved here from pg_stat_wal) can
+	// be read from the same scan; on PG17 those sums are simply zero.
+	sqlMaintIOSplit = `
+SELECT COALESCE(sum(reads)      FILTER (WHERE object = 'relation'), 0),
+       COALESCE(sum(reads)      FILTER (WHERE object = 'relation' AND backend_type = 'client backend'), 0),
+       COALESCE(sum(read_time)  FILTER (WHERE object = 'relation' AND backend_type = 'client backend'), 0)::float8,
+       COALESCE(sum(reads)      FILTER (WHERE object = 'relation' AND context = 'bulkread'), 0),
+       COALESCE(sum(reads)      FILTER (WHERE object = 'relation' AND context = 'vacuum'), 0),
+       COALESCE(sum(writes)     FILTER (WHERE object = 'relation' AND context = 'vacuum'), 0),
+       COALESCE(sum(writes)     FILTER (WHERE object = 'relation' AND backend_type = 'checkpointer'), 0),
+       COALESCE(sum(write_time) FILTER (WHERE object = 'relation' AND backend_type = 'checkpointer'), 0)::float8,
+       COALESCE(sum(writes)     FILTER (WHERE object = 'relation' AND backend_type = 'background writer'), 0),
+       COALESCE(sum(writes)     FILTER (WHERE object = 'relation' AND backend_type = 'client backend'), 0),
+       COALESCE(sum(write_time) FILTER (WHERE object = 'relation' AND backend_type = 'client backend'), 0)::float8,
+       COALESCE(sum(writes)     FILTER (WHERE object = 'wal'), 0),
+       COALESCE(sum(write_time) FILTER (WHERE object = 'wal'), 0)::float8,
+       COALESCE(sum(fsyncs)     FILTER (WHERE object = 'wal'), 0),
+       COALESCE(sum(fsync_time) FILTER (WHERE object = 'wal'), 0)::float8
+FROM   pg_stat_io`
+
+	// sqlMaintCurrentLSN is the write position as a byte offset, so two samples
+	// subtract to the live WAL rate. On a standby pg_current_wal_lsn() raises,
+	// so the replay position stands in.
+	sqlMaintCurrentLSN = `
+SELECT pg_wal_lsn_diff(CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn()
+                            ELSE pg_current_wal_lsn() END, '0/0')::bigint`
+
+	// sqlMaintWALDir sums the WAL segments on disk. pg_ls_waldir() needs
+	// pg_monitor; failure leaves the row at "n/a".
+	sqlMaintWALDir = `
+SELECT COALESCE(sum(size), 0)::bigint, count(*)::bigint
+FROM   pg_ls_waldir()`
+
+	// sqlMaintAutovacWorkers counts the autovacuum workers running right now,
+	// to compare against autovacuum_max_workers.
+	sqlMaintAutovacWorkers = `
+SELECT count(*)::int
+FROM   pg_stat_activity
+WHERE  backend_type = 'autovacuum worker'`
+
+	// sqlMaintTablesOverThreshold counts the current database's tables whose
+	// dead tuples already exceed their autovacuum trigger (threshold +
+	// scale_factor × reltuples, honouring per-table overrides via the shared
+	// CTE) and names the three worst. reltuples = -1 marks a never-analyzed
+	// table, whose threshold would go negative, so those are left out.
+	sqlMaintTablesOverThreshold = sqlVacuumRelSetCTE + `
+SELECT count(*)::bigint,
+       COALESCE((array_agg(schema_rel ORDER BY dead DESC))[1:3], '{}'::text[])
+FROM (
+    SELECT PSUT.schemaname || '.' || PSUT.relname AS schema_rel,
+           PSUT.n_dead_tup                        AS dead
+    FROM   pg_stat_user_tables PSUT
+    JOIN   pg_class C  ON C.oid = PSUT.relid
+    JOIN   rel_set RS  ON RS.oid = C.oid
+    WHERE  C.reltuples >= 0
+      AND  PSUT.n_dead_tup > coalesce(RS.rel_av_vac_threshold, current_setting('autovacuum_vacuum_threshold')::bigint)
+                           + coalesce(RS.rel_av_vac_scale_factor, current_setting('autovacuum_vacuum_scale_factor')::numeric) * C.reltuples
+) t`
 
 	// sqlMaintMaxConns reads max_connections once (rarely changes at runtime).
 	sqlMaintMaxConns = `SELECT current_setting('max_connections')::int`
@@ -156,7 +287,7 @@ LIMIT  8`
 	// sqlMaintTempByDB lists databases with non-zero temp-file usage, ordered by
 	// temp_bytes descending so the biggest offenders appear first.
 	sqlMaintTempByDB = `
-SELECT datname, temp_files, temp_bytes
+SELECT datname, temp_files, temp_bytes, stats_reset
 FROM   pg_stat_database
 WHERE  temp_files > 0
 ORDER  BY temp_bytes DESC
@@ -188,22 +319,21 @@ SELECT (pg_current_wal_insert_lsn() - redo_lsn)::bigint                         
        checkpoint_time
 FROM   pg_control_checkpoint()`
 
-	// sqlMaintWALStats reads cumulative WAL write statistics (PG 14+).
+	// sqlMaintWALStats reads cumulative WAL generation from pg_stat_wal.
 	// wal_buffers_full counts how often a backend had to wait for WAL buffer
-	// space — a persistent non-zero value means wal_buffers is too small.
-	sqlMaintWALStats = `SELECT wal_bytes, wal_buffers_full FROM pg_stat_wal`
+	// space — a persistent non-zero value means wal_buffers is too small;
+	// wal_fpi against wal_records is the full-page-image share. Only the
+	// columns PG18 kept are read (it dropped the wal_write/wal_sync timings).
+	sqlMaintWALStats = `
+SELECT wal_records, wal_fpi, wal_bytes, wal_buffers_full, stats_reset
+FROM   pg_stat_wal`
 
-	// sqlMaintBgwriter reads background-writer pressure: buffers written directly
-	// by client backends (bypassing the bgwriter/checkpointer, which stalls the
-	// writing query) against total buffer allocations. PG17 removed
-	// buffers_backend from pg_stat_bgwriter — the count now lives in pg_stat_io
-	// as client-backend relation writes — while buffers_alloc stayed. A high
-	// ratio signals that max_wal_size or bgwriter_lru_maxpages needs tuning.
+	// sqlMaintBgwriter reads the background writer's own counters. PG17 moved
+	// the backend-written count to pg_stat_io (sqlMaintIOSplit); what remains
+	// here is the LRU sweep: buffers_clean it wrote, maxwritten_clean the
+	// number of sweeps cut short by bgwriter_lru_maxpages.
 	sqlMaintBgwriter = `
-SELECT COALESCE((SELECT SUM(writes)::bigint
-                 FROM   pg_stat_io
-                 WHERE  backend_type = 'client backend' AND object = 'relation'), 0),
-       COALESCE(buffers_alloc, 0)
+SELECT COALESCE(buffers_clean, 0), COALESCE(maxwritten_clean, 0), COALESCE(buffers_alloc, 0)
 FROM   pg_stat_bgwriter`
 
 	// sqlMaintArchiver reads WAL-archiver health. failed_count > 0 means pg_wal
@@ -217,10 +347,14 @@ FROM   pg_stat_archiver`
 
 	// sqlAllSettings fetches all pg_settings for the Settings browser.
 	// boot_val is the compiled-in default; we compare setting == boot_val to
-	// flag non-default values (yellow highlight).
+	// flag non-default values (yellow highlight). display is the value as
+	// current_setting() formats it ("8GB", "5min") — with the same reset_val
+	// detour as sqlMaintSettings for GUCs pgdu overrides in its own session.
 	sqlAllSettings = `
 SELECT name,
        COALESCE(setting, ''),
+       COALESCE(CASE WHEN setting IS DISTINCT FROM reset_val THEN reset_val
+                     ELSE current_setting(name, true) END, '') AS display,
        COALESCE(unit,    ''),
        COALESCE(category,''),
        COALESCE(short_desc, ''),
@@ -431,6 +565,22 @@ var maintSettingsKeys = []string{
 	"autovacuum_naptime",
 	"autovacuum_freeze_max_age",
 	"autovacuum_multixact_freeze_max_age",
+	"autovacuum_work_mem",
+	"autovacuum_vacuum_cost_delay",
+	"autovacuum_vacuum_cost_limit",
+	"huge_pages",
+	"huge_page_size",
+	"shared_memory_size_in_huge_pages",
+	"wal_buffers",
+	"checkpoint_completion_target",
+	"bgwriter_lru_maxpages",
+	"idle_in_transaction_session_timeout",
+	"track_io_timing",
+	"track_wal_io_timing",
+	"track_functions",
+	"log_min_duration_statement",
+	"log_autovacuum_min_duration",
+	"log_checkpoints",
 	"pg_stat_statements.max",
 	"pg_stat_statements.track",
 	"pg_stat_statements.track_planning",
@@ -438,4 +588,31 @@ var maintSettingsKeys = []string{
 	"pg_qualstats.enabled",
 	"pg_qualstats.sample_rate",
 	"pg_qualstats.track_constants",
+}
+
+// maintSettingBytesKeys are the memory GUCs fetched as bytes (sqlMaintSettingBytes).
+var maintSettingBytesKeys = []string{
+	"shared_buffers",
+	"work_mem",
+	"maintenance_work_mem",
+	"autovacuum_work_mem",
+	"effective_cache_size",
+	"wal_buffers",
+	"max_wal_size",
+	"min_wal_size",
+}
+
+// maintSettingsRawKeys are the numeric GUCs fetched in base units
+// (sqlMaintSettingsRaw) and parsed into MaintTuning.
+var maintSettingsRawKeys = []string{
+	"checkpoint_timeout",
+	"checkpoint_completion_target",
+	"autovacuum_vacuum_cost_delay",
+	"vacuum_cost_delay",
+	"autovacuum_vacuum_cost_limit",
+	"vacuum_cost_limit",
+	"autovacuum_max_workers",
+	"shared_memory_size_in_huge_pages",
+	"bgwriter_lru_maxpages",
+	"idle_in_transaction_session_timeout",
 }
