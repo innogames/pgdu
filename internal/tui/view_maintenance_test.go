@@ -155,7 +155,7 @@ func TestRenderMaintenanceRatesAndAdvice(t *testing.T) {
 	out := stripANSI(m.renderMaintenance(s, 200))
 	for _, want := range []string{
 		"rates over the last 30s", "6.0k/min", "(last 30s)", "120.00 MB/min",
-		"! huge_pages try → vm.nr_hugepages=4200", "sysctl -w vm.nr_hugepages=4200",
+		"~ huge_pages try → vm.nr_hugepages=4200", "sysctl -w vm.nr_hugepages=4200",
 		"! max_wal_size 4GB", "of checkpoints WAL-driven",
 		"auto-refresh 10s",
 	} {

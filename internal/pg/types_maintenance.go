@@ -411,9 +411,9 @@ type WALDirStat struct {
 	Files   int64
 }
 
-// statsWindow returns how long the cumulative counters behind reset have been
+// StatsWindow returns how long the cumulative counters behind reset have been
 // accumulating: since the reset, or since postmaster start when never reset.
-func (m *MaintenanceInfo) statsWindow(reset time.Time) (time.Duration, bool) {
+func (m *MaintenanceInfo) StatsWindow(reset time.Time) (time.Duration, bool) {
 	since := reset
 	if since.IsZero() {
 		since = m.StartTime
@@ -434,7 +434,7 @@ func (m *MaintenanceInfo) WALBytesPerSecSinceReset() (float64, bool) {
 	if !m.WAL.HasData {
 		return 0, false
 	}
-	w, ok := m.statsWindow(m.WAL.StatsReset)
+	w, ok := m.StatsWindow(m.WAL.StatsReset)
 	if !ok {
 		return 0, false
 	}
@@ -449,7 +449,7 @@ func (m *MaintenanceInfo) AvgCheckpointInterval() (time.Duration, bool) {
 	if !m.Checkpointer.HasData || total <= 0 {
 		return 0, false
 	}
-	w, ok := m.statsWindow(m.Checkpointer.StatsReset)
+	w, ok := m.StatsWindow(m.Checkpointer.StatsReset)
 	if !ok {
 		return 0, false
 	}
@@ -494,6 +494,9 @@ type TempDBStat struct {
 	DB    string
 	Files int64
 	Bytes int64
+	// StatsReset is when this database's counters were last zeroed (zero =
+	// never): a lifetime byte total only means something as a rate over it.
+	StatsReset time.Time
 }
 
 // SettingRow is one row from pg_settings for the settings browser.

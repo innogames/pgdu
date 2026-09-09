@@ -287,7 +287,7 @@ LIMIT  8`
 	// sqlMaintTempByDB lists databases with non-zero temp-file usage, ordered by
 	// temp_bytes descending so the biggest offenders appear first.
 	sqlMaintTempByDB = `
-SELECT datname, temp_files, temp_bytes
+SELECT datname, temp_files, temp_bytes, stats_reset
 FROM   pg_stat_database
 WHERE  temp_files > 0
 ORDER  BY temp_bytes DESC

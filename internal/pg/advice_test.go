@@ -76,15 +76,17 @@ func TestMaintAdviceRules(t *testing.T) {
 		fixHas    string // substring the Fix must contain; "" = Fix must be empty
 	}{
 		{"huge pages not allocated", func(i *MaintenanceInfo) { i.Host.HugePagesTotal = 0 },
-			"huge_pages", AdviceCrit, "vm.nr_hugepages=4200", "sysctl -w vm.nr_hugepages=4200"},
+			"huge_pages", AdviceWarn, "vm.nr_hugepages=4200", "sysctl -w vm.nr_hugepages=4200"},
 		{"huge_pages off ignores host", func(i *MaintenanceInfo) { i.Host.HugePagesTotal = 0; i.Settings["huge_pages"] = "off" },
 			"", 0, "", ""},
-		{"swap in use", func(i *MaintenanceInfo) { i.Host.SwapFree = 7 * gib },
+		{"swap in use", func(i *MaintenanceInfo) { i.Host.SwapFree = 6 * gib }, // 2 GiB of 32 GiB
 			"swap", AdviceWarn, "", ""},
+		{"a little swap is fine", func(i *MaintenanceInfo) { i.Host.SwapFree = 8*gib - 45*mib },
+			"", 0, "", ""},
 		{"shared_buffers tiny", func(i *MaintenanceInfo) { i.SettingBytes["shared_buffers"] = gib },
 			"shared_buffers", AdviceInfo, "", ""},
 		{"effective_cache_size low", func(i *MaintenanceInfo) { i.SettingBytes["effective_cache_size"] = 4 * gib },
-			"effective_cache_size", AdviceWarn, "24GB", "ALTER SYSTEM SET effective_cache_size = '24GB'"},
+			"effective_cache_size", AdviceWarn, "21GB", "ALTER SYSTEM SET effective_cache_size = '21GB'"},
 		{"work_mem exposure", func(i *MaintenanceInfo) { i.SettingBytes["work_mem"] = 256 * mib },
 			"work_mem", AdviceWarn, "81MB", "ALTER SYSTEM SET work_mem"},
 		{"dirty buffers", func(i *MaintenanceInfo) { i.BufCache.Dirty = 300_000 },
@@ -96,6 +98,13 @@ func TestMaintAdviceRules(t *testing.T) {
 			"backend_fsyncs", AdviceCrit, "", ""},
 		{"backends writing", func(i *MaintenanceInfo) { i.IOSplit.ClientWrites = 30_000 },
 			"bgwriter_lru_maxpages", AdviceWarn, "400", "ALTER SYSTEM SET bgwriter_lru_maxpages = '400'"},
+		{"bgwriter capped sweeps", func(i *MaintenanceInfo) {
+			// 12M sweeps × 100 pages = 1.2G of 2.7G cleaned → 44 %.
+			i.Bgwriter = BgwriterStat{BuffersClean: 2_700_000_000, MaxwrittenClean: 12_000_000}
+		}, "bgwriter_lru_maxpages", AdviceInfo, "400", "bgwriter_lru_maxpages = '400'"},
+		{"bgwriter rarely capped is fine", func(i *MaintenanceInfo) {
+			i.Bgwriter = BgwriterStat{BuffersClean: 2_700_000_000, MaxwrittenClean: 1_000_000}
+		}, "", 0, "", ""},
 		{"backends writing below floor is ignored", func(i *MaintenanceInfo) {
 			i.IOSplit = IOSplitStat{HasData: true, CheckpointerWrites: 5, ClientWrites: 5}
 		}, "", 0, "", ""},
@@ -196,7 +205,7 @@ func TestMaintAdviceOrderAndActionable(t *testing.T) {
 	info := healthyInfo()
 	info.Settings["log_checkpoints"] = "off"           // Info with Fix
 	info.SettingBytes["shared_buffers"] = gib          // Info without Fix
-	info.Host.SwapFree = 7 * gib                       // Warn
+	info.Host.SwapFree = 6 * gib                       // Warn
 	info.Settings["pg_stat_statements.track"] = "none" // Crit
 	got := MaintAdvice(info)
 	keys := make([]string, 0, len(got))

@@ -136,7 +136,14 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	_ = pool.QueryRow(ctx, sqlMaintTempFiles).Scan(&info.TempFiles, &info.TempBytes)
 	info.TempByDB = collectBestEffort(ctx, pool, sqlMaintTempByDB, nil, func(rows pgx.Rows) (TempDBStat, bool) {
 		var s TempDBStat
-		return s, rows.Scan(&s.DB, &s.Files, &s.Bytes) == nil
+		var reset *time.Time
+		if rows.Scan(&s.DB, &s.Files, &s.Bytes, &reset) != nil {
+			return s, false
+		}
+		if reset != nil {
+			s.StatsReset = *reset
+		}
+		return s, true
 	})
 
 	// --- background writer LRU sweep ---

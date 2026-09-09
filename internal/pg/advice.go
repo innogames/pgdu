@@ -84,6 +84,10 @@ const (
 	// OOM path.
 	workMemExposureWarnFrac = 0.50
 
+	// A few dozen MB in swap is the kernel parking idle pages, not pressure;
+	// only swap worth a twentieth of RAM says memory is actually short.
+	swapWarnFracOfRAM = 0.05
+
 	// Dirty buffers: a quarter of the pool waiting to be flushed means the
 	// checkpointer / bgwriter are not keeping up with the write rate.
 	bufDirtyWarnFrac = 0.25
@@ -111,6 +115,11 @@ const (
 	// behind. The floor keeps a fresh cluster's handful of writes from grading.
 	backendWriteShareWarnFrac = 0.10
 	writeSplitMinWrites       = 1000
+
+	// A sweep stopped at bgwriter_lru_maxpages wrote exactly that many pages;
+	// when those capped sweeps account for this share of everything the
+	// bgwriter cleaned, its per-round budget is the limit, not the demand.
+	bgwriterCappedFrac = 0.25
 
 	// Full-page images are the WAL cost of frequent checkpoints; flag the share
 	// only once the record count is meaningful.
@@ -238,8 +247,10 @@ func adviseHostMemory(info *MaintenanceInfo, add func(Advice)) {
 	}
 
 	if hp := info.Settings["huge_pages"]; (hp == "try" || hp == "on") && host.HugePagesTotal == 0 {
+		// A warning, not critical: the server runs fine on 4 kB pages, it
+		// just pays TLB pressure and page-table memory for a large pool.
 		a := Advice{
-			Key: "huge_pages", Level: AdviceCrit, Setting: "huge_pages", Current: hp,
+			Key: "huge_pages", Level: AdviceWarn, Setting: "huge_pages", Current: hp,
 			Reason: "none allocated on the host — silently running on 4 kB pages",
 		}
 		if n := info.Tuning.ShmemHugePages; n > 0 {
@@ -250,10 +261,11 @@ func adviseHostMemory(info *MaintenanceInfo, add func(Advice)) {
 		add(a)
 	}
 
-	if used := host.SwapUsed(); used > 0 {
+	if used := host.SwapUsed(); float64(used) > swapWarnFracOfRAM*float64(host.Total) {
 		add(Advice{
 			Key: "swap", Level: AdviceWarn, Current: humanize.Bytes(used),
-			Reason: "swap in use — Postgres memory may be paged out",
+			Reason: fmt.Sprintf("swap in use (%.0f%% of RAM) — Postgres memory may be paged out",
+				100*float64(used)/float64(host.Total)),
 		})
 	}
 
@@ -269,14 +281,17 @@ func adviseHostMemory(info *MaintenanceInfo, add func(Advice)) {
 		}
 	}
 
+	// The trigger is what the host actually caches right now; the suggestion
+	// is the ⅔-of-RAM rule of thumb rather than that momentary figure, which
+	// a bulk load or a neighbouring process can move by gigabytes.
 	if ecs, ok := info.SettingBytes["effective_cache_size"]; ok && sbOK && host.Cached > 0 {
 		actual := sb + host.Cached
 		if float64(ecs) < ecsMinFracOfCache*float64(actual) {
-			sugg := max(actual/(1<<30), 1) << 30 // whole GiB, rounded down
+			sugg := max(host.Total*2/3/(1<<30), 1) << 30 // whole GiB, rounded down
 			add(Advice{
 				Key: "effective_cache_size", Level: AdviceWarn, Setting: "effective_cache_size",
 				Current: info.Settings["effective_cache_size"], Suggested: gucBytes(sugg),
-				Reason: fmt.Sprintf("planner assumes %s of cache, host has ~%s (shared_buffers + page cache)",
+				Reason: fmt.Sprintf("planner assumes %s of cache, host has ~%s (shared_buffers + page cache); ⅔ of RAM is the rule of thumb",
 					humanize.Bytes(ecs), humanize.Bytes(actual)),
 				Fix: alterReload("effective_cache_size", gucBytes(sugg)),
 			})
@@ -287,12 +302,15 @@ func adviseHostMemory(info *MaintenanceInfo, add func(Advice)) {
 		theoretical := wm * int64(info.MaxConns)
 		if float64(theoretical) > workMemExposureWarnFrac*float64(host.Total) {
 			sugg := max(host.Total/4/int64(info.MaxConns)/(1<<20), 1) << 20 // whole MiB, rounded down
+			reason := fmt.Sprintf("work_mem × max_connections = %s (%.0f%% of RAM)",
+				humanize.Bytes(theoretical), 100*float64(theoretical)/float64(host.Total))
+			if n := info.TotalConns(); n > 0 {
+				reason += fmt.Sprintf(", × %d in use = %s", n, humanize.Bytes(wm*int64(n)))
+			}
 			add(Advice{
 				Key: "work_mem", Level: AdviceWarn, Setting: "work_mem",
 				Current: info.Settings["work_mem"], Suggested: gucBytes(sugg),
-				Reason: fmt.Sprintf("work_mem × max_connections = %s (%.0f%% of RAM)",
-					humanize.Bytes(theoretical), 100*float64(theoretical)/float64(host.Total)),
-				Fix: alterReload("work_mem", gucBytes(sugg)),
+				Reason: reason, Fix: alterReload("work_mem", gucBytes(sugg)),
 			})
 		}
 	}
@@ -322,13 +340,22 @@ func adviseBufferCache(info *MaintenanceInfo, add func(Advice)) {
 			Reason: "fsyncs issued by backends — checkpointer can't keep up",
 		})
 	}
+	// Two signals on the same knob: backends writing dirty pages themselves is
+	// the bgwriter visibly behind (warn); sweeps routinely stopping at the cap
+	// is it being held back before that shows (info). One advice either way.
+	a := Advice{Key: "bgwriter_lru_maxpages", Setting: "bgwriter_lru_maxpages",
+		Current: info.Settings["bgwriter_lru_maxpages"]}
 	if frac, ok := info.IOSplit.ClientWriteFrac(); ok && frac > backendWriteShareWarnFrac &&
 		info.IOSplit.CheckpointerWrites+info.IOSplit.BgwriterWrites+info.IOSplit.ClientWrites >= writeSplitMinWrites {
-		a := Advice{
-			Key: "bgwriter_lru_maxpages", Level: AdviceWarn, Setting: "bgwriter_lru_maxpages",
-			Current: info.Settings["bgwriter_lru_maxpages"],
-			Reason:  fmt.Sprintf("%.0f%% of dirty-page writes done by backends themselves", frac*100),
-		}
+		a.Level = AdviceWarn
+		a.Reason = fmt.Sprintf("%.0f%% of dirty-page writes done by backends themselves", frac*100)
+	} else if bg, cur := info.Bgwriter, info.Tuning.BgwriterLRUMaxpages; cur > 0 && bg.BuffersClean > 0 &&
+		float64(bg.MaxwrittenClean*cur)/float64(bg.BuffersClean) > bgwriterCappedFrac {
+		a.Level = AdviceInfo
+		a.Reason = fmt.Sprintf("%s sweeps stopped at the %d-page cap — %.0f%% of what it cleaned",
+			compactCount(bg.MaxwrittenClean), cur, 100*float64(bg.MaxwrittenClean*cur)/float64(bg.BuffersClean))
+	}
+	if a.Reason != "" {
 		if cur := info.Tuning.BgwriterLRUMaxpages; cur > 0 && cur < 1000 {
 			sugg := min(cur*4, 1000)
 			a.Suggested = strconv.FormatInt(sugg, 10)

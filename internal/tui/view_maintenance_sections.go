@@ -765,11 +765,16 @@ func renderMaintWAL(v maintView) string {
 			legend := styleBar.Render("■") + mu(" checkpointer "+pct(sp.CheckpointerWrites)+"%  ") +
 				styleBarAlt.Render("■") + mu(" bgwriter "+pct(sp.BgwriterWrites)+"%  ") +
 				styleErr.Render("■") + mu(" backends "+pct(sp.ClientWrites)+"%")
-			b.WriteString(maintRow("dirty-page writes", bar+"  "+legend+v.note("bgwriter_lru_maxpages")))
+			b.WriteString(maintRow("dirty-page writes", bar+"  "+legend))
 		}
+		// Both bgwriter_lru_maxpages signals (backends writing, sweeps capped)
+		// land here, next to the knob they are about; without advice the row
+		// still shows how often the cap was hit.
 		bg := info.Bgwriter
 		bgLine := formatRows(bg.BuffersClean) + " cleaned"
-		if bg.MaxwrittenClean > 0 {
+		if note := v.note("bgwriter_lru_maxpages"); note != "" {
+			bgLine += note
+		} else if bg.MaxwrittenClean > 0 {
 			bgLine += "  " + mu(fmt.Sprintf("%s sweeps stopped at bgwriter_lru_maxpages (%s)",
 				formatRows(bg.MaxwrittenClean), settingOr(set, "bgwriter_lru_maxpages")))
 		}
@@ -876,7 +881,12 @@ func renderMaintHealth(v maintView) string {
 				if t.Files == 1 {
 					fileWord = "file"
 				}
-				b.WriteString(maintRow("", mu(fmt.Sprintf("  %s:  %s %s  %s", t.DB, formatRows(t.Files), fileWord, humanize.Bytes(t.Bytes)))))
+				line := fmt.Sprintf("  %s:  %s %s  %s", t.DB, formatRows(t.Files), fileWord, humanize.Bytes(t.Bytes))
+				if w, ok := info.StatsWindow(t.StatsReset); ok && w > time.Hour {
+					line += fmt.Sprintf("  (%s/day, %s)", humanize.Bytes(int64(float64(t.Bytes)/w.Hours()*24)),
+						sinceResetLabel(t.StatsReset, info.StartTime))
+				}
+				b.WriteString(maintRow("", mu(line)))
 			}
 		} else {
 			b.WriteString(maintRow("temp files", mu("none")))
