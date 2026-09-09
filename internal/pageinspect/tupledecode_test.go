@@ -31,6 +31,13 @@ func TestDecodeAttrValue(t *testing.T) {
 	}{
 		{"int4", pg.TupleAttr{Len: 4, TypName: "int4", Value: le32(123)}, "123"},
 		{"int8 negative", pg.TupleAttr{Len: 8, TypName: "int8", Value: le64(^uint64(0))}, "-1"},
+		{"unix seconds by _at name", pg.TupleAttr{Name: "created_at", Len: 4, TypName: "int4", Value: le32(1788347959)}, "2026-09-02 11:19:19 (1788347959)"},
+		{"unix seconds by timestamp name", pg.TupleAttr{Name: "Timestamp", Len: 8, TypName: "int8", Value: le64(1788347959)}, "2026-09-02 11:19:19 (1788347959)"},
+		{"unix seconds by _timestamp suffix", pg.TupleAttr{Name: "event_timestamp", Len: 4, TypName: "int4", Value: le32(1788347959)}, "2026-09-02 11:19:19 (1788347959)"},
+		{"unix millis in bigint", pg.TupleAttr{Name: "updated_at", Len: 8, TypName: "int8", Value: le64(1788347959123)}, "2026-09-02 11:19:19.123 (1788347959123)"},
+		{"time-named but too small", pg.TupleAttr{Name: "created_at", Len: 4, TypName: "int4", Value: le32(12345)}, "12345"},
+		{"time-named but too big", pg.TupleAttr{Name: "expires_at", Len: 8, TypName: "int8", Value: le64(4_102_444_800)}, "4102444800"},
+		{"plausible value, plain name", pg.TupleAttr{Name: "player_id", Len: 4, TypName: "int4", Value: le32(1788347959)}, "1788347959"},
 		{"bool", pg.TupleAttr{Len: 1, TypName: "bool", Value: []byte{1}}, "t"},
 		{"timestamp epoch", pg.TupleAttr{Len: 8, TypName: "timestamp", Value: le64(0)}, "2000-01-01 00:00:00"},
 		{"text short header", pg.TupleAttr{Len: -1, TypCategory: "S", Value: []byte{0x09, 'a', 'b', 'c'}}, "abc"},

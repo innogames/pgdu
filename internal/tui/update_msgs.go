@@ -270,6 +270,12 @@ func (m *Model) onDescribeLoaded(msg describeLoadedMsg) tea.Cmd {
 	if msg.err == nil && msg.table.OID != 0 {
 		s.table = msg.table
 	}
+	// A cross-database resolve may have landed somewhere other than the
+	// connection database; the screen follows so the crumb names the right
+	// database and the buffer footprint / page inspector query the right pool.
+	if msg.err == nil && msg.db != "" {
+		s.db = msg.db
+	}
 	// (Re)load the cache-footprint section for table describes — but only while
 	// detail mode is showing it: the plain view never scans pg_buffercache (the
 	// `d` toggle issues the first load instead). Triggering here — rather than
@@ -411,8 +417,26 @@ func (m *Model) onMaintLoaded(msg maintLoadedMsg) tea.Cmd {
 		return nil
 	}
 	s.maintenance.err = nil
+	s.maintenance.prev = s.maintenance.info
 	s.maintenance.info = msg.info
 	return nil
+}
+
+// onMaintTick re-samples the overview while it is the top screen and re-arms
+// the tick; navigating away (or cycling the cadence off) ends the loop so a
+// later re-entry starts a fresh one.
+func (m *Model) onMaintTick() tea.Cmd {
+	top := m.top()
+	if top.level != levelMaintenance {
+		m.maintTicking = false
+		return nil
+	}
+	next := m.maintTick()
+	if next == nil {
+		m.maintTicking = false
+		return nil
+	}
+	return tea.Batch(m.loadMaintenanceCmd(top.db), next)
 }
 
 func (m *Model) onSettingsLoaded(msg settingsLoadedMsg) tea.Cmd {

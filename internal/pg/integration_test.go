@@ -57,6 +57,29 @@ func TestIntegration_FullChain(t *testing.T) {
 		t.Fatalf("ListSchemas: err=%v len=%d", err, len(schemas))
 	}
 
+	// System overview: every sub-query is best-effort, so the only hard
+	// failure is a nil result. The PG17+ statistics views must have populated
+	// their HasData gates, and the advice rules must run without panicking on
+	// real data.
+	info, err := c.Maintenance(ctx, db)
+	if err != nil || info == nil {
+		t.Fatalf("Maintenance: err=%v info=%v", err, info)
+	}
+	if info.Version == "" || info.SampledAt.IsZero() {
+		t.Errorf("Maintenance: version %q / sampledAt %v not populated", info.Version, info.SampledAt)
+	}
+	if !info.Checkpointer.HasData || !info.WAL.HasData || !info.IO.HasData || !info.IOSplit.HasData {
+		t.Errorf("Maintenance: PG17+ stats views not read: checkpointer=%v wal=%v io=%v iosplit=%v",
+			info.Checkpointer.HasData, info.WAL.HasData, info.IO.HasData, info.IOSplit.HasData)
+	}
+	if info.WAL.CurrentLSNBytes <= 0 {
+		t.Errorf("Maintenance: current LSN not read")
+	}
+	if _, ok := info.SettingBytes["shared_buffers"]; !ok || info.Tuning.CheckpointTimeoutSecs <= 0 {
+		t.Errorf("Maintenance: typed settings not parsed: bytes=%v tuning=%+v", info.SettingBytes, info.Tuning)
+	}
+	_ = MaintAdvice(info)
+
 	// Find the public schema (seeded by hand).
 	var pubFound bool
 	for _, s := range schemas {

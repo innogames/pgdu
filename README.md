@@ -31,10 +31,15 @@ web server.
   histogram with dirty and pinned buffers per band; `p` reads a hot table page
   by page, `m` maps the whole shared-memory segment.
 - **Health triage board** — 25 checks run concurrently and land as red / yellow /
-  green; `↵` jumps straight to the offender, and the green ones unfold on demand. A system overview shows the server's
-  vital signs and a `pg_settings` browser that flags non-default and
-  restart-pending values.
-- **38 diagnostic queries, 11 with a runnable fix** — `↵` generates a lock-safe
+  green; `↵` jumps straight to the offender, and the green ones unfold on demand.
+- **System overview as a one-screen health check** — memory sizing against the
+  host (huge pages, page cache, swap), buffer-cache temperature and miss latency,
+  checkpoint interval and cost with a recommended `max_wal_size`, autovacuum
+  backlog, session hygiene and the observability settings; every threshold that
+  trips becomes a coloured note and a line in the **recommendations** panel with a
+  copyable `ALTER SYSTEM` fix. `t` samples twice for per-minute rates; a
+  `pg_settings` browser flags non-default and restart-pending values.
+- **39 diagnostic queries, 11 with a runnable fix** — `↵` generates a lock-safe
   script (REINDEX / DROP INDEX CONCURRENTLY, ANALYZE, VACUUM, `lock_timeout`-guarded
   ALTER), `y` runs it statement by statement with notices streamed back.
 - **Live activity with OS-level detail** — 20+ columns including RSS, CPU %,
@@ -196,8 +201,9 @@ toggles the category sections off for a flat count-ordered list. `/` searches, `
 widens the tail window (32 MiB up to the whole file), `t` starts a live tail
 that re-reads incrementally and survives rotation. `↵` drills group → entries →
 the full record, `j` jumps from an entry to its line in the timeline, `d`
-describes the table behind a statement or error, and `C` picks timeline columns
-(including a reverse-DNS `hostname` for the client).
+describes the table behind a statement or error (in the line's database when
+the prefix has `%d`, otherwise searched across all databases), and `C` picks
+timeline columns (including a reverse-DNS `hostname` for the client).
 
 Inside a group, `Tab` swaps the entry list for a **parameters** table: the
 literal values inlined in each member statement — or only the first one, `$1`
@@ -253,7 +259,7 @@ sorted most-severe first. Green checks collapse into one summary row; `↵` on i
 `↵` on a row drills into whatever explains it: the diagnostic query, the lock
 tree, the activity list, the system overview, or the pgbouncer tool.
 
-**Diagnostics** (under *Other tools*) are 38 saved queries in six categories —
+**Diagnostics** (under *Other tools*) are 39 saved queries in six categories —
 index, table, vacuum, activity, WAL, server — with `f` to filter by category, `s`
 to show the SQL, `C` to pick columns, and `d` to describe the object behind a
 row (in the row's own database when the query ran across all of them). Eleven of them come with a **fix**:
@@ -271,19 +277,27 @@ success the diagnostic reloads so you see the effect immediately.
 
 ### System overview
 
-A server dashboard on one screen: version, role, uptime, connection usage split by
-state, longest transaction; commit / rollback ratio, deadlocks and conflicts;
-tuple-level write and scan activity; replication and slots; memory GUCs;
-autovacuum settings and transaction-ID and multixact age against their
-`autovacuum_*freeze_max_age` limits; WAL and checkpoint statistics; `pg_stat_io`; and
-pending configuration changes, including settings that still need a restart. The
-top block shows **extension capacity** — how full `pg_stat_statements` /
-`pg_qualstats` and the table statistics are — with a confirmed reset (`↵`,
-`y`). `s` opens the **settings browser**: every `pg_settings` entry with its
-value, filterable with `/`, non-default values in yellow and settings still
-waiting for a restart in red — the place to go when the dashboard's *pending
-config* line names something. `a`, `w`, `r`, and `p` jump to activity, WAL,
-replication, and the progress monitor.
+A server health check on one screen: version, role, uptime, connections split by
+state, the longest transaction, idle-in-transaction and running query; commit / rollback ratio, deadlocks and conflicts; tuple-level write
+and scan activity; replication and slots; the memory GUCs against the host they run
+on (huge pages actually allocated, page cache, swap, `work_mem × max_connections`);
+autovacuum workers busy, tables past their vacuum threshold, and transaction-ID and
+multixact age against their `autovacuum_*freeze_max_age` limits; the buffer cache
+(`pg_buffercache_summary`, usage-count temperature, miss latency, who writes dirty
+pages); WAL rate, checkpoint interval and cost, `pg_wal` on disk; the observability
+settings (`track_io_timing`, `log_checkpoints`, `pg_stat_statements.track`); and
+pending configuration changes, including settings that still need a restart.
+Cumulative counters are labelled with the window they cover; `t` turns on
+auto-refresh so per-minute rates appear next to them. Every threshold that trips
+shows as a coloured note on its row and again in the **recommendations** panel at
+the bottom, worst first, with the concrete change as a copyable `ALTER SYSTEM`
+line — nothing is applied by pgdu. The top block shows **extension capacity** —
+how full `pg_stat_statements` / `pg_qualstats` and the table statistics are — with
+a confirmed reset (`↵`, `y`). `s` opens the **settings browser**: every
+`pg_settings` entry with its value, filterable with `/`, non-default values in
+yellow and settings still waiting for a restart in red — the place to go when the
+dashboard's *pending config* line names something. `a`, `w`, `r`, `o` and `p` jump
+to activity, WAL, replication, the full `pg_stat_io` table and the progress monitor.
 
 ### Table overview
 
@@ -356,7 +370,9 @@ redirect line pointer moves the cursor to its target, so repeated `↵` walks a
 HOT chain. `C` picks which of the table's own columns ride along as value
 columns (the primary key by default): a live row shows its value as the session
 sees it, while a dead, aborted or superseded tuple shows the value decoded from
-its own bytes, muted — the versions no query can reach any more.
+its own bytes, muted — the versions no query can reach any more. Integer columns
+named like a time (`*_at`, `timestamp`) whose values fall in a plausible range are
+rendered as timestamps.
 
 ![Tuples](docs/page_tuples.png)
 
@@ -490,12 +506,13 @@ Frequently used view-specific keys:
 | `k` `x`    | activity         | cancel query / terminate backend (`y` to confirm) |
 | `S` `L` `D`| top queries      | save / browse & diff / delete snapshots           |
 | `R`        | top queries      | re-baseline the window                            |
-| `d`        | queries, logs, diagnostics | describe the table (`d` again: detail mode) |
+| `d`        | queries, logs, diagnostics, wal | describe the table / index (`d` again: detail mode) |
 | `m`        | buffers / logs   | shared-memory map / toggle log sections           |
 | `Tab`      | logs / log group | groups → timeline → slow queries → pooler stats / entries → parameters → `$1` |
-| `t`        | activity, queries, logs, pgbouncer / describe | cycle auto-refresh / live tail / open top queries filtered to the table |
+| `t`        | activity, queries, logs, pgbouncer, overview / describe | cycle auto-refresh / live tail / open top queries filtered to the table |
 | `l`        | pgbouncer        | open the instance's log in the log analyzer       |
 | `s`        | diagnostics / index tuples / overview | show SQL / seek to a key / settings browser |
+| `a` `w` `r` `o` | overview    | jump to activity / WAL / replication slots / `pg_stat_io` by backend type |
 
 `e` writes the current view — filtered and sorted as displayed — to
 `$TMPDIR/pgdu-<tool>-YYYYMMDD-HHMMSS.csv` and prints the path. The temp
@@ -530,7 +547,9 @@ safe to re-run — each table is dropped and rebuilt.
 - The PgBouncer tool needs its login in `stats_users` or `admin_users` with a
   password in `auth_file` (see above); process discovery via `/proc` is
   Linux-only and needs pgdu on the pgbouncer host.
-- The per-backend RSS / CPU / IO columns in the activity view and the host
-  memory bar in the shared-buffers header are Linux-only and require pgdu to run
-  on the database host; IO rates additionally need the same UID as the postgres
-  processes or root.
+- The per-backend RSS / CPU / IO columns in the activity view, the host memory
+  bar in the shared-buffers header and the host rows of the system overview
+  (huge pages, page cache, swap) are Linux-only and require pgdu to run on the
+  database host; IO rates additionally need the same UID as the postgres
+  processes or root. The overview's `pg_wal` size and `pg_buffercache_summary`
+  rows need `pg_monitor` and show `n/a` without it.

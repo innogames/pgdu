@@ -5,10 +5,12 @@ VERSION := 0.1.0
 ARCH    := amd64
 DEB     := $(NAME)_$(VERSION)_$(ARCH).deb
 
-# -ldflags="-s -w" strips the symbol table (-s) and DWARF debug info (-w) for a
-# smaller binary. Drop the -ldflags flag to keep symbols for debugging/delve.
+# -s strips the symbol table, -w the DWARF debug info: ~30% smaller binary.
+# Override for debugging/delve: make build LDFLAGS=
+LDFLAGS ?= -s -w
+
 build:
-	CGO_ENABLED=0 go build -trimpath -o $(NAME) .
+	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o $(NAME) .
 
 run:
 	go run . $(ARGS)

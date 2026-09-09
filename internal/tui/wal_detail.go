@@ -94,7 +94,11 @@ func buildWALDetailItems(d pg.WALBlockDetail) []item {
 	}
 	out = append(out, walDetailKV("payload", payload))
 	if d.DecodeNote != "" {
-		out = append(out, walDetailStyled("note", styleBloat.Render(d.DecodeNote)))
+		note := styleBloat.Render(d.DecodeNote)
+		if d.PageInspectMissing != nil && d.PageInspectMissing.Installable {
+			note += "  " + mu("— press ") + styleBadge.Render("i") + mu(" to install pageinspect")
+		}
+		out = append(out, walDetailStyled("note", note))
 	}
 
 	// --- change data, decoded ---

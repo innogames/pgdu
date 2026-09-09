@@ -148,6 +148,29 @@ var diagServer = []Diagnostic{
 			empty result means the running config matches disk.`,
 	},
 	{
+		Key:         "io_stats",
+		Title:       "I/O by backend type",
+		Category:    "server",
+		Description: "pg_stat_io: reads, hits, writes, evictions and fsyncs per backend type / object / context — who does the I/O and why",
+		SQL:         sqlDiagIOStats,
+		Bar:         "reads",
+		Kinds: map[string]DiagColumnKind{
+			"hit_pct": DiagPercentGraded,
+			"read_ms": DiagFloat,
+		},
+		DefaultHidden: []string{"extends", "reuses", "stats_reset"},
+		Help: `Cluster-wide I/O broken down by who did it (backend_type), on what
+			(object: relation, temp relation, or WAL on PG18+) and in which
+			context: normal is shared_buffers traffic, bulkread/bulkwrite the
+			ring buffers of large scans and COPY, vacuum autovacuum's own
+			reads and writes. Client-backend reads are cache misses queries
+			waited for; read_ms is their mean latency (needs track_io_timing —
+			sub-millisecond means the OS page cache served them). Client-backend
+			writes and fsyncs mean backends had to flush dirty pages themselves
+			because the checkpointer/bgwriter were behind. evictions count pages
+			pushed out of shared_buffers; reuses are ring-buffer slots recycled.`,
+	},
+	{
 		Key:         "slru_stats",
 		Title:       "SLRU caches",
 		Category:    "server",

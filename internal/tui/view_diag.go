@@ -513,8 +513,8 @@ func (m *Model) renderDescribeInfo(s *screen, height int) string {
 		row("size", "pg_relation_size of the index — on disk, including bloat")
 	}
 	row("covers", "partial indexes only — estimated share of the table's rows the predicate keeps: the index's")
-	row("", "reltuples ÷ the table's reltuples. ‘?’ until the first VACUUM/ANALYZE. A share ≥ 90% is tinted:")
-	row("", "the predicate barely filters, so the index costs nearly as much as an unrestricted one.")
+	row("", "reltuples ÷ the table's reltuples. ‘?’ until the first VACUUM/ANALYZE. Red below 1%: the")
+	row("", "predicate keeps almost no rows. Green from 90%: it barely filters, the index is effectively unrestricted.")
 	row("scans", "idx_scan — index scans that used this index; ‘last’ is the age of the most recent one")
 	row("unused", "0 scans on an index that isn't backing a PK/UNIQUE constraint — a candidate to drop")
 	row("hit", "shared_buffers hit ratio for this index's own blocks: idx_blks_hit ÷ (idx_blks_hit + idx_blks_read).")
@@ -693,9 +693,10 @@ func describeIndexIdle(idx pg.DescribeIndexDef, asOf time.Time) bool {
 }
 
 // describeIndexCoverage renders a partial index's covered share of the table,
-// taking a CoveredPct result. A share close to the whole table means the
-// predicate barely filters — the index costs nearly as much as an unrestricted
-// one — so those are tinted rather than left muted. "?" is the honest answer
+// taking a CoveredPct result. The two ends of the range are the interesting
+// ones: a share near zero means the predicate keeps almost nothing, so the
+// index is a candidate to question (red); a share near the whole table means
+// it is effectively an unrestricted index (green). "?" is the honest answer
 // before the first VACUUM/ANALYZE fills the two reltuples estimates in.
 func describeIndexCoverage(pct float64, ok bool) string {
 	mu := styleMuted.Render
@@ -703,11 +704,21 @@ func describeIndexCoverage(pct float64, ok bool) string {
 		return mu("covers ?")
 	}
 	val := fmt.Sprintf("~%.1f%%", pct)
-	if pct >= 90 {
-		return mu("covers ") + styleBarAlt.Render(val)
+	switch {
+	case pct < describeCoverageEmptyBelow:
+		return mu("covers ") + styleBloat.Render(val)
+	case pct >= describeCoverageFullFrom:
+		return mu("covers ") + styleBadge.Render(val)
 	}
 	return mu("covers " + val)
 }
+
+// describeCoverageEmptyBelow / describeCoverageFullFrom bound the muted
+// middle of the covered-share scale; outside them the value is tinted.
+const (
+	describeCoverageEmptyBelow = 1.0
+	describeCoverageFullFrom   = 90.0
+)
 
 // renderDescribeStats renders the describe detail mode's table-metric sections
 // (size breakdown, tuple activity, scans, maintenance) from d.Stats. All

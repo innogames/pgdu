@@ -59,6 +59,7 @@ type keyMap struct {
 	JumpActivity    key.Binding // a: open the Activity tool
 	JumpWAL         key.Binding // w: open the WAL inspector
 	JumpReplication key.Binding // r: open the replication-slots diagnostic
+	JumpIO          key.Binding // o: open the pg_stat_io diagnostic
 	Progress        key.Binding // p: open the live progress monitor
 	Settings        key.Binding // s: open the pg_settings browser
 
@@ -180,6 +181,7 @@ func defaultKeys() keyMap {
 		JumpActivity:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "→ activity")),
 		JumpWAL:         key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "→ wal")),
 		JumpReplication: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "→ replication")),
+		JumpIO:          key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "→ i/o")),
 		Progress:        key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "→ progress")),
 		Settings:        key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "→ settings")),
 
@@ -237,7 +239,7 @@ func (k *keyMap) applyContext(s *screen) {
 	// on the live activity/progress levels. Surface it in the footer on the pure
 	// live monitors, whose header shows the cadence but not the key that changes
 	// it; the top-queries levels keep it to the ? help to avoid a crowded footer.
-	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity || s.level == levelProgress || logAny || pgbAny)
+	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity || s.level == levelProgress || logAny || pgbAny || s.level == levelMaintenance)
 	k.toggleRefreshInFooter = activity || s.level == levelProgress || logs || pgbAny
 	// l opens the highlighted instance's logfile from the pgbouncer list and its
 	// overview; the SHOW tables have no row-level log to open.
@@ -303,6 +305,7 @@ func (k *keyMap) applyContext(s *screen) {
 	k.JumpActivity.SetEnabled(maint)
 	k.JumpWAL.SetEnabled(maint)
 	k.JumpReplication.SetEnabled(maint)
+	k.JumpIO.SetEnabled(maint)
 	// s opens the pg_settings browser. Enter can't: on the dashboard it arms the
 	// extension-capacity reset for the cursor row. The physical key is ShowQuery
 	// (diagnostics) and Seek (index tuples) elsewhere, both off here.
@@ -333,8 +336,11 @@ func (k *keyMap) applyContext(s *screen) {
 	k.ReverseSort.SetEnabled(!progress)
 	// … and on the log entry / group-rows levels, where d describes the main
 	// table of the statement behind the row — the only path from a slow query
-	// to its relation.
-	k.describeInFooter = progress || logRow
+	// to its relation. The WAL views advertise it only while the cursor is on a
+	// relation / block-ref row, since their rmgr rows and section lines have
+	// no relation to describe.
+	_, walRel := walDescribeTarget(s)
+	k.describeInFooter = progress || logRow || walRel
 
 	// W opens the wait-event profile over the activity table's sample stream.
 	k.WaitProfile.SetEnabled(activity)
@@ -404,7 +410,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
 		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
-		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.Progress, k.Settings},
+		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.JumpIO, k.Progress, k.Settings},
 		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump, k.LogParams, k.OpenLog},
 		{k.Help, k.Quit},
 	}

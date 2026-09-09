@@ -3,7 +3,12 @@ package pg
 // SQL for the 'vacuum' diagnostics (registry: diag_defs_vacuum.go). Plain
 // SELECTs with no parameters; any identifier filtering is baked in.
 
-const sqlDiagVacuumStats = `
+// sqlVacuumRelSetCTE pulls each relation's autovacuum_vacuum_threshold /
+// autovacuum_vacuum_scale_factor storage-parameter overrides out of reloptions
+// (NULL when unset, so callers COALESCE to the cluster GUC). Shared by the
+// per-table vacuum-stats diagnostic and the system overview's over-threshold
+// count so both apply the identical trigger formula.
+const sqlVacuumRelSetCTE = `
 WITH rel_set AS (
     SELECT oid,
         CASE split_part(split_part(array_to_string(reloptions, ','), 'autovacuum_vacuum_threshold=', 2), ',', 1)
@@ -16,6 +21,9 @@ WITH rel_set AS (
         END AS rel_av_vac_scale_factor
     FROM pg_class
 )
+`
+
+const sqlDiagVacuumStats = sqlVacuumRelSetCTE + `
 SELECT
     PSUT.schemaname AS schema,
     PSUT.relname,

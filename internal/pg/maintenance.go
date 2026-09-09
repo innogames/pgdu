@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -20,9 +21,17 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	}
 
 	info := &MaintenanceInfo{
-		Settings:    settingsMap(ctx, pool, sqlMaintSettings, maintSettingsKeys),
-		ConnByState: make(map[string]int),
+		SampledAt:    time.Now(),
+		Settings:     settingsMap(ctx, pool, sqlMaintSettings, maintSettingsKeys),
+		SettingBytes: make(map[string]int64),
+		ConnByState:  make(map[string]int),
 	}
+	for k, v := range settingsMap(ctx, pool, sqlMaintSettingBytes, maintSettingBytesKeys) {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			info.SettingBytes[k] = n
+		}
+	}
+	info.Tuning = parseMaintTuning(settingsMap(ctx, pool, sqlMaintSettingsRaw, maintSettingsRawKeys))
 
 	// --- max_connections (also in Settings, but parse once to int) ---
 	_ = pool.QueryRow(ctx, sqlMaintMaxConns).Scan(&info.MaxConns)
@@ -66,15 +75,41 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 		_, _ = fmt.Sscanf(v, "%d", &info.MxidFreezeMaxAge)
 	}
 
-	// --- checkpoint counters (PG15+; silently absent on older clusters) ---
-	_ = pool.QueryRow(ctx, sqlMaintCheckpointer).Scan(&info.CheckpointsTimed, &info.CheckpointsReq)
+	// --- session hygiene: longest idle-in-txn / longest query ---
+	_ = pool.QueryRow(ctx, sqlMaintLongestIdleXact).Scan(
+		&info.Sess.IdleXactPID, &info.Sess.IdleXactApp, &info.Sess.IdleXactSecs)
+	_ = pool.QueryRow(ctx, sqlMaintLongestQuery).Scan(
+		&info.Sess.LongQueryPID, &info.Sess.LongQueryApp, &info.Sess.LongQuerySecs, &info.Sess.LongQueryText)
+
+	// --- checkpointer counters + costs ---
+	var cpReset *time.Time
+	if pool.QueryRow(ctx, sqlMaintCheckpointer).Scan(
+		&info.Checkpointer.Timed, &info.Checkpointer.Requested,
+		&info.Checkpointer.WriteTimeMs, &info.Checkpointer.SyncTimeMs,
+		&info.Checkpointer.BuffersWritten, &cpReset) == nil {
+		info.Checkpointer.HasData = true
+		if cpReset != nil {
+			info.Checkpointer.StatsReset = *cpReset
+		}
+	}
 
 	// --- WAL in-flight: bytes since last checkpoint vs max_wal_size ---
 	_ = pool.QueryRow(ctx, sqlMaintWALInFlight).Scan(
 		&info.WALBytesSinceCheckpoint, &info.WALMaxBytes, &info.WALCheckpointTime)
 
-	// --- WAL write statistics (PG14+; silently absent on older clusters) ---
-	_ = pool.QueryRow(ctx, sqlMaintWALStats).Scan(&info.WALBytesTotal, &info.WALBuffersFull)
+	// --- WAL generation counters + current write position ---
+	var walReset *time.Time
+	if pool.QueryRow(ctx, sqlMaintWALStats).Scan(
+		&info.WAL.Records, &info.WAL.FPI, &info.WAL.Bytes, &info.WAL.BuffersFull, &walReset) == nil {
+		info.WAL.HasData = true
+		if walReset != nil {
+			info.WAL.StatsReset = *walReset
+		}
+	}
+	_ = pool.QueryRow(ctx, sqlMaintCurrentLSN).Scan(&info.WAL.CurrentLSNBytes)
+	if pool.QueryRow(ctx, sqlMaintWALDir).Scan(&info.WALDir.Bytes, &info.WALDir.Files) == nil {
+		info.WALDir.HasData = true
+	}
 
 	// --- pending config changes (count + names) ---
 	_ = pool.QueryRow(ctx, sqlMaintPendingConfig).Scan(&info.PendingRestart, &info.PendingReload)
@@ -104,8 +139,13 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 		return s, rows.Scan(&s.DB, &s.Files, &s.Bytes) == nil
 	})
 
-	// --- background writer pressure (silently absent on very old clusters) ---
-	_ = pool.QueryRow(ctx, sqlMaintBgwriter).Scan(&info.BgwBuffersBackend, &info.BgwBuffersAlloc)
+	// --- background writer LRU sweep ---
+	_ = pool.QueryRow(ctx, sqlMaintBgwriter).Scan(
+		&info.Bgwriter.BuffersClean, &info.Bgwriter.MaxwrittenClean, &info.Bgwriter.BuffersAlloc)
+
+	// --- autovacuum saturation (workers cluster-wide, backlog in this db) ---
+	_ = pool.QueryRow(ctx, sqlMaintAutovacWorkers).Scan(&info.Autovac.WorkersBusy)
+	_ = pool.QueryRow(ctx, sqlMaintTablesOverThreshold).Scan(&info.Autovac.OverThreshold, &info.Autovac.OverTop)
 
 	// --- WAL archiver (silently absent when archive_mode = off) ---
 	_ = pool.QueryRow(ctx, sqlMaintArchiver).Scan(
@@ -163,11 +203,33 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 		info.TableStatsReset = *tblReset
 	}
 
-	// --- I/O stats (pg_stat_io, PG 16+) ---
+	// --- I/O stats (pg_stat_io): totals, then the by-backend-type split ---
 	if pool.QueryRow(ctx, sqlMaintIO).Scan(
 		&info.IO.Reads, &info.IO.Writes, &info.IO.Extends, &info.IO.Hits,
 		&info.IO.Evictions, &info.IO.Fsyncs, &info.IO.BackendFsyncs) == nil {
 		info.IO.HasData = true
+	}
+	sp := &info.IOSplit
+	if pool.QueryRow(ctx, sqlMaintIOSplit).Scan(
+		&sp.RelationReads, &sp.ClientReads, &sp.ClientReadTimeMs, &sp.BulkReads,
+		&sp.VacuumReads, &sp.VacuumWrites,
+		&sp.CheckpointerWrites, &sp.CheckpointerWriteTimeMs, &sp.BgwriterWrites,
+		&sp.ClientWrites, &sp.ClientWriteTimeMs,
+		&sp.WALWrites, &sp.WALWriteTimeMs, &sp.WALFsyncs, &sp.WALFsyncTimeMs) == nil {
+		sp.HasData = true
+	}
+
+	// --- buffer cache occupancy (pg_buffercache; summary needs pg_monitor) ---
+	if st, err := c.ProbeExtension(ctx, db, "pg_buffercache"); err == nil && st.Installed {
+		info.BufCache.Installed = true
+		if pool.QueryRow(ctx, sqlMaintBufSummary).Scan(
+			&info.BufCache.Used, &info.BufCache.Unused, &info.BufCache.Dirty,
+			&info.BufCache.Pinned, &info.BufCache.UsageAvg) == nil {
+			info.BufCache.HasData = true
+		}
+		if counts, err := collect(ctx, pool, "buffer usage counts", sqlBufferUsageCounts, nil, scanBufferUsageCount); err == nil {
+			info.BufCache.UsageCounts = counts
+		}
 	}
 
 	// --- blocked queries ---
@@ -188,6 +250,32 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	return info, nil
 }
 
+// parseMaintTuning converts the raw pg_settings values (base units) into the
+// typed numbers the advice rules need. A missing or unparsable key leaves its
+// field zero.
+func parseMaintTuning(raw map[string]string) MaintTuning {
+	i64 := func(k string) int64 {
+		n, _ := strconv.ParseInt(raw[k], 10, 64)
+		return n
+	}
+	f64 := func(k string) float64 {
+		f, _ := strconv.ParseFloat(raw[k], 64)
+		return f
+	}
+	return MaintTuning{
+		CheckpointTimeoutSecs: i64("checkpoint_timeout"),
+		CheckpointCompletion:  f64("checkpoint_completion_target"),
+		AutovacCostDelayMs:    f64("autovacuum_vacuum_cost_delay"),
+		VacuumCostDelayMs:     f64("vacuum_cost_delay"),
+		AutovacCostLimit:      i64("autovacuum_vacuum_cost_limit"),
+		VacuumCostLimit:       i64("vacuum_cost_limit"),
+		AutovacMaxWorkers:     int(i64("autovacuum_max_workers")),
+		ShmemHugePages:        i64("shared_memory_size_in_huge_pages"),
+		BgwriterLRUMaxpages:   i64("bgwriter_lru_maxpages"),
+		IdleInTxnTimeoutMs:    i64("idle_in_transaction_session_timeout"),
+	}
+}
+
 // ListSettings returns all pg_settings rows for the Settings browser.
 // Rows are ordered by category then name so they can be scrolled / filtered.
 func (c *Client) ListSettings(ctx context.Context, db string) ([]SettingRow, error) {
@@ -203,7 +291,7 @@ func (c *Client) ListSettings(ctx context.Context, db string) ([]SettingRow, err
 	var out []SettingRow
 	for rows.Next() {
 		var r SettingRow
-		if err := rows.Scan(&r.Name, &r.Setting, &r.Unit, &r.Category, &r.ShortDesc,
+		if err := rows.Scan(&r.Name, &r.Setting, &r.Display, &r.Unit, &r.Category, &r.ShortDesc,
 			&r.Context, &r.PendingRestart, &r.IsDefault); err != nil {
 			continue
 		}

@@ -283,3 +283,53 @@ func indexItems(s *screen) []item {
 	}
 	return out
 }
+
+// `d` on the overview describes the relation under the cursor through its
+// relfilenode, in the relation's own database (the connection database for a
+// shared relation); rmgr rows and section lines have nothing to describe.
+func TestWALDescribeTarget(t *testing.T) {
+	s := &screen{level: levelWAL, title: "wal", tool: toolWAL, db: "app", sort: sortBySize, sortDesc: true}
+	m := newTestModel(s)
+	m.onWALOverviewLoaded(walOverviewLoadedMsg{db: "app", start: "0/1000", end: "0/2000",
+		stats: []pg.WALRmgrStat{{Name: "Heap", Count: 1, CombinedSize: 1}}})
+	m.onWALRelationsLoaded(walRelationsLoadedMsg{db: "app", start: "0/1000", end: "0/2000", rels: []pg.WALRelStat{
+		{RelName: "public.orders", DBName: "shop", RelTablespace: 1663, RelFileNode: 16400, DataBytes: 3, RecCount: 1},
+		{RelName: "pg_authid", RelTablespace: 1664, RelFileNode: 1260, DataBytes: 2, RecCount: 1},
+		{RelTablespace: 1663, RelFileNode: 0, DataBytes: 1, RecCount: 1},
+	}})
+	want := map[string]struct {
+		ok             bool
+		db             string
+		tablespace, fn uint32
+	}{
+		"rmgr:Heap":         {},
+		"Σrmgr":             {},
+		"title":             {},
+		"rel:public.orders": {true, "shop", 1663, 16400},
+		"rel:pg_authid":     {true, "app", 1664, 1260},
+		"rel:relfilenode 0": {},
+		"Σrel":              {},
+	}
+	kinds := walKinds(s.items)
+	for vi, idx := range s.visibleIndexes() {
+		s.cursor = vi
+		w, known := want[kinds[idx]]
+		if !known {
+			continue
+		}
+		tgt, ok := describeTarget(s)
+		if ok != w.ok || tgt.byFilenode != w.ok || tgt.db != w.db || tgt.tablespace != w.tablespace || tgt.filenode != w.fn {
+			t.Errorf("%s: target = %+v ok=%v, want ok=%v db=%q filenode=%d/%d", kinds[idx], tgt, ok, w.ok, w.db, w.tablespace, w.fn)
+		}
+		// The footer advertises d exactly where it works.
+		if m.keys.applyContext(s); m.keys.describeInFooter != w.ok {
+			t.Errorf("%s: describe in footer = %v, want %v", kinds[idx], m.keys.describeInFooter, w.ok)
+		}
+	}
+	// A block reference on the relation drill-down resolves the same way.
+	bs := &screen{level: levelWALRelBlocks, tool: toolWAL, db: "app",
+		items: []item{{name: "0/1000", data: pg.WALBlockRef{StartLSN: "0/1000", DBName: "shop", RelTablespace: 1663, RelFileNode: 16400}}}}
+	if tgt, ok := describeTarget(bs); !ok || !tgt.byFilenode || tgt.db != "shop" || tgt.filenode != 16400 {
+		t.Errorf("block ref target = %+v ok=%v", tgt, ok)
+	}
+}

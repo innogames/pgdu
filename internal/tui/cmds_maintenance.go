@@ -2,10 +2,12 @@ package tui
 
 import (
 	"context"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pgdu/internal/pg"
+	"pgdu/internal/sysmem"
 )
 
 // ── Maintenance message types ─────────────────────────────────────────────────
@@ -68,11 +70,58 @@ type fixDoneMsg struct {
 	err error
 }
 
+// maintTickMsg re-samples the system overview (see maintTick).
+type maintTickMsg struct{}
+
 // ── Maintenance commands ──────────────────────────────────────────────────────
 
+// maintTick schedules the next overview re-sample, or nil when auto-refresh is
+// off (m.maintRefresh == 0). Same self-rescheduling shape as activityTick.
+func (m *Model) maintTick() tea.Cmd {
+	if m.maintRefresh <= 0 {
+		return nil
+	}
+	return tea.Tick(m.maintRefresh, func(time.Time) tea.Msg { return maintTickMsg{} })
+}
+
+// armMaintTick appends the overview refresh tick to cmds unless one is already
+// running.
+func (m *Model) armMaintTick(cmds []tea.Cmd) []tea.Cmd {
+	if !m.maintTicking {
+		if tick := m.maintTick(); tick != nil {
+			m.maintTicking = true
+			cmds = append(cmds, tick)
+		}
+	}
+	return cmds
+}
+
+// cycleMaintRefresh steps the overview cadence: off → 10s → 30s → 60s → off.
+// Nothing faster: one sample is some thirty catalog round trips, and rates
+// over a few seconds of an otherwise quiet server are noise.
+func (m *Model) cycleMaintRefresh() {
+	switch m.maintRefresh {
+	case 0:
+		m.maintRefresh = 10 * time.Second
+	case 10 * time.Second:
+		m.maintRefresh = 30 * time.Second
+	case 30 * time.Second:
+		m.maintRefresh = 60 * time.Second
+	default:
+		m.maintRefresh = 0
+	}
+}
+
+// loadMaintenanceCmd loads the overview snapshot and, like the shared-buffers
+// summary, annotates it with the local host's memory: pg never touches /proc,
+// and the figures only mean something when pgdu runs on the database host
+// (zero fields keep the host-relative rows hidden otherwise).
 func (m *Model) loadMaintenanceCmd(db string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		info, err := m.client.Maintenance(ctx, db)
+		if err == nil && info != nil {
+			info.Host = sysmem.Read()
+		}
 		return maintLoadedMsg{db: db, info: info, err: err}
 	})
 }

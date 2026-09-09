@@ -54,17 +54,154 @@ func (c *Client) ResolveIndex(ctx context.Context, db, name string) (oid uint32,
 	return oid, schema + "." + rel, nil
 }
 
+// ResolveTableAnyDB is ResolveTable for a name whose database is unknown — a
+// log line whose prefix carries no %d says which user ran the statement but
+// not where. The preferred database is tried first, then every other
+// connectable database in ListDatabases order (largest first), and the first
+// hit wins: a table that exists in several databases resolves to the largest,
+// the likeliest home of a logged statement. A database that fails to connect
+// is skipped, so the outcome is a hit or a not-found, never a connect error
+// for some unrelated database.
+func (c *Client) ResolveTableAnyDB(ctx context.Context, preferred, name string) (Table, error) {
+	var t Table
+	found, err := c.findInAnyDB(ctx, preferred, func(db string) error {
+		var rerr error
+		t, rerr = c.ResolveTable(ctx, db, name)
+		return rerr
+	})
+	if err != nil {
+		return Table{}, err
+	}
+	if !found {
+		return Table{}, &MissingRelationError{Name: name, AnyDB: true}
+	}
+	return t, nil
+}
+
+// ResolveIndexAnyDB is ResolveIndex across databases, the index analogue of
+// ResolveTableAnyDB; db names the database the index was found in.
+func (c *Client) ResolveIndexAnyDB(ctx context.Context, preferred, name string) (db string, oid uint32, qualified string, err error) {
+	found, err := c.findInAnyDB(ctx, preferred, func(cand string) error {
+		var rerr error
+		oid, qualified, rerr = c.ResolveIndex(ctx, cand, name)
+		if rerr == nil {
+			db = cand
+		}
+		return rerr
+	})
+	if err != nil {
+		return "", 0, "", err
+	}
+	if !found {
+		return "", 0, "", &MissingRelationError{Name: name, AnyDB: true}
+	}
+	return db, oid, qualified, nil
+}
+
+// FilenodeRel is what a WAL block reference's relfilenode resolves to: the
+// owning table (TOAST hops to its parent) or an index by OID and display name.
+type FilenodeRel struct {
+	IsIndex   bool
+	Table     Table  // when !IsIndex
+	IndexOID  uint32 // when IsIndex
+	IndexName string // when IsIndex — schema.name, as DescribeIndex titles it
+}
+
+// ResolveFilenode maps a WAL block reference's (tablespace, relfilenode) pair to
+// the relation `d` should describe, looked up in db because pg_filenode_relation
+// only knows the connected database's files. A relation that is no longer in the
+// catalog (dropped, or rewritten by VACUUM FULL / REINDEX so the filenode moved
+// on) is a plain error the describe panel shows as is; a relkind the panel
+// cannot describe (sequence, view, composite type) likewise.
+func (c *Client) ResolveFilenode(ctx context.Context, db string, tablespace, filenode uint32) (FilenodeRel, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return FilenodeRel{}, err
+	}
+	var (
+		oid          uint32
+		kind, schema string
+		name         string
+		size, rows   int64
+	)
+	err = pool.QueryRow(ctx, sqlResolveFilenode, tablespace, filenode).Scan(&oid, &kind, &schema, &name, &size, &rows)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return FilenodeRel{}, fmt.Errorf("relfilenode %d is not in the catalog of %q (dropped or rewritten since)", filenode, db)
+	}
+	if err != nil {
+		return FilenodeRel{}, fmt.Errorf("resolve relfilenode %d in %q: %w", filenode, db, err)
+	}
+	switch kind {
+	case "r", "p", "m", "f":
+		return FilenodeRel{Table: Table{DB: db, Schema: schema, Name: name, OID: oid, TotalBytes: size, EstRows: rows}}, nil
+	case "i", "I":
+		return FilenodeRel{IsIndex: true, IndexOID: oid, IndexName: schema + "." + name}, nil
+	}
+	return FilenodeRel{}, fmt.Errorf("relfilenode %d in %q is %s.%s (relkind %s), which has no describe panel", filenode, db, schema, name, kind)
+}
+
+// findInAnyDB runs try against the preferred database and then every other
+// connectable one until it succeeds. A *MissingRelationError or a connect
+// failure moves on to the next database; any other error (a broken catalog
+// query, a cancelled context) is returned as is, since retrying it elsewhere
+// would only repeat it. The preferred database is the one exception: its
+// connect failure is reported, because the caller could not have described
+// anything there either and hiding it would misreport the cause.
+func (c *Client) findInAnyDB(ctx context.Context, preferred string, try func(db string) error) (found bool, err error) {
+	if preferred == "" {
+		preferred = c.DefaultDB()
+	}
+	err = try(preferred)
+	if err == nil {
+		return true, nil
+	}
+	var missing *MissingRelationError
+	if !errors.As(err, &missing) {
+		return false, err
+	}
+	dbs, err := c.ListDatabases(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, d := range dbs {
+		if d.Name == preferred {
+			continue
+		}
+		if _, perr := c.PoolFor(ctx, d.Name); perr != nil {
+			continue
+		}
+		switch err = try(d.Name); {
+		case err == nil:
+			return true, nil
+		case errors.As(err, &missing):
+			continue
+		default:
+			return false, err
+		}
+	}
+	return false, nil
+}
+
 // MissingRelationError reports that a name couldn't be resolved to a describable
-// relation (e.g. it's a CTE alias, a view, or simply doesn't exist).
-type MissingRelationError struct{ Name string }
+// relation (e.g. it's a CTE alias, a view, or simply doesn't exist). AnyDB
+// marks a miss after a sweep over every database, so the message says how far
+// the search went.
+type MissingRelationError struct {
+	Name  string
+	AnyDB bool
+}
 
 func (e *MissingRelationError) Error() string {
 	// Names from diagnostic rows arrive pre-quoted for to_regclass; don't
 	// wrap those in a second layer of quotes.
+	msg := fmt.Sprintf("no table named %q", e.Name)
 	if strings.Contains(e.Name, `"`) {
-		return "no table named " + e.Name
+		msg = "no table named " + e.Name
 	}
-	return fmt.Sprintf("no table named %q", e.Name)
+	if e.AnyDB {
+		msg += " in any database"
+	}
+	return msg
 }
 
 // DescribeTable fetches a psql-\d-style description of a table: its columns

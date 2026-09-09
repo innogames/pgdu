@@ -76,6 +76,11 @@ type WALBlockDetail struct {
 	IndexCols  []IndexKeyColumn
 	IndexItems []IndexTuple
 	DecodeNote string
+	// PageInspectMissing is set when the page image could not be decoded
+	// because pageinspect is not installed in the connected database — the
+	// typed error the UI turns into its install affordance, since the record
+	// itself loaded fine and DecodeNote alone would leave the user stranded.
+	PageInspectMissing *MissingExtensionError
 }
 
 // IsBtree reports whether the block is a main-fork page of a B-tree index.
@@ -213,7 +218,12 @@ func (c *Client) fillWALPageImage(ctx context.Context, db string, pool *pgxpool.
 		return
 	}
 	if err := c.EnsurePageInspect(ctx, db); err != nil {
-		d.appendNote("page image not decoded: pageinspect is not installed in " + db)
+		if ext, ok := errors.AsType[*MissingExtensionError](err); ok {
+			d.PageInspectMissing = ext
+			d.appendNote("page image not decoded: pageinspect is not installed in " + ext.DB)
+		} else {
+			d.appendNote("page image not decoded: " + err.Error())
+		}
 		return
 	}
 	var h WALPageHeader

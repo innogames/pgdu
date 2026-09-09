@@ -249,9 +249,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if s.level == levelMaintenance {
-			// ↑↓ moves the capacity cursor (4 rows: statements, qualstats, table
-			// stats, table stats · all dbs).
-			s.maintenance.cursor = min(s.maintenance.cursor+1, 3)
+			// ↓ walks the capacity cursor (4 rows: statements, qualstats, table
+			// stats, table stats · all dbs) and, past the last row, scrolls the
+			// dashboard body so one key reads the whole screen. scrollWindow
+			// clamps the offset.
+			if s.maintenance.cursor < 3 {
+				s.maintenance.cursor++
+			} else {
+				s.offset++
+			}
 			break
 		}
 		if s.cursor < s.visibleLen()-1 {
@@ -269,7 +275,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if s.level == levelMaintenance {
-			s.maintenance.cursor = max(s.maintenance.cursor-1, 0)
+			// ↑ undoes the scroll first, then walks the cursor back up.
+			if s.offset > 0 {
+				s.offset--
+			} else {
+				s.maintenance.cursor = max(s.maintenance.cursor-1, 0)
+			}
 			break
 		}
 		if s.cursor > 0 {
@@ -334,11 +345,21 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.vacuum.follow = false
 			break
 		}
+		if s.level == levelMaintenance {
+			s.offset = 0
+			s.maintenance.cursor = 0
+			break
+		}
 		s.cursor = 0
 		s.skipInertRow(1)
 	case key.Matches(msg, m.keys.Bottom):
 		if s.level == levelStatementDetail || s.level == levelDescribe || s.level == levelLogEntry {
 			s.offset = math.MaxInt32 // clamped to the last screen by scrollWindow
+			break
+		}
+		if s.level == levelMaintenance {
+			s.offset = math.MaxInt32 // clamped to the last screen by scrollWindow
+			s.maintenance.cursor = 3
 			break
 		}
 		if s.level == levelParts && m.vacuumPaneVisible(s) {
@@ -373,12 +394,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.loadCurrent()
 	case key.Matches(msg, m.keys.JumpReplication):
 		// Open the replication-slots diagnostic against the default database.
-		for i := range pg.Diagnostics {
-			if pg.Diagnostics[i].Key == "replication_slots" {
-				m.stack = append(m.stack, diagnosticResultScreen(&pg.Diagnostics[i], "", false))
-				return m, m.loadCurrent()
-			}
-		}
+		return m, m.jumpToDiagnostic("replication_slots")
+	case key.Matches(msg, m.keys.JumpIO):
+		// The full pg_stat_io table behind the overview's buffer-cache rows.
+		return m, m.jumpToDiagnostic("io_stats")
 	case key.Matches(msg, m.keys.WaitProfile):
 		// Open the wait-event profile over the activity sample stream. No load
 		// Cmd: it renders from Model.waitRing, which the activity tick keeps
@@ -531,6 +550,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if s.level == levelMaintenance {
+			m.cycleMaintRefresh()
+			if m.maintRefresh > 0 && !m.maintTicking {
+				if tick := m.maintTick(); tick != nil {
+					m.maintTicking = true
+					return m, tick
+				}
+			}
+			return m, nil
+		}
 		if s.level == levelActivity || s.level == levelProgress {
 			m.cycleActivityRefresh()
 			if m.activityRefresh > 0 && !m.activityTicking {
@@ -628,13 +657,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			loading: true}
 		m.stack = append(m.stack, next)
 		if t.indexByName {
-			return m, m.loadDescribeIndexByNameCmd(t.db, t.indexName)
+			return m, m.loadDescribeIndexByNameCmd(t.db, t.indexName, t.anyDB)
+		}
+		if t.byFilenode {
+			return m, m.loadDescribeFilenodeCmd(t.db, t.tablespace, t.filenode)
 		}
 		if t.isIndex {
 			return m, m.loadDescribeIndexCmd(t.db, t.indexOID, t.indexName)
 		}
 		if t.byName {
-			return m, m.loadDescribeTableByNameCmd(t.db, t.tableName)
+			return m, m.loadDescribeTableByNameCmd(t.db, t.tableName, t.anyDB)
 		}
 		next.table = t.table
 		return m, m.loadDescribeTableCmd(t.table)
@@ -655,7 +687,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			db: t.db, loading: true,
 			sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 		m.stack = append(m.stack, next)
-		return m, m.resolveDiskTableCmd(t.db, t.tableName)
+		return m, m.resolveDiskTableCmd(t.db, t.tableName, t.anyDB)
 	case key.Matches(msg, m.keys.TopQueries):
 		// From a table's describe panel, open the top-queries tool the way the
 		// tool's own database pick does (table behind the window picker), with
@@ -741,8 +773,12 @@ type descTarget struct {
 	table       pg.Table // when !isIndex && !byName
 	db          string   // when isIndex || byName || indexByName
 	tableName   string   // when byName — resolved server-side via ResolveTable
+	anyDB       bool     // when byName || indexByName and db is only a guess: sweep every database (log line without %d)
 	indexOID    uint32   // when isIndex
 	indexName   string   // when isIndex or indexByName
+	byFilenode  bool     // when the relation is known only by its file (WAL block refs) — resolved via ResolveFilenode
+	tablespace  uint32   // when byFilenode
+	filenode    uint32   // when byFilenode
 }
 
 // describeTarget resolves what `d` should describe given the top screen. It
@@ -828,6 +864,8 @@ func describeTarget(s *screen) (descTarget, bool) {
 		return actDescribeTarget(s)
 	case levelDiagnosticResult:
 		return diagDescribeTarget(s)
+	case levelWAL, levelWALBlocks, levelWALRelBlocks:
+		return walDescribeTarget(s)
 	}
 
 	return descTarget{}, false

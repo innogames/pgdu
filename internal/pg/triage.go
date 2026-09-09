@@ -494,14 +494,15 @@ func connSaturationSeverity(used, maxConns int) Severity {
 // checkpointGrade watches the share of checkpoints forced by WAL volume rather
 // than checkpoint_timeout — a high share means max_wal_size is too small.
 func checkpointGrade(info *MaintenanceInfo) (Severity, string, error) {
-	total := info.CheckpointsTimed + info.CheckpointsReq
+	cp := info.Checkpointer
+	total := cp.Timed + cp.Requested
 	if total == 0 {
 		return SevOK, "no checkpoints recorded yet", nil
 	}
-	sev := checkpointSeverity(info.CheckpointsReq, total)
-	pct := 100 * float64(info.CheckpointsReq) / float64(total)
+	sev := checkpointSeverity(cp.Requested, total)
+	pct := 100 * float64(cp.Requested) / float64(total)
 	return sev, fmt.Sprintf("%d of %d checkpoints forced by WAL volume (%.0f%%)",
-		info.CheckpointsReq, total, pct), nil
+		cp.Requested, total, pct), nil
 }
 
 func checkpointSeverity(requested, total int64) Severity {

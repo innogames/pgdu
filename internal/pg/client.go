@@ -205,6 +205,12 @@ func (c *Client) HostLabel() string { return c.cfg.HostLabel() }
 // interactive install instead of failing with an opaque error. Auto-running
 // CREATE EXTENSION here would silently mask permission problems, so we don't.
 func (c *Client) ensureExtension(ctx context.Context, db, ext string, ready map[string]bool) error {
+	// Callers on cluster-wide tools pass "" for "the connection database";
+	// resolve it here so the ready cache has one key per database and a
+	// MissingExtensionError names the database the user would install into.
+	if db == "" {
+		db = c.cfg.Database
+	}
 	c.mu.Lock()
 	if ready[db] {
 		c.mu.Unlock()
