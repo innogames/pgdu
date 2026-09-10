@@ -249,12 +249,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if s.level == levelMaintenance {
-			// ↓ walks the capacity cursor (4 rows: statements, qualstats, table
-			// stats, table stats · all dbs) and, past the last row, scrolls the
-			// dashboard body so one key reads the whole screen. scrollWindow
-			// clamps the offset.
-			if s.maintenance.cursor < 3 {
-				s.maintenance.cursor++
+			// ↓ walks the action rows (capacity resets, then recommendations)
+			// and, past the last one, scrolls the dashboard body so one key
+			// reads the whole screen. scrollWindow clamps the offset.
+			st := &s.maintenance
+			if rows := st.actionRows(); st.cursor < len(rows)-1 {
+				st.setCursor(st.cursor+1, rows)
 			} else {
 				s.offset++
 			}
@@ -275,11 +275,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if s.level == levelMaintenance {
-			// ↑ undoes the scroll first, then walks the cursor back up.
-			if s.offset > 0 {
+			// ↑ scrolls back first while the cursor row sits above the window,
+			// then walks the cursor up (the render follows it), then scrolls
+			// the rest of the way.
+			st := &s.maintenance
+			switch {
+			case st.cursorLine >= 0 && st.cursorLine < s.offset:
 				s.offset--
-			} else {
-				s.maintenance.cursor = max(s.maintenance.cursor-1, 0)
+			case st.cursor > 0:
+				st.setCursor(st.cursor-1, st.actionRows())
+			default:
+				s.offset = max(s.offset-1, 0)
 			}
 			break
 		}
@@ -347,7 +353,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if s.level == levelMaintenance {
 			s.offset = 0
-			s.maintenance.cursor = 0
+			s.maintenance.setCursor(0, s.maintenance.actionRows())
 			break
 		}
 		s.cursor = 0
@@ -358,8 +364,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if s.level == levelMaintenance {
+			// G shows the end of the page; the cursor moves to the last action
+			// row without dragging the window back up to it.
 			s.offset = math.MaxInt32 // clamped to the last screen by scrollWindow
-			s.maintenance.cursor = 3
+			st := &s.maintenance
+			rows := st.actionRows()
+			st.setCursor(len(rows)-1, rows)
+			st.follow = false
 			break
 		}
 		if s.level == levelParts && m.vacuumPaneVisible(s) {
@@ -381,9 +392,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Settings):
 		// System-overview cross-link: the pg_settings browser, for the GUCs the
 		// dashboard summarises and the pending-restart/reload names it lists.
-		next := &screen{level: levelSettings, title: "settings", tool: toolMaintenance, db: s.db}
-		m.stack = append(m.stack, next)
-		return m, m.loadCurrent()
+		return m, m.openSettings(s, "")
 	case key.Matches(msg, m.keys.JumpActivity):
 		// System-overview cross-link: open the live Activity tool for the detail
 		// behind the dashboard's connection/blocked/long-xact figures.
@@ -394,10 +403,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.loadCurrent()
 	case key.Matches(msg, m.keys.JumpReplication):
 		// Open the replication-slots diagnostic against the default database.
-		return m, m.jumpToDiagnostic("replication_slots")
+		return m, m.jumpToDiagnostic("replication_slots", "")
 	case key.Matches(msg, m.keys.JumpIO):
 		// The full pg_stat_io table behind the overview's buffer-cache rows.
-		return m, m.jumpToDiagnostic("io_stats")
+		return m, m.jumpToDiagnostic("io_stats", "")
 	case key.Matches(msg, m.keys.WaitProfile):
 		// Open the wait-event profile over the activity sample stream. No load
 		// Cmd: it renders from Model.waitRing, which the activity tick keeps
@@ -615,11 +624,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelActivity {
 			s.act.verbose = !s.act.verbose
 			m.rebuildActivityItems(s)
-		}
-		// On triage, `v` unfolds/folds the green checks (same as Enter on the
-		// summary row, but reachable from anywhere in the list).
-		if s.level == levelTriage {
-			m.toggleTriageOK(s)
 		}
 	case key.Matches(msg, m.keys.Export):
 		// Write the current table/view to pgdu-<tool>-<datetime>.csv. Returns nil

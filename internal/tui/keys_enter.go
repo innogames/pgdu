@@ -123,22 +123,9 @@ func enterLabel(s *screen) (label string, ok bool) {
 	case levelSnapshots:
 		return "pick window", true
 	case levelMaintenance:
-		return "reset stats", true
+		return maintEnterLabel(s)
 	case levelActivity:
 		return "query detail", true
-	case levelTriage:
-		if hasCur {
-			switch r := cur.data.(type) {
-			case triageOKSummary:
-				if s.triage.showOK {
-					return "collapse", true
-				}
-				return "expand", true
-			case pg.TriageResult:
-				return triageTargetLabel(r), true
-			}
-		}
-		return "open target", true
 	case levelDiagnostics:
 		return "run", true
 	case levelDiagnosticResult:
@@ -152,8 +139,15 @@ func enterLabel(s *screen) (label string, ok bool) {
 			return "entry", true
 		}
 		if hasCur {
-			if _, isGroup := cur.data.(*pglog.Group); !isGroup {
-				return "", false // section header rows are inert
+			switch v := cur.data.(type) {
+			case logSection:
+				if v.collapsed {
+					return "unfold", true
+				}
+				return "fold", true
+			case *pglog.Group:
+			default:
+				return "", false
 			}
 		}
 		return "entries", true

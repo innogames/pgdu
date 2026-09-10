@@ -162,12 +162,11 @@ func (s *screen) clampCursor() {
 	}
 }
 
-// skipInertRow nudges the cursor off a section header/footer row in direction
-// dir (+1 down, -1 up) so it never rests on an inert line — the log groups
-// pane's logSection titles and the WAL overview's walSectionRow lines. It takes
-// the nearest selectable row that way, else the nearest the other way; a list
-// with none (the WAL overview before its first rmgr row) keeps the cursor. A
-// no-op when the current row is selectable, so every cursor move can call it.
+// skipInertRow nudges the cursor off an inert row in direction dir (+1 down,
+// -1 up) so it never rests on one — the WAL overview's walSectionRow lines. It
+// takes the nearest selectable row that way, else the nearest the other way; a
+// list with none (the WAL overview before its first rmgr row) keeps the cursor.
+// A no-op when the current row is selectable, so every cursor move can call it.
 func (s *screen) skipInertRow(dir int) {
 	vis := s.visibleIndexes()
 	if s.cursor < 0 || s.cursor >= len(vis) || !inertRow(s.items[vis[s.cursor]]) {
@@ -183,9 +182,18 @@ func (s *screen) skipInertRow(dir int) {
 	}
 }
 
-// inertRow reports whether the cursor must never rest on it: a section header
-// or footer rather than a selectable row.
+// inertRow reports whether the cursor must never rest on it: a section line
+// that answers to no key. Only the WAL overview's lines qualify — the log
+// groups pane's logSection headers are selectable, since Enter folds them.
 func inertRow(it item) bool {
+	_, ok := it.data.(walSectionRow)
+	return ok
+}
+
+// sectionRow reports whether it is a section header/footer rather than a data
+// row — the log groups pane's logSection titles (selectable) and the WAL
+// overview's walSectionRow lines (inert) — for the position counter.
+func sectionRow(it item) bool {
 	switch it.data.(type) {
 	case logSection, walSectionRow:
 		return true

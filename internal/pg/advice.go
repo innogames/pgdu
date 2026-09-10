@@ -2,6 +2,7 @@ package pg
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -10,16 +11,29 @@ import (
 	"pgdu/internal/humanize"
 )
 
-// AdviceLevel grades one system-overview recommendation. It is deliberately
-// not the triage Severity: the overview also carries purely informational
-// notes (a shared_buffers share outside the usual band), and the triage
-// renderer assumes its enum has exactly three graded values.
+// AdviceLevel grades one system-overview recommendation. Crit is reserved for
+// conditions that break or endanger the server (wraparound, a stuck archiver,
+// a lost slot); performance findings stay Warn, and Info carries the purely
+// informational notes (a shared_buffers share outside the usual band).
 type AdviceLevel int
 
 const (
 	AdviceInfo AdviceLevel = iota
 	AdviceWarn
 	AdviceCrit
+)
+
+// AdviceTarget names the screen Enter opens from a recommendation row on the
+// system overview: the diagnostic listing the offenders, the live view behind
+// a session finding, or the settings browser for a GUC.
+type AdviceTarget int
+
+const (
+	AdviceTargetNone       AdviceTarget = iota // nothing to open; Enter is disabled on the row
+	AdviceTargetDiagnostic                     // the registry diagnostic DiagKey, run in DB
+	AdviceTargetLockTree                       // the live lock tree
+	AdviceTargetActivity                       // the live pg_stat_activity list
+	AdviceTargetSettings                       // the pg_settings browser, filtered to Setting
 )
 
 // Advice is one recommendation the system overview derives from a
@@ -36,6 +50,11 @@ type Advice struct {
 	Suggested string // human suggested value; "" when none
 	Reason    string // one short clause, used verbatim as the inline note
 	Fix       string // copyable ALTER SYSTEM / sysctl line; "" when none
+	// Target is where Enter on the recommendation row leads; DiagKey and DB
+	// name the diagnostic (and the database it runs in) for AdviceTargetDiagnostic.
+	Target  AdviceTarget
+	DiagKey string
+	DB      string
 }
 
 // AdviceSet is the ordered result of MaintAdvice: Crit first, then Warn, then
@@ -65,9 +84,10 @@ func (a AdviceSet) Actionable() AdviceSet {
 	return out
 }
 
-// Overview thresholds. Like the triage constants they are named so the
-// opinions live in one place; the checkpoint, idle-in-xact and extension
-// capacity figures are shared with triage.go so the two screens agree.
+// Overview thresholds, named so the opinions live in one place and can be
+// tuned without hunting through rule code. Cumulative counters (deadlocks,
+// temp bytes) are graded as per-day rates over the window since stats_reset,
+// so a long-lived cluster is not punished for its uptime.
 const (
 	// shared_buffers outside 15–40 % of host RAM is not wrong, but is worth a
 	// glance: below it the OS cache does the work, above it double-caching
@@ -137,6 +157,108 @@ const (
 	// StatsFreshWindow: cumulative table counters younger than this are still
 	// warming up — dead-tuple and scan ratios are not yet meaningful.
 	StatsFreshWindow = 24 * time.Hour
+
+	// wraparound: autovacuum forces aggressive freezing at *_freeze_max_age;
+	// most of the way there means it is not keeping up, and at the hard limit
+	// the server stops accepting writes.
+	wraparoundWarnFrac = 0.80
+	wraparoundCritFrac = 0.95
+
+	// lock waits: any backend stuck on a lock is worth a look; one that has
+	// waited half a minute is past ordinary contention.
+	lockWaitCritSecs = 30
+
+	// idle-in-transaction: a second or two between statements is normal churn
+	// (poolers do it constantly); a minute holds locks and vacuum's horizon for
+	// real, five minutes is a stuck client.
+	idleXactWarnSecs = 60
+	idleXactCritSecs = 300
+
+	// long-running transaction: whatever it does, an open transaction pins the
+	// xmin horizon. Half an hour is past any OLTP request; three hours is a
+	// forgotten job.
+	longXactWarnSecs = 1800
+	longXactCritSecs = 3 * 3600
+
+	// prepared (2PC) transactions pin the horizon by their mere existence; one
+	// open for minutes is a coordinator that forgot to COMMIT/ROLLBACK PREPARED.
+	preparedXactCritSecs = 300
+
+	// connection saturation: past ~80 % of max_connections a spike yields
+	// "too many clients"; the superuser-reserved slots are the last line.
+	connSaturationWarnFrac = 0.80
+	connSaturationCritFrac = 0.95
+
+	// checkpoints: a high share of "requested" (as opposed to timed) checkpoints
+	// means WAL volume keeps hitting max_wal_size before checkpoint_timeout. The
+	// floor keeps a freshly started cluster green until there is a real sample.
+	checkpointReqWarnFrac = 0.30
+	checkpointReqCritFrac = 0.50
+	checkpointMinTotal    = 10
+
+	// stats extensions: at .max the extension evicts entries (pg_stat_statements
+	// deallocates ~5 % at a time) and the counters the top-queries tool reads
+	// silently stop being cumulative. Exported so the capacity bars colour
+	// exactly where the advice fires.
+	ExtCapacityNoticeFrac = 0.70
+	ExtCapacityWarnFrac   = 0.90
+
+	// replication slots: retained WAL past the slot's remaining safe_wal_size
+	// (or past a fixed budget when max_slot_wal_keep_size is unlimited) means
+	// invalidation is near; an inactive slot is normal churn, one with no
+	// consumer for an hour retains WAL for nobody.
+	slotRetainedCapBytes  = 16 << 30
+	slotStaleInactiveSecs = 3600
+
+	// replication: replay_lag reads NULL while a replica is idle and caught up,
+	// so bytes-behind is the second signal. A non-streaming state (catchup,
+	// backup) is transient and only warns.
+	replLagWarnSecs      = 60
+	replLagCritSecs      = 300
+	replByteLagCritBytes = 1 << 30
+	// standby side: the primary sends keepalives every wal_sender_timeout/2
+	// even when idle, so a receiver that heard nothing for a minute is stalled.
+	walReceiverStaleWarnSecs = 60
+	walReceiverStaleCritSecs = 300
+
+	// cache hit ratio: below ~90 % the working set clearly does not fit
+	// shared_buffers; below 95 % it is starting to slip. Only graded once the
+	// counters have seen real block traffic.
+	cacheHitWarnPct   = 90
+	cacheHitNoticePct = 95
+	cacheHitMinBlocks = 100_000
+
+	// SLRU caches: a poor hit ratio only matters once the cache sees real
+	// traffic; the read floor keeps byte-sized test clusters green.
+	slruHitWarnPct     = 90
+	slruWarnReadsFloor = 1_000
+	// slruAutoDivisor/Min/Max is how the server sizes an SLRU whose *_buffers
+	// GUC is 0: shared_buffers / 512 clamped to [16, 1024] blocks.
+	slruAutoDivisor = 512
+	slruAutoMin     = 16
+	slruAutoMax     = 1024
+
+	// deadlocks / temp files: cumulative counters graded as a per-day average
+	// over each database's own stats window (floored at one day in SQL so a
+	// fresh reset does not extrapolate an hour's burst). A deadlock a day is a
+	// lock-ordering bug that keeps biting; ten a day is transactions failing
+	// routinely. Temp spill at 10 GB/day means work_mem is undersized for a
+	// recurring query.
+	deadlocksWarnPerDay = 1
+	deadlocksCritPerDay = 10
+	tempBytesWarnPerDay = 10 << 30
+
+	// rollback ratio: a quarter of transactions rolling back is application
+	// errors or serialization failures; gated on a minimum volume so a nearly
+	// idle database never trips it.
+	rollbackWarnFrac = 0.25
+	rollbackMinXacts = 1000
+
+	// sequences: consumed_pct is the fraction of the sequence's own range handed
+	// out. Below 80 % there is nothing to do; at 95 % exhaustion (inserts fail at
+	// 100 %) is close enough that the type/cycle decision is overdue.
+	seqWarnPct = 80
+	seqCritPct = 95
 )
 
 // MaintRates are per-minute rates between two consecutive overview samples.
@@ -153,6 +275,9 @@ type MaintRates struct {
 	WALBytesPerMin    float64 // from the LSN delta, so it includes replayed WAL on a standby
 	TempBytesPerMin   float64
 	CheckpointsPerMin float64
+	// ReplicaBytesPerMin is each replica's replay_lsn advance, keyed by
+	// ReplicaStat.Key(); a replica seen in only one sample has no entry.
+	ReplicaBytesPerMin map[string]float64
 }
 
 // ComputeMaintRates derives MaintRates from two samples of the same cluster.
@@ -187,6 +312,18 @@ func ComputeMaintRates(prev, cur *MaintenanceInfo) MaintRates {
 		r.CheckpointsPerMin = per(prev.Checkpointer.Timed+prev.Checkpointer.Requested,
 			cur.Checkpointer.Timed+cur.Checkpointer.Requested)
 	}
+	if len(prev.Replicas) > 0 && len(cur.Replicas) > 0 {
+		before := make(map[string]int64, len(prev.Replicas))
+		for _, p := range prev.Replicas {
+			before[p.Key()] = p.ReplayLSNBytes
+		}
+		r.ReplicaBytesPerMin = make(map[string]float64, len(cur.Replicas))
+		for _, c := range cur.Replicas {
+			if b, ok := before[c.Key()]; ok && b > 0 && c.ReplayLSNBytes > 0 {
+				r.ReplicaBytesPerMin[c.Key()] = per(b, c.ReplayLSNBytes)
+			}
+		}
+	}
 	if !r.OK {
 		return MaintRates{}
 	}
@@ -214,22 +351,37 @@ func RecommendedMaxWALSize(bytesPerSec float64, timeoutSecs int64, cct float64) 
 	return (need + gib - 1) / gib * gib
 }
 
-// MaintAdvice evaluates every overview rule against one snapshot. Host-relative
-// rules need info.Host (only set when pgdu runs on the database host) and stay
-// silent otherwise; every other rule degrades the same way on missing data.
-func MaintAdvice(info *MaintenanceInfo) AdviceSet {
+// MaintAdvice evaluates every overview rule against one snapshot plus, once it
+// has landed, the per-database schema sweep (nil while it is still loading).
+// Host-relative rules need info.Host (only set when pgdu runs on the database
+// host) and stay silent otherwise; every other rule degrades the same way on
+// missing data.
+func MaintAdvice(info *MaintenanceInfo, schema *SchemaHealth) AdviceSet {
 	if info == nil {
 		return nil
 	}
 	var out AdviceSet
-	add := func(a Advice) { out = append(out, a) }
+	add := func(a Advice) {
+		// A GUC recommendation always has somewhere to go: the settings
+		// browser, filtered to the knob it names.
+		if a.Target == AdviceTargetNone && a.Setting != "" {
+			a.Target = AdviceTargetSettings
+		}
+		out = append(out, a)
+	}
 
+	adviseSafety(info, add)
 	adviseHostMemory(info, add)
 	adviseBufferCache(info, add)
 	adviseCheckpoints(info, add)
+	adviseWraparound(info, add)
 	adviseAutovacuum(info, add)
 	adviseSessions(info, add)
+	adviseOperational(info, add)
+	adviseCounters(info, add)
+	adviseReplication(info, add)
 	adviseObservability(info, add)
+	adviseSchema(schema, add)
 
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Level != out[j].Level {
@@ -451,10 +603,18 @@ func adviseCheckpoints(info *MaintenanceInfo, add func(Advice)) {
 	}
 
 	if frac, ok := info.WAL.FPIFrac(); ok && frac > fpiShareWarnFrac && info.WAL.Records >= fpiMinRecords && frequent {
-		add(Advice{
+		a := Advice{
 			Key: "wal_fpi", Level: AdviceInfo,
 			Reason: fmt.Sprintf("%.0f%% of WAL records are full-page images — frequent checkpoints inflate WAL", frac*100),
-		})
+		}
+		// Compression is the knob that shrinks the images themselves; only
+		// offer it when it is actually off.
+		if info.Settings["wal_compression"] == "off" {
+			a.Setting, a.Current, a.Suggested = "wal_compression", "off", "on"
+			a.Reason += "; wal_compression shrinks them"
+			a.Fix = alterReload("wal_compression", "on")
+		}
+		add(a)
 	}
 }
 
@@ -543,6 +703,492 @@ func adviseObservability(info *MaintenanceInfo, add func(Advice)) {
 			Fix: alterReload("log_checkpoints", "on"),
 		})
 	}
+	if q := info.Qualstats; q.Installed && q.Max > 0 && q.FillRatio() >= ExtCapacityWarnFrac {
+		sugg := strconv.FormatInt(q.Max*2, 10)
+		add(Advice{
+			Key: "pg_qualstats.max", Level: AdviceWarn, Setting: "pg_qualstats.max",
+			Current: strconv.FormatInt(q.Max, 10), Suggested: sugg,
+			Reason: "entries being dropped — new predicates are silently ignored",
+			Fix:    alterRestart("pg_qualstats.max", sugg),
+		})
+	}
+	if v, ok := info.Settings["log_lock_waits"]; ok && v == "off" {
+		add(Advice{
+			Key: "log_lock_waits", Level: AdviceInfo, Setting: "log_lock_waits",
+			Current: "off", Suggested: "on", Reason: "lock waits past deadlock_timeout are not logged",
+			Fix: alterReload("log_lock_waits", "on"),
+		})
+	}
+	// Spills are only worth logging once there are some; the default -1 is
+	// fine on a server that never spills.
+	if v, ok := info.Settings["log_temp_files"]; ok && v == "-1" && info.TempBytes > 0 {
+		add(Advice{
+			Key: "log_temp_files", Level: AdviceInfo, Setting: "log_temp_files",
+			Current: "-1", Suggested: "10MB", Reason: "temp-file spills are not logged, so the spilling queries stay anonymous",
+			Fix: alterReload("log_temp_files", "10MB"),
+		})
+	}
+}
+
+// adviseSafety covers the settings that must never be off on a production
+// server: each one silently trades durability or maintenance for speed.
+func adviseSafety(info *MaintenanceInfo, add func(Advice)) {
+	set := info.Settings
+	if v := set["autovacuum"]; v != "" && v != "on" {
+		add(Advice{
+			Key: "autovacuum", Level: AdviceCrit, Setting: "autovacuum", Current: v, Suggested: "on",
+			Reason: "autovacuum is off — dead tuples and wraparound age accumulate unchecked",
+			Fix:    alterReload("autovacuum", "on"),
+		})
+	}
+	if v := set["track_counts"]; v == "off" {
+		add(Advice{
+			Key: "track_counts", Level: AdviceCrit, Setting: "track_counts", Current: "off", Suggested: "on",
+			Reason: "statistics collection is off — autovacuum has nothing to act on and pg_stat_* views stay empty",
+			Fix:    alterReload("track_counts", "on"),
+		})
+	}
+	if v := set["fsync"]; v == "off" {
+		add(Advice{
+			Key: "fsync", Level: AdviceCrit, Setting: "fsync", Current: "off", Suggested: "on",
+			Reason: "commits are not durable — a crash or power loss corrupts the cluster",
+			Fix:    alterReload("fsync", "on"),
+		})
+	}
+	if v := set["full_page_writes"]; v == "off" {
+		add(Advice{
+			Key: "full_page_writes", Level: AdviceCrit, Setting: "full_page_writes", Current: "off", Suggested: "on",
+			Reason: "torn pages after a crash cannot be repaired from WAL",
+			Fix:    alterReload("full_page_writes", "on"),
+		})
+	}
+	// Informational only: checksums are enabled offline (pg_checksums), so
+	// there is no ALTER SYSTEM to offer.
+	if v := set["data_checksums"]; v == "off" {
+		add(Advice{
+			Key: "data_checksums", Level: AdviceInfo, Setting: "data_checksums", Current: "off",
+			Reason: "storage corruption goes undetected (enable offline with pg_checksums)",
+		})
+	}
+}
+
+// freezeLevel grades a transaction-ID (or multixact) age against its
+// autovacuum freeze limit; pct is the share consumed, 0 when either is unknown.
+func freezeLevel(age, maxAge int64) (AdviceLevel, float64) {
+	if maxAge <= 0 || age <= 0 {
+		return AdviceInfo, 0
+	}
+	frac := float64(age) / float64(maxAge)
+	switch {
+	case frac > wraparoundCritFrac:
+		return AdviceCrit, frac * 100
+	case frac > wraparoundWarnFrac:
+		return AdviceWarn, frac * 100
+	}
+	return AdviceInfo, frac * 100
+}
+
+// inDB is the " (in db)" tail cluster-wide advice uses to name the database a
+// per-database finding came from.
+func inDB(db string) string {
+	if db == "" {
+		return ""
+	}
+	return " (in " + db + ")"
+}
+
+func adviseWraparound(info *MaintenanceInfo, add func(Advice)) {
+	if lvl, pct := freezeLevel(info.XidAge, info.FreezeMaxAge); lvl >= AdviceWarn {
+		add(Advice{
+			Key: "wraparound", Level: lvl, Current: fmt.Sprintf("%.0f%%", pct),
+			Reason: fmt.Sprintf("oldest datfrozenxid %.0f%% of the way to a forced anti-wraparound autovacuum%s", pct, inDB(info.XidAgeDB)),
+			Target: AdviceTargetDiagnostic, DiagKey: "wraparound_tables", DB: info.XidAgeDB,
+		})
+	}
+	if lvl, pct := freezeLevel(info.MxidAge, info.MxidFreezeMaxAge); lvl >= AdviceWarn {
+		add(Advice{
+			Key: "mxid_wraparound", Level: lvl, Current: fmt.Sprintf("%.0f%%", pct),
+			Reason: fmt.Sprintf("oldest datminmxid %.0f%% of the way to a forced anti-wraparound autovacuum%s", pct, inDB(info.MxidAgeDB)),
+		})
+	}
+}
+
+// adviseOperational grades the live operational rows: connection saturation,
+// lock waits, the longest open transaction, prepared transactions, the WAL
+// archiver and pending configuration.
+func adviseOperational(info *MaintenanceInfo, add func(Advice)) {
+	if info.MaxConns > 0 {
+		used := info.TotalConns()
+		frac := float64(used) / float64(info.MaxConns)
+		lvl := AdviceInfo
+		switch {
+		case frac >= connSaturationCritFrac:
+			lvl = AdviceCrit
+		case frac >= connSaturationWarnFrac:
+			lvl = AdviceWarn
+		}
+		if lvl >= AdviceWarn {
+			add(Advice{
+				Key: "max_connections", Level: lvl, Setting: "max_connections",
+				Current: fmt.Sprintf("%d/%d", used, info.MaxConns),
+				Reason:  fmt.Sprintf("%.0f%% of max_connections in use — pool connections rather than raising the limit", frac*100),
+				Target:  AdviceTargetActivity,
+			})
+		}
+	}
+
+	if info.LockWaits > 0 || len(info.Blocked) > 0 {
+		n := max(info.LockWaits, len(info.Blocked))
+		longest := 0.0
+		for _, b := range info.Blocked {
+			longest = max(longest, b.WaitSec)
+		}
+		lvl := AdviceWarn
+		if longest > lockWaitCritSecs {
+			lvl = AdviceCrit
+		}
+		reason := fmt.Sprintf("%d backend(s) waiting on locks", n)
+		if longest > 0 {
+			reason += ", longest " + shortSecs(longest)
+		}
+		add(Advice{Key: "lock_waits", Level: lvl, Current: strconv.Itoa(n), Reason: reason, Target: AdviceTargetLockTree})
+	}
+
+	if secs := info.LongestXactSec; secs >= longXactWarnSecs {
+		lvl := AdviceWarn
+		if secs >= longXactCritSecs {
+			lvl = AdviceCrit
+		}
+		add(Advice{
+			Key: "long_xact", Level: lvl, Current: shortSecs(secs),
+			Reason: "a transaction has been open for " + shortSecs(secs) + " — it pins the xmin horizon, vacuum cannot reclaim past it",
+			Target: AdviceTargetActivity,
+		})
+	}
+
+	if info.PreparedXacts > 0 {
+		lvl := AdviceWarn
+		if info.OldestPrepSec > preparedXactCritSecs {
+			lvl = AdviceCrit
+		}
+		add(Advice{
+			Key: "prepared_xacts", Level: lvl, Current: strconv.Itoa(info.PreparedXacts),
+			Reason: fmt.Sprintf("%d prepared transaction(s), oldest %s — holds locks and the xmin horizon until COMMIT/ROLLBACK PREPARED",
+				info.PreparedXacts, shortSecs(info.OldestPrepSec)),
+		})
+	}
+
+	if info.ArchiveFailed > 0 {
+		a := Advice{
+			Key: "wal_archiver", Level: AdviceWarn, Current: compactCount(info.ArchiveFailed) + " failed",
+			Reason: "archive failures since stats reset — archiving has succeeded since",
+		}
+		// A failure newer than the last success is an archiver that is stuck
+		// right now: pg_wal grows until it gets through.
+		if !info.ArchiveLastFailedTime.IsZero() && info.ArchiveLastFailedTime.After(info.ArchiveLastTime) {
+			a.Level = AdviceCrit
+			a.Reason = fmt.Sprintf("archiver stuck: %s failed %s ago and nothing has been archived since — pg_wal grows until it succeeds",
+				info.ArchiveLastFailed, shortSecs(info.SampledAt.Sub(info.ArchiveLastFailedTime).Seconds()))
+		}
+		add(a)
+	}
+	// archive_command/archive_library are superuser-only GUCs; a missing key
+	// means pgdu cannot see them, not that they are empty.
+	cmd, cmdOK := info.Settings["archive_command"]
+	lib, libOK := info.Settings["archive_library"]
+	if mode := info.Settings["archive_mode"]; mode != "" && mode != "off" && cmdOK && libOK &&
+		strings.TrimSpace(cmd) == "" && strings.TrimSpace(lib) == "" {
+		add(Advice{
+			Key: "archive_mode", Level: AdviceCrit, Setting: "archive_mode", Current: mode,
+			Reason: "archive_command and archive_library are both empty — WAL is kept for an archiver that never runs",
+		})
+	}
+
+	if info.PendingRestart > 0 {
+		add(Advice{
+			Key: "pending_restart", Level: AdviceWarn, Current: strconv.Itoa(info.PendingRestart),
+			Reason: "setting(s) changed but waiting for a restart: " + strings.Join(info.PendingRestartSettings, ", "),
+			Target: AdviceTargetSettings,
+		})
+	}
+	if info.PendingReload > 0 {
+		add(Advice{
+			Key: "pending_reload", Level: AdviceInfo, Current: strconv.Itoa(info.PendingReload),
+			Reason: "setting(s) changed but not yet reloaded: " + strings.Join(info.PendingReloadSettings, ", "),
+			Fix:    "SELECT pg_reload_conf();",
+			Target: AdviceTargetSettings,
+		})
+	}
+}
+
+// adviseCounters grades the cumulative pg_stat_database / pg_stat_slru figures.
+func adviseCounters(info *MaintenanceInfo, add func(Advice)) {
+	if info.CacheBlocks >= cacheHitMinBlocks && info.CacheHitRatio < cacheHitNoticePct {
+		lvl := AdviceInfo
+		if info.CacheHitRatio < cacheHitWarnPct {
+			lvl = AdviceWarn
+		}
+		add(Advice{
+			Key: "cache_hit", Level: lvl, Current: fmt.Sprintf("%.1f%%", info.CacheHitRatio),
+			Reason: fmt.Sprintf("buffer cache hit ratio %.1f%% — the working set does not fit shared_buffers, or scans dominate", info.CacheHitRatio),
+			Target: AdviceTargetDiagnostic, DiagKey: "database_stats",
+		})
+	}
+
+	var worst *SLRUStat
+	for i := range info.SLRU {
+		s := &info.SLRU[i]
+		if s.Reads < slruWarnReadsFloor || s.HitPct() >= slruHitWarnPct {
+			continue
+		}
+		if worst == nil || s.HitPct() < worst.HitPct() {
+			worst = s
+		}
+	}
+	if worst != nil {
+		a := Advice{
+			Key: "slru", Level: AdviceWarn, Current: worst.Name,
+			Reason: fmt.Sprintf("%s SLRU hit ratio %.0f%% over %s reads — its buffers are too small", worst.Name, worst.HitPct(), compactCount(worst.Reads)),
+			Target: AdviceTargetDiagnostic, DiagKey: "slru_stats",
+		}
+		if guc := worst.BuffersGUC(); guc != "" {
+			a.Setting = guc
+			cur := info.Tuning.SLRUBuffers[guc]
+			eff := cur
+			if eff == 0 {
+				eff = autoSLRUBuffers(info.SettingBytes["shared_buffers"])
+			}
+			if eff > 0 {
+				const blk = 8 << 10
+				a.Current = gucBytes(eff * blk)
+				if cur == 0 {
+					a.Current += " (auto)"
+				}
+				a.Suggested = gucBytes(eff * 2 * blk)
+				a.Fix = alterRestart(guc, a.Suggested)
+			}
+		}
+		add(a)
+	}
+
+	if info.Deadlocks > 0 && info.DeadlocksPerDay >= deadlocksWarnPerDay {
+		lvl := AdviceWarn
+		if info.DeadlocksPerDay >= deadlocksCritPerDay {
+			lvl = AdviceCrit
+		}
+		add(Advice{
+			Key: "deadlocks", Level: lvl, Current: compactCount(info.Deadlocks),
+			Reason: fmt.Sprintf("~%s deadlocks/day since stats reset — a lock-ordering bug in the application that keeps biting", perDay(info.DeadlocksPerDay)),
+			Target: AdviceTargetDiagnostic, DiagKey: "database_stats",
+		})
+	}
+	if info.TempBytesPerDay >= tempBytesWarnPerDay {
+		add(Advice{
+			Key: "temp_files", Level: AdviceWarn, Current: humanize.Bytes(info.TempBytes),
+			Reason: fmt.Sprintf("~%s/day spilled to temp files — work_mem is undersized for a recurring query", humanize.Bytes(int64(info.TempBytesPerDay))),
+			Target: AdviceTargetDiagnostic, DiagKey: "database_stats",
+		})
+	}
+	if total := info.XactCommit + info.XactRollback; total >= rollbackMinXacts {
+		if frac := float64(info.XactRollback) / float64(total); frac >= rollbackWarnFrac {
+			add(Advice{
+				Key: "rollback_ratio", Level: AdviceWarn, Current: fmt.Sprintf("%.0f%%", frac*100),
+				Reason: fmt.Sprintf("%.0f%% of transactions roll back — application errors or serialization failures", frac*100),
+				Target: AdviceTargetDiagnostic, DiagKey: "database_stats",
+			})
+		}
+	}
+}
+
+// autoSLRUBuffers is the server's sizing of an SLRU whose *_buffers GUC is 0;
+// 0 when shared_buffers is unknown.
+func autoSLRUBuffers(sharedBuffersBytes int64) int64 {
+	if sharedBuffersBytes <= 0 {
+		return 0
+	}
+	return min(max(sharedBuffersBytes/(8<<10)/slruAutoDivisor, slruAutoMin), slruAutoMax)
+}
+
+// adviseReplication grades streaming replication from whichever side this
+// server is on — on a primary the worst replica and a missing synchronous
+// standby, on a standby the WAL receiver and recovery conflicts — and the slots.
+func adviseReplication(info *MaintenanceInfo, add func(Advice)) {
+	if info.InRecovery {
+		if wr := info.WalReceiver; wr == nil {
+			add(Advice{
+				Key: "wal_receiver", Level: AdviceWarn, Current: "none",
+				Reason: "standby without a WAL receiver — not streaming from a primary (log shipping, or the connection is down)",
+			})
+		} else {
+			age := wr.LastMsgAge.Seconds()
+			lvl := AdviceInfo
+			switch {
+			case age >= walReceiverStaleCritSecs:
+				lvl = AdviceCrit
+			case age >= walReceiverStaleWarnSecs || wr.Status != "streaming":
+				lvl = AdviceWarn
+			}
+			if lvl >= AdviceWarn {
+				add(Advice{
+					Key: "wal_receiver", Level: lvl, Current: wr.Status,
+					Reason: "last message from the primary " + shortSecs(age) + " ago — the standby is falling behind",
+				})
+			}
+		}
+		if v, ok := info.Settings["hot_standby_feedback"]; ok && v == "off" && info.Conflicts > 0 {
+			add(Advice{
+				Key: "hot_standby_feedback", Level: AdviceWarn, Setting: "hot_standby_feedback", Current: "off", Suggested: "on",
+				Reason: compactCount(info.Conflicts) + " queries cancelled by recovery conflicts — feedback makes the primary keep the rows they need",
+				Fix:    alterReload("hot_standby_feedback", "on"),
+			})
+		}
+	} else {
+		worst, worstRep := AdviceInfo, ReplicaStat{}
+		for _, r := range info.Replicas {
+			lag := r.ReplayLag.Seconds()
+			lvl := AdviceInfo
+			switch {
+			case lag >= replLagCritSecs || r.ByteLag >= replByteLagCritBytes:
+				lvl = AdviceCrit
+			case lag >= replLagWarnSecs || r.State != "streaming":
+				lvl = AdviceWarn
+			}
+			if lvl > worst {
+				worst, worstRep = lvl, r
+			}
+		}
+		if worst >= AdviceWarn {
+			name := worstRep.AppName
+			if name == "" {
+				name = worstRep.ClientAddr
+			}
+			add(Advice{
+				Key: "replication_lag", Level: worst, Current: name,
+				Reason: fmt.Sprintf("%s: %s, replay lag %s, %s behind", name, worstRep.State,
+					shortSecs(worstRep.ReplayLag.Seconds()), humanize.Bytes(worstRep.ByteLag)),
+			})
+		}
+		if names := strings.TrimSpace(info.Settings["synchronous_standby_names"]); names != "" &&
+			!slices.ContainsFunc(info.Replicas, func(r ReplicaStat) bool { return r.SyncState == "sync" || r.SyncState == "quorum" }) {
+			add(Advice{
+				Key: "synchronous_standby_names", Level: AdviceCrit, Setting: "synchronous_standby_names", Current: names,
+				Reason: "no connected standby is synchronous — every commit waits until one is",
+			})
+		}
+	}
+	adviseSlots(info, add)
+}
+
+// adviseSlots reports the worst replication slot: lost or unreserved WAL,
+// retention past the slot's budget, or a consumer that has been gone too long.
+func adviseSlots(info *MaintenanceInfo, add func(Advice)) {
+	var (
+		worst     AdviceLevel
+		worstSlot *ReplSlotStat
+		why       string
+		inactive  int
+	)
+	for i := range info.ReplSlots {
+		s := &info.ReplSlots[i]
+		lvl, reason := AdviceInfo, ""
+		if !s.Active {
+			inactive++
+			lvl, reason = AdviceWarn, "inactive"
+			if s.InactiveSecs > slotStaleInactiveSecs {
+				lvl, reason = AdviceCrit, "no consumer for "+shortSecs(s.InactiveSecs)
+			}
+		}
+		switch {
+		case s.WALStatus == "lost" || s.WALStatus == "unreserved":
+			lvl, reason = AdviceCrit, "wal_status "+s.WALStatus
+		case s.SafeWALBytes > 0 && s.RetainedBytes > s.SafeWALBytes:
+			lvl, reason = AdviceCrit, fmt.Sprintf("only %s of headroom left before max_slot_wal_keep_size invalidates it", humanize.Bytes(s.SafeWALBytes))
+		case s.SafeWALBytes <= 0 && s.RetainedBytes > slotRetainedCapBytes:
+			lvl, reason = AdviceCrit, "no max_slot_wal_keep_size cap"
+		}
+		if lvl > worst || (lvl == worst && worstSlot != nil && s.RetainedBytes > worstSlot.RetainedBytes) {
+			worst, worstSlot, why = lvl, s, reason
+		}
+	}
+	if worst < AdviceWarn {
+		return
+	}
+	a := Advice{
+		Key: "replication_slots", Level: worst, Current: worstSlot.Name,
+		Reason: fmt.Sprintf("%s: %s, %s of WAL retained", worstSlot.Name, why, humanize.Bytes(worstSlot.RetainedBytes)),
+		Target: AdviceTargetDiagnostic, DiagKey: "replication_slots",
+	}
+	others := inactive
+	if !worstSlot.Active {
+		others--
+	}
+	if others > 0 {
+		a.Reason += fmt.Sprintf("; %d more inactive", others)
+	}
+	if !worstSlot.Active {
+		a.Fix = fmt.Sprintf("SELECT pg_drop_replication_slot('%s');   -- only if its consumer is gone for good", worstSlot.Name)
+	}
+	add(a)
+}
+
+// adviseSchema turns the per-database catalog sweep into recommendations. It
+// is silent while the sweep is still loading (nil) and per check when that
+// check could not be evaluated.
+func adviseSchema(h *SchemaHealth, add func(Advice)) {
+	if h == nil {
+		return
+	}
+	tail := inDB(h.DB)
+	diag := func(a Advice, key string) Advice {
+		a.Target, a.DiagKey, a.DB = AdviceTargetDiagnostic, key, h.DB
+		return a
+	}
+	if c := h.Sequences; c.Err == nil && c.MaxPct >= seqWarnPct {
+		lvl := AdviceWarn
+		if c.MaxPct >= seqCritPct {
+			lvl = AdviceCrit
+		}
+		add(diag(Advice{
+			Key: "schema_sequences", Level: lvl, Current: fmt.Sprintf("%.1f%%", c.MaxPct),
+			Reason: fmt.Sprintf("%s at %.1f%% of its range%s — inserts fail at 100%%: migrate the column to bigint", c.topNames(), c.MaxPct, tail),
+		}, "sequences"))
+	}
+	if c := h.StaleStats; c.Err == nil && c.Rows > 0 {
+		add(diag(Advice{
+			Key: "schema_stale_stats", Level: AdviceWarn, Current: strconv.Itoa(c.Rows),
+			Reason: fmt.Sprintf("%d table(s) with stale planner statistics%s: %s — ANALYZE them", c.Rows, tail, c.topNames()),
+		}, "stale_statistics"))
+	}
+	if c := h.FKMissingIndex; c.Err == nil && c.Rows > 0 {
+		add(diag(Advice{
+			Key: "schema_fk_index", Level: AdviceWarn, Current: strconv.Itoa(c.Rows),
+			Reason: fmt.Sprintf("%d foreign key(s) without a supporting index%s: %s — cascading deletes and joins scan the whole table", c.Rows, tail, c.topNames()),
+		}, "fk_missing_index"))
+	}
+	if c := h.TableBloat; c.Err == nil && c.Rows > 0 {
+		add(diag(Advice{
+			Key: "schema_bloat_table", Level: AdviceWarn, Current: humanize.Bytes(c.Bytes),
+			Reason: fmt.Sprintf("%d heavily bloated table(s), ~%s wasted%s: %s — VACUUM FULL / pg_repack, then find what pins the xmin horizon", c.Rows, humanize.Bytes(c.Bytes), tail, c.topNames()),
+		}, "bloat_table"))
+	}
+	if c := h.IndexBloat; c.Err == nil && c.Rows > 0 {
+		add(diag(Advice{
+			Key: "schema_bloat_index", Level: AdviceWarn, Current: humanize.Bytes(c.Bytes),
+			Reason: fmt.Sprintf("%d heavily bloated index(es), ~%s wasted%s: %s — REINDEX INDEX CONCURRENTLY", c.Rows, humanize.Bytes(c.Bytes), tail, c.topNames()),
+		}, "bloat_index"))
+	}
+	if c := h.InvalidIndexes; c.Err == nil && c.Rows > 0 {
+		add(diag(Advice{
+			Key: "schema_index_invalid", Level: AdviceWarn, Current: strconv.Itoa(c.Rows),
+			Reason: fmt.Sprintf("%d INVALID index(es)%s: %s — maintained on every write, used by no query; REINDEX or DROP", c.Rows, tail, c.topNames()),
+		}, "index_invalid"))
+	}
+	if c := h.DuplicateIndexes; c.Err == nil && c.Rows > 0 {
+		add(diag(Advice{
+			Key: "schema_index_duplicate", Level: AdviceWarn, Current: humanize.Bytes(c.Bytes),
+			Reason: fmt.Sprintf("%d duplicate index group(s), ~%s redundant%s: %s — DROP INDEX CONCURRENTLY the copies", c.Rows, humanize.Bytes(c.Bytes), tail, c.topNames()),
+		}, "index_show_duplicate"))
+	}
 }
 
 // alterReload / alterRestart are the copyable fix lines: a reload-level GUC
@@ -595,8 +1241,32 @@ func roundDuration(d time.Duration) string {
 	}
 }
 
-// Exported mirrors of the triage thresholds the overview grades with, so the
-// renderer colours a metric exactly where the health check would flag it.
+// shortSecs renders seconds at one coarse unit — "48s", "11m", "3h", "34d" —
+// for the one-line reasons where "3h02m" would be false precision.
+func shortSecs(secs float64) string {
+	d := time.Duration(secs * float64(time.Second))
+	switch {
+	case d >= 24*time.Hour:
+		return fmt.Sprintf("%.0fd", d.Hours()/24)
+	case d >= time.Hour:
+		return fmt.Sprintf("%.0fh", d.Hours())
+	case d >= time.Minute:
+		return fmt.Sprintf("%.0fm", d.Minutes())
+	}
+	return fmt.Sprintf("%.0fs", d.Seconds())
+}
+
+// perDay renders a per-day count: whole numbers once it is at least one a
+// day, one decimal below that so "0.4" does not round to a misleading 0.
+func perDay(n float64) string {
+	if n >= 1 {
+		return fmt.Sprintf("%.0f", n)
+	}
+	return fmt.Sprintf("%.1f", n)
+}
+
+// Exported mirrors of the thresholds the renderer grades rows with, so a
+// metric is coloured exactly where the advice fires.
 const (
 	IdleXactWarnSecs      = idleXactWarnSecs
 	IdleXactCritSecs      = idleXactCritSecs

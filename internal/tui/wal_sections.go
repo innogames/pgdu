@@ -10,8 +10,8 @@ import (
 // stacks two tables — resource managers, then the same window per relation —
 // so besides the data rows the list carries each table's Σ footer, the
 // by-relation title and column header, and a note line for the relation scan's
-// loading / failed / empty states. Enter and the cursor skip them, exactly like
-// logSection.
+// loading / failed / empty states. Enter and the cursor skip them (unlike the
+// log groups pane's logSection headers, which fold on Enter).
 type walSectionKind int
 
 const (

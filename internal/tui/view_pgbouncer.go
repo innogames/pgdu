@@ -226,7 +226,7 @@ func (m *Model) renderPgBouncerInfo(height int) string {
 	b.WriteString("    " + mu("sv_active   servers linked to a client        sv_idle  pooled, ready       sv_used  idle > server_check_delay") + "\n")
 	b.WriteString("    " + mu("sv_login    servers still connecting          maxwait  longest queue time of the oldest waiting client") + "\n")
 	b.WriteString("    " + mu("Brief queueing is how transaction pooling works; a wait of a second means the pool is too small, the servers") + "\n")
-	b.WriteString("    " + mu("are stuck, or max_db_connections/max_user_connections cap it. Triage flags waits ≥ 1s (warn) / 10s (crit).") + "\n\n")
+	b.WriteString("    " + mu("are stuck, or max_db_connections/max_user_connections cap it.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" stats ") + "\n")
 	b.WriteString("    " + mu("avg_* columns are per-second rates and mean durations over pgbouncer's stats_period (default 60s), computed") + "\n")

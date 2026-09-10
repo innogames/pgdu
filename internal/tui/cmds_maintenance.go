@@ -73,6 +73,14 @@ type fixDoneMsg struct {
 // maintTickMsg re-samples the system overview (see maintTick).
 type maintTickMsg struct{}
 
+// maintSchemaLoadedMsg delivers the per-database catalog sweep behind the
+// overview's schema-health section. The sweep never fails as a whole;
+// per-check errors ride inside health.
+type maintSchemaLoadedMsg struct {
+	db     string
+	health *pg.SchemaHealth
+}
+
 // ── Maintenance commands ──────────────────────────────────────────────────────
 
 // maintTick schedules the next overview re-sample, or nil when auto-refresh is
@@ -123,6 +131,16 @@ func (m *Model) loadMaintenanceCmd(db string) tea.Cmd {
 			info.Host = sysmem.Read()
 		}
 		return maintLoadedMsg{db: db, info: info, err: err}
+	})
+}
+
+// loadMaintSchemaCmd runs the catalog sweep (sequences, stale stats, bloat,
+// invalid/duplicate indexes …) for the overview. It is issued by loadCurrent
+// only — never by the refresh tick — because the bloat estimates take seconds
+// on a big catalog.
+func (m *Model) loadMaintSchemaCmd(db string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		return maintSchemaLoadedMsg{db: db, health: m.client.SchemaHealth(ctx, db)}
 	})
 }
 

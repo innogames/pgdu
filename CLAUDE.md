@@ -125,7 +125,7 @@ fails (missing/corrupt → empty).
   are the picker. A new table = a `*_columns.go` registry + spec + one `colTable` field.
 - **Per-tool screen state lives in sub-structs** (`screen.stat`, `.act`, `.wal`, `.log`,
   `.pgb`, `.buf`, `.pages`, `.maintenance`, `.desc`, `.reindex`, `.tbl`, `.progress`,
-  `.lock`, `.triage`, `.parts` — the `*State` types below `screen` in `app.go`); only the
+  `.lock`, `.parts` — the `*State` types below `screen` in `app.go`); only the
   list/nav core, the load context and the generic table infra (`diag*`) are top-level.
 - **Byte decoding is not UI**: tuple layout segments, index-key/jsonb/TOAST decoding live
   in `internal/pageinspect` and return plain strings/segments; styling stays in tui.
@@ -145,12 +145,15 @@ fails (missing/corrupt → empty).
   (`wal.rmgrs`) and the by-relation rows (`wal.rels`, chained off the overview load
   because the block scan needs the resolved window). `applySort` rebuilds `s.items`
   via `buildWALItems`; its `walSectionRow` lines (Σ, title, column header, notes) are
-  inert like `logSection`, skipped by `skipInertRow`, and kept visible under a filter.
+  inert (the only rows `skipInertRow` steps over) and kept visible under a filter.
 - **Log analyzer** (`internal/pglog`): `pglog.Entry` text fields are `[]byte` sub-slices of the window buffer;
   convert to string only what you render. The `levelLogs` screen owns `log.report`;
   child screens find it via `findLevel(levelLogs)` and are re-pointed on each refresh.
   The groups pane orders itself, so `applySort` special-cases `levelLogs` with
-  `diagCols == nil`. Section header rows carry `logSection` and are inert.
+  `diagCols == nil`. Section header rows carry `logSection`; the cursor rests on them and
+  Enter folds the section (`log.collapsed`, keyed by category, applied in
+  `buildLogGroupItems` so the fold survives every rebuild). `skipLogHeader` lands the
+  cursor on the first group after a load or pane/mode switch.
   `Entry.Group` indexes `Report.Groups` (set by `Aggregate`); use it to walk a group's
   full membership, `Group.Samples` is capped. The group screen's tab (`log.params`)
   swaps the entry list for a generic `diagCols` table keyed by `pglog.ParamKey`.

@@ -88,11 +88,20 @@ func TestLogGroupItemsSections(t *testing.T) {
 	if len(titles) != 6 || titles[0] != `duplicate key value violates unique constraint "channel_name_plugin_idx"` {
 		t.Errorf("titles = %v", titles)
 	}
-	// The cursor never rests on a header row.
+	// The pane opens on the first group, one row below its section header.
 	s.resetCursor()
-	s.skipInertRow(1)
+	s.skipLogHeader()
+	if s.cursor != 1 {
+		t.Errorf("cursor after skipLogHeader = %d, want 1", s.cursor)
+	}
 	if _, hdr := s.items[s.visibleIndexes()[s.cursor]].data.(logSection); hdr {
 		t.Error("cursor rests on a section header")
+	}
+	// Headers are selectable, so ↑ from there lands on one.
+	s.cursor = 0
+	s.skipInertRow(-1)
+	if s.cursor != 0 {
+		t.Errorf("skipInertRow moved the cursor off a log header to %d", s.cursor)
 	}
 
 	// Flat mode: no headers at all.
@@ -102,6 +111,68 @@ func TestLogGroupItemsSections(t *testing.T) {
 		if _, ok := it.data.(logSection); ok {
 			t.Error("flat mode emitted a section header")
 		}
+	}
+}
+
+func TestLogSectionFold(t *testing.T) {
+	m, s := newLogTestModel(t)
+	all := len(s.items)
+	hdr := s.items[0].data.(logSection)
+	if hdr.cat != pglog.CatError || hdr.collapsed || !s.items[0].hasChildren {
+		t.Fatalf("first row = %+v hasChildren=%v, want an unfolded errors header with the drill mark", hdr, s.items[0].hasChildren)
+	}
+
+	// Enter on the header folds the section: its groups leave the list, the
+	// header keeps its counts and the cursor, and the footer offers "unfold".
+	s.cursor = 0
+	if cmd := m.drillIn(); cmd != nil {
+		t.Error("folding a section issued a Cmd")
+	}
+	if len(m.stack) != 2 {
+		t.Fatalf("folding pushed a screen: stack = %d", len(m.stack))
+	}
+	folded := s.items[0].data.(logSection)
+	if !folded.collapsed || folded.groups != hdr.groups || folded.entries != hdr.entries {
+		t.Errorf("folded header = %+v, want collapsed with counts of %+v", folded, hdr)
+	}
+	if len(s.items) != all-hdr.groups {
+		t.Errorf("items after fold = %d, want %d", len(s.items), all-hdr.groups)
+	}
+	for _, it := range s.items {
+		if g, ok := it.data.(*pglog.Group); ok && g.Category == pglog.CatError {
+			t.Errorf("folded section still lists %q", g.Title)
+		}
+	}
+	if s.cursor != 0 {
+		t.Errorf("cursor after fold = %d, want 0 (the header)", s.cursor)
+	}
+	if label, ok := enterLabel(s); !ok || label != "unfold" {
+		t.Errorf("enterLabel = %q,%v, want unfold", label, ok)
+	}
+	out := stripANSI(m.renderLogGroups(s, 20))
+	if !strings.Contains(out, "▸ errors") {
+		t.Errorf("folded header not marked:\n%s", out)
+	}
+
+	// The fold survives a rebuild (refresh, re-sort, pane switch) …
+	m.rebuildLogItems(s)
+	if len(s.items) != all-hdr.groups {
+		t.Errorf("items after rebuild = %d, want %d", len(s.items), all-hdr.groups)
+	}
+	// … and the position counter still counts groups only.
+	if total, _, _ := selectablePosition(s); total != all-hdr.groups-5 {
+		t.Errorf("selectablePosition total = %d, want %d groups", total, all-hdr.groups-5)
+	}
+
+	// Enter again unfolds.
+	if m.drillIn(); len(s.items) != all {
+		t.Errorf("items after unfold = %d, want %d", len(s.items), all)
+	}
+	if s.items[0].data.(logSection).collapsed {
+		t.Error("header still folded after the second Enter")
+	}
+	if !strings.Contains(stripANSI(m.renderLogGroups(s, 20)), "▾ errors") {
+		t.Error("unfolded header not marked")
 	}
 }
 

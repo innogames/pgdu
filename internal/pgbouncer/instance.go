@@ -114,7 +114,7 @@ type PoolTotals struct {
 }
 
 // Probe is the cheap health read done for the instance list and the
-// triage check: version plus pool totals, or the reason neither was available.
+// instance list: version plus pool totals, or the reason neither was available.
 type Probe struct {
 	Version string
 	Totals  PoolTotals

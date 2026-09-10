@@ -401,9 +401,23 @@ func (m *Model) renderLogGroups(s *screen, height int) string {
 		it := s.items[vis[vi]]
 		selected := vi == s.cursor
 		if hdr, ok := it.data.(logSection); ok {
-			label := fmt.Sprintf(" %s  %d group(s) · %s entries ", hdr.title, hdr.groups, fmtCount(hdr.entries))
-			rule := strings.Repeat("─", max(m.width-displayWidth(label)-4, 0))
-			b.WriteString(truncateToWidth("  "+styleSelected.Render(hdr.title)+mu(label[len(hdr.title)+1:])+mu(rule), m.width) + "\n")
+			// Cursor slot + drill mark, then the fold glyph, title, counts and a
+			// rule to the right edge; a folded section keeps its full counts.
+			cursor := "  "
+			if selected {
+				cursor = styleSelected.Render("▶ ")
+			}
+			fold, counts := "▾", fmt.Sprintf("%d group(s) · %s entries", hdr.groups, fmtCount(hdr.entries))
+			if hdr.collapsed {
+				fold = "▸"
+			}
+			rule := strings.Repeat("─", max(m.width-4-displayWidth(fold+" "+hdr.title+"  "+counts+" "), 0))
+			dim := mu
+			if selected {
+				dim = styleSelected.Render
+			}
+			line := cursor + drillMark(it.hasChildren) + dim(fold+" ") + styleSelected.Render(hdr.title) + dim("  "+counts+" ") + mu(rule)
+			b.WriteString(truncateToWidth(line, m.width) + "\n")
 			continue
 		}
 		g, ok := it.data.(*pglog.Group)

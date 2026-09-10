@@ -91,22 +91,33 @@ WHERE  pid <> pg_backend_pid()
 GROUP  BY state`
 
 	// sqlMaintCacheHit computes the aggregate buffer-cache hit ratio across all
-	// user databases (blks_hit / (blks_hit + blks_read)).
-	// Returns 0 when there have been no reads yet.
+	// user databases (blks_hit / (blks_hit + blks_read)), 0 with no reads yet,
+	// plus the block traffic it is computed over so a ratio over a handful of
+	// blocks is not graded.
 	sqlMaintCacheHit = `
 SELECT CASE WHEN sum(blks_hit) + sum(blks_read) > 0
             THEN sum(blks_hit)::float8 / (sum(blks_hit) + sum(blks_read))
             ELSE 0
-       END
+       END,
+       COALESCE(sum(blks_hit) + sum(blks_read), 0)::bigint
 FROM   pg_stat_database
 WHERE  datname NOT IN ('template0', 'template1')`
+
+	// sqlMaintSLRU reads the simple-LRU cache counters (transaction status,
+	// multixacts, subtransactions, …). A poor hit ratio on a busy one means its
+	// *_buffers GUC (PG17+) is too small.
+	sqlMaintSLRU = `
+SELECT name, blks_hit, blks_read
+FROM   pg_stat_slru
+ORDER  BY blks_read DESC`
 
 	// sqlMaintWraparound reads the maximum transaction-ID age across all
 	// non-template databases. A high age approaching autovacuum_freeze_max_age
 	// (typically 200 M) means wraparound is imminent and the autovacuum "emergency
 	// brake" will fire, degrading all write throughput.
-	// The database holding that oldest datfrozenxid rides along so the triage
-	// drill can open the per-table freeze-age diagnostic in the right place.
+	// The database holding that oldest datfrozenxid rides along so the
+	// wraparound recommendation can open the per-table freeze-age diagnostic
+	// in the right place.
 	sqlMaintWraparound = `
 SELECT datname, age(datfrozenxid)
 FROM   pg_database
@@ -336,13 +347,16 @@ FROM   pg_stat_wal`
 SELECT COALESCE(buffers_clean, 0), COALESCE(maxwritten_clean, 0), COALESCE(buffers_alloc, 0)
 FROM   pg_stat_bgwriter`
 
-	// sqlMaintArchiver reads WAL-archiver health. failed_count > 0 means pg_wal
-	// is accumulating unarchived segments, which will eventually fill the disk.
+	// sqlMaintArchiver reads WAL-archiver health. A last_failed_time newer than
+	// last_archived_time is an archiver stuck right now: pg_wal accumulates
+	// unarchived segments until it gets through. Both times are nullable and
+	// scanned as pointers (never archived / never failed).
 	sqlMaintArchiver = `
 SELECT archived_count,
        failed_count,
        COALESCE(last_failed_wal, ''),
-       COALESCE(last_archived_time, '-infinity'::timestamptz)
+       last_archived_time,
+       last_failed_time
 FROM   pg_stat_archiver`
 
 	// sqlAllSettings fetches all pg_settings for the Settings browser.
@@ -391,34 +405,47 @@ WHERE  datname = current_database()`
 	sqlMaintRecovery = `SELECT pg_is_in_recovery()`
 
 	// sqlMaintReplication reads streaming-replication standby info from the primary.
-	// The query returns no rows on a standby or when no standbys are connected.
-	// ByteLag is the LSN delta between the primary's write position and the
-	// replica's last confirmed replay position; NULL replay_lsn maps to 0.
+	// The query returns no rows when no standbys are connected. ByteLag is the
+	// LSN delta between this node's write (or, on a cascading standby, receive)
+	// position and the replica's last confirmed replay position; replay_lsn is
+	// also returned as an absolute byte offset so two samples give a throughput.
+	// pid pairs the walsender with the slot it holds (pg_replication_slots.active_pid).
 	sqlMaintReplication = `
-SELECT application_name,
+SELECT pid,
+       application_name,
        COALESCE(client_addr::text, ''),
        COALESCE(state, ''),
        COALESCE(sync_state, ''),
        COALESCE(EXTRACT(epoch FROM write_lag),  0)::float8,
        COALESCE(EXTRACT(epoch FROM flush_lag),  0)::float8,
        COALESCE(EXTRACT(epoch FROM replay_lag), 0)::float8,
-       COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn), 0)
+       COALESCE(pg_wal_lsn_diff(` + sqlMaintHeadLSN + `, replay_lsn), 0),
+       COALESCE(pg_wal_lsn_diff(replay_lsn, '0/0'), 0)
 FROM   pg_stat_replication
 ORDER  BY sync_state DESC, application_name`
 
 	// sqlMaintReplSlots reads replication slot health. retained_bytes is the
 	// amount of WAL that cannot be recycled because of this slot; when it grows
 	// large and the slot is inactive, it is a serious disk-space hazard.
-	// On a standby, pg_current_wal_lsn() is still valid (it returns the replay
-	// position), so retained_bytes is meaningful there too.
+	// safe_wal_size is the headroom left before max_slot_wal_keep_size
+	// invalidates the slot; NULL (no limit) maps to -1. inactive_since (PG17+)
+	// says how long nobody has consumed the slot; 0 while it is active.
 	sqlMaintReplSlots = `
 SELECT slot_name,
        slot_type,
        active,
+       COALESCE(active_pid, 0),
        COALESCE(wal_status, ''),
-       COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn), 0)
+       COALESCE(pg_wal_lsn_diff(` + sqlMaintHeadLSN + `, restart_lsn), 0),
+       COALESCE(safe_wal_size, -1),
+       COALESCE(EXTRACT(epoch FROM now() - inactive_since), 0)::float8
 FROM   pg_replication_slots
 ORDER  BY active DESC, slot_name`
+
+	// sqlMaintHeadLSN is the WAL position lag and retention are measured from:
+	// pg_current_wal_lsn() raises an error during recovery, so a standby uses
+	// what it has received instead.
+	sqlMaintHeadLSN = `CASE WHEN pg_is_in_recovery() THEN pg_last_wal_receive_lsn() ELSE pg_current_wal_lsn() END`
 
 	// sqlMaintWalReceiver reads the standby-side WAL receiver status.
 	// Returns no rows on a primary. latest_end_lsn is the last LSN reported
@@ -430,12 +457,18 @@ FROM   pg_stat_wal_receiver
 LIMIT  1`
 
 	// sqlMaintTxnStats aggregates commit/rollback/deadlock/conflict totals
-	// across all non-template user databases. Works on PG 9.2+.
+	// across all non-template user databases, plus per-day rates of deadlocks
+	// and temp bytes. Each database's stats_reset can differ, so the rate is
+	// summed per row over that row's own window rather than one grand total
+	// over one window; the window is floored at a day so a fresh reset does not
+	// extrapolate an hour's burst into a day's rate.
 	sqlMaintTxnStats = `
 SELECT COALESCE(sum(xact_commit),   0),
        COALESCE(sum(xact_rollback), 0),
        COALESCE(sum(deadlocks),     0),
-       COALESCE(sum(conflicts),     0)
+       COALESCE(sum(conflicts),     0),
+       COALESCE(sum(deadlocks  * 86400.0 / GREATEST(EXTRACT(epoch FROM now() - COALESCE(stats_reset, pg_postmaster_start_time())), 86400)), 0)::float8,
+       COALESCE(sum(temp_bytes * 86400.0 / GREATEST(EXTRACT(epoch FROM now() - COALESCE(stats_reset, pg_postmaster_start_time())), 86400)), 0)::float8
 FROM   pg_stat_database
 WHERE  datname NOT IN ('template0', 'template1')
   AND  datname IS NOT NULL`
@@ -559,6 +592,7 @@ var maintSettingsKeys = []string{
 	"wal_level",
 	"max_wal_size",
 	"min_wal_size",
+	"max_slot_wal_keep_size",
 	"checkpoint_timeout",
 	"autovacuum",
 	"autovacuum_max_workers",
@@ -572,15 +606,29 @@ var maintSettingsKeys = []string{
 	"huge_page_size",
 	"shared_memory_size_in_huge_pages",
 	"wal_buffers",
+	"wal_compression",
 	"checkpoint_completion_target",
 	"bgwriter_lru_maxpages",
 	"idle_in_transaction_session_timeout",
 	"track_io_timing",
 	"track_wal_io_timing",
 	"track_functions",
+	"track_counts",
 	"log_min_duration_statement",
 	"log_autovacuum_min_duration",
 	"log_checkpoints",
+	"log_lock_waits",
+	"log_temp_files",
+	// Safety and replication knobs the recommendations grade. archive_command
+	// and archive_library are superuser-only and simply absent for other roles.
+	"fsync",
+	"full_page_writes",
+	"data_checksums",
+	"archive_mode",
+	"archive_command",
+	"archive_library",
+	"synchronous_standby_names",
+	"hot_standby_feedback",
 	"pg_stat_statements.max",
 	"pg_stat_statements.track",
 	"pg_stat_statements.track_planning",
@@ -600,6 +648,7 @@ var maintSettingBytesKeys = []string{
 	"wal_buffers",
 	"max_wal_size",
 	"min_wal_size",
+	"max_slot_wal_keep_size",
 }
 
 // maintSettingsRawKeys are the numeric GUCs fetched in base units
@@ -615,4 +664,18 @@ var maintSettingsRawKeys = []string{
 	"shared_memory_size_in_huge_pages",
 	"bgwriter_lru_maxpages",
 	"idle_in_transaction_session_timeout",
+	"commit_timestamp_buffers",
+	"multixact_member_buffers",
+	"multixact_offset_buffers",
+	"notify_buffers",
+	"serializable_buffers",
+	"subtransaction_buffers",
+	"transaction_buffers",
+}
+
+// slruBufferGUCs are the PG17+ per-SLRU sizing GUCs (in blocks), parsed into
+// MaintTuning.SLRUBuffers.
+var slruBufferGUCs = []string{
+	"commit_timestamp_buffers", "multixact_member_buffers", "multixact_offset_buffers",
+	"notify_buffers", "serializable_buffers", "subtransaction_buffers", "transaction_buffers",
 }

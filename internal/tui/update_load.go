@@ -240,7 +240,11 @@ func (m *Model) loadCurrent() tea.Cmd {
 	case levelSnapshots:
 		return m.listSnapshotsCmd(m.snapshotDir, s.db)
 	case levelMaintenance:
-		return tea.Batch(m.armMaintTick([]tea.Cmd{m.loadMaintenanceCmd(s.db)})...)
+		// The catalog sweep is expensive, so it rides only on the explicit
+		// loads (open, space, after a reset); the auto-refresh tick re-samples
+		// MaintenanceInfo alone (onMaintTick).
+		s.maintenance.schemaLoading = true
+		return tea.Batch(m.armMaintTick([]tea.Cmd{m.loadMaintenanceCmd(s.db), m.loadMaintSchemaCmd(s.db)})...)
 	case levelSettings:
 		return m.loadSettingsCmd(s.db)
 	case levelActivity:
@@ -252,9 +256,6 @@ func (m *Model) loadCurrent() tea.Cmd {
 		return tea.Batch(m.armActivityTick([]tea.Cmd{m.loadLockTreeCmd(s.db)})...)
 	case levelTableStats:
 		return m.loadTableOverviewCmd(s.db, s.schema)
-	case levelTriage:
-		s.triage.gen++
-		return m.loadTriageCmd(s.triage.gen)
 	case levelPgBouncers:
 		return tea.Batch(m.armPgbTick([]tea.Cmd{m.discoverPgBouncersCmd()})...)
 	case levelPgBouncer:

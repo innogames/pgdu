@@ -8,7 +8,7 @@ import (
 )
 
 // The generic result shape lives in diagres so the pgbouncer console (which pg
-// itself depends on for triage) can produce it without importing pg. The
+// itself depends on for pooler discovery) can produce it without importing pg. The
 // aliases keep pg's public surface unchanged.
 type (
 	DiagColumnKind = diagres.Kind

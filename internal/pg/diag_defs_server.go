@@ -25,7 +25,7 @@ var diagServer = []Diagnostic{
 		Bar:         "hit_pct",
 		// Rarely-nonzero or niche columns start hidden to keep the wide default
 		// table readable; the C picker reveals them. stats_age_secs exists for
-		// the triage rate graders and duplicates stats_reset for a reader.
+		// per-day rate grading and duplicates stats_reset for a reader.
 		DefaultHidden: []string{"conflicts", "rollback_pct", "sessions", "stats_age_secs"},
 		Kinds: map[string]DiagColumnKind{
 			"hit_pct":      DiagPercentGraded, // higher is better

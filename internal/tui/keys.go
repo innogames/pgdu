@@ -249,10 +249,9 @@ func (k *keyMap) applyContext(s *screen) {
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
 	k.Params.SetEnabled(stmtDetail)
 	k.Execute.SetEnabled(stmtDetail)
-	// v is the verbose toggle on statement detail, the VACUUM trigger on parts,
-	// the auxiliary-backend visibility toggle on the activity table and the
-	// fold/unfold of green checks on triage.
-	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity || s.level == levelTriage)
+	// v is the verbose toggle on statement detail, the VACUUM trigger on parts
+	// and the auxiliary-backend visibility toggle on the activity table.
+	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity)
 	k.DeleteSnapshot.SetEnabled(snapshots)
 	// Install is only actionable when the screen offers an installable extension
 	// (the prompt renders its own `i` hint); keep it out of the footer otherwise.
@@ -306,9 +305,10 @@ func (k *keyMap) applyContext(s *screen) {
 	k.JumpWAL.SetEnabled(maint)
 	k.JumpReplication.SetEnabled(maint)
 	k.JumpIO.SetEnabled(maint)
-	// s opens the pg_settings browser. Enter can't: on the dashboard it arms the
-	// extension-capacity reset for the cursor row. The physical key is ShowQuery
-	// (diagnostics) and Seek (index tuples) elsewhere, both off here.
+	// s opens the pg_settings browser. Enter can't: on the dashboard it acts on
+	// the cursor's action row (arms a stats reset, opens a recommendation's
+	// screen). The physical key is ShowQuery (diagnostics) and Seek (index
+	// tuples) elsewhere, both off here.
 	k.Settings.SetEnabled(maint)
 	// p opens the live progress monitor, from the dashboard and the activity table
 	// (running operations are backends, so it's a natural cross-link from activity);

@@ -60,6 +60,7 @@ func ovRow(label, value string) string {
 func overviewScreen(info *pg.MaintenanceInfo) *screen {
 	s := &screen{level: levelMaintenance, tool: toolMaintenance, db: "postgres", loaded: true}
 	s.maintenance.info = info
+	s.maintenance.refreshAdvice()
 	return s
 }
 
@@ -77,6 +78,7 @@ func TestRenderMaintenanceHealthy(t *testing.T) {
 		"in shop", "wal rate", "since reset", "pg_wal on disk", "2.00 GB", "128 segments",
 		"dirty-page writes", "checkpointer 75.0%", "avg interval", "per checkpoint",
 		"counters since reset", "auto-refresh off",
+		" schema health (postgres) ", "loading…",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered overview lacks %q\n%s", want, out)
@@ -169,6 +171,111 @@ func TestRenderMaintenanceRatesAndAdvice(t *testing.T) {
 	}
 }
 
+// replicationInfo adds two streaming replicas holding their slots and one
+// abandoned slot to the healthy snapshot.
+func replicationInfo() *pg.MaintenanceInfo {
+	info := overviewInfo()
+	info.Settings["max_slot_wal_keep_size"] = "4GB"
+	info.Replicas = []pg.ReplicaStat{
+		{PID: 10, AppName: "db1", ClientAddr: "10.0.0.1", State: "streaming", SyncState: "async",
+			ReplayLag: 200 * time.Millisecond, ByteLag: 800 << 10, ReplayLSNBytes: 500 << 30},
+		{PID: 11, AppName: "db3", ClientAddr: "10.0.0.3", State: "streaming", SyncState: "sync", ReplayLSNBytes: 500 << 30},
+	}
+	info.ReplSlots = []pg.ReplSlotStat{
+		{Name: "slot_db1", SlotType: "physical", Active: true, ActivePID: 10, WALStatus: "reserved", RetainedBytes: 24 << 10, SafeWALBytes: 4 << 30},
+		{Name: "slot_db3", SlotType: "physical", Active: true, ActivePID: 11, WALStatus: "reserved", RetainedBytes: 16 << 10, SafeWALBytes: 4 << 30},
+		{Name: "slot_old", SlotType: "physical", Active: false, WALStatus: "extended", RetainedBytes: 2 << 30, SafeWALBytes: 500 << 20},
+	}
+	return info
+}
+
+// squashSpaces collapses column padding so table rows can be asserted as text.
+func squashSpaces(s string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(s, "\n") {
+		b.WriteString(strings.Join(strings.Fields(line), " ") + "\n")
+	}
+	return b.String()
+}
+
+func TestRenderMaintenanceReplication(t *testing.T) {
+	m := &Model{width: 200}
+	raw := stripANSI(m.renderMaintenance(overviewScreen(replicationInfo()), 300))
+	out := squashSpaces(raw)
+	for _, want := range []string{
+		"replication & slots\n",
+		"max_slot_wal_keep_size 4GB\n",
+		"node address state sync lag behind slot type status retained safe\n",
+		"db1 10.0.0.1 streaming async <1s 800.00 KB slot_db1 physical active reserved 24.00 KB 4.00 GB\n",
+		"db3 10.0.0.3 streaming sync slot_db3 physical active reserved 16.00 KB 4.00 GB\n",
+		"slot_old physical inactive extended 2.00 GB 500.00 MB\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("replication section lacks %q\n%s", want, raw)
+		}
+	}
+	// Columns line up: the slot name starts at the same offset on every table
+	// row (the recommendation and its inline note name the slot too, so only
+	// rows carrying the slot type count).
+	var slotCol []int
+	for line := range strings.SplitSeq(raw, "\n") {
+		if i := strings.Index(line, " slot_"); i >= 0 && strings.Contains(line, " physical ") {
+			slotCol = append(slotCol, i)
+		}
+	}
+	if len(slotCol) != 3 || slotCol[0] != slotCol[1] || slotCol[1] != slotCol[2] {
+		t.Errorf("slot column misaligned: offsets %v\n%s", slotCol, raw)
+	}
+	if strings.Contains(out, "rate (") {
+		t.Errorf("single sample must show no throughput column\n%s", raw)
+	}
+
+	// -1 means unlimited; with an inactive slot hoarding WAL that deserves a note.
+	info := replicationInfo()
+	info.Settings["max_slot_wal_keep_size"] = "-1"
+	out = squashSpaces(stripANSI(m.renderMaintenance(overviewScreen(info), 300)))
+	if !strings.Contains(out, "max_slot_wal_keep_size unlimited an inactive slot can fill pg_wal\n") {
+		t.Errorf("unlimited keep size with a 2 GB inactive slot must warn\n%s", out)
+	}
+	info.ReplSlots = info.ReplSlots[:2]
+	out = squashSpaces(stripANSI(m.renderMaintenance(overviewScreen(info), 300)))
+	if !strings.Contains(out, "max_slot_wal_keep_size unlimited\n") {
+		t.Errorf("unlimited keep size without a hoarding slot must not warn\n%s", out)
+	}
+}
+
+// Replica throughput shows both windows once the screen has three samples,
+// and only the last one while the first sample is still the previous one.
+func TestRenderMaintenanceReplicationRates(t *testing.T) {
+	first := replicationInfo()
+	prev := replicationInfo()
+	cur := replicationInfo()
+	prev.SampledAt = first.SampledAt.Add(270 * time.Second)
+	cur.SampledAt = first.SampledAt.Add(300 * time.Second)
+	prev.Replicas[0].ReplayLSNBytes += 240 << 20
+	cur.Replicas[0].ReplayLSNBytes += 300 << 20
+	cur.Replicas[1].AppName = "db4" // reconnected under a new name: no rate
+	s := overviewScreen(cur)
+	s.maintenance.first, s.maintenance.prev = first, prev
+	m := &Model{width: 200}
+	out := squashSpaces(stripANSI(m.renderMaintenance(s, 300)))
+	for _, want := range []string{
+		"retained safe rate (last 30s) rate (since open 5m)\n",
+		"24.00 KB 4.00 GB 120.00 MB/min 60.00 MB/min\n",
+		"db4 10.0.0.3 streaming sync slot_db3 physical active reserved 16.00 KB 4.00 GB\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("replication table with rates lacks %q\n%s", want, out)
+		}
+	}
+
+	s.maintenance.first = prev
+	out = squashSpaces(stripANSI(m.renderMaintenance(s, 300)))
+	if !strings.Contains(out, "safe rate (last 30s)\n") || strings.Contains(out, "since open") {
+		t.Errorf("second sample must show only the last window\n%s", out)
+	}
+}
+
 func TestRenderMaintenanceNarrow(t *testing.T) {
 	m := &Model{width: 120}
 	out := stripANSI(m.renderMaintenance(overviewScreen(overviewInfo()), 400))
@@ -184,7 +291,7 @@ func TestRenderMaintenanceNarrow(t *testing.T) {
 
 func TestRenderColumnsWidth(t *testing.T) {
 	out := renderColumns("left line\nsecond", "right", 12, 8)
-	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(out, "\n"), "\n") {
 		plain := stripANSI(line)
 		if !strings.HasPrefix(plain[12:], "│ ") {
 			t.Errorf("column rule misplaced in %q", plain)

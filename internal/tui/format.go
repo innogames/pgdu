@@ -65,17 +65,17 @@ func positionLabel(s *screen) string {
 	return fmt.Sprintf("%d/%d", cursor, vis)
 }
 
-// selectablePosition counts the selectable (non-inert) rows of a sectioned
-// list — all of them, the visible ones, and the cursor's 1-based rank among
-// the visible ones.
+// selectablePosition counts the data rows of a sectioned list, leaving out its
+// section headers/footers — all of them, the visible ones, and the cursor's
+// 1-based rank among the visible ones (on a header: the rank of the row above).
 func selectablePosition(s *screen) (total, vis, cursor int) {
 	for _, it := range s.items {
-		if !inertRow(it) {
+		if !sectionRow(it) {
 			total++
 		}
 	}
 	for i, idx := range s.visibleIndexes() {
-		if inertRow(s.items[idx]) {
+		if sectionRow(s.items[idx]) {
 			continue
 		}
 		vis++
@@ -190,8 +190,6 @@ func levelLabel(l level) string {
 		return "settings"
 	case levelProgress:
 		return "progress"
-	case levelTriage:
-		return "triage"
 	case levelWaitProfile:
 		return "wait-profile"
 	case levelLogFiles:

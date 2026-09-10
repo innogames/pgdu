@@ -5,7 +5,6 @@ import (
 	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"testing"
 
 	"pgdu/internal/cli"
@@ -222,20 +221,16 @@ func diagByKey(t *testing.T, key string) Diagnostic {
 	panic("unreachable")
 }
 
-// TestIntegration_Triage runs the whole health battery against the live test
-// cluster. Severities are data-dependent (a small test DB can legitimately
-// grade red on e.g. cache hit ratio), so the assertion is only that every
-// check evaluated — nothing may degrade to "could not evaluate".
-func TestIntegration_Triage(t *testing.T) {
-	c, _ := diagTestClient(t)
-	results := c.Triage(context.Background())
-	if want := len(c.TriageCheckNames()); len(results) != want {
-		t.Fatalf("Triage returned %d results, want %d", len(results), want)
-	}
-	for _, r := range results {
-		if strings.HasPrefix(r.Detail, "could not evaluate") {
-			t.Errorf("%s: %s", r.Check, r.Detail)
+// TestIntegration_SchemaHealth runs the overview's per-database catalog sweep
+// against the live test cluster. Findings are data-dependent, so the assertion
+// is only that every check evaluated.
+func TestIntegration_SchemaHealth(t *testing.T) {
+	c, db := diagTestClient(t)
+	h := c.SchemaHealth(context.Background(), db)
+	for name, chk := range h.Checks() {
+		if chk.Err != nil {
+			t.Errorf("%s: %v", name, chk.Err)
 		}
-		t.Logf("%-24s sev=%d  %s", r.Check, r.Severity, r.Detail)
+		t.Logf("%-20s rows=%d bytes=%d maxpct=%.1f top=%v", name, chk.Rows, chk.Bytes, chk.MaxPct, chk.Top)
 	}
 }

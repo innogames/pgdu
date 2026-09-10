@@ -138,6 +138,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case maintLoadedMsg:
 		return m, m.onMaintLoaded(msg)
+	case maintSchemaLoadedMsg:
+		return m, m.onMaintSchemaLoaded(msg)
 	case maintTickMsg:
 		return m, m.onMaintTick()
 	case settingsLoadedMsg:
@@ -178,13 +180,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tableOverviewLoadedMsg:
 		return m, m.onTableOverviewLoaded(msg)
-
-	case triageStartedMsg:
-		return m, m.onTriageStarted(msg)
-	case triageCheckMsg:
-		return m, m.onTriageCheck(msg)
-	case triageLoadedMsg:
-		return m, m.onTriageLoaded(msg)
 
 	case pgbAvailableMsg:
 		if msg.found {

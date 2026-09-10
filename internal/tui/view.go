@@ -304,8 +304,6 @@ func (m *Model) View() string {
 			b.WriteString(m.renderLockTree(s, contentHeight))
 		case levelProgress:
 			b.WriteString(m.renderProgress(s, contentHeight))
-		case levelTriage:
-			b.WriteString(m.renderTriageList(s, contentHeight))
 		case levelWaitProfile:
 			b.WriteString(m.renderWaitProfile(s, contentHeight))
 		case levelLogFiles:
@@ -430,8 +428,9 @@ func walStatusLabel(s *screen) string {
 // empty while a placeholder is still loading.
 //
 // Two decorations keep the trail self-sufficient without adding crumbs: a
-// screen that switches tool mid-trail (describe → page inspector, triage → lock
-// tree, the single-database fast path that skips the picker) is prefixed with
+// screen that switches tool mid-trail (describe → page inspector, an overview
+// recommendation → lock tree, the single-database fast path that skips the
+// picker) is prefixed with
 // the tool name, and the first screen scoped to a database the trail hasn't
 // named yet is suffixed with "(db)". Cluster-wide tools carry the connection
 // database only as a handle, so they never get the suffix. Relations read the
@@ -613,8 +612,6 @@ func crumbText(sc, prev *screen, named crumbScope) (text string, names crumbScop
 		return "lock tree", names
 	case levelWaitProfile:
 		return "wait profile", names
-	case levelTriage:
-		return "triage", names
 	case levelLogFiles:
 		return "logs", names
 	case levelLogs:

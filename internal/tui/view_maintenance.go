@@ -33,34 +33,52 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	}
 
 	info := s.maintenance.info
+	st := &s.maintenance
+	v := newMaintView(s)
+	rows := st.actionRows()
 
 	var body strings.Builder
+	// cursorLine is the body line the cursor's action row lands on (and span
+	// how many lines it takes); the follow logic below turns it into a scroll
+	// offset once the hint/legend lines above the body are known.
+	cursorLine, cursorSpan := -1, 1
+	markCursor := func(idx int) {
+		if idx == st.cursor {
+			cursorLine = strings.Count(body.String(), "\n")
+		}
+	}
 
-	// ── EXTENSION CAPACITY ────────────────────────────────────────────
-	// Kept first because it owns the ↑↓ cursor and reset flow — the only
-	// actionable rows on this dashboard, so they stay reachable without having
-	// to scroll past the read-only status sections below.
+	// ── EXTENSION CAPACITY + RECOMMENDATIONS ──────────────────────────
+	// The action rows come first: the capacity rows own the reset flow and
+	// every recommendation opens the screen behind it, so all of them stay
+	// reachable without scrolling past the read-only status sections below.
 	body.WriteString("  " + styleHeader.Render(" extension capacity ") + "\n")
 	var stmtsCap, qualsCap pg.ExtCapacity
 	if info != nil {
 		stmtsCap = info.Statements
 		qualsCap = info.Qualstats
 	}
+	markCursor(0)
 	body.WriteString(m.renderCapacityRow(s, s.db, 0, "pg_stat_statements", stmtsCap) + "\n")
+	markCursor(1)
 	body.WriteString(m.renderCapacityRow(s, s.db, 1, "pg_qualstats", qualsCap) + "\n")
+	markCursor(2)
 	body.WriteString(m.renderTableStatsRow(s, info, 2) + "\n")
+	markCursor(3)
 	body.WriteString(m.renderTableStatsAllRow(s, 3) + "\n")
 	body.WriteString("\n")
 
-	v := newMaintView(s)
+	rec, at, span := renderMaintRecommendations(v, rows, len(maintResetRows), st.cursor)
+	if at >= 0 {
+		cursorLine, cursorSpan = strings.Count(body.String(), "\n")+at, span
+	}
+	body.WriteString(rec)
 
 	// Wide terminals get a two-pane layout: compact "vitals" sections side by
 	// side, verbose sections (long advisory lines, bars, blocked-query text)
 	// full width below so they aren't truncated. The paned sections carry
 	// annotated rows of up to ~80 cols (host memory, advice notes), so the
 	// split only pays off from 160 cols; narrower terminals stack everything.
-	// The recommendations panel closes the screen so the eye lands on it after
-	// scrolling through the sections it summarises.
 	if m.width >= 160 {
 		// Split evenly: both panes carry long rows now (connections by app and
 		// query text on the left, host memory and advice notes on the right),
@@ -87,15 +105,17 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	body.WriteString(renderMaintReplication(v))
 	body.WriteString(renderMaintWAL(v))
 	body.WriteString(renderMaintHealth(v))
-	body.WriteString(renderMaintRecommendations(v))
+	body.WriteString(renderMaintSchemaHealth(v))
 
 	hintLine := m.renderMaintHint(s)
 
 	var full strings.Builder
+	prefix := 1 // the legend line
 	if hintLine != "" {
 		full.WriteString(hintLine + "\n")
+		prefix++
 	}
-	full.WriteString("  " + mu("↑↓ capacity row / scroll  ·  pgdn g G  ·  ↵ reset  ·  ") +
+	full.WriteString("  " + mu("↑↓ action row / scroll  ·  pgdn g G  ·  ↵ reset / open  ·  ") +
 		styleBadge.Render("s") + mu(" → settings  ·  ") +
 		styleBadge.Render("a") + mu(" → activity  ·  ") +
 		styleBadge.Render("w") + mu(" → wal  ·  ") +
@@ -105,6 +125,23 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 		styleBadge.Render("t") + mu(" auto-refresh "+m.maintRefreshLabel()) + "\n")
 	full.WriteString(body.String())
 
+	// ↑↓ ask the render to keep the cursor row in view (follow); an explicit
+	// PgDn, G or ↓ past the last row may still scroll it away on purpose.
+	if cursorLine >= 0 {
+		cursorLine += prefix
+	}
+	st.cursorLine = cursorLine
+	if st.follow {
+		st.follow = false
+		if cursorLine >= 0 && height > 0 {
+			switch {
+			case cursorLine < s.offset:
+				s.offset = cursorLine
+			case cursorLine+cursorSpan > s.offset+height:
+				s.offset = max(cursorLine+cursorSpan-height, 0)
+			}
+		}
+	}
 	return scrollWindow(full.String(), &s.offset, height)
 }
 
@@ -155,8 +192,8 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 	ratio := cap.FillRatio()
 	barW := 20
 
-	// Colour follows the triage thresholds so the bar and the "extension
-	// capacity" health check never disagree: warn red, notice yellow, else bar-cyan.
+	// Colour follows the advice thresholds so the bar and the .max
+	// recommendation never disagree: warn red, notice yellow, else bar-cyan.
 	var barStyle lipgloss.Style
 	switch {
 	case ratio >= pg.ExtCapacityWarnFrac:
@@ -480,7 +517,18 @@ func (m *Model) renderMaintenanceInfo(height int) string {
 	b.WriteString("    " + mu("Every red/yellow note (and informational ones with a concrete change) collected worst") + "\n")
 	b.WriteString("    " + mu("first, with a copyable ALTER SYSTEM line. pg_reload_conf() applies reload-level GUCs;") + "\n")
 	b.WriteString("    " + mu("'restart required' ones wait for the next restart. sysctl lines are host-side.") + "\n")
-	b.WriteString("    " + mu("Nothing is applied by pgdu.") + "\n\n")
+	b.WriteString("    " + mu("Nothing is applied by pgdu. Each line is an action row: ↵ opens what explains it —") + "\n")
+	b.WriteString("    " + mu("the diagnostic listing the offenders, the lock tree, the activity list, or the") + "\n")
+	b.WriteString("    " + mu("settings browser filtered to the GUC. Red = something is breaking or about to;") + "\n")
+	b.WriteString("    " + mu("yellow = performance or hygiene; the rest is informational.") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" schema health ") + "\n")
+	b.WriteString("    " + mu("A catalog sweep of the connection database: sequences past 30% of their range, tables") + "\n")
+	b.WriteString("    " + mu("whose planner statistics are stale, foreign keys without a supporting index, heavily") + "\n")
+	b.WriteString("    " + mu("bloated tables and indexes, INVALID indexes left by failed CONCURRENTLY builds, and") + "\n")
+	b.WriteString("    " + mu("duplicate indexes. The bloat estimates take seconds on a big catalog, so the sweep runs") + "\n")
+	b.WriteString("    " + mu("on open and on space, never on the t auto-refresh. Each row is a diagnostic under") + "\n")
+	b.WriteString("    " + mu("Other Tools; the recommendation for it opens that diagnostic with per-row fixes.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" pending config ") + "\n")
 	b.WriteString("    " + mu("need restart  — the setting was changed in postgresql.conf but requires a full server") + "\n")

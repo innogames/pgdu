@@ -78,7 +78,7 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 		}
 		if s.log.view == logViewGroups {
 			m.rebuildLogItems(s)
-			s.skipInertRow(1)
+			s.skipLogHeader()
 		}
 		return nil, true
 
@@ -89,7 +89,7 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 		}
 		m.rebuildLogItems(s)
 		s.resetCursor()
-		s.skipInertRow(1)
+		s.skipLogHeader()
 		return m.logHostsCmd(s), true
 
 	case key.Matches(msg, m.keys.LogWindow):

@@ -419,6 +419,23 @@ func (m *Model) onMaintLoaded(msg maintLoadedMsg) tea.Cmd {
 	s.maintenance.err = nil
 	s.maintenance.prev = s.maintenance.info
 	s.maintenance.info = msg.info
+	if s.maintenance.first == nil {
+		s.maintenance.first = msg.info
+	}
+	s.maintenance.refreshAdvice()
+	return nil
+}
+
+// onMaintSchemaLoaded lands the catalog sweep; the recommendations are
+// re-derived so the schema findings join the action rows.
+func (m *Model) onMaintSchemaLoaded(msg maintSchemaLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelMaintenance)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	s.maintenance.schemaLoading = false
+	s.maintenance.schema = msg.health
+	s.maintenance.refreshAdvice()
 	return nil
 }
 

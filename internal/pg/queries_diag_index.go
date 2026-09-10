@@ -217,7 +217,7 @@ ORDER BY disk_pain DESC NULLS LAST
 // sqlDiagIndexShowDuplicate groups indexes by (table, opclasses, key columns,
 // expressions, predicate): more than one per group means fully interchangeable
 // copies. wasted_bytes is what dropping all but the largest copy would free —
-// the figure the triage check sums.
+// the figure the overview's schema-health sweep sums.
 const sqlDiagIndexShowDuplicate = `
 SELECT
     pg_size_pretty(sum(pg_relation_size(idx))::bigint) AS size,

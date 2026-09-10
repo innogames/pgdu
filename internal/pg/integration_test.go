@@ -78,7 +78,7 @@ func TestIntegration_FullChain(t *testing.T) {
 	if _, ok := info.SettingBytes["shared_buffers"]; !ok || info.Tuning.CheckpointTimeoutSecs <= 0 {
 		t.Errorf("Maintenance: typed settings not parsed: bytes=%v tuning=%+v", info.SettingBytes, info.Tuning)
 	}
-	_ = MaintAdvice(info)
+	_ = MaintAdvice(info, nil)
 
 	// Find the public schema (seeded by hand).
 	var pubFound bool

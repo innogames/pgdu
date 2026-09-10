@@ -126,9 +126,15 @@ func (m *Model) drillIn() tea.Cmd {
 			}
 			return nil
 		}
+		if sec, ok := cur.data.(logSection); ok {
+			// A section header folds/unfolds in place; the header keeps its
+			// counts and the cursor, only the group rows below it come and go.
+			m.toggleLogSection(s, sec.cat)
+			return nil
+		}
 		g, ok := cur.data.(*pglog.Group)
 		if !ok {
-			return nil // section header rows are inert
+			return nil
 		}
 		m.stack = append(m.stack, m.logGroupScreen(s, g))
 		return m.loadCurrent()
@@ -151,8 +157,6 @@ func (m *Model) drillIn() tea.Cmd {
 		}
 		m.stack = append(m.stack, m.logEntryScreen(s, e))
 		return m.loadCurrent()
-	case levelTriage:
-		return m.drillTriage(s, cur)
 	case levelParts:
 		// Only the heap row drills further — into per-column space estimates.
 		// Toast and index rows have no meaningful sub-breakdown.
@@ -190,10 +194,6 @@ func (m *Model) toolEntryScreen(t tool) *screen {
 	case toolMaintenance:
 		// Maintenance dashboard is cluster-wide: skip the database picker.
 		return &screen{level: levelMaintenance, title: "system overview", tool: toolMaintenance, db: m.client.DefaultDB()}
-	case toolTriage:
-		// Triage runs its battery cluster-wide: skip the database picker and go
-		// straight to the report, loading asynchronously (loadTriageCmd).
-		return &screen{level: levelTriage, title: "triage", tool: toolTriage, db: m.client.DefaultDB(), loading: true}
 	case toolLogs:
 		// An explicit --log-file skips the picker; otherwise discover candidates
 		// (pg_current_logfile, /var/log/postgresql, server log dir) first.

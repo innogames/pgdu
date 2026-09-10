@@ -254,7 +254,7 @@ func (c *Client) Show(ctx context.Context, inst Instance, what string) (*diagres
 	return c.query(ctx, inst, "SHOW "+strings.ToUpper(what))
 }
 
-// Probe is the cheap health read for the instance list and triage:
+// Probe is the cheap health read for the instance list:
 // version plus pool totals.
 func (c *Client) Probe(ctx context.Context, inst Instance) Probe {
 	pr := Probe{User: c.loginUser()}

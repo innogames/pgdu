@@ -58,8 +58,14 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	}
 
 	// --- cache hit ratio ---
-	_ = pool.QueryRow(ctx, sqlMaintCacheHit).Scan(&info.CacheHitRatio)
+	_ = pool.QueryRow(ctx, sqlMaintCacheHit).Scan(&info.CacheHitRatio, &info.CacheBlocks)
 	info.CacheHitRatio *= 100 // store as percent
+
+	// --- SLRU caches ---
+	info.SLRU = collectBestEffort(ctx, pool, sqlMaintSLRU, nil, func(rows pgx.Rows) (SLRUStat, bool) {
+		var s SLRUStat
+		return s, rows.Scan(&s.Name, &s.Hits, &s.Reads) == nil
+	})
 
 	// --- XID age ---
 	_ = pool.QueryRow(ctx, sqlMaintWraparound).Scan(&info.XidAgeDB, &info.XidAge)
@@ -155,8 +161,16 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	_ = pool.QueryRow(ctx, sqlMaintTablesOverThreshold).Scan(&info.Autovac.OverThreshold, &info.Autovac.OverTop)
 
 	// --- WAL archiver (silently absent when archive_mode = off) ---
-	_ = pool.QueryRow(ctx, sqlMaintArchiver).Scan(
-		&info.ArchiveCount, &info.ArchiveFailed, &info.ArchiveLastFailed, &info.ArchiveLastTime)
+	var archivedAt, failedAt *time.Time
+	if pool.QueryRow(ctx, sqlMaintArchiver).Scan(
+		&info.ArchiveCount, &info.ArchiveFailed, &info.ArchiveLastFailed, &archivedAt, &failedAt) == nil {
+		if archivedAt != nil {
+			info.ArchiveLastTime = *archivedAt
+		}
+		if failedAt != nil {
+			info.ArchiveLastFailedTime = *failedAt
+		}
+	}
 
 	// --- recovery role ---
 	_ = pool.QueryRow(ctx, sqlMaintRecovery).Scan(&info.InRecovery)
@@ -165,8 +179,8 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	info.Replicas = collectBestEffort(ctx, pool, sqlMaintReplication, nil, func(rows pgx.Rows) (ReplicaStat, bool) {
 		var r ReplicaStat
 		var writeSec, flushSec, replaySec float64
-		if rows.Scan(&r.AppName, &r.ClientAddr, &r.State, &r.SyncState,
-			&writeSec, &flushSec, &replaySec, &r.ByteLag) != nil {
+		if rows.Scan(&r.PID, &r.AppName, &r.ClientAddr, &r.State, &r.SyncState,
+			&writeSec, &flushSec, &replaySec, &r.ByteLag, &r.ReplayLSNBytes) != nil {
 			return r, false
 		}
 		r.WriteLag = time.Duration(writeSec * float64(time.Second))
@@ -178,7 +192,7 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	// --- replication slots ---
 	info.ReplSlots = collectBestEffort(ctx, pool, sqlMaintReplSlots, nil, func(rows pgx.Rows) (ReplSlotStat, bool) {
 		var s ReplSlotStat
-		return s, rows.Scan(&s.Name, &s.SlotType, &s.Active, &s.WALStatus, &s.RetainedBytes) == nil
+		return s, rows.Scan(&s.Name, &s.SlotType, &s.Active, &s.ActivePID, &s.WALStatus, &s.RetainedBytes, &s.SafeWALBytes, &s.InactiveSecs) == nil
 	})
 
 	// --- WAL receiver (standby-side) ---
@@ -193,7 +207,8 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 
 	// --- transaction & session stats ---
 	_ = pool.QueryRow(ctx, sqlMaintTxnStats).Scan(
-		&info.XactCommit, &info.XactRollback, &info.Deadlocks, &info.Conflicts)
+		&info.XactCommit, &info.XactRollback, &info.Deadlocks, &info.Conflicts,
+		&info.DeadlocksPerDay, &info.TempBytesPerDay)
 	// PG14+ session columns; silently absent on older clusters.
 	_ = pool.QueryRow(ctx, sqlMaintSessionStats).Scan(
 		&info.Sessions, &info.SessAbandoned, &info.SessFatal, &info.SessKilled,
@@ -269,7 +284,14 @@ func parseMaintTuning(raw map[string]string) MaintTuning {
 		f, _ := strconv.ParseFloat(raw[k], 64)
 		return f
 	}
+	slru := make(map[string]int64, len(slruBufferGUCs))
+	for _, k := range slruBufferGUCs {
+		if _, ok := raw[k]; ok {
+			slru[k] = i64(k)
+		}
+	}
 	return MaintTuning{
+		SLRUBuffers:           slru,
 		CheckpointTimeoutSecs: i64("checkpoint_timeout"),
 		CheckpointCompletion:  f64("checkpoint_completion_target"),
 		AutovacCostDelayMs:    f64("autovacuum_vacuum_cost_delay"),

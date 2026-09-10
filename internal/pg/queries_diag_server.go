@@ -165,7 +165,7 @@ ORDER BY acl_base.object_schema, acl_base.object_type, acl_base.object_name
 // additionally start hidden (Diagnostic.DefaultHidden).
 //
 // stats_age_secs is the length of the window the cumulative counters cover, so
-// triage can grade deadlocks/temp_bytes as a per-day rate instead of by raw
+// a reader can grade deadlocks/temp_bytes as a per-day rate instead of by raw
 // total. A never-reset entry has a NULL stats_reset; the postmaster start is the
 // nearest honest lower bound for it (stats never predate the running instance).
 const sqlDiagDatabaseStats = `

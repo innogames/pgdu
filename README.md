@@ -7,9 +7,9 @@
 An ncdu-style TUI for deep inspection of a PostgreSQL server — drill from
 databases into schemas, tables, partitions, indexes, columns, pages, and tuples;
 analyse query performance, live activity, server logs, WAL, and index health;
-see what is living in `shared_buffers`; and run a one-key health triage. A single
-binary that talks to the server like `psql` does — no daemon, no collector, no
-web server.
+see what is living in `shared_buffers`; and get a one-screen health verdict with
+the fix for every finding. A single binary that talks to the server like `psql`
+does — no daemon, no collector, no web server.
 
 ## Highlights
 
@@ -30,15 +30,19 @@ web server.
   cached %, hit %, dirty bytes and dirty %, and a usage-count "temperature"
   histogram with dirty and pinned buffers per band; `p` reads a hot table page
   by page, `m` maps the whole shared-memory segment.
-- **Health triage board** — 25 checks run concurrently and land as red / yellow /
-  green; `↵` jumps straight to the offender, and the green ones unfold on demand.
 - **System overview as a one-screen health check** — memory sizing against the
   host (huge pages, page cache, swap), buffer-cache temperature and miss latency,
-  checkpoint interval and cost with a recommended `max_wal_size`, autovacuum
-  backlog, session hygiene and the observability settings; every threshold that
-  trips becomes a coloured note and a line in the **recommendations** panel with a
-  copyable `ALTER SYSTEM` fix. `t` samples twice for per-minute rates; a
-  `pg_settings` browser flags non-default and restart-pending values.
+  checkpoint interval and cost with a recommended `max_wal_size`, wraparound age,
+  replication lag and slots, lock waits, long and prepared transactions, the WAL
+  archiver, deadlock and temp-file rates, autovacuum backlog, session hygiene,
+  the safety and observability settings, and a catalog sweep of the database
+  (sequences near their ceiling, stale statistics, bloat, invalid and duplicate
+  indexes). Every threshold that trips becomes a coloured note and a line in the
+  **recommendations** panel at the top — red for breakage, yellow for
+  performance — with a copyable `ALTER SYSTEM` fix; `↵` on a line opens what
+  explains it (the diagnostic, the lock tree, the activity list, the settings
+  browser). `t` samples twice for per-minute rates; a `pg_settings` browser
+  flags non-default and restart-pending values.
 - **39 diagnostic queries, 11 with a runnable fix** — `↵` generates a lock-safe
   script (REINDEX / DROP INDEX CONCURRENTLY, ANALYZE, VACUUM, `lock_timeout`-guarded
   ALTER), `y` runs it statement by statement with notices streamed back.
@@ -165,8 +169,8 @@ mode, and relation being waited on — and `W` opens a **wait-event profiler** t
 samples activity in the background and aggregates the last few minutes by wait
 class, so a checkpoint stall or a lock storm shows up as a shape, not a single
 sample. Backends that sit idle in a transaction while holding locks are listed
-by the `idle_in_xact_holders` diagnostic, and both conditions feed the health
-triage.
+by the `idle_in_xact_holders` diagnostic, and both conditions feed the system
+overview's recommendations.
 
 ### Log analyzer
 
@@ -196,8 +200,9 @@ grouped view, a sortable chronological timeline, a slow-queries pane ordered by
 duration and, for pgbouncer logs, a **pooler stats** pane: one row per
 `stats_period` with transactions and queries per second, bytes in / out and
 transaction / query latency, cells coloured relative to the column's max and a
-sparkline per metric in the header. `m`
-toggles the category sections off for a flat count-ordered list. `/` searches, `w`
+sparkline per metric in the header. `↵` on a section header folds the section
+away (and back) so a long slow-queries list doesn't bury the rest; `m` toggles
+the category sections off for a flat count-ordered list. `/` searches, `w`
 widens the tail window (32 MiB up to the whole file), `t` starts a live tail
 that re-reads incrementally and survives rotation. `↵` drills group → entries →
 the full record, `j` jumps from an entry to its line in the timeline, `d`
@@ -242,22 +247,9 @@ suffices) or `admin_users`, with a password in `auth_file`; pgdu reads it from
 `PGDU_PGBOUNCER_PASSWORD`, `PGPASSWORD`, or `~/.pgpass` keyed by the socket
 directory (`/var/run/pgbouncer_1:6432:pgbouncer:postgres:…`, the libpq
 convention) or `localhost`. A refused login shows exactly that hint next to the
-instance. The triage check *pgbouncer waits* probes every discovered instance
-and drills into this tool.
+instance.
 
-### Health triage & diagnostics
-
-**Health triage** runs 25 checks concurrently — transaction-ID and multixact
-wraparound age, WAL archiver, replication lag, connection saturation, PgBouncer
-waits, checkpoint pressure, prepared transactions, extension capacity, blocked
-backends, long and idle-in-transaction sessions, replication slots, cache hit
-ratio, SLRU pressure, deadlocks, temp files, rollback ratio, sequence
-exhaustion, stale statistics, missing FK indexes, table and index bloat, invalid
-and duplicate indexes — and boils them down to a red / yellow / green board
-sorted most-severe first. Green checks collapse into one summary row; `↵` on it
-(or `v` anywhere) unfolds them so each can be read and drilled like a finding.
-`↵` on a row drills into whatever explains it: the diagnostic query, the lock
-tree, the activity list, the system overview, or the pgbouncer tool.
+### Diagnostics
 
 **Diagnostics** (under *Other tools*) are 39 saved queries in six categories —
 index, table, vacuum, activity, WAL, server — with `f` to filter by category, `s`
@@ -278,22 +270,37 @@ success the diagnostic reloads so you see the effect immediately.
 ### System overview
 
 A server health check on one screen: version, role, uptime, connections split by
-state, the longest transaction, idle-in-transaction and running query; commit / rollback ratio, deadlocks and conflicts; tuple-level write
-and scan activity; replication and slots; the memory GUCs against the host they run
-on (huge pages actually allocated, page cache, swap, `work_mem × max_connections`);
-autovacuum workers busy, tables past their vacuum threshold, and transaction-ID and
-multixact age against their `autovacuum_*freeze_max_age` limits; the buffer cache
-(`pg_buffercache_summary`, usage-count temperature, miss latency, who writes dirty
-pages); WAL rate, checkpoint interval and cost, `pg_wal` on disk; the observability
-settings (`track_io_timing`, `log_checkpoints`, `pg_stat_statements.track`); and
-pending configuration changes, including settings that still need a restart.
+state, the longest transaction, idle-in-transaction and running query; commit /
+rollback ratio, deadlocks and conflicts; tuple-level write and scan activity;
+replication and slots (lag, sync state, retained WAL, inactive consumers); the
+memory GUCs against the host they run on (huge pages actually allocated, page
+cache, swap, `work_mem × max_connections`); autovacuum workers busy, tables past
+their vacuum threshold, and transaction-ID and multixact age against their
+`autovacuum_*freeze_max_age` limits; the buffer cache (`pg_buffercache_summary`,
+usage-count temperature, miss latency, SLRU caches, who writes dirty pages); WAL
+rate, checkpoint interval and cost, `pg_wal` on disk; the observability settings
+(`track_io_timing`, `log_checkpoints`, `log_lock_waits`, `log_temp_files`,
+`pg_stat_statements.track`); operational health (pending configuration changes,
+lock waits and blocked chains, prepared transactions, temp files, the WAL
+archiver); and **schema health**, a catalog sweep of the connection database —
+sequences near their ceiling, tables with stale planner statistics, foreign keys
+without an index, heavily bloated tables and indexes, invalid and duplicate
+indexes — that runs on open and on `space`, never on the auto-refresh tick.
 Cumulative counters are labelled with the window they cover; `t` turns on
-auto-refresh so per-minute rates appear next to them. Every threshold that trips
-shows as a coloured note on its row and again in the **recommendations** panel at
-the bottom, worst first, with the concrete change as a copyable `ALTER SYSTEM`
-line — nothing is applied by pgdu. The top block shows **extension capacity** —
-how full `pg_stat_statements` / `pg_qualstats` and the table statistics are — with
-a confirmed reset (`↵`, `y`). `s` opens the **settings browser**: every
+auto-refresh so per-minute rates appear next to them.
+
+Every threshold that trips shows as a coloured note on its row and again in the
+**recommendations** panel right under the capacity rows, worst first — red means
+something is breaking or about to (wraparound past 95 %, a stuck archiver, a lost
+slot, `autovacuum`/`fsync` off, a missing synchronous standby), yellow is
+performance or hygiene — with the concrete change as a copyable `ALTER SYSTEM`
+line; nothing is applied by pgdu. Each recommendation is an action row: `↑↓`
+walk the capacity rows and the recommendations, and `↵` opens whatever explains
+the finding — the diagnostic listing the offenders (with its per-row fixes), the
+lock tree, the activity list, or the settings browser filtered to the GUC. The
+top block shows **extension capacity** — how full `pg_stat_statements` /
+`pg_qualstats` and the table statistics are — with a confirmed reset (`↵`, `y`).
+`s` opens the **settings browser**: every
 `pg_settings` entry with its value, filterable with `/`, non-default values in
 yellow and settings still waiting for a restart in red — the place to go when the
 dashboard's *pending config* line names something. `a`, `w`, `r`, `o` and `p` jump
@@ -468,8 +475,8 @@ choices) from `~/.config/pgdu`.
 The title line of every screen is a breadcrumb — `host ▸ tool ▸ database ▸ schema
 ▸ object ▸ …` — with one crumb per screen, so `esc` always steps back exactly one
 crumb. A screen entered by jumping tools (a describe panel into the page
-inspector, a triage row into the lock tree) is prefixed with the tool it belongs
-to, and the first screen scoped to a database the trail hasn't named yet shows
+inspector, an overview recommendation into the lock tree) is prefixed with the
+tool it belongs to, and the first screen scoped to a database the trail hasn't named yet shows
 it in parentheses.
 
 Rows that `↵` opens — the next level, a detail overlay, or an unfolding row —
@@ -500,7 +507,7 @@ Frequently used view-specific keys:
 | Key        | Where            | Action                                            |
 |------------|------------------|---------------------------------------------------|
 | `b`        | activity         | open the lock tree                                |
-| `v`        | parts / activity / triage | run VACUUM / show auxiliary backends / unfold green checks |
+| `v`        | parts / activity | run VACUUM / show auxiliary backends              |
 | `p`        | activity, overview / parts, buffers, describe | progress monitor / open the page inspector |
 | `W`        | activity         | wait-event profiler                               |
 | `k` `x`    | activity         | cancel query / terminate backend (`y` to confirm) |

@@ -49,14 +49,20 @@ type MaintenanceInfo struct {
 	ConnByState    map[string]int // pg_stat_activity grouped by state
 	LongestXactSec float64        // max xact age in seconds (non-idle)
 
-	// Cache health
-	CacheHitRatio float64 // sum(blks_hit)/(hit+read) over pg_stat_database
+	// Cache health: the hit ratio and the block traffic it is computed over
+	// (a ratio over a handful of blocks says nothing).
+	CacheHitRatio float64 // sum(blks_hit)/(hit+read) over pg_stat_database, in percent
+	CacheBlocks   int64   // sum(blks_hit + blks_read)
 
 	// Transaction & session health (pg_stat_database aggregate, non-template DBs)
 	XactCommit   int64
 	XactRollback int64
 	Deadlocks    int64
 	Conflicts    int64
+	// Per-day rates of the two counters worth grading, summed over each
+	// database's own stats window (floored at one day) in SQL.
+	DeadlocksPerDay float64
+	TempBytesPerDay float64
 	// Session counters below are PG14+; all stay zero on older clusters.
 	Sessions      int64
 	SessAbandoned int64   // connections dropped due to client disconnect mid-session
@@ -99,6 +105,9 @@ type MaintenanceInfo struct {
 
 	// Buffer-cache occupancy (pg_buffercache_summary + usage histogram).
 	BufCache BufCacheStat
+
+	// SLRU caches (pg_stat_slru), busiest first.
+	SLRU []SLRUStat
 
 	// Autovacuum saturation for the current database.
 	Autovac AutovacStat
@@ -153,10 +162,11 @@ type MaintenanceInfo struct {
 
 	// WAL archiver status (pg_stat_archiver). ArchiveFailed > 0 is a critical
 	// signal: the pg_wal directory fills up silently when archiving stalls.
-	ArchiveCount      int64
-	ArchiveFailed     int64
-	ArchiveLastFailed string    // WAL file name of the last failure
-	ArchiveLastTime   time.Time // time of last successful archive
+	ArchiveCount          int64
+	ArchiveFailed         int64
+	ArchiveLastFailed     string    // WAL file name of the last failure
+	ArchiveLastTime       time.Time // time of last successful archive; zero when none yet
+	ArchiveLastFailedTime time.Time // time of the last failure; newer than ArchiveLastTime = stuck now
 
 	// WAL in-flight: how much WAL has been generated since the last checkpoint.
 	// When WALBytesSinceCheckpoint reaches WALMaxBytes, Postgres triggers a
@@ -188,6 +198,9 @@ type MaintTuning struct {
 	ShmemHugePages        int64 // shared_memory_size_in_huge_pages; -1 when the platform has none
 	BgwriterLRUMaxpages   int64
 	IdleInTxnTimeoutMs    int64 // idle_in_transaction_session_timeout; 0 = disabled
+	// SLRUBuffers holds the PG17+ *_buffers GUCs in blocks, keyed by GUC name;
+	// 0 means the server sizes the cache from shared_buffers.
+	SLRUBuffers map[string]int64
 }
 
 // EffectiveAutovacCostDelayMs resolves the -1 fallback to vacuum_cost_delay.
@@ -514,23 +527,60 @@ type SettingRow struct {
 
 // ReplicaStat holds one row from pg_stat_replication (primary-side view).
 type ReplicaStat struct {
-	AppName    string
-	ClientAddr string
-	State      string // streaming / catchup / backup / …
-	SyncState  string // async / sync / quorum / …
-	WriteLag   time.Duration
-	FlushLag   time.Duration
-	ReplayLag  time.Duration
-	ByteLag    int64 // pg_wal_lsn_diff(current_wal_lsn, replay_lsn), bytes behind
+	PID            int32 // walsender backend; matches ReplSlotStat.ActivePID
+	AppName        string
+	ClientAddr     string
+	State          string // streaming / catchup / backup / …
+	SyncState      string // async / sync / quorum / …
+	WriteLag       time.Duration
+	FlushLag       time.Duration
+	ReplayLag      time.Duration
+	ByteLag        int64 // pg_wal_lsn_diff(current_wal_lsn, replay_lsn), bytes behind
+	ReplayLSNBytes int64 // replay_lsn as an absolute offset; its advance between samples is the throughput
 }
+
+// Key identifies a replica across samples. The walsender PID changes on every
+// reconnect, so name and address pair samples instead; a reconnected replica
+// keeps its rate, a renamed one starts over.
+func (r ReplicaStat) Key() string { return r.AppName + "@" + r.ClientAddr }
 
 // ReplSlotStat holds one row from pg_replication_slots.
 type ReplSlotStat struct {
 	Name          string
 	SlotType      string // physical / logical
 	Active        bool
-	WALStatus     string // reserved / extended / unreserved / lost
-	RetainedBytes int64  // pg_wal_lsn_diff(current_wal_lsn, restart_lsn)
+	ActivePID     int32   // walsender using the slot, 0 when inactive
+	WALStatus     string  // reserved / extended / unreserved / lost
+	RetainedBytes int64   // pg_wal_lsn_diff(current_wal_lsn, restart_lsn)
+	SafeWALBytes  int64   // headroom before max_slot_wal_keep_size invalidates the slot; -1 when unlimited
+	InactiveSecs  float64 // how long the slot has had no consumer (inactive_since); 0 while active
+}
+
+// SLRUStat is one pg_stat_slru row: a simple-LRU cache (transaction status,
+// multixacts, subtransactions, …) whose hit ratio says whether its fixed
+// buffer count keeps up with the workload.
+type SLRUStat struct {
+	Name  string
+	Hits  int64
+	Reads int64
+}
+
+// HitPct is the cache hit ratio in percent; 100 with no traffic.
+func (s SLRUStat) HitPct() float64 {
+	total := s.Hits + s.Reads
+	if total == 0 {
+		return 100
+	}
+	return 100 * float64(s.Hits) / float64(total)
+}
+
+// BuffersGUC is the PG17+ setting sizing this cache ("subtransaction" →
+// subtransaction_buffers), "" for the catch-all "other".
+func (s SLRUStat) BuffersGUC() string {
+	if s.Name == "" || s.Name == "other" {
+		return ""
+	}
+	return s.Name + "_buffers"
 }
 
 // WalReceiverStat holds the standby-side view from pg_stat_wal_receiver.

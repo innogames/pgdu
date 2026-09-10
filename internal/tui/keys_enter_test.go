@@ -51,12 +51,15 @@ func TestEnterLabel(t *testing.T) {
 		{"statement detail select", with(&screen{level: levelStatementDetail, stat: stmtState{detail: &sel}}), "EXPLAIN ANALYZE", true},
 		{"statement detail update", with(&screen{level: levelStatementDetail, stat: stmtState{detail: &upd}}), "", false},
 		{"activity", with(&screen{level: levelActivity}), "query detail", true},
-		{"triage result", with(&screen{level: levelTriage},
-			item{data: pg.TriageResult{Target: pg.TriageTargetLockTree}}), "lock tree", true},
+		{"overview reset row", overviewActionScreen(0), "reset stats", true},
+		{"overview lock-tree recommendation", overviewActionScreen(4), "lock tree", true},
+		{"overview diagnostic recommendation", overviewActionScreen(5), "Database stats", true},
+		{"overview recommendation without target", overviewActionScreen(6), "", false},
 		{"diag result with fix", with(&screen{level: levelDiagnosticResult, diag: &pg.Diagnostic{Fix: func(func(string) (string, bool)) (string, bool) { return "x", true }}}), "fix", true},
 		{"diag result no fix", with(&screen{level: levelDiagnosticResult, diag: &pg.Diagnostic{}}), "", false},
 		{"logs groups", with(&screen{level: levelLogs}, item{data: &pglog.Group{}}), "entries", true},
-		{"logs section", with(&screen{level: levelLogs}, item{data: logSection{}}), "", false},
+		{"logs section", with(&screen{level: levelLogs}, item{data: logSection{}}), "fold", true},
+		{"logs section folded", with(&screen{level: levelLogs}, item{data: logSection{collapsed: true}}), "unfold", true},
 		{"pgbouncer log row", with(&screen{level: levelPgBouncer}, item{data: pgbLogRow{}}), "log analyzer", true},
 		{"columns leaf", with(&screen{level: levelColumns}), "", false},
 		{"lock tree leaf", with(&screen{level: levelLockTree}), "", false},
@@ -95,4 +98,17 @@ func TestApplyContextEnterFooter(t *testing.T) {
 	if d := m.keys.ReverseSort.Help().Desc; strings.HasPrefix(d, "→") {
 		t.Errorf("ReverseSort is an in-place action, help = %q", d)
 	}
+}
+
+// overviewActionScreen is a system overview with three recommendations behind
+// its four reset rows, the cursor on action row cursor.
+func overviewActionScreen(cursor int) *screen {
+	s := &screen{level: levelMaintenance, tool: toolMaintenance, db: "postgres"}
+	s.maintenance.advice = pg.AdviceSet{
+		{Key: "lock_waits", Level: pg.AdviceCrit, Target: pg.AdviceTargetLockTree},
+		{Key: "deadlocks", Level: pg.AdviceWarn, Target: pg.AdviceTargetDiagnostic, DiagKey: "database_stats"},
+		{Key: "swap", Level: pg.AdviceWarn},
+	}
+	s.maintenance.cursor = cursor
+	return s
 }

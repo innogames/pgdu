@@ -54,7 +54,6 @@ const (
 	levelLockTree         // blocking-chain forest from pg_locks (child of levelActivity)
 	levelTableStats       // per-table statistics overview for one schema (toolTableStats)
 	levelProgress         // live pg_stat_progress_* monitor (child of levelMaintenance)
-	levelTriage           // one-key health-triage report (toolTriage)
 	levelWaitProfile      // wait-event sampling profile ('W' on levelActivity)
 	levelLogFiles         // log-analyzer file picker (toolLogs)
 	levelLogs             // log-analyzer overview: aggregated groups ⇄ chronological timeline
@@ -82,7 +81,6 @@ const (
 	toolMaintenance // server-health dashboard + settings browser
 	toolActivity    // live server activity (pg_stat_activity)
 	toolTableStats  // per-table statistics overview (pg_stat_all_tables + sizes)
-	toolTriage      // one-key health-triage report (levelTriage)
 	toolLogs        // server-log analyzer (levelLogFiles → levelLogs)
 	toolPgBouncer   // pgbouncer console browser (levelPgBouncers → levelPgBouncer → levelPgBouncerShow)
 )
@@ -107,8 +105,6 @@ func (t tool) Name() string {
 		return "activity"
 	case toolTableStats:
 		return "tables"
-	case toolTriage:
-		return "triage"
 	case toolLogs:
 		return "logs"
 	case toolPgBouncer:
@@ -309,7 +305,6 @@ type screen struct {
 	tbl         tblState
 	progress    progressState
 	lock        lockState
-	triage      triageState
 	parts       partsState
 	pages       pageState
 }
@@ -513,6 +508,10 @@ type logState struct {
 	// hosts caches reverse-DNS results (IP → hostname) for the timeline's
 	// opt-in hostname column, filled asynchronously like actHosts.
 	hosts map[string]string
+	// collapsed holds the groups-pane sections folded with Enter on their
+	// header, keyed by category so the fold survives refreshes, re-sorts and
+	// pane switches (the rows rebuild from the report every time).
+	collapsed map[pglog.Category]bool
 }
 
 // pgbState: PgBouncer tool state.
@@ -558,12 +557,30 @@ type maintState struct {
 	// on the screen, not the Model, so a Back to the tool menu forgets the
 	// window and a stale sample from another db is impossible.
 	prev *pg.MaintenanceInfo
-	// cursor is the row within the extension-capacity section that ↑↓ move
-	// over (0 = pg_stat_statements, 1 = pg_qualstats, 2 = table stats, 3 = table
-	// stats · all dbs).
-	cursor int
+	// first is the sample taken when the screen was opened, the base of the
+	// since-open rates; same lifetime as prev.
+	first *pg.MaintenanceInfo
+	// cursor is the action row ↑↓ move over: the four extension-capacity
+	// reset rows (maintResetRows) followed by the recommendations (actionRows).
+	// cursorKey is that row's identity (reset name or Advice.Key) so a reload
+	// that reshuffles the recommendations puts the cursor back on the same
+	// finding; cursorLine is the line it was rendered on (-1 unknown) and
+	// follow asks the next render to scroll it into view.
+	cursor     int
+	cursorKey  string
+	cursorLine int
+	follow     bool
 	// pendingReset is set by Enter on a capacity row; y confirms the reset.
 	pendingReset string
+	// advice is MaintAdvice over info and schema, cached on every load so the
+	// action rows, the inline notes and the panel are one list.
+	advice pg.AdviceSet
+	// schema is the per-database catalog sweep behind the schema-health
+	// section; it loads separately (loadMaintSchemaCmd) on open and on manual
+	// refresh only, never on the auto-refresh tick. schemaLoading marks a sweep
+	// in flight (the previous one stays on screen meanwhile).
+	schema        *pg.SchemaHealth
+	schemaLoading bool
 	// settingRows is the full pg_settings list for levelSettings.
 	settingRows []pg.SettingRow
 }
@@ -649,24 +666,6 @@ type lockState struct {
 	// DFS order (item.data = lockTreeRow carrying the node and its indent depth).
 	nodes []pg.LockNode
 	err   error
-}
-
-// triageState: Triage state.
-type triageState struct {
-	// ── Health triage (levelTriage) ───────────────────────────────────────────
-	// results holds the checks that have reported so far, severity-sorted;
-	// pending names the ones still running, in battery order; names is the
-	// full battery order SortTriage keys on. items are derived from results
-	// and pending with green checks collapsed (see triageItems).
-	results []pg.TriageResult
-	pending []string
-	names   []string
-	// gen is bumped on every (re)load; messages from an older run carry the
-	// old gen and are dropped, so a refresh mid-run never mixes two reports.
-	gen uint64
-	// showOK unfolds the green checks into one row each instead of the single
-	// collapsed summary row (Enter on that row or v toggles it).
-	showOK bool
 }
 
 // partsState: levelParts extras: bloat scan progress, the per-table maintenance stats and the armed VACUUM.
@@ -960,8 +959,8 @@ type Model struct {
 	// pgbAvailable gates the PgBouncer entry on the root tool picker: it is
 	// hidden until discovery (fired from Init) has actually found an instance,
 	// so hosts without a pooler don't advertise a tool that can only say "no
-	// pgbouncer instance found". --pgbouncer and the triage drill bypass the
-	// menu and keep working regardless.
+	// pgbouncer instance found". --pgbouncer bypasses the
+	// menu and keeps working regardless.
 	pgbAvailable bool
 
 	// logFile is the --log-file override: when set the analyzer skips the picker
@@ -1047,7 +1046,7 @@ func (m *Model) vacuumPaneVisible(s *screen) bool {
 // by the --<tool> CLI flags) back to the tool enum. The bool is false for an
 // unknown/empty name so the caller can fall back to the tool picker.
 func toolByName(name string) (tool, bool) {
-	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity, toolTableStats, toolTriage, toolLogs, toolPgBouncer} {
+	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity, toolTableStats, toolLogs, toolPgBouncer} {
 		if t.Name() == name {
 			return t, true
 		}
@@ -1113,12 +1112,11 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 // controls whether the PgBouncer entry is included (see Model.pgbAvailable).
 func toolItems(pgBouncer bool) []item {
 	items := []item{
+		{name: "System overview", detail: "server health on one screen: recommendations that open the finding behind them, connections, transactions, I/O, replication, autovacuum, WAL, schema health", hasChildren: true, data: toolMaintenance},
 		{name: "Disk usage", detail: "browse tables by total relation size on disk", hasChildren: true, data: toolDisk},
 		{name: "Top queries", detail: "powa-style top queries from pg_stat_statements — calls, time, I/O; EXPLAIN and sample params on Enter", hasChildren: true, data: toolQueries},
 		{name: "Current Activity", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
 		{name: "Table overview", detail: "per-table stats for a schema: size, write/scan activity, cache hit ratios, bloat, vacuum age, storage options — sortable, customizable columns", hasChildren: true, data: toolTableStats},
-		{name: "System overview", detail: "server health dashboard: connections, transactions, I/O, replication, autovacuum, WAL", hasChildren: true, data: toolMaintenance},
-		{name: "Health triage", detail: "one-key red/yellow/green health report: runs the whole diagnostic battery concurrently; Enter drills into the check that fired", hasChildren: true, data: toolTriage},
 		{name: "Log analyzer", detail: "parse the server log (current, rotated, .gz): errors, slow statements, checkpoints, temp files, locks — grouped and searchable, live tail", hasChildren: true, data: toolLogs},
 		{name: "PgBouncer", detail: "pgbouncer console browser: auto-discovered instances (/proc, /etc/pgbouncer), pools, per-second stats, clients, servers, databases, config", hasChildren: true, data: toolPgBouncer},
 		{name: "Shared buffers", detail: "browse tables by shared_buffers footprint and cache hit ratio", hasChildren: true, data: toolBuffers},

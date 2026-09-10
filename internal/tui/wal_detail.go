@@ -14,7 +14,7 @@ import (
 
 // walDetailRow is the payload of one levelWALBlockDetail line. The screen is
 // a key/value dump split into sections (record, block, decoded tuple, hex,
-// page image); section rows are inert headers, exactly like logSection.
+// page image); section rows are inert headers, like the WAL overview's.
 type walDetailRow struct {
 	section bool
 	key     string

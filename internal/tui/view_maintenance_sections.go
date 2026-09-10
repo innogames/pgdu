@@ -21,16 +21,30 @@ const overviewLabelW = 24
 // a note next to a metric and the line in the recommendations panel are the
 // same value and can never disagree.
 type maintView struct {
+	db     string
 	info   *pg.MaintenanceInfo
 	rates  pg.MaintRates
 	advice pg.AdviceSet
+	// sinceOpen are the same rates measured from the first sample of this
+	// screen; zero while that is also the previous sample, when both windows
+	// would say the same thing.
+	sinceOpen pg.MaintRates
+	// schema is the catalog sweep (nil until it lands); schemaLoading marks a
+	// re-sweep in flight over the previous result.
+	schema        *pg.SchemaHealth
+	schemaLoading bool
 }
 
+// newMaintView reads the cached advice (maintState.refreshAdvice) rather than
+// deriving it again, so the action rows and the sections are one list.
 func newMaintView(s *screen) maintView {
-	v := maintView{info: s.maintenance.info}
+	st := &s.maintenance
+	v := maintView{db: s.db, info: st.info, advice: st.advice, schema: st.schema, schemaLoading: st.schemaLoading}
 	if v.info != nil {
-		v.rates = pg.ComputeMaintRates(s.maintenance.prev, v.info)
-		v.advice = pg.MaintAdvice(v.info)
+		v.rates = pg.ComputeMaintRates(st.prev, v.info)
+		if st.first != st.prev {
+			v.sinceOpen = pg.ComputeMaintRates(st.first, v.info)
+		}
 	}
 	return v
 }
@@ -43,6 +57,15 @@ func (v maintView) note(key string) string {
 		return ""
 	}
 	return "  " + adviceStyle(a.Level).Render(a.Reason)
+}
+
+// graded renders value in the colour of the advice that fired for key, plain
+// when none did — so a row is red exactly when the panel says so.
+func (v maintView) graded(key, value string) string {
+	if a := v.advice.Find(key); a != nil {
+		return adviceStyle(a.Level).Render(value)
+	}
+	return value
 }
 
 // adviceStyle maps an advice level onto the overview's colour scale: red for
@@ -122,7 +145,7 @@ func renderMaintServer(v maintView) string {
 	if info.InRecovery {
 		roleStr = styleErr.Render("standby (recovery)")
 	}
-	b.WriteString(maintRow("version", version+"  "+mu("(")+roleStr+mu(")")))
+	b.WriteString(maintRow("version", version+"  "+mu("(")+roleStr+mu(")")+v.note("data_checksums")))
 	if !info.StartTime.IsZero() {
 		b.WriteString(maintRow("uptime", formatUptime(time.Since(info.StartTime))))
 	}
@@ -151,10 +174,10 @@ func renderMaintServer(v maintView) string {
 	if len(connParts) > 0 {
 		connLine += mu("  (") + strings.Join(connParts, mu("  ·  ")) + mu(")")
 	}
-	b.WriteString(maintRow("connections", connLine))
+	b.WriteString(maintRow("connections", connLine+v.note("max_connections")))
 	if info.LongestXactSec > 0 {
 		b.WriteString(maintRow("longest xact",
-			maintDurationStyle(info.LongestXactSec).Render(fmtSecsDuration(info.LongestXactSec))))
+			maintDurationStyle(info.LongestXactSec).Render(fmtSecsDuration(info.LongestXactSec))+v.note("long_xact")))
 	}
 	// The idle-in-txn row carries pid/app itself; the advice reason repeats
 	// them for the panel, so it is not appended here.
@@ -222,7 +245,7 @@ func renderMaintTransactions(v maintView) string {
 		b.WriteString("\n")
 		return b.String()
 	}
-	b.WriteString(maintRow("cache hit %", gradedPercentStyle(info.CacheHitRatio).Render(fmt1(info.CacheHitRatio)+"%")))
+	b.WriteString(maintRow("cache hit %", gradedPercentStyle(info.CacheHitRatio).Render(fmt1(info.CacheHitRatio)+"%")+v.note("cache_hit")))
 	if info.XactCommit+info.XactRollback > 0 {
 		total := info.XactCommit + info.XactRollback
 		rollPct := float64(info.XactRollback) / float64(total) * 100
@@ -237,10 +260,12 @@ func renderMaintTransactions(v maintView) string {
 		}
 		txnLine := fmt.Sprintf("%s commit  %s rollback  ", formatRows(info.XactCommit), formatRows(info.XactRollback)) +
 			gradeStyle(rollPct, 5, 20).Render(pctStr+"% rollback")
-		b.WriteString(maintRow("transactions", txnLine))
+		b.WriteString(maintRow("transactions", txnLine+v.note("rollback_ratio")))
 	}
 	if info.Deadlocks > 0 {
-		b.WriteString(maintRow("deadlocks", styleErr.Render(formatRows(info.Deadlocks)+" detected")))
+		// The advice grades the per-day rate, so a handful of deadlocks in
+		// months of uptime reads plain, a daily one coloured.
+		b.WriteString(maintRow("deadlocks", v.graded("deadlocks", formatRows(info.Deadlocks)+" detected")+v.note("deadlocks")))
 	} else {
 		b.WriteString(maintRow("deadlocks", lipgloss.NewStyle().Foreground(colorOK).Render("0")))
 	}
@@ -309,8 +334,10 @@ func renderMaintTableActivity(v maintView) string {
 	return b.String()
 }
 
-// renderMaintReplication renders the "replication & slots" section.
-// Returns "" when there is no replication data to show.
+// renderMaintReplication renders the "replication & slots" section as one
+// table: a row per replica carrying the slot its walsender holds, then the
+// slots nobody is streaming from with the node cells empty. Returns "" when
+// there is no replication data to show.
 func renderMaintReplication(v maintView) string {
 	info := v.info
 	if info == nil || (len(info.Replicas) == 0 && len(info.ReplSlots) == 0 && info.WalReceiver == nil) {
@@ -319,49 +346,181 @@ func renderMaintReplication(v maintView) string {
 	mu := styleMuted.Render
 	var b strings.Builder
 	b.WriteString("  " + styleHeader.Render(" replication & slots ") + "\n")
+	// The table cells have no room for a note, so the replication findings
+	// get their own lines under the header.
+	for _, key := range []string{"synchronous_standby_names", "replication_lag", "replication_slots"} {
+		if note := v.note(key); note != "" {
+			b.WriteString(maintRow("", strings.TrimLeft(note, " ")))
+		}
+	}
+	if len(info.ReplSlots) > 0 {
+		b.WriteString(maintRow("max_slot_wal_keep_size", slotKeepSizeText(info)))
+	}
 	if info.WalReceiver != nil {
 		wr := info.WalReceiver
 		wrLine := wr.Status
 		if wr.LastMsgAge > 0 {
 			wrLine += "  " + mu("last msg "+relativeAge(wr.LastMsgAge))
 		}
-		b.WriteString(maintRow("wal receiver", wrLine))
+		b.WriteString(maintRow("wal receiver", wrLine+v.note("wal_receiver")))
 	}
+
+	header := []string{"node", "address", "state", "sync", "lag", "behind",
+		"slot", "type", "status", "retained", "safe"}
+	// Throughput columns exist only once a second sample does; the header
+	// names the window so the figures cannot be mistaken for lifetime averages.
+	if v.rates.OK {
+		header = append(header, "rate (last "+shortDuration(v.rates.Window)+")")
+	}
+	if v.sinceOpen.OK {
+		header = append(header, "rate (since open "+shortDuration(v.sinceOpen.Window)+")")
+	}
+
+	// Slots are matched to replicas by the walsender PID; a slot nobody holds
+	// gets its own row below the replicas.
+	slotByPID := make(map[int32]int, len(info.ReplSlots))
+	for i, slot := range info.ReplSlots {
+		if slot.ActivePID > 0 {
+			slotByPID[slot.ActivePID] = i
+		}
+	}
+	taken := make([]bool, len(info.ReplSlots))
+	rows := make([][]string, 0, len(info.Replicas)+len(info.ReplSlots))
 	for _, r := range info.Replicas {
-		lagStr := ""
+		lag, behind := "", ""
 		if r.ReplayLag > 0 {
-			lagStr = "  lag " + fmtSecsDuration(r.ReplayLag.Seconds())
+			lag = fmtSecsDuration(r.ReplayLag.Seconds())
 		}
-		byteStr := ""
 		if r.ByteLag > 0 {
-			byteStr = "  " + mu(humanize.Bytes(r.ByteLag)+" behind")
+			behind = humanize.Bytes(r.ByteLag)
 		}
-		syncMark := mu(r.SyncState)
-		if r.SyncState == "sync" || r.SyncState == "quorum" {
-			syncMark = lipgloss.NewStyle().Foreground(colorOK).Render(r.SyncState)
+		row := []string{r.AppName, mu(r.ClientAddr), r.State, replSyncText(r.SyncState), lag, behind}
+		if i, ok := slotByPID[r.PID]; ok && r.PID > 0 {
+			taken[i] = true
+			row = append(row, replSlotCells(info.ReplSlots[i])...)
+		} else {
+			row = append(row, "", "", "", "", "")
 		}
-		b.WriteString(maintRow("replica", r.AppName+"  "+mu(r.ClientAddr)+"  "+r.State+"  "+syncMark+lagStr+byteStr))
+		if v.rates.OK {
+			row = append(row, replicaRateCell(v.rates, r.Key()))
+		}
+		if v.sinceOpen.OK {
+			row = append(row, replicaRateCell(v.sinceOpen, r.Key()))
+		}
+		rows = append(rows, row)
 	}
-	for _, slot := range info.ReplSlots {
-		activeStr := mu("inactive")
-		if slot.Active {
-			activeStr = lipgloss.NewStyle().Foreground(colorOK).Render("active")
+	for i, slot := range info.ReplSlots {
+		if !taken[i] {
+			rows = append(rows, append([]string{"", "", "", "", "", ""}, replSlotCells(slot)...))
 		}
-		retStr := ""
-		if slot.RetainedBytes > 0 {
-			retStr = "  " + humanize.Bytes(slot.RetainedBytes) + " retained"
-		}
-		statusStyle := mu(slot.WALStatus)
-		if slot.WALStatus == "lost" || slot.WALStatus == "unreserved" {
-			statusStyle = styleErr.Render(slot.WALStatus)
-		} else if !slot.Active && slot.RetainedBytes > 1<<30 {
-			// Inactive slot holding > 1 GB of WAL is a disk hazard.
-			statusStyle = lipgloss.NewStyle().Foreground(colorAccent).Render(slot.WALStatus)
-		}
-		b.WriteString(maintRow("slot", slot.Name+"  "+mu(slot.SlotType)+"  "+activeStr+"  "+statusStyle+retStr))
 	}
+	b.WriteString(renderCellTable("  ", header, rows))
 	b.WriteString("\n")
 	return b.String()
+}
+
+// renderCellTable lays cells out in aligned columns under a muted header;
+// cells may carry their own styling. Trailing padding is dropped so the last
+// column never widens the line.
+func renderCellTable(indent string, header []string, rows [][]string) string {
+	widths := make([]int, len(header))
+	for i, h := range header {
+		widths[i] = displayWidth(h)
+	}
+	for _, row := range rows {
+		for i, c := range row {
+			if i < len(widths) {
+				widths[i] = max(widths[i], displayWidth(c))
+			}
+		}
+	}
+	line := func(cells []string, style func(string) string) string {
+		var b strings.Builder
+		b.WriteString(indent)
+		for i, c := range cells {
+			if i == len(cells)-1 {
+				b.WriteString(style(c))
+				break
+			}
+			b.WriteString(padRight(style(c), widths[i]+2))
+		}
+		return strings.TrimRight(b.String(), " ") + "\n"
+	}
+	var b strings.Builder
+	b.WriteString(line(header, func(s string) string { return styleMuted.Render(s) }))
+	for _, row := range rows {
+		b.WriteString(line(row, func(s string) string { return s }))
+	}
+	return b.String()
+}
+
+// replSyncText colours a synchronous standby green; async is the ordinary case.
+func replSyncText(syncState string) string {
+	if syncState == "sync" || syncState == "quorum" {
+		return lipgloss.NewStyle().Foreground(colorOK).Render(syncState)
+	}
+	return styleMuted.Render(syncState)
+}
+
+// replSlotCells are a slot's table cells: name, type, activity + wal_status,
+// retained WAL and the headroom left before max_slot_wal_keep_size
+// invalidates it.
+func replSlotCells(slot pg.ReplSlotStat) []string {
+	mu := styleMuted.Render
+	status := mu(slot.WALStatus)
+	if slot.WALStatus == "lost" || slot.WALStatus == "unreserved" {
+		status = styleErr.Render(slot.WALStatus)
+	} else if !slot.Active && slot.RetainedBytes > 1<<30 {
+		// Inactive slot holding > 1 GB of WAL is a disk hazard.
+		status = lipgloss.NewStyle().Foreground(colorAccent).Render(slot.WALStatus)
+	}
+	if slot.Active {
+		status = lipgloss.NewStyle().Foreground(colorOK).Render("active") + " " + status
+	} else {
+		status = mu("inactive") + " " + status
+	}
+	retained := ""
+	if slot.RetainedBytes > 0 {
+		retained = humanize.Bytes(slot.RetainedBytes)
+	}
+	safe := ""
+	if slot.SafeWALBytes >= 0 {
+		safe = humanize.Bytes(slot.SafeWALBytes)
+		switch {
+		case slot.SafeWALBytes == 0:
+			safe = styleErr.Render(safe)
+		case slot.SafeWALBytes < slot.RetainedBytes/4:
+			// Less than a fifth of the budget left: the slot is close to invalidation.
+			safe = lipgloss.NewStyle().Foreground(colorAccent).Render(safe)
+		}
+	}
+	return []string{slot.Name, mu(slot.SlotType), status, retained, safe}
+}
+
+// replicaRateCell is a replica's throughput in one rate window, "" when the
+// replica was not in the window's first sample.
+func replicaRateCell(rates pg.MaintRates, key string) string {
+	r, ok := rates.ReplicaBytesPerMin[key]
+	if !ok {
+		return ""
+	}
+	return humanize.Bytes(int64(r)) + "/min"
+}
+
+// slotKeepSizeText renders max_slot_wal_keep_size; -1 is "unlimited", which
+// with an inactive slot retaining serious WAL is worth a warning since nothing
+// stops it filling pg_wal.
+func slotKeepSizeText(info *pg.MaintenanceInfo) string {
+	val := settingOr(info.Settings, "max_slot_wal_keep_size")
+	if val != "-1" {
+		return val
+	}
+	for _, slot := range info.ReplSlots {
+		if !slot.Active && slot.RetainedBytes > 1<<30 {
+			return "unlimited  " + lipgloss.NewStyle().Foreground(colorAccent).Render("an inactive slot can fill pg_wal")
+		}
+	}
+	return "unlimited"
 }
 
 // renderMaintMemory renders the "memory & resources" section: the sizing GUCs
@@ -450,8 +609,8 @@ func renderMaintAutovacuum(v maintView) string {
 	}
 	set := info.Settings
 	// autovacuum = on is the only sane state and not worth a row; off is.
-	if v := set["autovacuum"]; v != "" && v != "on" {
-		b.WriteString(maintRow("autovacuum", styleErr.Render(v)))
+	if av := set["autovacuum"]; av != "" && av != "on" {
+		b.WriteString(maintRow("autovacuum", v.graded("autovacuum", av)+v.note("autovacuum")))
 	}
 
 	workers := fmt.Sprintf("%d / %s busy", info.Autovac.WorkersBusy, settingOr(set, "autovacuum_max_workers"))
@@ -488,18 +647,18 @@ func renderMaintAutovacuum(v maintView) string {
 
 	b.WriteString(gucRow(set, "freeze_max_age", "autovacuum_freeze_max_age", ""))
 	b.WriteString(gucRow(set, "mxid_freeze_max_age", "autovacuum_multixact_freeze_max_age", ""))
-	b.WriteString(freezeAgeLine("xid age", info.XidAge, info.FreezeMaxAge, info.XidAgeDB))
-	b.WriteString(freezeAgeLine("mxid age", info.MxidAge, info.MxidFreezeMaxAge, info.MxidAgeDB))
+	b.WriteString(freezeAgeLine("xid age", info.XidAge, info.FreezeMaxAge, info.XidAgeDB, v.note("wraparound")))
+	b.WriteString(freezeAgeLine("mxid age", info.MxidAge, info.MxidFreezeMaxAge, info.MxidAgeDB, v.note("mxid_wraparound")))
 	b.WriteString("\n")
 	return b.String()
 }
 
-// freezeAgeLine renders one "<label>  age / max  pct%  (db)" overview line,
-// colouring the percentage by how close the counter is to a forced
+// freezeAgeLine renders one "<label>  age / max  pct%  (db)  note" overview
+// line, colouring the percentage by how close the counter is to a forced
 // anti-wraparound autovacuum and naming the database that holds the oldest
 // horizon (template0/postgres often turn out to be the culprit). Empty when
 // the age is unknown; bare age when the max is.
-func freezeAgeLine(label string, age, maxAge int64, db string) string {
+func freezeAgeLine(label string, age, maxAge int64, db, note string) string {
 	mu := styleMuted.Render
 	dbStr := ""
 	if db != "" {
@@ -509,11 +668,11 @@ func freezeAgeLine(label string, age, maxAge int64, db string) string {
 	case age <= 0:
 		return ""
 	case maxAge <= 0:
-		return maintRow(label, formatRows(age)+dbStr)
+		return maintRow(label, formatRows(age)+dbStr+note)
 	}
 	pct := float64(age) / float64(maxAge) * 100
 	return maintRow(label, fmt.Sprintf("%s / %s  ", formatRows(age), formatRows(maxAge))+
-		gradeStyle(pct, 50, 80).Render(fmt1(pct)+"%")+dbStr)
+		gradeStyle(pct, 50, 80).Render(fmt1(pct)+"%")+dbStr+note)
 }
 
 // renderMaintBufferCache renders the "buffer cache" section: shared_buffers
@@ -560,6 +719,10 @@ func renderMaintBufferCache(v maintView, barW int) string {
 		if note := v.note("buffercache_tight") + v.note("buffercache_slack"); note != "" {
 			b.WriteString("  " + padRight("", overviewLabelW) + strings.TrimLeft(note, " ") + "\n")
 		}
+	}
+
+	if line := slruLine(v); line != "" {
+		b.WriteString(maintRow("slru", line))
 	}
 
 	io := info.IO
@@ -643,6 +806,26 @@ func renderMaintBufferCache(v maintView, barW int) string {
 	b.WriteString(maintRow("fsyncs", fsyncs))
 	b.WriteString("\n")
 	return b.String()
+}
+
+// slruLine summarises the SLRU caches: the one the advice flagged, otherwise
+// the busiest, with its hit ratio and read count. "" without data.
+func slruLine(v maintView) string {
+	if len(v.info.SLRU) == 0 {
+		return ""
+	}
+	pick := v.info.SLRU[0]
+	if a := v.advice.Find("slru"); a != nil {
+		for _, s := range v.info.SLRU {
+			if s.BuffersGUC() == a.Setting || s.Name == a.Current {
+				pick = s
+				break
+			}
+		}
+	}
+	mu := styleMuted.Render
+	return pick.Name + "  " + v.graded("slru", fmt1(pick.HitPct())+"% hit") + "  " +
+		mu(formatRows(pick.Reads)+" reads") + v.note("slru")
 }
 
 // renderMaintWAL renders the "wal & checkpoints" section: what WAL the server
@@ -831,7 +1014,7 @@ func renderMaintHealth(v maintView) string {
 	if info != nil {
 		restartStr := mu("0 need restart")
 		if info.PendingRestart > 0 {
-			restartStr = styleErr.Render(fmt.Sprintf("%d need restart", info.PendingRestart))
+			restartStr = v.graded("pending_restart", fmt.Sprintf("%d need restart", info.PendingRestart))
 			if len(info.PendingRestartSettings) > 0 {
 				restartStr += mu("  (" + strings.Join(info.PendingRestartSettings, ", ") + ")")
 			}
@@ -847,8 +1030,8 @@ func renderMaintHealth(v maintView) string {
 		b.WriteString(maintRow("", reloadStr+mu("  ·  s browses pg_settings")))
 
 		lockStr := mu("0 waiting")
-		if info.LockWaits > 0 {
-			lockStr = styleErr.Render(fmt.Sprintf("%d waiting", info.LockWaits))
+		if info.LockWaits > 0 || len(info.Blocked) > 0 {
+			lockStr = v.graded("lock_waits", fmt.Sprintf("%d waiting", max(info.LockWaits, len(info.Blocked)))) + v.note("lock_waits")
 		}
 		b.WriteString(maintRow("lock waits", lockStr))
 
@@ -862,20 +1045,20 @@ func renderMaintHealth(v maintView) string {
 		}
 
 		if info.PreparedXacts > 0 {
-			prepLine := styleErr.Render(fmt.Sprintf("%d prepared xact(s)", info.PreparedXacts))
+			prepLine := v.graded("prepared_xacts", fmt.Sprintf("%d prepared xact(s)", info.PreparedXacts))
 			if info.OldestPrepSec > 0 {
-				prepLine += mu("  oldest: "+fmtSecsDuration(info.OldestPrepSec)) + "  " + mu("— may pin xmin horizon")
+				prepLine += mu("  oldest: " + fmtSecsDuration(info.OldestPrepSec))
 			}
-			b.WriteString(maintRow("prepared xacts", prepLine))
+			b.WriteString(maintRow("prepared xacts", prepLine+v.note("prepared_xacts")))
 		}
 
 		if info.TempFiles > 0 {
 			tmp := fmt.Sprintf("%s files  %s", formatRows(info.TempFiles), humanize.Bytes(info.TempBytes))
 			if v.rates.OK && v.rates.TempBytesPerMin > 0 {
 				tmp += "  " + mu("·  "+humanize.Bytes(int64(v.rates.TempBytesPerMin))+"/min (last "+
-					shortDuration(v.rates.Window)+") — queries spilling: work_mem or bad plans")
+					shortDuration(v.rates.Window)+")")
 			}
-			b.WriteString(maintRow("temp files", tmp))
+			b.WriteString(maintRow("temp files", tmp+v.note("temp_files")))
 			for _, t := range info.TempByDB {
 				fileWord := "files"
 				if t.Files == 1 {
@@ -893,11 +1076,11 @@ func renderMaintHealth(v maintView) string {
 		}
 
 		if info.ArchiveFailed > 0 {
-			line := styleErr.Render(fmt.Sprintf("%s archived  %s failed", formatRows(info.ArchiveCount), formatRows(info.ArchiveFailed)))
+			line := v.graded("wal_archiver", fmt.Sprintf("%s archived  %s failed", formatRows(info.ArchiveCount), formatRows(info.ArchiveFailed)))
 			if info.ArchiveLastFailed != "" {
 				line += mu("  last: " + info.ArchiveLastFailed)
 			}
-			b.WriteString(maintRow("wal archiver", line))
+			b.WriteString(maintRow("wal archiver", line+v.note("wal_archiver")))
 		} else if info.ArchiveCount > 0 {
 			archiveAge := ""
 			if !info.ArchiveLastTime.IsZero() && info.ArchiveLastTime.Year() > 1 {
@@ -914,21 +1097,26 @@ func renderMaintHealth(v maintView) string {
 // renderMaintRecommendations lists the actionable advice — every warning and
 // critical note plus informational ones that come with a concrete change —
 // worst first, each with its copyable fix line. It is the same advice the
-// sections annotate inline, collected in one place.
-func renderMaintRecommendations(v maintView) string {
+// sections annotate inline, collected in one place, and every line is an
+// action row: rows[first:] are the recommendations, cursor the highlighted
+// action row. cursorAt is the block-relative line of the cursor row (-1 when
+// the cursor is not on a recommendation) and span the lines it occupies (two
+// with a fix line), so the caller can scroll the whole row into view.
+func renderMaintRecommendations(v maintView, rows []maintAction, first, cursor int) (block string, cursorAt, span int) {
 	mu := styleMuted.Render
 	var b strings.Builder
+	cursorAt, span = -1, 1
 	b.WriteString("  " + styleHeader.Render(" recommendations ") + "\n")
 	if v.info == nil {
 		b.WriteString("\n")
-		return b.String()
+		return b.String(), cursorAt, span
 	}
-	act := v.advice.Actionable()
-	if len(act) == 0 {
+	if len(rows) <= first {
 		b.WriteString("  " + mu("none — nothing graded worse than informational") + "\n\n")
-		return b.String()
+		return b.String(), cursorAt, span
 	}
-	for _, a := range act {
+	for i, row := range rows[first:] {
+		a := row.advice
 		st := adviceStyle(a.Level)
 		glyph := "·"
 		switch a.Level {
@@ -948,11 +1136,78 @@ func renderMaintRecommendations(v maintView) string {
 		if a.Suggested != "" {
 			head += " → " + a.Suggested
 		}
-		b.WriteString("  " + st.Render(glyph) + " " + padRight(st.Render(head), 44) + "  " + mu(a.Reason) + "\n")
+		mark := "  "
+		if first+i == cursor {
+			mark = styleSelected.Render("▶ ")
+			cursorAt = strings.Count(b.String(), "\n")
+			if a.Fix != "" {
+				span = 2
+			}
+		}
+		// The ↵ mark says Enter opens something for this row; the reset rows
+		// above arm a confirm instead and carry none.
+		_, drills := row.enterLabel()
+		b.WriteString(mark + drillMark(drills) + st.Render(glyph) + " " + padRight(st.Render(head), 44) + "  " + mu(a.Reason) + "\n")
 		if a.Fix != "" {
-			b.WriteString("      " + mu(a.Fix) + "\n")
+			b.WriteString("        " + mu(a.Fix) + "\n")
 		}
 	}
+	b.WriteString("\n")
+	return b.String(), cursorAt, span
+}
+
+// renderMaintSchemaHealth renders the per-database catalog sweep: one row per
+// check with its count and, where the advice fired, the coloured reason. The
+// sweep loads separately from the snapshot, so the section shows "loading…"
+// until it lands and keeps the previous result while a re-sweep runs.
+func renderMaintSchemaHealth(v maintView) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+	header := "  " + styleHeader.Render(" schema health ("+v.db+") ")
+	if v.schemaLoading && v.schema != nil {
+		header += "  " + mu("refreshing…")
+	}
+	b.WriteString(header + "\n")
+	if v.schema == nil {
+		b.WriteString(maintRow("", mu("loading…")))
+		b.WriteString("\n")
+		return b.String()
+	}
+	h := v.schema
+	// check renders one row: the error, the zero text, or the finding with
+	// its note — and the top names only when no note already lists them.
+	check := func(label, key string, c pg.SchemaCheck, zero, some string) {
+		var val string
+		switch {
+		case c.Err != nil:
+			val = styleErr.Render("could not evaluate") + "  " + mu(oneLineQuery(c.Err.Error()))
+		case c.Rows == 0:
+			val = mu(zero)
+		default:
+			val = v.graded(key, some) + v.note(key)
+			if v.advice.Find(key) == nil && len(c.Top) > 0 {
+				val += "  " + mu(strings.Join(c.Top, ", "))
+			}
+		}
+		b.WriteString(maintRow(label, val))
+	}
+	plural := func(n int, one, many string) string {
+		if n == 1 {
+			return "1 " + one
+		}
+		return fmt.Sprintf("%d %s", n, many)
+	}
+	check("sequences", "schema_sequences", h.Sequences, "none past 30% of their range",
+		fmt.Sprintf("%s past 30%% · most-consumed %s%%", plural(h.Sequences.Rows, "sequence", "sequences"), fmt1(h.Sequences.MaxPct)))
+	check("stale statistics", "schema_stale_stats", h.StaleStats, "none", plural(h.StaleStats.Rows, "table", "tables"))
+	check("fk without index", "schema_fk_index", h.FKMissingIndex, "none", plural(h.FKMissingIndex.Rows, "foreign key", "foreign keys"))
+	check("table bloat", "schema_bloat_table", h.TableBloat, "none over 50%",
+		plural(h.TableBloat.Rows, "table", "tables")+" · ~"+humanize.Bytes(h.TableBloat.Bytes)+" wasted")
+	check("index bloat", "schema_bloat_index", h.IndexBloat, "none over 50%",
+		plural(h.IndexBloat.Rows, "index", "indexes")+" · ~"+humanize.Bytes(h.IndexBloat.Bytes)+" wasted")
+	check("invalid indexes", "schema_index_invalid", h.InvalidIndexes, "none", plural(h.InvalidIndexes.Rows, "index", "indexes"))
+	check("duplicate indexes", "schema_index_duplicate", h.DuplicateIndexes, "none",
+		plural(h.DuplicateIndexes.Rows, "group", "groups")+" · ~"+humanize.Bytes(h.DuplicateIndexes.Bytes)+" redundant")
 	b.WriteString("\n")
 	return b.String()
 }

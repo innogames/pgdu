@@ -79,18 +79,18 @@ func TestBreadcrumbToolSwitch(t *testing.T) {
 			{level: levelIndexPages, tool: toolPageInspect, db: "shop", schema: "public",
 				pages: pageState{index: pg.Relation{Schema: "public", Name: "orders_pkey"}}},
 		}, "db:5432 ▸ disk ▸ shop ▸ public ▸ orders ▸ describe orders ▸ pageinspect: orders_pkey"},
-		{"triage → lock tree", []*screen{
-			{level: levelTriage, tool: toolTriage, db: "postgres"},
+		{"overview recommendation → lock tree", []*screen{
+			{level: levelMaintenance, tool: toolMaintenance, db: "postgres"},
 			{level: levelLockTree, tool: toolActivity, db: "postgres"},
-		}, "db:5432 ▸ triage ▸ activity: lock tree"},
-		{"triage → activity entry", []*screen{
-			{level: levelTriage, tool: toolTriage, db: "postgres"},
+		}, "db:5432 ▸ system overview ▸ activity: lock tree"},
+		{"overview recommendation → activity entry", []*screen{
+			{level: levelMaintenance, tool: toolMaintenance, db: "postgres"},
 			{level: levelActivity, tool: toolActivity, db: "postgres"},
-		}, "db:5432 ▸ triage ▸ activity"},
-		{"triage → per-db diagnostic", []*screen{
-			{level: levelTriage, tool: toolTriage, db: "postgres"},
+		}, "db:5432 ▸ system overview ▸ activity"},
+		{"overview recommendation → per-db diagnostic", []*screen{
+			{level: levelMaintenance, tool: toolMaintenance, db: "postgres"},
 			{level: levelDiagnosticResult, tool: toolTools, db: "shop", diag: unused},
-		}, "db:5432 ▸ triage ▸ tools: Unused indexes (shop)"},
+		}, "db:5432 ▸ system overview ▸ tools: Unused indexes (shop)"},
 		{"activity → progress cross-link", []*screen{
 			{level: levelActivity, tool: toolActivity, db: "postgres"},
 			{level: levelProgress, tool: toolMaintenance, db: "postgres"},
@@ -318,7 +318,6 @@ func TestViewFitsTerminal(t *testing.T) {
 		"statements":  {{level: levelDatabases, tool: toolQueries}, {level: levelStatements, tool: toolQueries, db: "shop", loaded: true}},
 		"activity":    {{level: levelActivity, tool: toolActivity, db: "postgres", loaded: true}},
 		"maintenance": {{level: levelMaintenance, tool: toolMaintenance, db: "postgres", loaded: true}},
-		"triage":      {{level: levelTriage, tool: toolTriage, db: "postgres", loaded: true}},
 		"wal":         {{level: levelWAL, tool: toolWAL, db: "postgres", loaded: true}},
 		"pgbouncers":  {{level: levelPgBouncers, tool: toolPgBouncer, db: "postgres", loaded: true}},
 		"snapshots":   {{level: levelSnapshots, tool: toolQueries, db: "shop", loaded: true}},

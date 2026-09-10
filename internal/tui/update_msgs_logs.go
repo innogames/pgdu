@@ -73,11 +73,14 @@ func (g logGroupBy) label() string {
 }
 
 // logSection is the item.data payload of a section header row in the groups
-// pane. Header rows are inert on Enter and skipped by the cursor-less filter.
+// pane. The cursor may rest on one and Enter folds the section: a collapsed
+// header keeps its full counts while its group rows are left out of the list.
 type logSection struct {
-	title   string
-	groups  int
-	entries int
+	cat       pglog.Category
+	title     string
+	groups    int
+	entries   int
+	collapsed bool
 }
 
 // logScreen builds the levelLogs screen for one source, with the default view
@@ -238,12 +241,16 @@ func (m *Model) onLogLoaded(msg logLoadedMsg) tea.Cmd {
 		return nil
 	}
 	s.log.err = nil
-	// Remember the highlighted group across a refresh so a live tail doesn't
-	// yank the cursor when counts reshuffle the order.
-	var keepKey string
-	if msg.refresh && s.log.view == logViewGroups {
-		if g := s.selectedLogGroup(); g != nil {
-			keepKey = g.Key
+	// Remember the highlighted row (a group, or a section header) across a
+	// refresh so a live tail doesn't yank the cursor when counts reshuffle the
+	// order.
+	var keep func(item) bool
+	if cur, ok := s.currentItem(); ok && msg.refresh && s.log.view == logViewGroups {
+		switch v := cur.data.(type) {
+		case *pglog.Group:
+			keep = func(it item) bool { g, ok := it.data.(*pglog.Group); return ok && g.Key == v.Key }
+		case logSection:
+			keep = func(it item) bool { h, ok := it.data.(logSection); return ok && h.cat == v.cat }
 		}
 	}
 	s.log.report = msg.report
@@ -255,18 +262,16 @@ func (m *Model) onLogLoaded(msg logLoadedMsg) tea.Cmd {
 		}
 	}
 	m.rebuildLogItems(s)
-	if keepKey != "" {
-		vis := s.visibleIndexes()
-		for vi, idx := range vis {
-			if g, ok := s.items[idx].data.(*pglog.Group); ok && g.Key == keepKey {
+	if keep != nil {
+		for vi, idx := range s.visibleIndexes() {
+			if keep(s.items[idx]) {
 				s.cursor = vi
 				break
 			}
 		}
 	} else if !msg.refresh {
 		s.resetCursor()
-		// The groups pane opens on the first real row, not a section header.
-		s.skipInertRow(1)
+		s.skipLogHeader()
 	}
 	if top := m.top(); top != s && (top.level == levelLogGroup || top.level == levelLogEntry) {
 		m.rebuildLogChild(top)
@@ -307,14 +312,39 @@ func (m *Model) onLogTick() tea.Cmd {
 	return tea.Batch(m.loadLogCmd(s, true), next)
 }
 
-// selectedLogGroup returns the group under the cursor in the groups pane.
-func (s *screen) selectedLogGroup() *pglog.Group {
+// skipLogHeader moves the cursor down off a section header onto the first
+// group row below it. The groups pane opens (and re-opens after a pane or mode
+// switch) on the top group so Enter drills straight into it; the header stays
+// one ↑ away. A no-op on a group row; a pane whose every section is folded
+// keeps the cursor on the header.
+func (s *screen) skipLogHeader() {
 	vis := s.visibleIndexes()
-	if s.cursor < 0 || s.cursor >= len(vis) {
-		return nil
+	for i := s.cursor; i >= 0 && i < len(vis); i++ {
+		if _, hdr := s.items[vis[i]].data.(logSection); !hdr {
+			s.cursor = i
+			return
+		}
 	}
-	g, _ := s.items[vis[s.cursor]].data.(*pglog.Group)
-	return g
+}
+
+// toggleLogSection folds or unfolds one groups-pane section and rebuilds the
+// rows, keeping the cursor on the section's header.
+func (m *Model) toggleLogSection(s *screen, cat pglog.Category) {
+	if s.log.collapsed == nil {
+		s.log.collapsed = make(map[pglog.Category]bool)
+	}
+	if s.log.collapsed[cat] {
+		delete(s.log.collapsed, cat)
+	} else {
+		s.log.collapsed[cat] = true
+	}
+	m.rebuildLogItems(s)
+	for vi, idx := range s.visibleIndexes() {
+		if h, ok := s.items[idx].data.(logSection); ok && h.cat == cat {
+			s.cursor = vi
+			return
+		}
+	}
 }
 
 // rebuildLogItems regenerates the levelLogs rows for the current pane. The groups pane is ordered here (sections + per-section sort), so
@@ -348,6 +378,7 @@ func (m *Model) buildLogGroupItems(s *screen) []item {
 	r := s.log.report
 	type section struct {
 		key     int
+		cat     pglog.Category
 		title   string
 		groups  []*pglog.Group
 		entries int
@@ -357,7 +388,7 @@ func (m *Model) buildLogGroupItems(s *screen) []item {
 	add := func(key int, title string, g *pglog.Group) {
 		sec := secs[key]
 		if sec == nil {
-			sec = &section{key: key, title: title}
+			sec = &section{key: key, cat: g.Category, title: title}
 			secs[key] = sec
 			order = append(order, key)
 		}
@@ -405,10 +436,16 @@ func (m *Model) buildLogGroupItems(s *screen) []item {
 		sec := secs[key]
 		sort.SliceStable(sec.groups, func(i, j int) bool { return less(sec.groups[i], sec.groups[j]) })
 		if s.log.groupBy != logGroupByNone {
+			collapsed := s.log.collapsed[sec.cat]
 			items = append(items, item{
-				name: sec.title,
-				data: logSection{title: sec.title, groups: len(sec.groups), entries: sec.entries},
+				name:        sec.title,
+				hasChildren: true, // Enter folds/unfolds the section in place
+				data: logSection{cat: sec.cat, title: sec.title, groups: len(sec.groups),
+					entries: sec.entries, collapsed: collapsed},
 			})
+			if collapsed {
+				continue // the header stands in for its rows
+			}
 		}
 		for _, g := range sec.groups {
 			items = append(items, item{
