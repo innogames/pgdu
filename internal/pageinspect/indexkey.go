@@ -319,8 +319,14 @@ func decodeVarlena(b []byte, off int, c pg.IndexKeyColumn) (string, int, bool) {
 
 // formatVarlenaPayload renders a varlena's data bytes: string types
 // (typcategory 'S') as text when valid UTF-8, with control characters shown
-// as backslash escapes, everything else (bytea, geometry, …) as \x-hex.
+// as backslash escapes, everything else (bytea, geometry, …) as \x-hex. A
+// payload that is itself a compressed stream (an application compressing into
+// a bytea) is unwrapped first, whatever the column's type says — the magic
+// number is the stronger signal.
 func formatVarlenaPayload(payload []byte, typCategory string) string {
+	if s, ok := compressedBlobValue(payload); ok {
+		return s
+	}
 	if typCategory == "S" && utf8.Valid(payload) {
 		return escapeControlBytes(payload)
 	}

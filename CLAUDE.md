@@ -22,7 +22,8 @@ internal/pg/         # pgx wrapper: one *pgxpool.Pool per database, lazy
   logdiscover.go     #   log file discovery (pg_current_logfile / pg_ls_logdir) + server-side LogSource
 internal/diagres/    # generic column/row result table (kinds, cells, pgx row scan) shared by pg and pgbouncer
 internal/pgbouncer/  # pgbouncer console: ini parser, discovery, simple-protocol conns (own Client, no pool)
-internal/pageinspect/# pure byte decoders over pg row types: tuple layout, index keys, jsonb, TOAST pointers
+internal/pageinspect/# byte decoders over pg row types: tuple layout, index keys, jsonb, TOAST
+                     #   pointers, compressed blobs (gzip/zlib/zstd inside a bytea)
 internal/procfs/     # Linux-only host reads (/proc process list + per-PID stats, stat inode) with no-op fallbacks
 internal/pglog/      # log analyzer engine (pure Go, no pgx): parse, classify, aggregate, local/gz sources
 internal/tui/        # Bubble Tea Model/Update/View
@@ -130,7 +131,11 @@ fails (missing/corrupt → empty).
 - **Byte decoding is not UI**: tuple layout segments, index-key/jsonb/TOAST decoding live
   in `internal/pageinspect` and return plain strings/segments; styling stays in tui.
   `/proc` and stat(2) reads go through `internal/procfs`, never a per-package
-  `_linux.go` pair.
+  `_linux.go` pair. A varlena payload that is itself a compressed stream (`blob.go`) is
+  unwrapped before the text/hex rules apply — magic-number sniffed, inflated to a
+  bounded prefix and shown as `zstd:`/`gzip:`/`zlib:` + content, degrading to
+  `zstd · 4.48 KB raw` when only the frame header can be read. zstd is the sole reason
+  the binary has a non-pg dependency (`klauspost/compress`, isolated in `blob_zstd.go`).
 - **Best-effort enrichments must degrade, never break**: the tuple row-content query
   (`sqlHeapTuplesCols`: pk + picked columns as visible-row text and as page bytes →
   `sqlHeapTuplesDecode` → plain `sqlHeapTuples`) and the HOT-chain hop (`fillHotChains`,
