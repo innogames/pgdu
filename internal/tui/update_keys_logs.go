@@ -109,8 +109,34 @@ func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bo
 			logSpec(s.log.view).open(m, m.logTableFor(s.log.view))
 		}
 		return nil, true
+
+	case key.Matches(msg, m.keys.ActivityFilter):
+		s.log.cat, s.log.catOn = nextLogCategory(s.log.report, s.log.cat, s.log.catOn)
+		m.rebuildLogItems(s)
+		s.resetCursor()
+		s.skipLogHeader()
+		return nil, true
 	}
 	return nil, false
+}
+
+// nextLogCategory steps the f cycle: all → the first category the window has
+// entries for → the next present one → … → all, in section order. Absent
+// categories are skipped so the cycle never lands on an empty pane.
+func nextLogCategory(r *pglog.Report, cat pglog.Category, on bool) (pglog.Category, bool) {
+	if r == nil {
+		return cat, false
+	}
+	start := 0
+	if on {
+		start = slices.Index(pglog.Categories, cat) + 1
+	}
+	for _, c := range pglog.Categories[start:] {
+		if r.ByCategory[c] > 0 {
+			return c, true
+		}
+	}
+	return cat, false
 }
 
 // handleLogColumnConfigKey drives the C picker over the timeline columns.
@@ -123,7 +149,8 @@ func (m *Model) handleLogColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 
 // jumpToLogEntry pops back to the levelLogs screen, switches it to the
 // timeline and puts the cursor on e, so the user sees what happened around
-// that line. Any / filter is lifted so the target row is visible.
+// that line. Any / filter, and a category narrowing that would hide the line,
+// is lifted so the target row is visible.
 func (m *Model) jumpToLogEntry(logs *screen, e *pglog.Entry) tea.Cmd {
 	for i, v := range slices.Backward(m.stack) {
 		if v == logs {
@@ -133,6 +160,9 @@ func (m *Model) jumpToLogEntry(logs *screen, e *pglog.Entry) tea.Cmd {
 	}
 	logs.filter = ""
 	logs.filterFocused = false
+	if logs.log.catOn && e.Category != logs.log.cat {
+		logs.log.catOn = false
+	}
 	logs.log.view = logViewTimeline
 	m.rebuildLogItems(logs)
 	for vi, idx := range logs.visibleIndexes() {

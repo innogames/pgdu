@@ -121,7 +121,8 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 		styleBadge.Render("w") + mu(" → wal  ·  ") +
 		styleBadge.Render("r") + mu(" → replication  ·  ") +
 		styleBadge.Render("o") + mu(" → i/o  ·  ") +
-		styleBadge.Render("p") + mu(" → progress  ·  space refresh  ·  ") +
+		styleBadge.Render("p") + mu(" → progress  ·  ") +
+		styleBadge.Render("l") + mu(" → logs  ·  space refresh  ·  ") +
 		styleBadge.Render("t") + mu(" auto-refresh "+m.maintRefreshLabel()) + "\n")
 	full.WriteString(body.String())
 

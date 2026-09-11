@@ -213,7 +213,9 @@ func decompressGzip(b []byte) (data []byte, truncated, ok bool) {
 	if err != nil {
 		return nil, false, false
 	}
-	defer r.Close()
+	// The source is an in-memory slice; Close only releases decoder state and
+	// has nothing to report beyond what readBounded already saw.
+	defer func() { _ = r.Close() }()
 	return readBounded(r)
 }
 
@@ -222,6 +224,6 @@ func decompressZlib(b []byte) (data []byte, truncated, ok bool) {
 	if err != nil {
 		return nil, false, false
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	return readBounded(r)
 }

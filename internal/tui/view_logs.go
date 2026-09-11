@@ -187,6 +187,11 @@ func (m *Model) renderLogHeader(s *screen) string {
 		} else {
 			badges = append(badges, styleBadge.Render(logs.log.groupBy.label()))
 		}
+		// The category narrowing hides most of the file, so it is called out
+		// in the accent the live-tail cadence uses, not as a plain badge.
+		if logs.log.catOn {
+			badges = append(badges, styleSelected.Render(logs.log.cat.Label()+" only"))
+		}
 	}
 	if m.logRefresh > 0 {
 		badges = append(badges, styleSelected.Render(fmt.Sprintf("⟳ %s", m.logRefresh)))
@@ -796,6 +801,7 @@ func (m *Model) renderLogsInfo(height int) string {
 		{"↵", "groups pane: open the group's entries · entry rows: the full record (message, DETAIL, STATEMENT highlighted)"},
 		{"tab", "cycle the panes: aggregated groups → chronological timeline → slow queries by duration → pooler stats (pgbouncer logs; tables sortable, C picks columns)"},
 		{"m", "section mode: by category ⇄ flat"},
+		{"f", "narrow both panes to one category: all → errors → … → all (only categories the window has); the WAL inspector's l lands here on checkpoints"},
 		{"j", "on an entry or a group's rows: jump to that line in the timeline"},
 		{"d", "describe the main table of the statement behind the row (slow query / log_statement SQL or an error's STATEMENT)"},
 		{"←/→ r", "sort groups by count / last seen / title (timeline: by column)"},

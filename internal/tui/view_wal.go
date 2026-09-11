@@ -209,6 +209,8 @@ func (m *Model) renderWALSummary(s *screen) string {
 			settingOr(cp.Settings, "checkpoint_timeout"),
 			settingOr(cp.Settings, "checkpoint_completion_target"),
 			settingOr(cp.Settings, "wal_compression")))
+		// The counters say how often; the server log says what each one cost.
+		csLine += mu("  ·  ") + styleBadge.Render("l") + mu(" checkpoint log")
 		lines = append(lines, csLine)
 	}
 
@@ -751,7 +753,10 @@ func (m *Model) renderWALInfo(height int) string {
 	b.WriteString("    " + mu("gigabytes against the window's megabytes. last/next = when the last one finished and the next timed") + "\n")
 	b.WriteString("    " + mu("one is due (checkpoint_timeout). A high requested-% means max_wal_size is too small.") + "\n")
 	b.WriteString("    " + mu("This block needs pg_control_checkpoint / pg_stat_checkpointer (superuser); it is omitted") + "\n")
-	b.WriteString("    " + mu("when unavailable — the rest of the header still renders.") + "\n\n")
+	b.WriteString("    " + mu("when unavailable — the rest of the header still renders.") + "\n")
+	b.WriteString("    " + styleBadge.Render("l") + mu(" opens the log analyzer on the current server log, narrowed to its checkpoint lines:") + "\n")
+	b.WriteString("    " + mu("what each one wrote (buffers, share of shared_buffers), how long write/sync took and") + "\n")
+	b.WriteString("    " + mu("how many WAL files it added, removed or recycled. f there widens back to every category.") + "\n\n")
 
 	b.WriteString("  " + mu("↵ drills into the individual records of the selected rmgr, or the block references") + "\n")
 	b.WriteString("  " + mu("of the selected relation across the window (FPI-heaviest first); ") +

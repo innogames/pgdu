@@ -211,6 +211,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if cmd, ok := m.handlePgbKey(s, msg); ok {
 		return m, cmd
 	}
+	if cmd, ok := m.handleOpenLogKey(s, msg); ok {
+		return m, cmd
+	}
 
 	switch {
 	case key.Matches(msg, m.keys.Quit):

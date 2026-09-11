@@ -73,10 +73,12 @@ type keyMap struct {
 	LogJump      key.Binding // j: jump to this line in the chronological timeline
 	LogParams    key.Binding // tab (group screen): entries → by parameters → by $1
 
-	// PgBouncer-tool binding.
-	OpenLog key.Binding // l: open the instance's logfile in the log analyzer
+	// Log-analyzer cross-link: the pgbouncer instance's logfile, or the current
+	// server log — narrowed per level (logLinkFor).
+	OpenLog key.Binding // l: → log analyzer
 
-	// openLogInFooter advertises l on the pgbouncer list and overview.
+	// openLogInFooter advertises l where it is enabled, except on the system
+	// overview whose header line lists it with the other jump keys.
 	openLogInFooter bool
 
 	// logJumpInFooter advertises j on the entry and group-rows levels.
@@ -242,9 +244,19 @@ func (k *keyMap) applyContext(s *screen) {
 	k.ToggleRefresh.SetEnabled(stmtTable || stmtDetail || activity || s.level == levelProgress || logAny || pgbAny || s.level == levelMaintenance)
 	k.toggleRefreshInFooter = activity || s.level == levelProgress || logs || pgbAny
 	// l opens the highlighted instance's logfile from the pgbouncer list and its
-	// overview; the SHOW tables have no row-level log to open.
-	k.OpenLog.SetEnabled(pgbAny && !pgbShow)
-	k.openLogInFooter = pgbAny && !pgbShow
+	// overview (the SHOW tables have no row-level log to open), and elsewhere
+	// the current server log as logLinkFor says: checkpoint lines from the WAL
+	// overview, slow-query lines from top queries, the whole log from the system
+	// overview. The overview's header line already lists its jump keys, so the
+	// footer stays as it is there.
+	link, linked := logLinkFor(s)
+	k.OpenLog.SetEnabled((pgbAny && !pgbShow) || linked)
+	k.openLogInFooter = k.OpenLog.Enabled() && s.level != levelMaintenance
+	if linked {
+		k.OpenLog.SetHelp("l", link.help())
+	} else {
+		k.OpenLog.SetHelp("l", "→ log analyzer")
+	}
 	k.SaveSnapshot.SetEnabled(stmtTable || stmtDetail)
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
 	k.Params.SetEnabled(stmtDetail)
@@ -258,8 +270,8 @@ func (k *keyMap) applyContext(s *screen) {
 	k.Install.SetEnabled(s.extPrompt != nil && s.extPrompt.installable)
 
 	// f cycles the backend filter on the activity table and the category filter
-	// on the diagnostics list.
-	k.ActivityFilter.SetEnabled(activity || s.level == levelDiagnostics)
+	// on the diagnostics list and the log analyzer's overview.
+	k.ActivityFilter.SetEnabled(activity || s.level == levelDiagnostics || logs)
 	// Cancel/terminate act on the selected backend from both the activity table
 	// and its lock-tree child.
 	k.CancelBackend.SetEnabled(activity || s.level == levelLockTree)

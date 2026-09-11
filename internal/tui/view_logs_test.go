@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
+
 	"pgdu/internal/pg"
 	"pgdu/internal/pglog"
 )
@@ -703,5 +706,100 @@ func TestLogGroupParamsTable(t *testing.T) {
 	m.rebuildLogChild(gs)
 	if gs.log.params != logParamsOff || gs.diagCols != nil || len(gs.items) != 2 {
 		t.Errorf("third tab: params=%v cols=%v rows=%d", gs.log.params, gs.diagCols, len(gs.items))
+	}
+}
+
+// The f cycle narrows both panes to one category, visits only the categories
+// the window has entries for, in section order, and comes back to all.
+func TestLogCategoryFilterCycle(t *testing.T) {
+	m, s := newLogTestModel(t)
+	m.keys = defaultKeys()
+	r := s.log.report
+	var want []pglog.Category
+	for _, c := range pglog.Categories {
+		if r.ByCategory[c] > 0 {
+			want = append(want, c)
+		}
+	}
+	if len(want) < 3 {
+		t.Fatalf("sample report should span several categories, has %d", len(want))
+	}
+	press := func() {
+		m.keys.applyContext(s)
+		if _, ok := m.handleLogKey(s, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")}); !ok {
+			t.Fatal("f must be handled on the log overview")
+		}
+	}
+
+	s.log.view = logViewTimeline
+	m.rebuildLogItems(s)
+	all := len(s.items)
+	for _, c := range want {
+		press()
+		if !s.log.catOn || s.log.cat != c {
+			t.Fatalf("cycle landed on %v/%v, want %v", s.log.catOn, s.log.cat, c)
+		}
+		if len(s.items) != r.ByCategory[c] {
+			t.Errorf("%v: %d timeline rows, want %d", c, len(s.items), r.ByCategory[c])
+		}
+		for _, it := range s.items {
+			if e := s.logEntryOf(it); e == nil || e.Category != c {
+				t.Errorf("%v: row of another category leaked: %+v", c, e)
+			}
+		}
+		if hdr := ansi.Strip(m.renderLogHeader(s)); !strings.Contains(hdr, c.Label()+" only") {
+			t.Errorf("header must call out the narrowing, got %q", hdr)
+		}
+	}
+	press()
+	if s.log.catOn || len(s.items) != all {
+		t.Errorf("after the last category the cycle must return to all: catOn=%v rows=%d/%d", s.log.catOn, len(s.items), all)
+	}
+
+	// Groups pane: one section, only its groups.
+	s.log.view = logViewGroups
+	s.log.cat, s.log.catOn = pglog.CatCheckpoint, true
+	m.rebuildLogItems(s)
+	for _, it := range s.items {
+		switch v := it.data.(type) {
+		case logSection:
+			if v.cat != pglog.CatCheckpoint {
+				t.Errorf("section %v shown under a checkpoint narrowing", v.cat)
+			}
+		case *pglog.Group:
+			if v.Category != pglog.CatCheckpoint {
+				t.Errorf("group %q shown under a checkpoint narrowing", v.Title)
+			}
+		}
+	}
+	if len(s.items) != 2 {
+		t.Errorf("groups pane rows = %d, want the checkpoints header and its one group", len(s.items))
+	}
+}
+
+// A jump to an entry outside the narrowed category lifts the narrowing, like
+// the / filter, so the target row can be shown.
+func TestJumpToLogEntryLiftsCategory(t *testing.T) {
+	m, s := newLogTestModel(t)
+	var target *pglog.Entry
+	for i := range s.log.report.Entries {
+		if s.log.report.Entries[i].Category == pglog.CatSlowQuery {
+			target = &s.log.report.Entries[i]
+		}
+	}
+	s.log.cat, s.log.catOn = pglog.CatCheckpoint, true
+	m.jumpToLogEntry(s, target)
+	if s.log.catOn {
+		t.Error("checkpoint narrowing must be lifted for a slow-query target")
+	}
+	vis := s.visibleIndexes()
+	if got := s.logEntryOf(s.items[vis[s.cursor]]); got == nil || got.Off != target.Off {
+		t.Errorf("cursor not on the target entry: %+v", got)
+	}
+
+	s.log.cat, s.log.catOn = pglog.CatSlowQuery, true
+	m.jumpToLogEntry(s, target)
+	if !s.log.catOn {
+		t.Error("a narrowing that keeps the target visible must stay")
 	}
 }

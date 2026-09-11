@@ -512,6 +512,15 @@ type logState struct {
 	// header, keyed by category so the fold survives refreshes, re-sorts and
 	// pane switches (the rows rebuild from the report every time).
 	collapsed map[pglog.Category]bool
+	// cat narrows both panes to one category while catOn is set. f cycles it;
+	// the cross-links that open the analyzer for one kind of line (the WAL
+	// inspector's checkpoint log) arrive with it set. Distinct from the /
+	// filter, which matches text. On the picker, autoOpen asks discovery to
+	// open the current server log as soon as it lands, so a cross-link needs
+	// no pick.
+	cat      pglog.Category
+	catOn    bool
+	autoOpen bool
 }
 
 // pgbState: PgBouncer tool state.

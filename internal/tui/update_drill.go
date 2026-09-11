@@ -116,8 +116,7 @@ func (m *Model) drillIn() tea.Cmd {
 		if cur.logIdx <= 0 || cur.logIdx > len(s.log.cands) {
 			return nil
 		}
-		m.stack = append(m.stack, m.logScreen(s.log.cands[cur.logIdx-1].Open()))
-		return m.loadCurrent()
+		return m.openLogCandidate(s, s.log.cands[cur.logIdx-1])
 	case levelLogs:
 		if s.log.view.table() {
 			if e := s.logEntryOf(cur); e != nil {

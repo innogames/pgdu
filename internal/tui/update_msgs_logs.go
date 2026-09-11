@@ -167,11 +167,62 @@ func (m *Model) onLogFilesLoaded(msg logFilesLoadedMsg) tea.Cmd {
 		}
 	}
 	// One readable candidate: skip the picker (it stays on the stack for o/Esc).
-	if len(msg.cands) == 1 && m.top() == s {
-		m.stack = append(m.stack, m.logScreen(msg.cands[0].Open()))
-		return m.loadCurrent()
+	// A cross-link (autoOpen) skips it too, straight onto the current server
+	// log; when discovery found none the picker stays up for a manual pick and
+	// the category it came with still applies to that pick.
+	if m.top() == s {
+		if idx := logAutoOpenIndex(s, msg.cands); idx >= 0 {
+			s.log.autoOpen = false
+			return m.openLogCandidate(s, msg.cands[idx])
+		}
+		if s.log.autoOpen {
+			s.log.autoOpen = false
+			m.notice = "no current server log found — pick a file"
+		}
 	}
 	return nil
+}
+
+// logAutoOpenIndex is the candidate the picker opens without a pick: the only
+// one there is, or under autoOpen the current server log (● in the picker).
+// -1 leaves the picker up.
+func logAutoOpenIndex(s *screen, cands []pg.LogCandidate) int {
+	if len(cands) == 1 {
+		return 0
+	}
+	if s.log.autoOpen {
+		for i, c := range cands {
+			if c.Info.Current {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// openLogCandidate pushes the analyzer for one picker row. A category the
+// picker was opened with (a cross-link) carries over, so the file opens
+// already narrowed.
+func (m *Model) openLogCandidate(picker *screen, c pg.LogCandidate) tea.Cmd {
+	next := m.logScreen(c.Open())
+	if picker.log.catOn {
+		next.log.narrow(picker.log.cat)
+	}
+	m.stack = append(m.stack, next)
+	return m.loadCurrent()
+}
+
+// narrow restricts a not-yet-loaded analyzer screen to one category and opens
+// it on the pane that reads that category best: slow queries on their own
+// pane (slowest first), everything else on the timeline — a single category
+// is read chronologically (checkpoint starting/complete pairs, a night of
+// autovacuum runs), not by group.
+func (l *logState) narrow(cat pglog.Category) {
+	l.cat, l.catOn = cat, true
+	l.view = logViewTimeline
+	if cat == pglog.CatSlowQuery {
+		l.view = logViewSlow
+	}
 }
 
 // logFileColumns is the picker's schema; logFileItems keeps its cells parallel.
@@ -397,6 +448,9 @@ func (m *Model) buildLogGroupItems(s *screen) []item {
 	}
 	for i := range r.Groups {
 		g := &r.Groups[i]
+		if s.log.catOn && g.Category != s.log.cat {
+			continue
+		}
 		switch s.log.groupBy {
 		case logGroupByNone:
 			add(0, "", g)
@@ -470,6 +524,9 @@ func (m *Model) rebuildLogTimeline(s *screen) {
 	for i := range r.Entries {
 		e := &r.Entries[i]
 		if s.log.view == logViewSlow && e.Category != pglog.CatSlowQuery {
+			continue
+		}
+		if s.log.catOn && e.Category != s.log.cat {
 			continue
 		}
 		if s.log.view == logViewStats && e.PoolerStats == nil {

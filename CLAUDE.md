@@ -162,6 +162,12 @@ fails (missing/corrupt → empty).
   `Entry.Group` indexes `Report.Groups` (set by `Aggregate`); use it to walk a group's
   full membership, `Group.Samples` is capped. The group screen's tab (`log.params`)
   swaps the entry list for a generic `diagCols` table keyed by `pglog.ParamKey`.
+  `log.cat`/`catOn` narrow both panes to one category (`f` cycles it, distinct from
+  the text filter). The `l` cross-links (`logLinkFor`/`openLogLink` in
+  `update_keys_openlog.go`: WAL → checkpoints, top queries → slow queries on the slow
+  pane, system overview → the whole log) push the picker with `log.autoOpen`, and
+  `onLogFilesLoaded` then opens the current server log without a pick. Adding a link
+  is one `logLinkFor` case.
 - **PgBouncer** lives in `internal/pgbouncer`, reached as `pg.Client.PgBouncer`. Instances
   on one host share a TCP port via so_reuseport, so always address by
   `unix_socket_dir/.s.PGSQL.<port>` when the socket exists. The console only speaks the

@@ -274,7 +274,14 @@ func (m *Model) renderStatementsInfo(height int) string {
 	b.WriteString("    " + mu("(the window from when you opened the tool) and ") + styleSelected.Render("since last reset") +
 		mu(" (everything since the server's last reset).") + "\n")
 	b.WriteString("    " + mu("The same browser greets you when the tool opens, minus ‘now’: ↵ there picks the base of the") + "\n")
-	b.WriteString("    " + mu("live window (session start is preselected), Esc leaves the tool without loading the table.") + "\n")
+	b.WriteString("    " + mu("live window (session start is preselected), Esc leaves the tool without loading the table.") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" slow query log ") + "  " +
+		mu("the individual executions behind these aggregates") + "\n")
+	b.WriteString("    " + mu("Press ") + styleBadge.Render("l") +
+		mu(" to open the log analyzer on the current server log, narrowed to its slow-query lines") + "\n")
+	b.WriteString("    " + mu("(log_min_duration_statement), slowest first — each execution with its duration and the") + "\n")
+	b.WriteString("    " + mu("parameters it ran with. f there widens back to every category, tab switches panes.") + "\n")
 
 	return padInfo(&b, height)
 }

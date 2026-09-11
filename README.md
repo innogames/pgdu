@@ -135,7 +135,10 @@ statements — plan nodes are heat-coloured by their share of the total time,
 with the single worst node bolded, so the bottleneck stands out without reading
 every line — `E` executes it and shows the rows, `p` browses the captured
 parameter sets, `d` describes the statement's main table, and `u` jumps to that
-table in the disk view.
+table in the disk view. `l` opens the log analyzer on the current server log
+narrowed to its slow-query lines (`log_min_duration_statement`), slowest first:
+the individual executions behind these aggregates, with the parameters they ran
+with.
 
 The describe panel is `\d` with statistics attached: columns, indexes with their
 size and scan counts, foreign keys, and the table's own counters. `d` again
@@ -195,7 +198,8 @@ statements by normalized SQL with avg / p95 / max duration — and sections them
 category: errors, warnings, lock waits, temp-file spills, replication,
 checkpoints, autovacuum, connections, and — last, because it usually has the
 most distinct groups — slow queries. Column headers show the sort. The header
-carries a per-severity timeline histogram of the loaded window. `Tab` cycles the
+carries a per-severity timeline histogram of the loaded window. `f` narrows both
+panes to one category (cycling only the categories the window has). `Tab` cycles the
 grouped view, a sortable chronological timeline, a slow-queries pane ordered by
 duration and, for pgbouncer logs, a **pooler stats** pane: one row per
 `stats_period` with transactions and queries per second, bytes in / out and
@@ -303,8 +307,9 @@ top block shows **extension capacity** — how full `pg_stat_statements` /
 `s` opens the **settings browser**: every
 `pg_settings` entry with its value, filterable with `/`, non-default values in
 yellow and settings still waiting for a restart in red — the place to go when the
-dashboard's *pending config* line names something. `a`, `w`, `r`, `o` and `p` jump
-to activity, WAL, replication, the full `pg_stat_io` table and the progress monitor.
+dashboard's *pending config* line names something. `a`, `w`, `r`, `o`, `p` and `l`
+jump to activity, WAL, replication, the full `pg_stat_io` table, the progress
+monitor and the log analyzer on the current server log.
 
 ### Table overview
 
@@ -405,8 +410,10 @@ and segment, the size of `pg_wal`, the lifetime `pg_stat_wal` counters, the LSN
 window analysed (the most recent 16 MiB — every breakdown covers that window,
 not the WAL since the checkpoint), and a **checkpoint bar**: WAL written since
 the last checkpoint's redo point against `max_wal_size`, with the timed /
-requested split and when the next timed checkpoint is due. Both tables end in a
-Σ row.
+requested split and when the next timed checkpoint is due. `l` opens the log
+analyzer on the current server log narrowed to its checkpoint lines — what each
+one wrote, how long write/sync took, how many WAL files it recycled. Both tables
+end in a Σ row.
 
 ![WAL inspector](docs/wal_inspector.png)
 
@@ -517,9 +524,10 @@ Frequently used view-specific keys:
 | `m`        | buffers / logs   | shared-memory map / toggle log sections           |
 | `Tab`      | logs / log group | groups → timeline → slow queries → pooler stats / entries → parameters → `$1` |
 | `t`        | activity, queries, logs, pgbouncer, overview / describe | cycle auto-refresh / live tail / open top queries filtered to the table |
-| `l`        | pgbouncer        | open the instance's log in the log analyzer       |
+| `l`        | pgbouncer / wal / top queries / overview | log analyzer: the instance's log / the server log's checkpoint lines / its slow-query lines / the whole log |
+| `f`        | activity, diagnostics, logs | cycle the backend / category filter    |
 | `s`        | diagnostics / index tuples / overview | show SQL / seek to a key / settings browser |
-| `a` `w` `r` `o` | overview    | jump to activity / WAL / replication slots / `pg_stat_io` by backend type |
+| `a` `w` `r` `o` `l` | overview | jump to activity / WAL / replication slots / `pg_stat_io` by backend type / the server log |
 
 `e` writes the current view — filtered and sorted as displayed — to
 `$TMPDIR/pgdu-<tool>-YYYYMMDD-HHMMSS.csv` and prints the path. The temp
