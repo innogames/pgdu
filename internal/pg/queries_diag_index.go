@@ -67,11 +67,18 @@ ORDER BY pg_relation_size(i.oid) DESC
 // cannot enforce uniqueness). correlation_pct (abs correlation × 100) is the
 // headline bar: the _pct suffix classifies it as DiagPercent so it renders as a
 // 0–100 bar graded green→yellow, mirroring the STRONG/Possible split.
+// index_columns spells the btree's whole key list (one row per correlated
+// column, so a multi-column index can appear several times): the fix builds
+// the BRIN on column_name alone and needs to know whether the btree also
+// serves lookups on other columns before it suggests dropping it.
 const sqlDiagIndexBrinCandidates = `
 SELECT
+    n.nspname                                          AS schema,
     t.relname                                          AS table_name,
     i.relname                                          AS index_name,
     a.attname                                          AS column_name,
+    (SELECT string_agg(pg_get_indexdef(i.oid, kc::int, true), ', ' ORDER BY kc)
+       FROM generate_series(1, idx.indnkeyatts) AS kc)  AS index_columns,
     round((abs(s.correlation) * 100)::numeric, 1)      AS correlation_pct,
     pg_size_pretty(pg_relation_size(i.oid))            AS index_size,
     pg_size_pretty(pg_relation_size(t.oid))            AS table_size,

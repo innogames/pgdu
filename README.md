@@ -38,15 +38,18 @@ does — no daemon, no collector, no web server.
   archiver, deadlock and temp-file rates, autovacuum backlog, session hygiene,
   the safety and observability settings, and a catalog sweep of the database
   (sequences near their ceiling, stale statistics, bloat, invalid and duplicate
-  indexes). Every threshold that trips becomes a coloured note and a line in the
-  **recommendations** panel at the top — red for breakage, yellow for
+  indexes). Every ratio is a gauge in one shared column, coloured by the finding
+  behind it; every threshold that trips becomes a coloured note, a mark on its
+  section title and a line in the **recommendations** panel at the top — red for
+  breakage, yellow for
   performance — with a copyable `ALTER SYSTEM` fix; `↵` on a line opens what
   explains it (the diagnostic, the lock tree, the activity list, the settings
   browser). `t` samples twice for per-minute rates; a `pg_settings` browser
   flags non-default and restart-pending values.
-- **39 diagnostic queries, 11 with a runnable fix** — `↵` generates a lock-safe
-  script (REINDEX / DROP INDEX CONCURRENTLY, ANALYZE, VACUUM, `lock_timeout`-guarded
-  ALTER), `y` runs it statement by statement with notices streamed back.
+- **39 diagnostic queries, 12 with a runnable fix** — `↵` generates a lock-safe
+  script (CREATE / REINDEX / DROP INDEX CONCURRENTLY, ANALYZE, VACUUM,
+  `lock_timeout`-guarded ALTER), `y` runs it statement by statement with notices
+  streamed back.
 - **Live activity with OS-level detail** — 20+ columns including RSS, CPU %,
   read/s and write/s per backend (from `/proc`), reverse-DNS client hostname,
   `blocked_by`, inline operation progress; `b` opens the lock-blocking tree, `W` a
@@ -259,14 +262,18 @@ instance.
 **Diagnostics** (under *Other tools*) are 39 saved queries in six categories —
 index, table, vacuum, activity, WAL, server — with `f` to filter by category, `s`
 to show the SQL, `C` to pick columns, and `d` to describe the object behind a
-row (in the row's own database when the query ran across all of them). Eleven of them come with a **fix**:
-index bloat, unused / duplicate / redundant / invalid indexes, CLUSTER candidates,
-table bloat, stale statistics, fillfactor, vacuum stats, and wraparound freeze
-age. Duplicate indexes are ranked by the bytes that dropping the extra copies
-would free. `↵` on a result row generates the script for that object — only lock-safe
-statements (`REINDEX INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `ANALYZE`,
-plain `VACUUM`; `ALTER TABLE` guarded by a 3 s `lock_timeout`; `VACUUM FULL` and
-`CLUSTER` only ever as comments) — and `y` runs it statement by statement over a
+row (in the row's own database when the query ran across all of them). Twelve of them come with a **fix**:
+index bloat, unused / duplicate / redundant / invalid indexes, BRIN and CLUSTER
+candidates, table bloat, stale statistics, fillfactor, vacuum stats, and
+wraparound freeze age. Duplicate indexes are ranked by the bytes that dropping
+the extra copies would free. A BRIN candidate's fix builds the BRIN index next to
+the btree it could replace and leaves the `DROP` as a comment to run once the
+plans are confirmed to prune — or, when the btree keys on further columns and
+still serves lookups on those, a warning not to drop it. `↵` on a result row
+generates the script for that object — only lock-safe statements (`CREATE`,
+`REINDEX` and `DROP INDEX CONCURRENTLY`, `ANALYZE`, plain `VACUUM`; `ALTER TABLE`
+guarded by a 3 s `lock_timeout`; `VACUUM FULL` and `CLUSTER` only ever as
+comments) — and `y` runs it statement by statement over a
 dedicated connection, streaming server notices and per-statement timings. On
 success the diagnostic reloads so you see the effect immediately.
 
@@ -294,6 +301,17 @@ without an index, heavily bloated tables and indexes, invalid and duplicate
 indexes — that runs on open and on `space`, never on the auto-refresh tick.
 Cumulative counters are labelled with the window they cover; `t` turns on
 auto-refresh so per-minute rates appear next to them.
+
+Every ratio on the screen is a gauge in one shared column — connections by state
+against `max_connections`, buffer-pool occupancy with its dirty share, host
+memory split into shared_buffers (used and unused), other processes, page cache
+and free the way the shared-buffers header draws it, swap, autovacuum workers,
+the freeze ages, full-page images, timed against requested checkpoints, the
+average checkpoint interval against `checkpoint_timeout`, and WAL since the last
+checkpoint against `max_wal_size`. A bar takes its colour from the recommendation
+that fired for it, so a gauge never contradicts the panel, and a section title
+carries the panel's `!` or `~` mark for the worst finding it holds, so the
+sections worth reading stand out while scrolling.
 
 Every threshold that trips shows as a coloured note on its row and again in the
 **recommendations** panel right under the capacity rows, worst first — red means

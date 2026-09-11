@@ -204,7 +204,7 @@ func TestRenderMaintenanceReplication(t *testing.T) {
 	raw := stripANSI(m.renderMaintenance(overviewScreen(replicationInfo()), 300))
 	out := squashSpaces(raw)
 	for _, want := range []string{
-		"replication & slots\n",
+		"replication & slots !\n", // the nearly invalidated slot marks the section
 		"max_slot_wal_keep_size 4GB\n",
 		"node address state sync lag behind slot type status retained safe\n",
 		"db1 10.0.0.1 streaming async <1s 800.00 KB slot_db1 physical active reserved 24.00 KB 4.00 GB\n",
@@ -330,9 +330,9 @@ func TestRenderMaintenanceRoutineFreezeIsNotRed(t *testing.T) {
 	info.XidAge = 198_000_000 // 99 % of freeze_max_age: the trigger, not a fault
 	s := overviewScreen(info)
 
-	raw := renderMaintAutovacuum(newMaintView(s))
+	raw := renderMaintAutovacuum(newMaintView(s), maintBarW)
 	out := stripANSI(raw)
-	if !strings.Contains(out, ovRow("xid age", "198.0M / 200.0M  99.0%")) {
+	if !strings.Contains(out, ovRow("xid age", "[▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇░]  198.0M / 200.0M   99.0%")) {
 		t.Errorf("xid age row missing from:\n%s", out)
 	}
 	if !strings.Contains(out, "routine anti-wraparound autovacuum is due") {
@@ -353,7 +353,7 @@ func TestRenderMaintenanceRoutineFreezeIsNotRed(t *testing.T) {
 // inline so the overview alone identifies the session to deal with.
 func TestRenderMaintenanceHorizonRow(t *testing.T) {
 	info := overviewInfo()
-	out := stripANSI(renderMaintAutovacuum(newMaintView(overviewScreen(info))))
+	out := stripANSI(renderMaintAutovacuum(newMaintView(overviewScreen(info)), maintBarW))
 	if !strings.Contains(out, ovRow("xmin horizon", "none — nothing pins a snapshot")) {
 		t.Errorf("idle cluster horizon row missing from:\n%s", out)
 	}
@@ -361,7 +361,7 @@ func TestRenderMaintenanceHorizonRow(t *testing.T) {
 	info = overviewInfo()
 	info.Horizon = pg.HorizonStat{Age: 62_104_882, Kind: "idle transaction",
 		Holder: "pid 4711 in shop (app), idle in transaction for 00:42:00"}
-	out = stripANSI(renderMaintAutovacuum(newMaintView(overviewScreen(info))))
+	out = stripANSI(renderMaintAutovacuum(newMaintView(overviewScreen(info)), maintBarW))
 	for _, want := range []string{"xmin horizon", "62.1M", "pid 4711 in shop", "VACUUM cannot freeze past it"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("horizon row missing %q in:\n%s", want, out)
@@ -371,7 +371,7 @@ func TestRenderMaintenanceHorizonRow(t *testing.T) {
 	// Unreadable is reported as unknown, never as "none".
 	info = overviewInfo()
 	info.Horizon = pg.HorizonStat{Restricted: true}
-	out = stripANSI(renderMaintAutovacuum(newMaintView(overviewScreen(info))))
+	out = stripANSI(renderMaintAutovacuum(newMaintView(overviewScreen(info)), maintBarW))
 	if !strings.Contains(out, "n/a (needs pg_read_all_stats)") {
 		t.Errorf("restricted horizon row missing from:\n%s", out)
 	}
@@ -408,14 +408,14 @@ func TestWraparoundDiagnosticCarriesItsNote(t *testing.T) {
 func TestRenderMaintenanceRestrictedHorizonIsQualified(t *testing.T) {
 	info := overviewInfo()
 	info.Horizon = pg.HorizonStat{Age: 1_000, Kind: "backend", Holder: "pid 99", Restricted: true}
-	out := stripANSI(renderMaintAutovacuum(newMaintView(overviewScreen(info))))
+	out := stripANSI(renderMaintAutovacuum(newMaintView(overviewScreen(info)), maintBarW))
 	if !strings.Contains(out, "lower bound") || !strings.Contains(out, "pg_read_all_stats") {
 		t.Errorf("restricted horizon row is not qualified:\n%s", out)
 	}
 
 	// With full visibility the same small age carries no caveat.
 	info.Horizon.Restricted = false
-	out = stripANSI(renderMaintAutovacuum(newMaintView(overviewScreen(info))))
+	out = stripANSI(renderMaintAutovacuum(newMaintView(overviewScreen(info)), maintBarW))
 	if strings.Contains(out, "lower bound") {
 		t.Errorf("unrestricted horizon row should not be qualified:\n%s", out)
 	}

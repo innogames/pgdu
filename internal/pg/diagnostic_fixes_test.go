@@ -94,6 +94,53 @@ func TestFixTableFillfactor(t *testing.T) {
 	}
 }
 
+func TestFixCreateBrin(t *testing.T) {
+	// single-column btree: build the BRIN, then suggest dropping the btree
+	sql, ok := fixCreateBrin(fixGetter(map[string]string{
+		"schema": "public", "table_name": "events", "index_name": "events_created_at_idx",
+		"column_name": "created_at", "index_columns": "created_at",
+	}))
+	if !ok {
+		t.Fatal("expected a fix")
+	}
+	if !strings.HasPrefix(sql, "CREATE INDEX CONCURRENTLY events_created_at_brin ON public.events USING brin (created_at);") {
+		t.Errorf("create: got\n%s", sql)
+	}
+	if !strings.Contains(sql, "-- then: DROP INDEX CONCURRENTLY public.events_created_at_idx;") {
+		t.Errorf("single-column btree must suggest the drop:\n%s", sql)
+	}
+	// only the CREATE is executable; the drop advice must stay a comment
+	if stmts := SplitSQLStatements(sql); len(stmts) != 1 || !strings.HasPrefix(stmts[0], "CREATE INDEX CONCURRENTLY") {
+		t.Errorf("executable statements: %q", stmts)
+	}
+
+	// pg_get_indexdef quotes a mixed-case column — still a single-column index
+	sql, ok = fixCreateBrin(fixGetter(map[string]string{
+		"schema": "public", "table_name": "Events", "index_name": "ev_idx",
+		"column_name": "CreatedAt", "index_columns": `"CreatedAt"`,
+	}))
+	if !ok || !strings.Contains(sql, `CREATE INDEX CONCURRENTLY "Events_CreatedAt_brin" ON public."Events" USING brin ("CreatedAt");`) ||
+		!strings.Contains(sql, "-- then: DROP INDEX CONCURRENTLY public.ev_idx;") {
+		t.Errorf("quoted column: got %q, %v", sql, ok)
+	}
+
+	// multi-column btree: the BRIN complements it; no drop advice
+	sql, ok = fixCreateBrin(fixGetter(map[string]string{
+		"schema": "public", "table_name": "events", "index_name": "events_user_created_idx",
+		"column_name": "created_at", "index_columns": "user_id, created_at",
+	}))
+	if !ok || !strings.Contains(sql, "USING brin (created_at);") {
+		t.Fatalf("multi-column: got %q, %v", sql, ok)
+	}
+	if strings.Contains(sql, "DROP INDEX") || !strings.Contains(sql, "keys on (user_id, created_at)") {
+		t.Errorf("multi-column btree must warn instead of suggesting the drop:\n%s", sql)
+	}
+
+	if _, ok := fixCreateBrin(fixGetter(map[string]string{"schema": "public", "table_name": "events"})); ok {
+		t.Error("missing column_name must produce no fix")
+	}
+}
+
 func TestFixBuilders(t *testing.T) {
 	reindex := fixReindex("schema_name", "index_name", "-- extra")
 	sql, ok := reindex(fixGetter(map[string]string{"schema_name": "s", "index_name": "i"}))

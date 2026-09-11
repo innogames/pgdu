@@ -45,13 +45,19 @@ var diagIndex = []Diagnostic{
 		Description: "non-unique btree indexes on high-correlation columns (|corr| ≥ 0.7) — candidates to replace with a smaller BRIN index",
 		SQL:         sqlDiagIndexBrinCandidates,
 		Bar:         "correlation_pct",
+		Fix:         fixCreateBrin,
 		Help: `Non-unique btree indexes whose column closely follows the table's
 			physical row order (correlation_pct ≥ 70 to appear) on tables over
 			100k rows — the pattern where a BRIN index prunes almost as well at a
 			tiny fraction of index_size. Typical for append-only timestamps and
 			serial keys; ≥ 90 is flagged a STRONG candidate. BRIN pays off for
 			range scans, not single-row lookups — check the workload first, create
-			the BRIN, verify the plans still prune, then drop the btree.`,
+			the BRIN, verify the plans still prune, then drop the btree. The fix
+			runs the first step, CREATE INDEX CONCURRENTLY … USING brin on
+			column_name; the DROP stays a comment. index_columns shows the
+			btree's full key list — when it has more columns than the flagged
+			one, the btree still serves lookups on those and is not a drop
+			candidate.`,
 	},
 	{
 		Key:         "index_cluster_candidates",

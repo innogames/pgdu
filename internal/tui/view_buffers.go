@@ -312,13 +312,8 @@ func (m *Model) renderBufferSummary(s *screen) (string, map[uint32]int) {
 		sbUsed := sum.ThisDBBytes + sum.OtherDBBytes
 		sbFree := sum.FreeBytes()
 		sbTotal := sum.TotalBytes
-		// "Other used" is non-shared_buffers memory that isn't reclaimable
-		// (= total - available - SB). The cache (= reclaimable buffers +
-		// page cache) is what `free -w` calls "buff/cache"; we approximate
-		// it as MemAvailable - MemFree, which is close enough for a bar.
-		// Clamp all derived values to >=0 in case of rounding races.
-		otherUsed := max(sum.ServerMemBytes-sum.ServerMemAvailableBytes-sbTotal, 0)
-		cache := max(sum.ServerMemAvailableBytes-sum.ServerMemFreeBytes, 0)
+		// The same split the system overview's host-memory row draws.
+		otherUsed, cache := serverMemParts(sum.ServerMemBytes, sum.ServerMemAvailableBytes, sum.ServerMemFreeBytes, sbTotal)
 		bar := renderServerMemBar(sbUsed, sbFree, otherUsed, cache, sum.ServerMemBytes, barW)
 		muted := styleMuted.Render
 		sw := func(style lipgloss.Style) string { return swatch(style) + " " }

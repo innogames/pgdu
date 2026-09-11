@@ -5,7 +5,7 @@ import "strings"
 // This file holds the Diagnostic.Fix builders: per-row remediation SQL the
 // TUI shows when Enter is pressed on a diagnostic result and runs (via
 // Client.RunFix) only after an explicit y confirm. Statements stay lock-safe —
-// REINDEX/DROP INDEX CONCURRENTLY, ANALYZE, plain VACUUM; anything that takes a
+// CREATE/REINDEX/DROP INDEX CONCURRENTLY, ANALYZE, plain VACUUM; anything that takes a
 // long exclusive lock (VACUUM FULL, CLUSTER) is only ever suggested inside a
 // SQL comment. The exceptions are the fillfactor and CLUSTER ON ALTERs, whose
 // brief ACCESS EXCLUSIVE lock is defused with an explicit lock_timeout line so
@@ -226,6 +226,48 @@ func fixClusterOn(get func(string) (string, bool)) (string, bool) {
 		"-- exclusively for the duration — run off-peak, or use pg_repack instead.",
 		"-- rows scatter again as writes continue; re-cluster periodically.",
 	}, "\n"), true
+}
+
+// fixCreateBrin builds the BRIN index an index_brin_candidates row proposes:
+// CREATE INDEX CONCURRENTLY on the correlated column alone, named
+// <table>_<column>_brin so it sits next to the btree it is meant to replace.
+// Only the build runs — whether the plans still prune is for the user to
+// verify, so dropping the btree stays a comment. When the btree keys on more
+// columns than the flagged one (index_columns), the drop advice is replaced
+// by a warning: a BRIN on one column does not replace lookups on the others.
+func fixCreateBrin(get func(string) (string, bool)) (string, bool) {
+	tbl, ok := fixQualify(get, "schema", "table_name")
+	if !ok {
+		return "", false
+	}
+	tblName, _ := get("table_name")
+	col, ok := get("column_name")
+	if !ok {
+		return "", false
+	}
+	lines := []string{
+		"CREATE INDEX CONCURRENTLY " + fixIdent(tblName+"_"+col+"_brin") +
+			" ON " + tbl + " USING brin (" + fixIdent(col) + ");",
+		"-- pages_per_range defaults to 128 heap pages per summary; a smaller value prunes",
+		"-- finer at the cost of a larger index. A cancelled build leaves an INVALID index.",
+		"-- BRIN serves range scans, not point lookups: EXPLAIN the workload's queries on",
+		"-- " + fixIdent(col) + " and confirm the new index prunes before touching the btree.",
+	}
+	idx, hasIdx := fixQualify(get, "schema", "index_name")
+	// pg_get_indexdef spells a single plain column as quote_identifier(attname),
+	// i.e. either the bare name or the always-quoted form — anything else means
+	// the btree has further key columns or expressions.
+	cols, hasCols := get("index_columns")
+	multi := hasCols && cols != col && cols != quoteIdent(col)
+	switch {
+	case hasIdx && multi:
+		lines = append(lines,
+			"-- "+idx+" keys on ("+cols+"): it still serves lookups on the other",
+			"-- columns, so the BRIN complements it rather than replacing it — do not drop it.")
+	case hasIdx:
+		lines = append(lines, "-- then: DROP INDEX CONCURRENTLY "+idx+";")
+	}
+	return strings.Join(lines, "\n"), true
 }
 
 // fixDropDuplicateIndex drops idx2 of an index_show_duplicate row, keeping

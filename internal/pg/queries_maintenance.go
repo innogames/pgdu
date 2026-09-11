@@ -69,11 +69,14 @@ SELECT count(*),
        COALESCE(current_setting('pg_qualstats.max', true)::bigint, 0)
 FROM   pg_qualstats()`
 
-	// sqlMaintServer fetches server version string and the two postmaster timestamps.
+	// sqlMaintServer fetches the server version string, the two postmaster
+	// timestamps and the database the snapshot is taken in — the overview
+	// names it where the screen itself has none (pgdu started without -d).
 	sqlMaintServer = `
 SELECT version(),
        pg_postmaster_start_time(),
-       pg_conf_load_time()`
+       pg_conf_load_time(),
+       current_database()`
 
 	// sqlMaintActivity counts connections by state (active/idle/idle in transaction/…)
 	// and finds the longest-running transaction age in seconds.

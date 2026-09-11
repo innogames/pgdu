@@ -52,6 +52,21 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	// The action rows come first: the capacity rows own the reset flow and
 	// every recommendation opens the screen behind it, so all of them stay
 	// reachable without scrolling past the read-only status sections below.
+	// One bar width for the whole page, decided by the narrower pane, so
+	// every gauge on the screen sits in the same column.
+	paned := m.width >= 160
+	barW := maintBarW
+	var leftW, rightW int
+	if paned {
+		// Split evenly: both panes carry long rows (connections by app and
+		// query text on the left, host memory and advice notes on the right),
+		// keeping the right pane ≥48 cols. -3 throughout is the "│ " rule + safety.
+		leftW = max(40, min(m.width-48-3, m.width/2))
+		rightW = max(20, m.width-leftW-3)
+		barW = maintBarWidth(min(leftW, rightW))
+	}
+	db := v.dbName()
+
 	body.WriteString("  " + styleHeader.Render(" extension capacity ") + "\n")
 	var stmtsCap, qualsCap pg.ExtCapacity
 	if info != nil {
@@ -59,11 +74,11 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 		qualsCap = info.Qualstats
 	}
 	markCursor(0)
-	body.WriteString(m.renderCapacityRow(s, s.db, 0, "pg_stat_statements", stmtsCap) + "\n")
+	body.WriteString(m.renderCapacityRow(s, db, 0, "pg_stat_statements", stmtsCap, barW) + "\n")
 	markCursor(1)
-	body.WriteString(m.renderCapacityRow(s, s.db, 1, "pg_qualstats", qualsCap) + "\n")
+	body.WriteString(m.renderCapacityRow(s, db, 1, "pg_qualstats", qualsCap, barW) + "\n")
 	markCursor(2)
-	body.WriteString(m.renderTableStatsRow(s, info, 2) + "\n")
+	body.WriteString(m.renderTableStatsRow(s, info, db, 2) + "\n")
 	markCursor(3)
 	body.WriteString(m.renderTableStatsAllRow(s, 3) + "\n")
 	body.WriteString("\n")
@@ -79,31 +94,26 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	// full width below so they aren't truncated. The paned sections carry
 	// annotated rows of up to ~80 cols (host memory, advice notes), so the
 	// split only pays off from 160 cols; narrower terminals stack everything.
-	if m.width >= 160 {
-		// Split evenly: both panes carry long rows now (connections by app and
-		// query text on the left, host memory and advice notes on the right),
-		// keeping the right pane ≥48 cols. -3 throughout is the "│ " rule + safety.
-		leftW := max(40, min(m.width-48-3, m.width/2))
-		rightW := max(20, m.width-leftW-3)
+	if paned {
 		// Column heights are balanced by hand: server + transactions + table
 		// activity are short, so the buffer cache goes left; the settings-heavy
 		// memory + autovacuum + observability stack goes right.
-		left := renderMaintServer(v) + renderMaintTransactions(v) + renderMaintTableActivity(v) +
-			renderMaintBufferCache(v, min(20, max(leftW-overviewLabelW-14, 8)))
-		right := renderMaintMemory(v) + renderMaintAutovacuum(v) + renderMaintObservability(v)
+		left := renderMaintServer(v, barW) + renderMaintTransactions(v) + renderMaintTableActivity(v, barW) +
+			renderMaintBufferCache(v, barW)
+		right := renderMaintMemory(v, barW) + renderMaintAutovacuum(v, barW) + renderMaintObservability(v)
 		body.WriteString(renderColumns(left, right, leftW, rightW))
 		body.WriteString("\n")
 	} else {
-		body.WriteString(renderMaintServer(v))
+		body.WriteString(renderMaintServer(v, barW))
 		body.WriteString(renderMaintTransactions(v))
-		body.WriteString(renderMaintTableActivity(v))
-		body.WriteString(renderMaintBufferCache(v, 20))
-		body.WriteString(renderMaintMemory(v))
-		body.WriteString(renderMaintAutovacuum(v))
+		body.WriteString(renderMaintTableActivity(v, barW))
+		body.WriteString(renderMaintBufferCache(v, barW))
+		body.WriteString(renderMaintMemory(v, barW))
+		body.WriteString(renderMaintAutovacuum(v, barW))
 		body.WriteString(renderMaintObservability(v))
 	}
 	body.WriteString(renderMaintReplication(v))
-	body.WriteString(renderMaintWAL(v))
+	body.WriteString(renderMaintWAL(v, barW))
 	body.WriteString(renderMaintHealth(v))
 	body.WriteString(renderMaintSchemaHealth(v))
 
@@ -180,18 +190,17 @@ func renderColumns(left, right string, leftW, rightW int) string {
 // renderCapacityRow renders one extension capacity row with a fill bar,
 // counts, percentage, memory footprint, and reset-age. idx is the 0-based row
 // index within the capacity section; s.maintCursor highlights the selected row.
-func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, cap pg.ExtCapacity) string {
+func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, cap pg.ExtCapacity, barW int) string {
 	mu := styleMuted.Render
 	cursor := "  "
 	if s.maintenance.cursor == idx {
 		cursor = styleSelected.Render("▶ ")
 	}
 	if !cap.Installed {
-		return cursor + padRight(mu(name), 22) + mu("not installed in "+db)
+		return cursor + padRight(mu(name), overviewLabelW) + mu("not installed"+inDB(db))
 	}
 
 	ratio := cap.FillRatio()
-	barW := 20
 
 	// Colour follows the advice thresholds so the bar and the .max
 	// recommendation never disagree: warn red, notice yellow, else bar-cyan.
@@ -204,14 +213,8 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 	default:
 		barStyle = styleBar
 	}
-
-	var barStr string
-	if cap.Max > 0 {
-		filled := min(int(float64(barW)*ratio), barW)
-		barStr = paintBar(barW, barSegment{cells: filled, style: barStyle})
-	} else {
-		barStr = paintBar(barW, barSegment{cells: 0, style: styleBar})
-	}
+	// FillRatio is 0 without a max, so an unbounded extension keeps an empty bar.
+	barStr := gaugeBar(ratio, barStyle, barW)
 
 	pctStr := ""
 	if cap.Max > 0 {
@@ -241,9 +244,9 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 		extra += "  " + mu("reset "+relativeAge(age))
 	}
 
-	nameW := 22
-	line := cursor + padRight(mu(name), nameW) + barStr + "  " + padRight(usedMax, 16) + padRight(pctStr, 8) + extra
-	return line
+	// The cursor plus the name is the overview's label column, so the bar
+	// lines up with the gauges in the sections below.
+	return cursor + padRight(mu(name), overviewLabelW) + barCells(barStr, usedMax, pctStr) + extra
 }
 
 // renderTableStatsRow renders the third actionable capacity-section row: the
@@ -251,17 +254,17 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 // Table overview. Unlike the two extension rows there is no fill bar — the
 // counters are unbounded — so it shows the database name and the last-reset age
 // only. idx is its position in the maintCursor sequence.
-func (m *Model) renderTableStatsRow(s *screen, info *pg.MaintenanceInfo, idx int) string {
+func (m *Model) renderTableStatsRow(s *screen, info *pg.MaintenanceInfo, db string, idx int) string {
 	mu := styleMuted.Render
 	cursor := "  "
 	if s.maintenance.cursor == idx {
 		cursor = styleSelected.Render("▶ ")
 	}
-	detail := "table & index counters in " + s.db
+	detail := "table & index counters" + inDB(db)
 	if info != nil && !info.TableStatsReset.IsZero() {
 		detail += "  ·  reset " + relativeAge(time.Since(info.TableStatsReset))
 	}
-	return cursor + padRight(mu("table statistics"), 22) + mu(detail)
+	return cursor + padRight(mu("table statistics"), overviewLabelW) + mu(detail)
 }
 
 // renderTableStatsAllRow renders the fourth actionable capacity-section row: the
@@ -276,7 +279,7 @@ func (m *Model) renderTableStatsAllRow(s *screen, idx int) string {
 	if s.maintenance.cursor == idx {
 		cursor = styleSelected.Render("▶ ")
 	}
-	return cursor + padRight(mu("table stats · all dbs"), 22) +
+	return cursor + padRight(mu("table stats · all dbs"), overviewLabelW) +
 		mu("table & index counters in every database (pg_stat_reset)")
 }
 

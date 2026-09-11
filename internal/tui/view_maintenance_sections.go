@@ -126,12 +126,11 @@ func (v maintView) rateSuffix(perMin float64, fmtFn func(int64) string) string {
 
 // renderMaintServer renders the "server" section: identity, uptime,
 // connections and the session-hygiene extremes.
-func renderMaintServer(v maintView) string {
+func renderMaintServer(v maintView, barW int) string {
 	mu := styleMuted.Render
-	sel := styleSelected.Render
 	info := v.info
 	var b strings.Builder
-	b.WriteString("  " + styleHeader.Render(" server ") + "\n")
+	b.WriteString(v.header("server", "data_checksums", "max_connections", "long_xact", "idle_in_transaction") + "\n")
 	if info == nil {
 		return b.String()
 	}
@@ -156,25 +155,39 @@ func renderMaintServer(v maintView) string {
 	active := info.ConnByState["active"]
 	idle := info.ConnByState["idle"]
 	idleTxn := info.ConnByState["idle in transaction"]
+	// The states wear the activity list's colours (stateStyle) and the bar
+	// paints them the same way, so the counts double as its legend.
+	activeSt, _ := stateStyle("active")
+	idleSt, _ := stateStyle("idle")
+	idleTxnSt, _ := stateStyle("idle in transaction")
+	// Idle comes last: it is the count a narrow pane can best afford to cut.
+	var connParts []string
+	if active > 0 {
+		connParts = append(connParts, activeSt.Render(strconv.Itoa(active))+" active")
+	}
+	if idleTxn > 0 {
+		connParts = append(connParts, idleTxnSt.Render(strconv.Itoa(idleTxn))+" idle-in-txn")
+	}
+	if idle > 0 {
+		connParts = append(connParts, idleSt.Render(fmt.Sprintf("%d idle", idle)))
+	}
+	legend := ""
+	if len(connParts) > 0 {
+		legend = mu("  (") + strings.Join(connParts, mu("  ·  ")) + mu(")")
+	}
 	connLine := fmt.Sprintf("%d/%d", total, info.MaxConns)
 	if info.MaxConns > 0 {
 		pct := 100 * float64(total) / float64(info.MaxConns)
-		connLine += "  " + gradeStyle(pct, 80, 95).Render(fmt.Sprintf("%.0f%%", pct))
+		// Anything else (autovacuum workers, fastpath calls) is the plain bar
+		// colour; the tail is the headroom under max_connections.
+		bar := shareBar(int64(info.MaxConns), barW,
+			barPart{int64(active), activeSt},
+			barPart{int64(idleTxn), idleTxnSt},
+			barPart{int64(idle), idleSt},
+			barPart{int64(max(total-active-idle-idleTxn, 0)), styleBar})
+		connLine = bar + "  " + connLine + "  " + gradeStyle(pct, 80, 95).Render(fmt.Sprintf("%.0f%%", pct))
 	}
-	var connParts []string
-	if active > 0 {
-		connParts = append(connParts, sel(strconv.Itoa(active))+" active")
-	}
-	if idle > 0 {
-		connParts = append(connParts, mu(fmt.Sprintf("%d idle", idle)))
-	}
-	if idleTxn > 0 {
-		connParts = append(connParts, styleErr.Render(strconv.Itoa(idleTxn))+" idle-in-txn")
-	}
-	if len(connParts) > 0 {
-		connLine += mu("  (") + strings.Join(connParts, mu("  ·  ")) + mu(")")
-	}
-	b.WriteString(maintRow("connections", connLine+v.note("max_connections")))
+	b.WriteString(maintRow("connections", connLine+legend+v.note("max_connections")))
 	if info.LongestXactSec > 0 {
 		b.WriteString(maintRow("longest xact",
 			maintDurationStyle(info.LongestXactSec).Render(fmtSecsDuration(info.LongestXactSec))+v.note("long_xact")))
@@ -240,7 +253,7 @@ func oneLineQuery(q string) string {
 func renderMaintTransactions(v maintView) string {
 	info := v.info
 	var b strings.Builder
-	b.WriteString("  " + styleHeader.Render(" transactions ") + "\n")
+	b.WriteString(v.header("transactions", "cache_hit", "rollback_ratio", "deadlocks") + "\n")
 	if info == nil {
 		b.WriteString("\n")
 		return b.String()
@@ -278,12 +291,13 @@ func renderMaintTransactions(v maintView) string {
 
 // renderMaintTableActivity renders the "table activity" section: tuple-level
 // write/scan counters aggregated across pg_stat_user_tables for the current
-// database. Ratios are derived here from the raw counters.
-func renderMaintTableActivity(v maintView) string {
+// database. Ratios are derived here from the raw counters; each gauge fills
+// the share its label names, coloured by how good that share is.
+func renderMaintTableActivity(v maintView, barW int) string {
 	mu := styleMuted.Render
 	info := v.info
 	var b strings.Builder
-	b.WriteString("  " + styleHeader.Render(" table activity ") + "\n")
+	b.WriteString(v.header("table activity") + "\n")
 	if info == nil {
 		b.WriteString("\n")
 		return b.String()
@@ -295,11 +309,19 @@ func renderMaintTableActivity(v maintView) string {
 		b.WriteString("  " + mu("counters reset "+relativeAge(time.Since(info.TableStatsReset))+
 			" — dead tuples / index usage not yet meaningful") + "\n")
 	}
+	rows := 0
 
 	if info.TupInserted+info.TupUpdated+info.TupDeleted > 0 {
 		b.WriteString(maintRow("writes", fmt.Sprintf("%s ins  %s upd  %s del",
 			formatRows(info.TupInserted), formatRows(info.TupUpdated), formatRows(info.TupDeleted))))
+		rows++
 	}
+
+	// The three gauges share one figure column so their percentages line up.
+	hotFig := formatRows(info.TupHotUpdated) + " of " + formatRows(info.TupUpdated) + " upd"
+	idxFig := formatRows(info.IdxScans) + " idx / " + formatRows(info.SeqScans) + " seq"
+	deadFig := formatRows(info.DeadTuples) + " / " + formatRows(info.LiveTuples+info.DeadTuples)
+	figW := figureColW(hotFig, idxFig, deadFig)
 
 	// HOT updates are good: a high ratio means updates avoided index churn.
 	if info.TupUpdated > 0 {
@@ -311,23 +333,30 @@ func renderMaintTableActivity(v maintView) string {
 		case hotPct < 80:
 			hotStyle = lipgloss.NewStyle().Foreground(colorAccent)
 		}
-		b.WriteString(maintRow("hot ratio", hotStyle.Render(fmt1(hotPct)+"%")+
-			"  "+mu(fmt.Sprintf("(%s of %s upd)", formatRows(info.TupHotUpdated), formatRows(info.TupUpdated)))))
+		b.WriteString(barRowW("hot ratio", gaugeBar(hotPct/100, hotStyle, barW), hotFig, hotStyle.Render(fmt1(hotPct)+"%"), "", figW))
+		rows++
 	}
 
 	// Index usage is good: high ratio means few seq scans relative to index scans.
 	if info.SeqScans+info.IdxScans > 0 {
 		idxPct := float64(info.IdxScans) / float64(info.SeqScans+info.IdxScans) * 100
-		b.WriteString(maintRow("index usage", gradedPercentStyle(idxPct).Render(fmt1(idxPct)+"%")+
-			"  "+mu(fmt.Sprintf("(%s idx / %s seq)", formatRows(info.IdxScans), formatRows(info.SeqScans)))))
+		st := gradedPercentStyle(idxPct)
+		b.WriteString(barRowW("index usage", gaugeBar(idxPct/100, st, barW), idxFig, st.Render(fmt1(idxPct)+"%"), "", figW))
+		rows++
 	}
 
 	// Dead tuples are bad: a high fraction signals bloat / vacuum lag.
 	if info.LiveTuples+info.DeadTuples > 0 {
 		deadPct := float64(info.DeadTuples) / float64(info.LiveTuples+info.DeadTuples) * 100
-		b.WriteString(maintRow("dead tuples",
-			fmt.Sprintf("%s / %s  ", formatRows(info.DeadTuples), formatRows(info.LiveTuples+info.DeadTuples))+
-				gradeStyle(deadPct, 10, 20).Render(fmt1(deadPct)+"%")))
+		st := gradeStyle(deadPct, 10, 20)
+		b.WriteString(barRowW("dead tuples", gaugeBar(deadPct/100, st, barW), deadFig, st.Render(fmt1(deadPct)+"%"), "", figW))
+		rows++
+	}
+
+	// A database without user tables (or with counters nobody has touched
+	// yet) would otherwise leave a bare header.
+	if rows == 0 {
+		b.WriteString(maintRow("", mu("no user-table counters"+inDB(v.dbName()))))
 	}
 
 	b.WriteString("\n")
@@ -345,7 +374,7 @@ func renderMaintReplication(v maintView) string {
 	}
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString("  " + styleHeader.Render(" replication & slots ") + "\n")
+	b.WriteString(v.header("replication & slots", "synchronous_standby_names", "replication_lag", "replication_slots", "wal_receiver") + "\n")
 	// The table cells have no room for a note, so the replication findings
 	// get their own lines under the header.
 	for _, key := range []string{"synchronous_standby_names", "replication_lag", "replication_slots"} {
@@ -525,11 +554,11 @@ func slotKeepSizeText(info *pg.MaintenanceInfo) string {
 
 // renderMaintMemory renders the "memory & resources" section: the sizing GUCs
 // put against the host they run on (when pgdu runs there).
-func renderMaintMemory(v maintView) string {
+func renderMaintMemory(v maintView, barW int) string {
 	mu := styleMuted.Render
 	info := v.info
 	var b strings.Builder
-	b.WriteString("  " + styleHeader.Render(" memory & resources ") + "\n")
+	b.WriteString(v.header("memory & resources", "shared_buffers", "work_mem", "effective_cache_size", "huge_pages", "swap") + "\n")
 	if info == nil {
 		b.WriteString("\n")
 		return b.String()
@@ -584,25 +613,75 @@ func renderMaintMemory(v maintView) string {
 	b.WriteString(maintRow("huge_pages", hp+v.note("huge_pages")))
 
 	if host.Total > 0 {
-		b.WriteString(maintRow("host memory", fmt.Sprintf("%s total  %s available  %s page cache",
-			humanize.Bytes(host.Total), humanize.Bytes(host.Available), humanize.Bytes(host.Cached))))
+		b.WriteString(hostMemoryRows(info, barW))
 		if host.SwapTotal == 0 {
 			b.WriteString(maintRow("swap", mu("none")))
 		} else {
-			b.WriteString(maintRow("swap", fmt.Sprintf("%s used / %s", humanize.Bytes(host.SwapUsed()),
-				humanize.Bytes(host.SwapTotal))+v.note("swap")))
+			used := host.SwapUsed()
+			st := v.fill("swap")
+			pctStr := fmt1(100*float64(used)/float64(host.SwapTotal)) + "%"
+			if used > 0 {
+				pctStr = st.Render(pctStr)
+			} else {
+				pctStr = mu(pctStr)
+			}
+			b.WriteString(barRow("swap", gaugeBar(float64(used)/float64(host.SwapTotal), st, barW),
+				humanize.Bytes(used)+" / "+humanize.Bytes(host.SwapTotal), pctStr, v.note("swap")))
 		}
 	}
 	b.WriteString("\n")
 	return b.String()
 }
 
+// hostMemoryRows are the "host memory" rows: the host-RAM composition the
+// buffers screen draws (shared_buffers used / unused, other, reclaimable
+// cache, free) as a bar with the totals, then a swatch legend with the
+// figures. The split needs MemAvailable, MemFree and the shared_buffers
+// size; without them the figures stand alone.
+func hostMemoryRows(info *pg.MaintenanceInfo, barW int) string {
+	mu := styleMuted.Render
+	host := info.Host
+	sb := info.SettingBytes["shared_buffers"]
+	if host.Available <= 0 || host.Free <= 0 || sb <= 0 {
+		return maintRow("host memory", fmt.Sprintf("%s total  %s available  %s page cache",
+			humanize.Bytes(host.Total), humanize.Bytes(host.Available), humanize.Bytes(host.Cached)))
+	}
+	otherUsed, cache := serverMemParts(host.Total, host.Available, host.Free, sb)
+	// pg_buffercache says how much of the pool holds pages; without it the
+	// whole pool counts as used.
+	sbUsed, sbFree := sb, int64(0)
+	if bc := info.BufCache; bc.HasData && bc.Used+bc.Unused > 0 {
+		sbUsed = int64(float64(sb) * float64(bc.Used) / float64(bc.Used+bc.Unused))
+		sbFree = sb - sbUsed
+	}
+	bar := shareBar(host.Total, barW,
+		barPart{sbUsed, styleBar},
+		barPart{sbFree, styleSBFree},
+		barPart{otherUsed, styleOtherUsed},
+		barPart{cache, styleCache})
+	// The legend takes two short rows: one line would be wider than the
+	// pane it lives in.
+	sw := func(st lipgloss.Style, text string) string { return swatch(st) + mu(" "+text) }
+	pool := sw(styleBar, "shared_buffers "+humanize.Bytes(sb))
+	if sbFree > 0 {
+		pool = mu("shared_buffers  ") + sw(styleBar, humanize.Bytes(sbUsed)+" used") +
+			"  " + sw(styleSBFree, humanize.Bytes(sbFree)+" unused")
+	}
+	rest := sw(styleOtherUsed, "other "+humanize.Bytes(otherUsed)) +
+		"  " + sw(styleCache, "cache "+humanize.Bytes(cache)) +
+		"  " + mu("░ free "+humanize.Bytes(host.Free))
+	return maintRow("host memory", bar+"  "+fmt.Sprintf("%s total  %s available",
+		humanize.Bytes(host.Total), humanize.Bytes(host.Available))) +
+		maintRow("", pool) + maintRow("", rest)
+}
+
 // renderMaintAutovacuum renders the "autovacuum & wraparound" section.
-func renderMaintAutovacuum(v maintView) string {
+func renderMaintAutovacuum(v maintView, barW int) string {
 	mu := styleMuted.Render
 	info := v.info
 	var b strings.Builder
-	b.WriteString("  " + styleHeader.Render(" autovacuum & wraparound ") + "\n")
+	b.WriteString(v.header("autovacuum & wraparound", "autovacuum", "autovacuum_cost", "autovacuum_backlog", "wraparound",
+		"mxid_wraparound", "xmin_horizon") + "\n")
 	if info == nil {
 		b.WriteString("\n")
 		return b.String()
@@ -613,11 +692,18 @@ func renderMaintAutovacuum(v maintView) string {
 		b.WriteString(maintRow("autovacuum", v.graded("autovacuum", av)+v.note("autovacuum")))
 	}
 
-	workers := fmt.Sprintf("%d / %s busy", info.Autovac.WorkersBusy, settingOr(set, "autovacuum_max_workers"))
-	if maxW := info.Tuning.AutovacMaxWorkers; maxW > 0 && info.Autovac.WorkersBusy >= maxW {
-		workers = lipgloss.NewStyle().Foreground(colorAccent).Render(workers) + "  " + mu("all workers busy right now")
+	busy := info.Autovac.WorkersBusy
+	workers := fmt.Sprintf("%d / %s busy", busy, settingOr(set, "autovacuum_max_workers"))
+	if maxW := info.Tuning.AutovacMaxWorkers; maxW > 0 {
+		st, note := styleBar, ""
+		if busy >= maxW {
+			st = lipgloss.NewStyle().Foreground(colorAccent)
+			workers, note = st.Render(workers), "  "+mu("all workers busy right now")
+		}
+		b.WriteString(barRow("workers", gaugeBar(float64(busy)/float64(maxW), st, barW), workers, "", note))
+	} else {
+		b.WriteString(maintRow("workers", workers))
 	}
-	b.WriteString(maintRow("workers", workers))
 	b.WriteString(gucRow(set, "naptime", "autovacuum_naptime", ""))
 	// -1 means "inherit the plain VACUUM setting"; spell out what that is.
 	costDelay := settingOr(set, "autovacuum_vacuum_cost_delay")
@@ -648,24 +734,25 @@ func renderMaintAutovacuum(v maintView) string {
 	b.WriteString(gucRow(set, "freeze_max_age", "autovacuum_freeze_max_age", ""))
 	b.WriteString(gucRow(set, "mxid_freeze_max_age", "autovacuum_multixact_freeze_max_age", ""))
 	b.WriteString(gucRow(set, "failsafe_age", "vacuum_failsafe_age", ""))
-	b.WriteString(v.freezeAgeLine("xid age", info.XidAge, info.FreezeMaxAge, info.XidAgeDB, "wraparound"))
-	b.WriteString(v.freezeAgeLine("mxid age", info.MxidAge, info.MxidFreezeMaxAge, info.MxidAgeDB, "mxid_wraparound"))
+	b.WriteString(v.freezeAgeLine("xid age", info.XidAge, info.FreezeMaxAge, info.XidAgeDB, "wraparound", barW))
+	b.WriteString(v.freezeAgeLine("mxid age", info.MxidAge, info.MxidFreezeMaxAge, info.MxidAgeDB, "mxid_wraparound", barW))
 	b.WriteString(v.horizonLine())
 	b.WriteString("\n")
 	return b.String()
 }
 
-// freezeAgeLine renders one "<label>  age / max  pct%  (db)  note" overview
-// line, naming the database that holds the oldest horizon (template0/postgres
-// often turn out to be the culprit). Empty when the age is unknown; bare age
-// when the max is.
+// freezeAgeLine renders one "<label>  [bar]  age / max  pct%  (db)  note"
+// overview line, naming the database that holds the oldest horizon
+// (template0/postgres often turn out to be the culprit). Empty when the age is
+// unknown; bare age when the max is.
 //
-// The percentage is coloured by the advice that fired for key, not by
-// thresholds of its own: reaching 100% of *_freeze_max_age is the trigger for
-// the routine anti-wraparound autovacuum, so an absolute scale over this ratio
-// paints a healthy cluster red. Deferring to the advice keeps the row coloured
-// exactly where the recommendations panel says something is wrong.
-func (v maintView) freezeAgeLine(label string, age, maxAge int64, db, key string) string {
+// The bar and the percentage are coloured by the advice that fired for key,
+// not by thresholds of their own: reaching 100% of *_freeze_max_age is the
+// trigger for the routine anti-wraparound autovacuum, so an absolute scale
+// over this ratio paints a healthy cluster red. Deferring to the advice keeps
+// the row coloured exactly where the recommendations panel says something is
+// wrong.
+func (v maintView) freezeAgeLine(label string, age, maxAge int64, db, key string, barW int) string {
 	mu := styleMuted.Render
 	note := v.note(key)
 	// The note already ends in "(in <db>)", so naming the database twice on one
@@ -681,8 +768,8 @@ func (v maintView) freezeAgeLine(label string, age, maxAge int64, db, key string
 		return maintRow(label, formatRows(age)+dbStr+note)
 	}
 	pct := float64(age) / float64(maxAge) * 100
-	return maintRow(label, fmt.Sprintf("%s / %s  ", formatRows(age), formatRows(maxAge))+
-		v.graded(key, fmt1(pct)+"%")+dbStr+note)
+	return barRow(label, gaugeBar(pct/100, v.fill(key), barW), formatRows(age)+" / "+formatRows(maxAge),
+		v.graded(key, fmt1(pct)+"%"), dbStr+note)
 }
 
 // horizonLine renders the oldest live xmin and what pins it. It sits with the
@@ -716,12 +803,12 @@ func (v maintView) horizonLine() string {
 
 // renderMaintBufferCache renders the "buffer cache" section: shared_buffers
 // occupancy and temperature (pg_buffercache), then the pg_stat_io counters
-// with their interpretation. barW is the temperature bar width.
+// with their interpretation. barW is the page's shared bar width.
 func renderMaintBufferCache(v maintView, barW int) string {
 	mu := styleMuted.Render
 	info := v.info
 	var b strings.Builder
-	b.WriteString("  " + styleHeader.Render(" buffer cache ") + "\n")
+	b.WriteString(v.header("buffer cache", "buffercache_dirty", "buffercache_tight", "buffercache_slack", "slru", "backend_fsyncs") + "\n")
 	if info == nil {
 		b.WriteString("\n")
 		return b.String()
@@ -736,10 +823,18 @@ func renderMaintBufferCache(v maintView, barW int) string {
 		total := bc.Used + bc.Unused
 		occ := fmt.Sprintf("%s / %s buffers", formatRows(bc.Used), formatRows(total))
 		if total > 0 {
-			occ += "  " + mu(fmt.Sprintf("%.0f%% used · avg usage %.1f", 100*float64(bc.Used)/float64(total), bc.UsageAvg))
+			// Used pages split into clean and dirty; the dirty row below is
+			// the legend of the magenta segment. A full pool is the normal
+			// state, so the percentage stays muted.
+			bar := shareBar(total, barW,
+				barPart{max(bc.Used-bc.Dirty, 0), styleBar},
+				barPart{bc.Dirty, styleDirty})
+			b.WriteString(maintRow("occupancy", bar+"  "+occ+"  "+mu(fmt.Sprintf("%.0f%%  ·  avg usage %.1f",
+				100*float64(bc.Used)/float64(total), bc.UsageAvg))))
+		} else {
+			b.WriteString(maintRow("occupancy", occ))
 		}
-		b.WriteString(maintRow("occupancy", occ))
-		dirty := formatRows(bc.Dirty)
+		dirty := swatch(styleDirty) + " " + formatRows(bc.Dirty)
 		if bc.Used > 0 {
 			pct := fmt1(bc.DirtyFrac()*100) + "%"
 			if note := v.note("buffercache_dirty"); note != "" {
@@ -869,11 +964,12 @@ func slruLine(v maintView) string {
 
 // renderMaintWAL renders the "wal & checkpoints" section: what WAL the server
 // generates and where it sits, then how checkpoints are keeping up with it.
-func renderMaintWAL(v maintView) string {
+func renderMaintWAL(v maintView, barW int) string {
 	mu := styleMuted.Render
 	info := v.info
 	var b strings.Builder
-	b.WriteString("  " + styleHeader.Render(" wal & checkpoints ") + "\n")
+	b.WriteString(v.header("wal & checkpoints", "wal_buffers", "wal_fpi", "checkpoint_completion_target", "max_wal_size",
+		"checkpoint_sync", "bgwriter_lru_maxpages") + "\n")
 	if info == nil {
 		b.WriteString("\n")
 		return b.String()
@@ -906,7 +1002,8 @@ func renderMaintWAL(v maintView) string {
 		b.WriteString(maintRow("wal rate", rate))
 		b.WriteString(maintRow("wal generated", humanize.Bytes(w.Bytes)+"  "+mu(formatRows(w.Records)+" records")))
 		if frac, ok := w.FPIFrac(); ok {
-			b.WriteString(maintRow("full-page images", fmt1(frac*100)+"% of records"+v.note("wal_fpi")))
+			b.WriteString(maintRow("full-page images", gaugeBar(frac, v.fill("wal_fpi"), barW)+"  "+
+				v.graded("wal_fpi", fmt1(frac*100)+"%")+"  "+mu("of records")+v.note("wal_fpi")))
 		}
 	}
 	if d := info.WALDir; d.HasData {
@@ -928,25 +1025,35 @@ func renderMaintWAL(v maintView) string {
 		total := cp.Timed + cp.Requested
 		cpLine := fmt.Sprintf("%s timed  %s requested", formatRows(cp.Timed), formatRows(cp.Requested))
 		if total > 0 {
+			// Timed (green) against requested (graded): the counts wear the
+			// segment colours so the text is the bar's legend.
 			reqPct := float64(cp.Requested) / float64(total) * 100
-			cpLine += "  " + gradeStyle(reqPct, 100*pg.CheckpointReqWarnFrac, 100*pg.CheckpointReqCritFrac).Render(fmt1(reqPct)+"% requested")
+			okSt := lipgloss.NewStyle().Foreground(colorOK)
+			reqSt := gradeStyle(reqPct, 100*pg.CheckpointReqWarnFrac, 100*pg.CheckpointReqCritFrac)
+			bar := shareBar(total, barW, barPart{cp.Timed, okSt}, barPart{cp.Requested, reqSt})
+			cpLine = bar + "  " + okSt.Render(formatRows(cp.Timed)) + " timed  " + reqSt.Render(formatRows(cp.Requested)) +
+				" requested  " + reqSt.Render(fmt1(reqPct)+"% requested")
 		}
 		if v.rates.OK && v.rates.CheckpointsPerMin > 0 {
 			cpLine += "  " + mu(fmt.Sprintf("·  %.1f/min", v.rates.CheckpointsPerMin))
 		}
 		b.WriteString(maintRow("checkpoints", cpLine))
 		if iv, ok := info.AvgCheckpointInterval(); ok {
-			line := shortDuration(iv)
 			if t := info.Tuning.CheckpointTimeoutSecs; t > 0 {
+				// Checkpoints arriving well ahead of the timeout are WAL-driven:
+				// amber once they come at less than half the interval.
 				frac := iv.Seconds() / float64(t)
-				st := mu
+				pct := fmt.Sprintf("%.0f%%", frac*100)
+				st, pctStr := styleBar, mu(pct)
 				if frac < 0.5 {
-					st = lipgloss.NewStyle().Foreground(colorAccent).Render
+					st = lipgloss.NewStyle().Foreground(colorAccent)
+					pctStr = st.Render(pct)
 				}
-				line = st(shortDuration(iv)) + "  " + mu(fmt.Sprintf("(timeout %s — %.0f%% of it)",
-					shortDuration(time.Duration(t)*time.Second), frac*100))
+				b.WriteString(maintRow("avg interval", gaugeBar(frac, st, barW)+"  "+shortDuration(iv)+" / "+
+					shortDuration(time.Duration(t)*time.Second)+"  "+pctStr+"  "+mu("of checkpoint_timeout")))
+			} else {
+				b.WriteString(maintRow("avg interval", shortDuration(iv)))
 			}
-			b.WriteString(maintRow("avg interval", line))
 		}
 		if total > 0 {
 			line := fmt.Sprintf("write %s  sync %s  %s buffers", fmtAge(cp.WriteTimeMs/float64(total)),
@@ -957,16 +1064,13 @@ func renderMaintWAL(v maintView) string {
 
 	if info.WALMaxBytes > 0 {
 		ratio := min(float64(info.WALBytesSinceCheckpoint)/float64(info.WALMaxBytes), 1)
-		walBarStyle := gradeStyle(ratio, 0.5, 0.8)
-		barW := 20
-		filled := min(int(float64(barW)*ratio), barW)
-		bar := paintBar(barW, barSegment{cells: filled, style: walBarStyle})
-		detail := fmt.Sprintf("%s / %s  %s", humanize.Bytes(info.WALBytesSinceCheckpoint),
-			humanize.Bytes(info.WALMaxBytes), walBarStyle.Render(fmt1(ratio*100)+"%"))
+		st := gradeStyle(ratio, 0.5, 0.8)
+		note := ""
 		if !info.WALCheckpointTime.IsZero() {
-			detail += "  " + mu("last checkpoint "+relativeAge(time.Since(info.WALCheckpointTime)))
+			note = "  " + mu("last checkpoint "+relativeAge(time.Since(info.WALCheckpointTime)))
 		}
-		b.WriteString(maintRow("since checkpoint", bar+"  "+detail))
+		b.WriteString(barRow("since checkpoint", gaugeBar(ratio, st, barW),
+			humanize.Bytes(info.WALBytesSinceCheckpoint)+" / "+humanize.Bytes(info.WALMaxBytes), st.Render(fmt1(ratio*100)+"%"), note))
 	}
 
 	// Who writes dirty buffers: the checkpointer (planned) and the bgwriter
@@ -975,18 +1079,14 @@ func renderMaintWAL(v maintView) string {
 	if sp := info.IOSplit; sp.HasData {
 		total := sp.CheckpointerWrites + sp.BgwriterWrites + sp.ClientWrites
 		if total > 0 {
-			barW := 20
-			cpC := int(float64(barW) * float64(sp.CheckpointerWrites) / float64(total))
-			bgC := int(float64(barW) * float64(sp.BgwriterWrites) / float64(total))
-			clC := max(barW-cpC-bgC, 0)
-			bar := paintBar(barW,
-				barSegment{cells: cpC, style: styleBar},
-				barSegment{cells: bgC, style: styleBarAlt},
-				barSegment{cells: clC, style: styleErr})
+			bar := shareBar(total, barW,
+				barPart{sp.CheckpointerWrites, styleBar},
+				barPart{sp.BgwriterWrites, styleBarAlt},
+				barPart{sp.ClientWrites, styleErr})
 			pct := func(n int64) string { return fmt1(100 * float64(n) / float64(total)) }
-			legend := styleBar.Render("■") + mu(" checkpointer "+pct(sp.CheckpointerWrites)+"%  ") +
-				styleBarAlt.Render("■") + mu(" bgwriter "+pct(sp.BgwriterWrites)+"%  ") +
-				styleErr.Render("■") + mu(" backends "+pct(sp.ClientWrites)+"%")
+			legend := swatch(styleBar) + mu(" checkpointer "+pct(sp.CheckpointerWrites)+"%  ") +
+				swatch(styleBarAlt) + mu(" bgwriter "+pct(sp.BgwriterWrites)+"%  ") +
+				swatch(styleErr) + mu(" backends "+pct(sp.ClientWrites)+"%")
 			b.WriteString(maintRow("dirty-page writes", bar+"  "+legend))
 		}
 		// Both bgwriter_lru_maxpages signals (backends writing, sweeps capped)
@@ -1014,7 +1114,8 @@ func renderMaintWAL(v maintView) string {
 func renderMaintObservability(v maintView) string {
 	info := v.info
 	var b strings.Builder
-	b.WriteString("  " + styleHeader.Render(" observability ") + "\n")
+	b.WriteString(v.header("observability", "track_io_timing", "log_checkpoints", "pg_stat_statements.track",
+		"pg_stat_statements.max", "pg_qualstats.max") + "\n")
 	if info == nil {
 		b.WriteString("\n")
 		return b.String()
@@ -1036,7 +1137,7 @@ func renderMaintObservability(v maintView) string {
 	if info.Qualstats.Installed {
 		b.WriteString("\n  " + styleHeader.Render(" pg_qualstats ") + "\n")
 		b.WriteString(gucRow(set, "enabled", "pg_qualstats.enabled", ""))
-		b.WriteString(gucRow(set, "max", "pg_qualstats.max", ""))
+		b.WriteString(gucRow(set, "max", "pg_qualstats.max", v.note("pg_qualstats.max")))
 		b.WriteString(gucRow(set, "sample_rate", "pg_qualstats.sample_rate", ""))
 		b.WriteString(gucRow(set, "track_constants", "pg_qualstats.track_constants", ""))
 	}
@@ -1049,7 +1150,8 @@ func renderMaintHealth(v maintView) string {
 	mu := styleMuted.Render
 	info := v.info
 	var b strings.Builder
-	b.WriteString("  " + styleHeader.Render(" operational health ") + "\n")
+	b.WriteString(v.header("operational health", "pending_restart", "pending_reload", "lock_waits", "prepared_xacts",
+		"temp_files", "wal_archiver") + "\n")
 	if info != nil {
 		restartStr := mu("0 need restart")
 		if info.PendingRestart > 0 {
@@ -1157,13 +1259,7 @@ func renderMaintRecommendations(v maintView, rows []maintAction, first, cursor i
 	for i, row := range rows[first:] {
 		a := row.advice
 		st := adviceStyle(a.Level)
-		glyph := "·"
-		switch a.Level {
-		case pg.AdviceCrit:
-			glyph = "!"
-		case pg.AdviceWarn:
-			glyph = "~"
-		}
+		glyph := adviceGlyph(a.Level)
 		name := a.Setting
 		if name == "" {
 			name = a.Key
@@ -1202,7 +1298,12 @@ func renderMaintRecommendations(v maintView, rows []maintAction, first, cursor i
 func renderMaintSchemaHealth(v maintView) string {
 	mu := styleMuted.Render
 	var b strings.Builder
-	header := "  " + styleHeader.Render(" schema health ("+v.db+") ")
+	name := "schema health"
+	if db := v.dbName(); db != "" {
+		name += " (" + db + ")"
+	}
+	header := v.header(name, "schema_sequences", "schema_stale_stats", "schema_fk_index", "schema_bloat_table",
+		"schema_bloat_index", "schema_index_invalid", "schema_index_duplicate")
 	if v.schemaLoading && v.schema != nil {
 		header += "  " + mu("refreshing…")
 	}

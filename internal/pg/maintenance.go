@@ -37,7 +37,7 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	_ = pool.QueryRow(ctx, sqlMaintMaxConns).Scan(&info.MaxConns)
 
 	// --- server version + postmaster start + conf reload ---
-	_ = pool.QueryRow(ctx, sqlMaintServer).Scan(&info.Version, &info.StartTime, &info.ConfLoad)
+	_ = pool.QueryRow(ctx, sqlMaintServer).Scan(&info.Version, &info.StartTime, &info.ConfLoad, &info.Database)
 
 	// --- connection counts by state ---
 	connRows, err := pool.Query(ctx, sqlMaintActivity)

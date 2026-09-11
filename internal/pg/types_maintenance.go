@@ -43,6 +43,7 @@ type MaintenanceInfo struct {
 	StartTime  time.Time // pg_postmaster_start_time()
 	ConfLoad   time.Time // pg_conf_load_time()
 	InRecovery bool      // pg_is_in_recovery()
+	Database   string    // current_database(): where the per-database figures were read
 
 	// Connection counts
 	MaxConns       int
