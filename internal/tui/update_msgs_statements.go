@@ -498,10 +498,16 @@ func sampleItems(samples []pg.QualSample) []item {
 }
 
 // sampleLabel renders a captured qual as "table.column op value", falling back
-// to bare value (then "=") when pg_qualstats couldn't resolve the left side.
+// to bare value (then "=") when pg_qualstats couldn't resolve the left side. A
+// value cut at the extension's 80-byte constant buffer says so, since what is
+// shown is only the head of the real constant.
 func sampleLabel(sm pg.QualSample) string {
+	val := sm.ConstValue
+	if sm.Truncated {
+		val += "… (cut at 80 chars by pg_qualstats)"
+	}
 	if sm.Column == "" {
-		return sm.ConstValue
+		return val
 	}
 	col := sm.Column
 	if sm.Relation != "" {
@@ -511,7 +517,7 @@ func sampleLabel(sm pg.QualSample) string {
 	if op == "" {
 		op = "="
 	}
-	return col + " " + op + " " + sm.ConstValue
+	return col + " " + op + " " + val
 }
 
 func (m *Model) onStatementExplainLoaded(msg statementExplainLoadedMsg) tea.Cmd {

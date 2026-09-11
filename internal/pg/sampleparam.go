@@ -163,7 +163,7 @@ func (c *Client) SampleParamValues(ctx context.Context, db, query string, params
 // into the sample call exactly where BuildSampleCall would place a synthesized
 // one. Array placeholders (col = ANY($1)) wrap the scalar in a one-element array.
 func sampleLiteralFromValue(quoted, regtype string) string {
-	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(regtype)), "[]") {
+	if isArrayType(regtype) {
 		return "ARRAY[" + quoted + "]::" + regtype
 	}
 	return quoted + "::" + regtype

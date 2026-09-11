@@ -88,9 +88,10 @@ func (s *screen) selectedSample() (pg.QualSample, bool) {
 
 // sampleAnalyzeQuery builds the literal query to EXPLAIN ANALYZE for a captured
 // value: a clean $1 substitution for single-parameter queries, else the real
-// example query. Returns "" when neither is usable.
+// example query. Returns "" when neither is usable — a value pg_qualstats cut
+// off is a prefix of the real constant and would only earn a syntax error.
 func sampleAnalyzeQuery(normalized, example string, sm pg.QualSample) string {
-	if uniqueParams(normalized) == 1 && sm.ConstValue != "" {
+	if uniqueParams(normalized) == 1 && sm.ConstValue != "" && !sm.Truncated {
 		return strings.ReplaceAll(normalized, "$1", sm.ConstValue)
 	}
 	return example

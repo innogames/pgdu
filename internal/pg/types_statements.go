@@ -244,4 +244,7 @@ type QualSample struct {
 	ConstValue  string
 	Position    int   // constant_position: char offset in the original query text
 	Occurrences int64 // occurences: how often this predicate fired
+	// Truncated marks a ConstValue cut at pg_qualstats' 80-byte constant buffer:
+	// it is a prefix of the real value, not a usable literal.
+	Truncated bool
 }
