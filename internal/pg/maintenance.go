@@ -75,10 +75,31 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 		_, _ = fmt.Sscanf(v, "%d", &info.FreezeMaxAge)
 	}
 
+	// vacuum_failsafe_age is where danger actually starts; absent on PG < 14,
+	// which leaves it 0 and lets the advice fall back to a fixed age.
+	if v, ok := info.Settings["vacuum_failsafe_age"]; ok {
+		_, _ = fmt.Sscanf(v, "%d", &info.FailsafeAge)
+	}
+
 	// --- multixact age ---
 	_ = pool.QueryRow(ctx, sqlMaintMxidWraparound).Scan(&info.MxidAgeDB, &info.MxidAge)
 	if v, ok := info.Settings["autovacuum_multixact_freeze_max_age"]; ok {
 		_, _ = fmt.Sscanf(v, "%d", &info.MxidFreezeMaxAge)
+	}
+	if v, ok := info.Settings["vacuum_multixact_failsafe_age"]; ok {
+		_, _ = fmt.Sscanf(v, "%d", &info.MxidFailsafeAge)
+	}
+
+	// --- oldest live xmin and what pins it ---
+	// Best effort like its neighbours: an unreadable horizon leaves Age 0, and
+	// the Restricted flag (set even when the age reads 0) is what stops that
+	// from being reported as an all-clear.
+	_ = pool.QueryRow(ctx, sqlMaintXminHorizon).Scan(&info.Horizon.Age, &info.Horizon.Restricted)
+	if info.Horizon.Age > 0 {
+		// The holder query can fail or return nothing where the horizon query
+		// succeeded (a row that vanished between the two); the advice then
+		// still fires, naming the kind it could not resolve.
+		_ = pool.QueryRow(ctx, sqlMaintXminHolder).Scan(&info.Horizon.Kind, &info.Horizon.Holder, new(int64))
 	}
 
 	// --- session hygiene: longest idle-in-txn / longest query ---

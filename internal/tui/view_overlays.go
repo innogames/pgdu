@@ -181,6 +181,14 @@ func renderLegend(s *screen) string {
 	}
 	sep := styleMuted.Render("  ·  ")
 	switch s.level {
+	case levelDiagnosticResult:
+		// Not a colour legend: the few diagnostics whose numbers invite the
+		// wrong reading carry a one-line caveat, and this slot is where it
+		// belongs — on screen with the table, not behind ?.
+		if s.diag != nil && s.diag.Note != "" {
+			return "  " + styleMuted.Render(s.diag.Note)
+		}
+		return ""
 	case levelTables:
 		// Page-inspector tables show a solid heap-only bar; the segmented
 		// legend would mislead, so suppress it on that flow.

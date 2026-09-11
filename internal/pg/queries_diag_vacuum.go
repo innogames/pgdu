@@ -50,48 +50,71 @@ JOIN rel_set RS ON PSUT.relid = RS.oid
 ORDER BY C.reltuples DESC
 `
 
-// sqlDiagWraparoundTables ranks tables by transaction-ID freeze age — how far
-// their oldest unfrozen XID (relfrozenxid, folded together with the table's
-// TOAST relation, whichever is older) has drifted behind the current XID.
-// pct_freeze_max expresses that age as a fraction of autovacuum_freeze_max_age,
-// the age at which PostgreSQL forces an anti-wraparound autovacuum; a table at
-// (or past) 100% is one freezing can't keep up with. It is the drill-down for
-// the cluster-wide "wraparound" health check.
+// sqlDiagWraparoundTables ranks tables by how far their oldest unfrozen XID
+// (relfrozenxid, and their TOAST relation's) trails the current XID.
 //
-// last_autovacuum and autovacuum_count separate the root causes: a high age
-// next to a recent autovacuum, or a large autovacuum_count that still hasn't
-// dropped the age, means the vacuums that ran were non-aggressive and skipped
-// all-visible pages (a low-churn table below vacuum_freeze_table_age never gets
-// its relfrozenxid advanced until the anti-wraparound trigger at
-// autovacuum_freeze_max_age forces a full scan) — or, more rarely, the horizon
-// is pinned by an old snapshot (chase it with the idle-in-xact and
-// replication-slot diagnostics — VACUUM can't freeze past the oldest live xmin).
-// An old/absent last_autovacuum instead means autovacuum isn't reaching the
-// table at all (throughput, or a table it keeps failing to vacuum).
+// Deliberately *not* ranked by distance to the next anti-wraparound autovacuum:
+// age / autovacuum_freeze_max_age measures the routine maintenance event
+// PostgreSQL is designed around, so on a busy cluster every table cycles through
+// 100% every few days and the number says nothing about danger. The danger
+// denominators are vacuum_failsafe_age (where VACUUM drops its cost delay and
+// index cleanup to catch up) and the 2^31 hard stop where the server refuses
+// writes; pct_freeze_max is kept, hidden by default, as "distance to the next
+// routine freeze".
+//
+// main_xid_age and toast_xid_age are reported separately because the folded
+// greatest() hides the common case where the *TOAST* relation is what is old:
+// toast_last_autovacuum NULL next to a large toast_xid_age is a TOAST table
+// autovacuum has never reached. toast_xid_age is NULL (rendered "—") for a table
+// with no TOAST relation rather than a misleading 0.
+//
+// last_autovacuum and autovacuum_count separate the remaining root causes: a
+// high age next to a recent autovacuum, or a large autovacuum_count that still
+// hasn't dropped the age, means the vacuums that ran were non-aggressive and
+// skipped all-visible pages — or that the xmin horizon is pinned, so no vacuum
+// can freeze past it (the system overview's xmin_horizon finding says which).
+// An old or absent last_autovacuum instead means autovacuum isn't reaching the
+// table at all.
 //
 // Only ordinary tables and matviews are considered; TOAST is attributed to its
 // parent via reltoastrelid, and partitioned parents (relfrozenxid 0, so age() is
-// meaninglessly huge) are excluded.
+// meaninglessly huge) are excluded. vacuum_failsafe_age is read with missing_ok
+// so a server without it (PG < 14) falls back to the 1.6 B default rather than
+// failing the whole query.
 const sqlDiagWraparoundTables = `
 SELECT
     n.nspname AS schema,
     c.relname AS table_name,
-    greatest(age(c.relfrozenxid), COALESCE(age(tc.relfrozenxid), 0)) AS xid_age,
-    round(100.0 * greatest(age(c.relfrozenxid), COALESCE(age(tc.relfrozenxid), 0))
+    g.max_xid_age,
+    g.main_xid_age,
+    g.toast_xid_age,
+    mxid_age(c.relminmxid) AS mxid_age,
+    round(100.0 * g.max_xid_age / 2147483647, 3) AS pct_of_wraparound,
+    round(100.0 * g.max_xid_age
+          / COALESCE(NULLIF(current_setting('vacuum_failsafe_age', true)::numeric, 0),
+                     1600000000), 2) AS pct_of_failsafe,
+    round(100.0 * g.max_xid_age
           / current_setting('autovacuum_freeze_max_age')::numeric, 1) AS pct_freeze_max,
-    COALESCE(age(tc.relfrozenxid), 0) AS toast_xid_age,
     pg_table_size(c.oid) AS size_bytes,
     st.n_dead_tup AS dead_tuples,
     st.autovacuum_count,
-    st.last_autovacuum
+    st.last_autovacuum,
+    ts.autovacuum_count AS toast_autovacuum_count,
+    ts.last_autovacuum AS toast_last_autovacuum
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_class tc ON tc.oid = c.reltoastrelid
 LEFT JOIN pg_stat_all_tables st ON st.relid = c.oid
+LEFT JOIN pg_stat_all_tables ts ON ts.relid = c.reltoastrelid
+CROSS JOIN LATERAL (
+    SELECT age(c.relfrozenxid) AS main_xid_age,
+           age(tc.relfrozenxid) AS toast_xid_age,
+           greatest(age(c.relfrozenxid), COALESCE(age(tc.relfrozenxid), 0)) AS max_xid_age
+) g
 WHERE c.relkind IN ('r', 'm')
   AND c.relfrozenxid <> 0
   AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-ORDER BY xid_age DESC
+ORDER BY g.max_xid_age DESC
 `
 
 const sqlDiagVacuumRunning = `

@@ -647,21 +647,31 @@ func renderMaintAutovacuum(v maintView) string {
 
 	b.WriteString(gucRow(set, "freeze_max_age", "autovacuum_freeze_max_age", ""))
 	b.WriteString(gucRow(set, "mxid_freeze_max_age", "autovacuum_multixact_freeze_max_age", ""))
-	b.WriteString(freezeAgeLine("xid age", info.XidAge, info.FreezeMaxAge, info.XidAgeDB, v.note("wraparound")))
-	b.WriteString(freezeAgeLine("mxid age", info.MxidAge, info.MxidFreezeMaxAge, info.MxidAgeDB, v.note("mxid_wraparound")))
+	b.WriteString(gucRow(set, "failsafe_age", "vacuum_failsafe_age", ""))
+	b.WriteString(v.freezeAgeLine("xid age", info.XidAge, info.FreezeMaxAge, info.XidAgeDB, "wraparound"))
+	b.WriteString(v.freezeAgeLine("mxid age", info.MxidAge, info.MxidFreezeMaxAge, info.MxidAgeDB, "mxid_wraparound"))
+	b.WriteString(v.horizonLine())
 	b.WriteString("\n")
 	return b.String()
 }
 
 // freezeAgeLine renders one "<label>  age / max  pct%  (db)  note" overview
-// line, colouring the percentage by how close the counter is to a forced
-// anti-wraparound autovacuum and naming the database that holds the oldest
-// horizon (template0/postgres often turn out to be the culprit). Empty when
-// the age is unknown; bare age when the max is.
-func freezeAgeLine(label string, age, maxAge int64, db, note string) string {
+// line, naming the database that holds the oldest horizon (template0/postgres
+// often turn out to be the culprit). Empty when the age is unknown; bare age
+// when the max is.
+//
+// The percentage is coloured by the advice that fired for key, not by
+// thresholds of its own: reaching 100% of *_freeze_max_age is the trigger for
+// the routine anti-wraparound autovacuum, so an absolute scale over this ratio
+// paints a healthy cluster red. Deferring to the advice keeps the row coloured
+// exactly where the recommendations panel says something is wrong.
+func (v maintView) freezeAgeLine(label string, age, maxAge int64, db, key string) string {
 	mu := styleMuted.Render
+	note := v.note(key)
+	// The note already ends in "(in <db>)", so naming the database twice on one
+	// row is just noise; the bare row still needs it.
 	dbStr := ""
-	if db != "" {
+	if db != "" && note == "" {
 		dbStr = "  " + mu("in "+db)
 	}
 	switch {
@@ -672,7 +682,36 @@ func freezeAgeLine(label string, age, maxAge int64, db, note string) string {
 	}
 	pct := float64(age) / float64(maxAge) * 100
 	return maintRow(label, fmt.Sprintf("%s / %s  ", formatRows(age), formatRows(maxAge))+
-		gradeStyle(pct, 50, 80).Render(fmt1(pct)+"%")+dbStr+note)
+		v.graded(key, fmt1(pct)+"%")+dbStr+note)
+}
+
+// horizonLine renders the oldest live xmin and what pins it. It sits with the
+// freeze ages because it is the reason they move: vacuum cannot freeze past the
+// horizon, so while one is pinned no vacuum advances relfrozenxid anywhere.
+func (v maintView) horizonLine() string {
+	mu := styleMuted.Render
+	h := v.info.Horizon
+	switch {
+	case h.Age <= 0 && h.Restricted:
+		return maintRow("xmin horizon", mu("n/a (needs pg_read_all_stats)")+v.note("xmin_horizon"))
+	case h.Age <= 0:
+		return maintRow("xmin horizon", mu("none — nothing pins a snapshot"))
+	}
+	val := v.graded("xmin_horizon", formatRows(h.Age))
+	note := v.note("xmin_horizon")
+	// Below the warn tier there is no note, so the row itself has to say who
+	// holds the horizon; once a note fires it names the holder already.
+	if note == "" && h.Holder != "" {
+		val += "  " + mu(h.Kind+": "+h.Holder)
+	}
+	// A filtered pg_stat_activity still shows this role its own sessions, so
+	// the age it reports is a lower bound. Saying so is the difference between
+	// "nothing pins the horizon" and "nothing I can see does" — and the note
+	// (which carries the same caveat) only appears from the warn tier up.
+	if h.Restricted && note == "" {
+		val += "  " + mu("lower bound — needs pg_read_all_stats to see other sessions")
+	}
+	return maintRow("xmin horizon", val+note)
 }
 
 // renderMaintBufferCache renders the "buffer cache" section: shared_buffers

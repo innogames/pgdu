@@ -32,8 +32,9 @@ does — no daemon, no collector, no web server.
   by page, `m` maps the whole shared-memory segment.
 - **System overview as a one-screen health check** — memory sizing against the
   host (huge pages, page cache, swap), buffer-cache temperature and miss latency,
-  checkpoint interval and cost with a recommended `max_wal_size`, wraparound age,
-  replication lag and slots, lock waits, long and prepared transactions, the WAL
+  checkpoint interval and cost with a recommended `max_wal_size`, freeze ages and
+  the xmin horizon that caps them, replication lag and slots, lock waits, long
+  and prepared transactions, the WAL
   archiver, deadlock and temp-file rates, autovacuum backlog, session hygiene,
   the safety and observability settings, and a catalog sweep of the database
   (sequences near their ceiling, stale statistics, bloat, invalid and duplicate
@@ -279,8 +280,9 @@ rollback ratio, deadlocks and conflicts; tuple-level write and scan activity;
 replication and slots (lag, sync state, retained WAL, inactive consumers); the
 memory GUCs against the host they run on (huge pages actually allocated, page
 cache, swap, `work_mem × max_connections`); autovacuum workers busy, tables past
-their vacuum threshold, and transaction-ID and multixact age against their
-`autovacuum_*freeze_max_age` limits; the buffer cache (`pg_buffercache_summary`,
+their vacuum threshold, transaction-ID and multixact age against their
+`autovacuum_*freeze_max_age` limits, and the oldest live xmin with whatever pins
+it; the buffer cache (`pg_buffercache_summary`,
 usage-count temperature, miss latency, SLRU caches, who writes dirty pages); WAL
 rate, checkpoint interval and cost, `pg_wal` on disk; the observability settings
 (`track_io_timing`, `log_checkpoints`, `log_lock_waits`, `log_temp_files`,
@@ -295,15 +297,29 @@ auto-refresh so per-minute rates appear next to them.
 
 Every threshold that trips shows as a coloured note on its row and again in the
 **recommendations** panel right under the capacity rows, worst first — red means
-something is breaking or about to (wraparound past 95 %, a stuck archiver, a lost
-slot, `autovacuum`/`fsync` off, a missing synchronous standby), yellow is
-performance or hygiene — with the concrete change as a copyable `ALTER SYSTEM`
-line; nothing is applied by pgdu. Each recommendation is an action row: `↑↓`
+something is breaking or about to (a freeze age past half of
+`vacuum_failsafe_age`, a stuck archiver, a lost slot, `autovacuum`/`fsync` off, a
+missing synchronous standby), yellow is performance or hygiene — with the
+concrete change as a copyable `ALTER SYSTEM` line; nothing is applied by pgdu. Each recommendation is an action row: `↑↓`
 walk the capacity rows and the recommendations, and `↵` opens whatever explains
 the finding — the diagnostic listing the offenders (with its per-row fixes), the
 lock tree, the activity list, or the settings browser filtered to the GUC. The
 top block shows **extension capacity** — how full `pg_stat_statements` /
 `pg_qualstats` and the table statistics are — with a confirmed reset (`↵`, `y`).
+
+Freezing is graded on whether it is *keeping up*, not on how close the next
+routine anti-wraparound autovacuum is. An age approaching
+`autovacuum_freeze_max_age` is that autovacuum's trigger, so on a busy cluster it
+happens constantly and only earns an explanatory note; a warning needs an age
+several times the limit, which means a forced freeze cycle already ran without
+advancing `relfrozenxid`, and red is reserved for `vacuum_failsafe_age` and the
+2^31 stop. The leading indicator is its own finding: the **oldest live xmin**
+across backends, replication slots and prepared transactions, named down to the
+holding pid, slot or gid — while a horizon is pinned no vacuum can advance
+`relfrozenxid` anywhere, so it moves days before the ages do. A
+`pg_stat_activity` this role cannot fully read is reported as unknown rather than
+as an all-clear.
+
 `s` opens the **settings browser**: every
 `pg_settings` entry with its value, filterable with `/`, non-default values in
 yellow and settings still waiting for a restart in red — the place to go when the

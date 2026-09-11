@@ -54,6 +54,11 @@ func healthyInfo() *MaintenanceInfo {
 			UsageCounts: []BufferUsageCount{{Count: 0, Buffers: 200_000}, {Count: 1, Buffers: 200_000},
 				{Count: 2, Buffers: 200_000}, {Count: 3, Buffers: 200_000}, {Count: 4, Buffers: 100_000}, {Count: 5, Buffers: 100_000}}},
 		Autovac: AutovacStat{WorkersBusy: 1, OverThreshold: 3},
+		// A real cluster always has these; the horizon rules need
+		// FreezeMaxAge as their denominator. The ages themselves stay 0 so
+		// nothing grades until a case sets one.
+		FreezeMaxAge: 200_000_000, FailsafeAge: 1_600_000_000,
+		MxidFailsafeAge: 1_600_000_000,
 	}
 }
 
@@ -188,15 +193,51 @@ func TestMaintAdviceRules(t *testing.T) {
 		{"data_checksums off", func(i *MaintenanceInfo) { i.Settings["data_checksums"] = "off" },
 			"data_checksums", AdviceInfo, "", ""},
 
-		// wraparound
-		{"xid age warn", func(i *MaintenanceInfo) { i.XidAge, i.FreezeMaxAge, i.XidAgeDB = 170_000_000, 200_000_000, "shop" },
-			"wraparound", AdviceWarn, "", ""},
-		{"xid age crit", func(i *MaintenanceInfo) { i.XidAge, i.FreezeMaxAge = 195_000_000, 200_000_000 },
-			"wraparound", AdviceCrit, "", ""},
+		// wraparound. Reaching autovacuum_freeze_max_age *is* the trigger for
+		// the routine anti-wraparound autovacuum, so the whole 0–100 % band is
+		// healthy: it must never grade above Info however close it gets.
+		{"xid age at 99% of freeze_max_age is routine", func(i *MaintenanceInfo) {
+			i.XidAge, i.FreezeMaxAge, i.XidAgeDB = 198_000_000, 200_000_000, "shop"
+		}, "wraparound", AdviceInfo, "", ""},
+		{"xid age just past freeze_max_age is still routine", func(i *MaintenanceInfo) {
+			i.XidAge, i.FreezeMaxAge = 240_000_000, 200_000_000
+		}, "wraparound", AdviceInfo, "", ""},
 		{"xid age fine", func(i *MaintenanceInfo) { i.XidAge, i.FreezeMaxAge = 50_000_000, 200_000_000 },
 			"", 0, "", ""},
-		{"mxid age crit", func(i *MaintenanceInfo) { i.MxidAge, i.MxidFreezeMaxAge = 390_000_000, 400_000_000 },
-			"mxid_wraparound", AdviceCrit, "", ""},
+		{"xid age 2.5x freeze_max_age warns", func(i *MaintenanceInfo) {
+			i.XidAge, i.FreezeMaxAge, i.XidAgeDB = 500_000_000, 200_000_000, "shop"
+		}, "wraparound", AdviceWarn, "", ""},
+		{"xid age past half the failsafe is critical", func(i *MaintenanceInfo) {
+			i.XidAge, i.FreezeMaxAge, i.FailsafeAge = 1_200_000_000, 200_000_000, 1_600_000_000
+		}, "wraparound", AdviceCrit, "", ""},
+		{"failsafe absent falls back to a fixed age", func(i *MaintenanceInfo) {
+			i.XidAge, i.FreezeMaxAge, i.FailsafeAge = 1_100_000_000, 200_000_000, 0
+		}, "wraparound", AdviceCrit, "", ""},
+		{"mxid age at 99% is routine", func(i *MaintenanceInfo) { i.MxidAge, i.MxidFreezeMaxAge = 396_000_000, 400_000_000 },
+			"mxid_wraparound", AdviceInfo, "", ""},
+		// Multixacts grade against their own failsafe; with the limit tightened
+		// below the 400 M default the warn band opens up as it does for XIDs.
+		{"mxid age 3x a tightened limit warns", func(i *MaintenanceInfo) {
+			i.MxidAge, i.MxidFreezeMaxAge = 600_000_000, 200_000_000
+		}, "mxid_wraparound", AdviceWarn, "", ""},
+		{"mxid age past half its failsafe is critical", func(i *MaintenanceInfo) {
+			i.MxidAge, i.MxidFreezeMaxAge = 1_000_000_000, 400_000_000
+		}, "mxid_wraparound", AdviceCrit, "", ""},
+
+		// xmin horizon: the leading indicator. Graded against
+		// autovacuum_freeze_max_age because that is the budget it eats into.
+		{"horizon below a quarter of freeze_max_age is fine", func(i *MaintenanceInfo) {
+			i.Horizon = HorizonStat{Age: 30_000_000, Kind: horizonKindIdleXact, Holder: "pid 4711"}
+		}, "", 0, "", ""},
+		{"horizon past a quarter warns", func(i *MaintenanceInfo) {
+			i.Horizon = HorizonStat{Age: 60_000_000, Kind: horizonKindIdleXact, Holder: "pid 4711 in shop, idle in transaction for 42m"}
+		}, "xmin_horizon", AdviceWarn, "", ""},
+		{"horizon past half is critical", func(i *MaintenanceInfo) {
+			i.Horizon = HorizonStat{Age: 120_000_000, Kind: horizonKindSlot, Holder: "slot standby_dc2 (physical, inactive)"}
+		}, "xmin_horizon", AdviceCrit, "", ""},
+		{"unreadable horizon is not an all-clear", func(i *MaintenanceInfo) {
+			i.Horizon = HorizonStat{Restricted: true}
+		}, "xmin_horizon", AdviceWarn, "", ""},
 
 		// operational
 		{"connections warn", func(i *MaintenanceInfo) { i.ConnByState = map[string]int{"idle": 70, "active": 12} },
@@ -383,7 +424,10 @@ func TestMaintAdviceTargets(t *testing.T) {
 	info.Settings["track_io_timing"] = "off"
 	info.LockWaits = 1
 	info.LongestXactSec = 2000
-	info.XidAge, info.FreezeMaxAge, info.XidAgeDB = 195_000_000, 200_000_000, "shop"
+	// Well past a forced freeze cycle, so the finding is actionable and carries
+	// its drill-down; 99 % of freeze_max_age would be routine and Info-only.
+	info.XidAge, info.FreezeMaxAge, info.XidAgeDB = 500_000_000, 200_000_000, "shop"
+	info.Horizon = HorizonStat{Age: 60_000_000, Kind: horizonKindIdleXact, Holder: "pid 4711 in shop"}
 	info.Host.SwapFree = 6 * gib
 	got := MaintAdvice(info, nil)
 	want := map[string]struct {
@@ -395,6 +439,7 @@ func TestMaintAdviceTargets(t *testing.T) {
 		"lock_waits":      {AdviceTargetLockTree, "", ""},
 		"long_xact":       {AdviceTargetActivity, "", ""},
 		"wraparound":      {AdviceTargetDiagnostic, "wraparound_tables", "shop"},
+		"xmin_horizon":    {AdviceTargetDiagnostic, "idle_in_xact_holders", ""},
 		"swap":            {AdviceTargetNone, "", ""},
 	}
 	for key, w := range want {
@@ -517,5 +562,125 @@ func TestGucBytes(t *testing.T) {
 		if got := gucBytes(n); got != want {
 			t.Errorf("gucBytes(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+// The regression this redesign exists for: a cluster that burns through
+// autovacuum_freeze_max_age every few days sat permanently at a red
+// "wraparound" recommendation, which sent people chasing a phantom pinned
+// horizon. Everything below 2× the limit must stay out of the recommendations
+// panel, and the note it does carry must say the state is routine.
+func TestWraparoundRoutineFreezingIsNotActionable(t *testing.T) {
+	for _, age := range []int64{100_000_000, 198_000_000, 200_000_000, 260_000_000, 390_000_000} {
+		info := healthyInfo()
+		info.XidAge, info.XidAgeDB = age, "powa"
+		got := MaintAdvice(info, nil)
+		if act := got.Actionable(); len(act) != 0 {
+			t.Errorf("age %d: actionable advice %+v, want none", age, act)
+		}
+		a := got.Find("wraparound")
+		if a == nil {
+			// Only the low end is allowed to stay entirely silent.
+			if age >= int64(freezeRoutineNoticeFrac*float64(info.FreezeMaxAge)) {
+				t.Errorf("age %d: expected an explanatory note, got none", age)
+			}
+			continue
+		}
+		if a.Level != AdviceInfo {
+			t.Errorf("age %d: level = %d, want Info", age, a.Level)
+		}
+		if !strings.Contains(a.Reason, "routine") {
+			t.Errorf("age %d: reason %q does not call the state routine", age, a.Reason)
+		}
+	}
+}
+
+// Past two freeze cycles the finding must be actionable and must point at both
+// causes an operator can actually do something about.
+func TestWraparoundBehindNamesTheCauses(t *testing.T) {
+	info := healthyInfo()
+	info.XidAge, info.XidAgeDB = 500_000_000, "powa"
+	a := MaintAdvice(info, nil).Find("wraparound")
+	if a == nil || a.Level != AdviceWarn {
+		t.Fatalf("advice = %+v, want a warning", a)
+	}
+	for _, want := range []string{"2.5×", "autovacuum_freeze_max_age", "relfrozenxid", "xmin_horizon", "autovacuum", "in powa"} {
+		if !strings.Contains(a.Reason, want) {
+			t.Errorf("reason %q missing %q", a.Reason, want)
+		}
+	}
+}
+
+// The critical tier is about the hard limit, not the routine trigger, so it has
+// to quantify the remaining room.
+func TestWraparoundCriticalQuantifiesTheHardLimit(t *testing.T) {
+	info := healthyInfo()
+	info.XidAge, info.XidAgeDB = 1_200_000_000, "powa"
+	a := MaintAdvice(info, nil).Find("wraparound")
+	if a == nil || a.Level != AdviceCrit {
+		t.Fatalf("advice = %+v, want critical", a)
+	}
+	// 1.2e9 / 2^31 ≈ 55.9 %.
+	for _, want := range []string{"56%", "2^31", "failsafe"} {
+		if !strings.Contains(a.Reason, want) {
+			t.Errorf("reason %q missing %q", a.Reason, want)
+		}
+	}
+}
+
+// A horizon finding is only useful if it says which holder to go and deal with,
+// and leads to the view listing that kind of holder.
+func TestHorizonNamesHolderAndTarget(t *testing.T) {
+	cases := []struct {
+		kind   string
+		target AdviceTarget
+		diag   string
+	}{
+		{horizonKindIdleXact, AdviceTargetDiagnostic, "idle_in_xact_holders"},
+		{horizonKindSlot, AdviceTargetDiagnostic, "replication_slots"},
+		{horizonKindBackend, AdviceTargetActivity, ""},
+		{horizonKindPrepared, AdviceTargetNone, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.kind, func(t *testing.T) {
+			info := healthyInfo()
+			info.Horizon = HorizonStat{Age: 60_000_000, Kind: c.kind, Holder: "the holder"}
+			a := MaintAdvice(info, nil).Find("xmin_horizon")
+			if a == nil {
+				t.Fatal("expected an xmin_horizon finding")
+			}
+			if !strings.Contains(a.Reason, "the holder") {
+				t.Errorf("reason %q does not name the holder", a.Reason)
+			}
+			if a.Target != c.target || a.DiagKey != c.diag {
+				t.Errorf("target = %v/%q, want %v/%q", a.Target, a.DiagKey, c.target, c.diag)
+			}
+			if c.diag != "" {
+				if _, ok := DiagnosticByKey(c.diag); !ok {
+					t.Errorf("diagnostic %q not registered", c.diag)
+				}
+			}
+		})
+	}
+}
+
+// A filtered pg_stat_activity must never read as an all-clear: that false green
+// is what the old check trained operators to distrust.
+func TestHorizonRestrictedIsReported(t *testing.T) {
+	info := healthyInfo()
+	info.Horizon = HorizonStat{Restricted: true}
+	a := MaintAdvice(info, nil).Find("xmin_horizon")
+	if a == nil || a.Level != AdviceWarn {
+		t.Fatalf("advice = %+v, want a warning", a)
+	}
+	if !strings.Contains(a.Reason, "pg_read_all_stats") {
+		t.Errorf("reason %q does not say what is missing", a.Reason)
+	}
+
+	// A visible horizon that is only a lower bound says so alongside the age.
+	info.Horizon = HorizonStat{Age: 60_000_000, Kind: horizonKindIdleXact, Holder: "pid 1", Restricted: true}
+	a = MaintAdvice(info, nil).Find("xmin_horizon")
+	if a == nil || !strings.Contains(a.Reason, "may be hidden") {
+		t.Fatalf("reason = %q, want the lower-bound caveat", a.Reason)
 	}
 }

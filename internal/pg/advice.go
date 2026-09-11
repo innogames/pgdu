@@ -158,11 +158,41 @@ const (
 	// warming up — dead-tuple and scan ratios are not yet meaningful.
 	StatsFreshWindow = 24 * time.Hour
 
-	// wraparound: autovacuum forces aggressive freezing at *_freeze_max_age;
-	// most of the way there means it is not keeping up, and at the hard limit
-	// the server stops accepting writes.
-	wraparoundWarnFrac = 0.80
-	wraparoundCritFrac = 0.95
+	// wraparound: an age *at* autovacuum_freeze_max_age is not a fault — it is
+	// exactly the trigger for the routine anti-wraparound autovacuum Postgres
+	// relies on, so a busy cluster cycles every table through 100 % every few
+	// days. Grading that as danger makes the check permanently red and trains
+	// operators to ignore it. Freezing is only behind once a whole forced cycle
+	// came and went without relfrozenxid advancing, i.e. past twice the limit.
+	freezeBehindWarnFactor = 2.0
+	// Real danger starts at vacuum_failsafe_age, where VACUUM drops its cost
+	// delay and skips index cleanup to catch up; half of it is the last
+	// comfortable warning before the 2^31 hard stop at which the server refuses
+	// writes altogether.
+	failsafeCritFrac = 0.50
+	// vacuum_failsafe_age is PG14+; without it fall back to a fixed age rather
+	// than to a fraction of an unknown.
+	failsafeAgeFallback = 1_000_000_000
+	// hardXIDLimit is 2^31-1, the age at which the server stops accepting
+	// writes — the denominator that makes a critical message concrete. It is
+	// the right limit for multixacts too: both wrap limits are computed half
+	// the 32-bit space away from the oldest value (xidWrapLimit /
+	// multiWrapLimit), so the usable distance is 2^31 in both counters.
+	hardXIDLimit = 2_147_483_647
+
+	// The band that used to be graded warn/crit (0.80–0.95 of freeze_max_age)
+	// is where an operator most needs to be told the state is *normal*, so an
+	// age approaching the routine trigger carries an explanatory Info note.
+	// Below that there is nothing to say and the check stays silent.
+	freezeRoutineNoticeFrac = 0.75
+
+	// xmin horizon: vacuum cannot freeze anything newer than the oldest live
+	// xmin, so a pinned horizon caps how far *any* vacuum can advance
+	// relfrozenxid. That makes it the leading indicator — it moves days before
+	// the ages do. A quarter of freeze_max_age already eats a quarter of the
+	// budget; past half, freezing stalls cluster-wide.
+	xminHorizonWarnFrac = 0.25
+	xminHorizonCritFrac = 0.50
 
 	// lock waits: any backend stuck on a lock is worth a look; one that has
 	// waited half a minute is past ordinary contention.
@@ -375,6 +405,7 @@ func MaintAdvice(info *MaintenanceInfo, schema *SchemaHealth) AdviceSet {
 	adviseBufferCache(info, add)
 	adviseCheckpoints(info, add)
 	adviseWraparound(info, add)
+	adviseHorizon(info, add)
 	adviseAutovacuum(info, add)
 	adviseSessions(info, add)
 	adviseOperational(info, add)
@@ -772,20 +803,52 @@ func adviseSafety(info *MaintenanceInfo, add func(Advice)) {
 	}
 }
 
-// freezeLevel grades a transaction-ID (or multixact) age against its
-// autovacuum freeze limit; pct is the share consumed, 0 when either is unknown.
-func freezeLevel(age, maxAge int64) (AdviceLevel, float64) {
+// freezeGrade is what freezeLevel resolved about one age: the level, plus the
+// two framings a message needs — the age as a multiple of its own
+// *_freeze_max_age (the "is freezing keeping up" question) and as a share of
+// the 2^31 hard limit (the "how much room is left" question).
+type freezeGrade struct {
+	Level   AdviceLevel
+	Factor  float64 // age / maxAge; 2.5 = two and a half freeze_max_age cycles
+	PctOf31 float64 // age as a percentage of 2^31-1
+	Ok      bool    // false when either input is unknown, so nothing is graded
+}
+
+// worthSaying reports whether a graded age is worth a finding at all: any
+// warn/crit tier, plus the Info band close to the routine freeze trigger where
+// the point is to say out loud that the state is normal. A young age produces
+// nothing.
+func (g freezeGrade) worthSaying() bool {
+	return g.Ok && (g.Level >= AdviceWarn || g.Factor >= freezeRoutineNoticeFrac)
+}
+
+// freezeLevel grades a transaction-ID (or multixact) age. Deliberately *not*
+// against the distance to the next routine anti-wraparound autovacuum: that
+// event is normal maintenance, not a fault. Warn once the age is a multiple of
+// autovacuum_freeze_max_age (a forced cycle passed without advancing
+// relfrozenxid), go critical only near the vacuum failsafe and the 2^31 stop.
+// failsafeAge is 0 when vacuum_failsafe_age is unavailable (PG < 14).
+func freezeLevel(age, maxAge, failsafeAge int64) freezeGrade {
 	if maxAge <= 0 || age <= 0 {
-		return AdviceInfo, 0
+		return freezeGrade{}
 	}
-	frac := float64(age) / float64(maxAge)
+	g := freezeGrade{
+		Level:   AdviceInfo,
+		Factor:  float64(age) / float64(maxAge),
+		PctOf31: 100 * float64(age) / float64(hardXIDLimit),
+		Ok:      true,
+	}
+	critAge := int64(failsafeCritFrac * float64(failsafeAge))
+	if failsafeAge <= 0 {
+		critAge = failsafeAgeFallback
+	}
 	switch {
-	case frac > wraparoundCritFrac:
-		return AdviceCrit, frac * 100
-	case frac > wraparoundWarnFrac:
-		return AdviceWarn, frac * 100
+	case age > critAge:
+		g.Level = AdviceCrit
+	case g.Factor > freezeBehindWarnFactor:
+		g.Level = AdviceWarn
 	}
-	return AdviceInfo, frac * 100
+	return g
 }
 
 // inDB is the " (in db)" tail cluster-wide advice uses to name the database a
@@ -797,20 +860,116 @@ func inDB(db string) string {
 	return " (in " + db + ")"
 }
 
+// freezeReason composes the one-line note for a graded age. counter names the
+// catalog column the age came from ("datfrozenxid"), guc its freeze limit, and
+// db the database holding it. The Info wording exists to say out loud that a
+// routine anti-wraparound autovacuum is not a problem — the check used to shout
+// at exactly this state.
+func freezeReason(g freezeGrade, age int64, counter, guc, db string) string {
+	switch g.Level {
+	case AdviceCrit:
+		return fmt.Sprintf("%s age %s is %.0f%% of the 2^31 wraparound limit — VACUUM runs in failsafe mode "+
+			"(no cost delay, no index cleanup) and the server stops accepting writes at the limit%s",
+			counter, compactCount(age), g.PctOf31, inDB(db))
+	case AdviceWarn:
+		return fmt.Sprintf("%s age %s is %.1f× %s — a forced anti-wraparound cycle passed without advancing "+
+			"relfrozenxid; check the xmin_horizon finding or a disabled/starved autovacuum%s",
+			counter, compactCount(age), g.Factor, guc, inDB(db))
+	default:
+		return fmt.Sprintf("%s age %s is %.0f%% of %s — a routine anti-wraparound autovacuum is due%s",
+			counter, compactCount(age), g.Factor*100, guc, inDB(db))
+	}
+}
+
+// adviseWraparound grades how far behind freezing is, not how close the next
+// routine anti-wraparound autovacuum is. Below the warn tier it still emits an
+// Info note so the overview's age rows read explained rather than bare;
+// Actionable() keeps Info-without-a-Fix out of the recommendations panel, so a
+// healthy cluster shows nothing to do.
 func adviseWraparound(info *MaintenanceInfo, add func(Advice)) {
-	if lvl, pct := freezeLevel(info.XidAge, info.FreezeMaxAge); lvl >= AdviceWarn {
+	if g := freezeLevel(info.XidAge, info.FreezeMaxAge, info.FailsafeAge); g.worthSaying() {
 		add(Advice{
-			Key: "wraparound", Level: lvl, Current: fmt.Sprintf("%.0f%%", pct),
-			Reason: fmt.Sprintf("oldest datfrozenxid %.0f%% of the way to a forced anti-wraparound autovacuum%s", pct, inDB(info.XidAgeDB)),
+			Key: "wraparound", Level: g.Level, Current: compactCount(info.XidAge),
+			Reason: freezeReason(g, info.XidAge, "datfrozenxid", "autovacuum_freeze_max_age", info.XidAgeDB),
 			Target: AdviceTargetDiagnostic, DiagKey: "wraparound_tables", DB: info.XidAgeDB,
 		})
 	}
-	if lvl, pct := freezeLevel(info.MxidAge, info.MxidFreezeMaxAge); lvl >= AdviceWarn {
+	// Multixacts have their own 32-bit counter, their own freeze limit and
+	// their own failsafe. Their limit defaults to twice the XID one while the
+	// failsafe defaults to the same 1.6 B, so at stock settings the warn band
+	// is narrow and an old multixact age reaches the critical tier directly.
+	if g := freezeLevel(info.MxidAge, info.MxidFreezeMaxAge, info.MxidFailsafeAge); g.worthSaying() {
 		add(Advice{
-			Key: "mxid_wraparound", Level: lvl, Current: fmt.Sprintf("%.0f%%", pct),
-			Reason: fmt.Sprintf("oldest datminmxid %.0f%% of the way to a forced anti-wraparound autovacuum%s", pct, inDB(info.MxidAgeDB)),
+			Key: "mxid_wraparound", Level: g.Level, Current: compactCount(info.MxidAge),
+			Reason: freezeReason(g, info.MxidAge, "datminmxid", "autovacuum_multixact_freeze_max_age", info.MxidAgeDB),
 		})
 	}
+}
+
+// adviseHorizon grades the oldest live xmin against autovacuum_freeze_max_age.
+// This is the finding that actually means trouble: VACUUM cannot freeze a tuple
+// newer than the oldest snapshot anyone still holds, so while the horizon is
+// pinned no amount of vacuuming advances relfrozenxid anywhere in the cluster —
+// the ages then climb on their own and the wraparound findings follow days later.
+// The message names the holder because the fix is always "deal with that
+// backend / slot / prepared transaction", never "vacuum harder".
+func adviseHorizon(info *MaintenanceInfo, add func(Advice)) {
+	h := info.Horizon
+	maxAge := info.FreezeMaxAge
+	if maxAge <= 0 {
+		return
+	}
+
+	// pg_stat_activity hides other users' rows without pg_read_all_stats, so an
+	// unreadable horizon is an unknown, not an all-clear. Say so rather than
+	// staying silent — a false green here is what the old check trained people
+	// to chase by hand.
+	if h.Age <= 0 {
+		if h.Restricted {
+			add(Advice{
+				Key: "xmin_horizon", Level: AdviceWarn, Current: "unknown",
+				Reason: "could not read the oldest xmin: pg_stat_activity is filtered to your own backends " +
+					"without pg_read_all_stats, and no replication slot or prepared transaction pins one — " +
+					"grant pg_monitor to see whether another user's session holds the horizon",
+			})
+		}
+		return
+	}
+
+	frac := float64(h.Age) / float64(maxAge)
+	lvl := AdviceInfo
+	switch {
+	case frac > xminHorizonCritFrac:
+		lvl = AdviceCrit
+	case frac > xminHorizonWarnFrac:
+		lvl = AdviceWarn
+	}
+	if lvl < AdviceWarn {
+		return
+	}
+
+	holder := h.Holder
+	if holder == "" {
+		holder = "an unidentified " + h.Kind
+	}
+	reason := fmt.Sprintf("oldest xmin is %s transactions old (%.0f%% of autovacuum_freeze_max_age), held by %s — "+
+		"VACUUM cannot freeze past it, so relfrozenxid stalls cluster-wide", compactCount(h.Age), frac*100, holder)
+	if h.Restricted {
+		reason += " — and pg_stat_activity is filtered without pg_read_all_stats, so an older xmin may be hidden"
+	}
+
+	a := Advice{Key: "xmin_horizon", Level: lvl, Current: compactCount(h.Age), Reason: reason}
+	// Point Enter at whichever existing view lists the holder's kind, so the
+	// finding leads straight to the row the operator has to act on.
+	switch h.Kind {
+	case horizonKindIdleXact:
+		a.Target, a.DiagKey = AdviceTargetDiagnostic, "idle_in_xact_holders"
+	case horizonKindSlot:
+		a.Target, a.DiagKey = AdviceTargetDiagnostic, "replication_slots"
+	case horizonKindBackend:
+		a.Target = AdviceTargetActivity
+	}
+	add(a)
 }
 
 // adviseOperational grades the live operational rows: connection saturation,

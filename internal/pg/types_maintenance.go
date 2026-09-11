@@ -91,10 +91,22 @@ type MaintenanceInfo struct {
 	XidAge       int64  // max(age(datfrozenxid)) over pg_database
 	XidAgeDB     string // database holding that oldest datfrozenxid
 	FreezeMaxAge int64  // autovacuum_freeze_max_age from settings
+	// FailsafeAge is vacuum_failsafe_age: the age at which VACUUM abandons its
+	// cost delay and index cleanup to catch up. Unlike FreezeMaxAge it marks
+	// real danger rather than routine maintenance, which is why the wraparound
+	// advice grades against it. 0 when unknown (PG < 14, where the GUC does not
+	// exist) — the advice then falls back to a fixed age.
+	FailsafeAge int64
+
 	// Multixact IDs have their own 32-bit counter and freeze horizon.
 	MxidAge          int64  // max(mxid_age(datminmxid)) over pg_database
 	MxidAgeDB        string // database holding that oldest datminmxid
 	MxidFreezeMaxAge int64  // autovacuum_multixact_freeze_max_age from settings
+	MxidFailsafeAge  int64  // vacuum_multixact_failsafe_age; 0 when unknown (PG < 14)
+
+	// Horizon is the oldest live xmin and what pins it — the leading indicator
+	// for freezing falling behind.
+	Horizon HorizonStat
 
 	// Checkpointer, WAL, bgwriter and per-backend-type I/O counters, each with
 	// its own HasData gate (privilege or missing view).
@@ -554,6 +566,31 @@ type ReplSlotStat struct {
 	RetainedBytes int64   // pg_wal_lsn_diff(current_wal_lsn, restart_lsn)
 	SafeWALBytes  int64   // headroom before max_slot_wal_keep_size invalidates the slot; -1 when unlimited
 	InactiveSecs  float64 // how long the slot has had no consumer (inactive_since); 0 while active
+}
+
+// Horizon holder kinds, in the order the advice prefers to explain them: an
+// idle transaction is the common, fixable case, a slot the next, a prepared
+// transaction the rarest. Kind selects which existing view Enter opens.
+const (
+	horizonKindIdleXact = "idle transaction"
+	horizonKindBackend  = "backend"
+	horizonKindSlot     = "replication slot"
+	horizonKindPrepared = "prepared transaction"
+)
+
+// HorizonStat is the oldest live xmin in the cluster and what holds it.
+// VACUUM cannot freeze a tuple newer than this, so the horizon caps how far
+// relfrozenxid can advance anywhere — it moves days before the per-database
+// ages react, which makes it the leading indicator for freezing falling behind.
+type HorizonStat struct {
+	Age    int64  // greatest() over backends, slots and prepared xacts; 0 = nothing pins a horizon
+	Kind   string // one of the horizonKind* constants; "" when Age is 0
+	Holder string // the holder spelled out: "pid 4711 in shop, idle in transaction for 42m" / slot name / gid
+	// Restricted is true when this session cannot see other users' rows in
+	// pg_stat_activity (no pg_read_all_stats / superuser), so Age is a lower
+	// bound. Reported rather than silently ignored: a filtered view that finds
+	// nothing must not read as an all-clear.
+	Restricted bool
 }
 
 // SLRUStat is one pg_stat_slru row: a simple-LRU cache (transaction status,

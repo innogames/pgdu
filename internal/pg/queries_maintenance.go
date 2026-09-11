@@ -136,6 +136,77 @@ WHERE  datname NOT IN ('template0', 'template1')
 ORDER  BY 2 DESC
 LIMIT  1`
 
+	// sqlMaintXminHorizon reads the oldest live xmin in the cluster: the oldest
+	// snapshot anyone still holds, across running backends, replication slots
+	// (both the data and the catalog horizon) and prepared transactions. VACUUM
+	// cannot freeze a tuple newer than this, so it caps how far relfrozenxid can
+	// advance in *every* database — which makes it the leading indicator that
+	// freezing is about to fall behind, days before age(datfrozenxid) reacts.
+	//
+	// greatest() ignores NULLs, so a cluster with no slots and no prepared
+	// transactions still reports its backends' horizon and an entirely idle one
+	// reports NULL (COALESCEd to 0 = "nothing pins a horizon"). pgdu's own
+	// backend is excluded: it holds a snapshot while this very query runs, and
+	// reporting pgdu to itself as the holder would be both useless and the one
+	// row guaranteed to be present.
+	//
+	// The last column says whether pg_stat_activity is showing us everything:
+	// without pg_read_all_stats (which pg_monitor grants) it hides other users'
+	// rows, so the age is only a lower bound. That has to be reported — a
+	// filtered view finding nothing must never read as an all-clear.
+	sqlMaintXminHorizon = `
+SELECT COALESCE(greatest(
+         (SELECT max(age(backend_xmin)) FROM pg_stat_activity WHERE pid <> pg_backend_pid()),
+         (SELECT max(age(backend_xid))  FROM pg_stat_activity WHERE pid <> pg_backend_pid()),
+         (SELECT max(age(xmin))         FROM pg_replication_slots),
+         (SELECT max(age(catalog_xmin)) FROM pg_replication_slots),
+         (SELECT max(age(transaction))  FROM pg_prepared_xacts)
+       ), 0)::bigint,
+       NOT (pg_has_role(current_user, 'pg_read_all_stats', 'member')
+            OR current_setting('is_superuser')::bool)`
+
+	// sqlMaintXminHolder names the single oldest holder behind
+	// sqlMaintXminHorizon so the recommendation can say what to go and fix
+	// rather than only that something is wrong. One UNION ALL rather than a
+	// query per source type keeps it to one round trip; the kind strings match
+	// the horizonKind* constants, which pick the view Enter opens.
+	//
+	// A backend's own xact_start age is spelled out because "idle in
+	// transaction for 42m" is what identifies the leaked pool connection. Slots
+	// report whichever of the two horizons is older, and a backend is reported
+	// under the idle-transaction kind only when it is actually idle — an active
+	// query holding a snapshot is a different conversation.
+	sqlMaintXminHolder = `
+SELECT kind, holder, age
+FROM (
+    SELECT CASE WHEN a.state IN ('idle in transaction', 'idle in transaction (aborted)')
+                THEN 'idle transaction' ELSE 'backend' END AS kind,
+           'pid ' || a.pid
+             || COALESCE(' in ' || a.datname::text, '')
+             || COALESCE(' (' || a.usename::text || ')', '')
+             || ', ' || COALESCE(a.state, 'unknown state')
+             || COALESCE(' for ' || date_trunc('second', now() - a.xact_start)::text, '') AS holder,
+           greatest(age(a.backend_xmin), age(a.backend_xid)) AS age
+    FROM   pg_stat_activity a
+    WHERE  (a.backend_xmin IS NOT NULL OR a.backend_xid IS NOT NULL)
+      AND  a.pid <> pg_backend_pid()
+  UNION ALL
+    SELECT 'replication slot',
+           'slot ' || s.slot_name::text || ' (' || s.slot_type
+             || CASE WHEN s.active THEN ', active' ELSE ', inactive' END || ')',
+           greatest(age(s.xmin), age(s.catalog_xmin))
+    FROM   pg_replication_slots s
+    WHERE  s.xmin IS NOT NULL OR s.catalog_xmin IS NOT NULL
+  UNION ALL
+    SELECT 'prepared transaction',
+           'gid ' || p.gid || ' prepared ' || date_trunc('second', now() - p.prepared)::text || ' ago',
+           age(p.transaction)
+    FROM   pg_prepared_xacts p
+) h
+WHERE age IS NOT NULL
+ORDER BY age DESC
+LIMIT 1`
+
 	// sqlMaintCheckpointer fetches the cumulative checkpoint counters and costs
 	// from pg_stat_checkpointer (PG17+ has the write/sync times there). A high
 	// requested/(timed+requested) ratio signals max_wal_size pressure: WAL is
@@ -599,6 +670,12 @@ var maintSettingsKeys = []string{
 	"autovacuum_naptime",
 	"autovacuum_freeze_max_age",
 	"autovacuum_multixact_freeze_max_age",
+	// The failsafe ages are PG14+ and simply absent below that, which the
+	// wraparound advice treats as "unknown" and falls back for. Each counter
+	// has its own: vacuum_failsafe_age gates XIDs, the multixact one gates
+	// multixacts, and both default to 1.6 B.
+	"vacuum_failsafe_age",
+	"vacuum_multixact_failsafe_age",
 	"autovacuum_work_mem",
 	"autovacuum_vacuum_cost_delay",
 	"autovacuum_vacuum_cost_limit",

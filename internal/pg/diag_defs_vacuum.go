@@ -61,30 +61,67 @@ var diagVacuum = []Diagnostic{
 		PerDB:       true,
 		Title:       "Wraparound freeze age",
 		Category:    "vacuum",
-		Description: "tables ranked by XID freeze age as % of autovacuum_freeze_max_age — the drill-down for the wraparound health check (last_autovacuum tells a pinned horizon from a lagging autovacuum)",
+		Description: "tables ranked by how far their oldest unfrozen XID trails the current one, against the limits that actually matter (vacuum_failsafe_age, 2^31) — the drill-down for the wraparound health check",
 		SQL:         sqlDiagWraparoundTables,
-		Bar:         "pct_freeze_max",
+		// pct_of_failsafe is the bar because its denominator is a real danger
+		// threshold, and it is constant across rows, so the bar order matches
+		// the max_xid_age sort. Sorting on the age itself keeps the ranking
+		// readable when every row rounds to 0.0% of the failsafe.
+		Bar:  "pct_of_failsafe",
+		Sort: "max_xid_age",
 		Kinds: map[string]DiagColumnKind{
-			"pct_freeze_max": DiagPercentBad, // higher is worse, graded on an absolute scale
-			// XID ages and the per-table autovacuum counter are counts, but summing
-			// them across tables is meaningless — DiagFloat renders them right-aligned
-			// yet keeps them out of the Σ footer (which still totals dead_tuples and
-			// size_bytes).
-			"xid_age":          DiagFloat,
-			"toast_xid_age":    DiagFloat,
-			"autovacuum_count": DiagFloat,
+			// Higher is worse, graded on an absolute scale.
+			"pct_of_wraparound": DiagPercentBad,
+			"pct_of_failsafe":   DiagPercentBad,
+			"pct_freeze_max":    DiagPercentBad,
+			// XID/multixact ages and the per-table autovacuum counters are
+			// counts, but summing them across tables is meaningless — DiagFloat
+			// renders them right-aligned yet keeps them out of the Σ footer
+			// (which still totals dead_tuples and size_bytes).
+			"max_xid_age":            DiagFloat,
+			"main_xid_age":           DiagFloat,
+			"toast_xid_age":          DiagFloat,
+			"mxid_age":               DiagFloat,
+			"autovacuum_count":       DiagFloat,
+			"toast_autovacuum_count": DiagFloat,
 		},
+		// pct_freeze_max is the metric this view used to lead with; it stays
+		// fetched and one C keystroke away, but it grades routine maintenance
+		// and must not be the headline. dead_tuples belongs to Vacuum stats.
+		DefaultHidden: []string{"pct_freeze_max", "dead_tuples"},
+		Note: "ages near autovacuum_freeze_max_age are normal — an anti-wraparound autovacuum is about to run; " +
+			"investigate past 2× that, or when the xmin horizon check fires",
 		Fix: fixTableStmt("VACUUM (FREEZE, VERBOSE)", "schema", "table_name",
-			"-- run off-peak; check for an old xmin (idle transactions, stalled slots) first"),
+			"-- run off-peak; if the xmin horizon is pinned this cannot freeze anything — check that first"),
 		Help: `Each table's XID freeze age: how far its oldest unfrozen transaction
-			ID (including its TOAST relation) trails the current XID.
-			pct_freeze_max is that age against autovacuum_freeze_max_age — at
-			100% PostgreSQL forces an aggressive anti-wraparound autovacuum, and
-			a cluster whose freezing can't keep up eventually stops accepting
-			writes. Steadily climbing ages are normal (regular vacuums skip
-			all-visible pages and rarely advance the age); worry when rows
-			approach 100%: schedule VACUUM (FREEZE) off-peak, and check for an
-			old xmin pinning the horizon — idle-in-transaction sessions and
-			stalled replication slots (both have their own diagnostics).`,
+			ID trails the current XID, for the table (main_xid_age) and its TOAST
+			relation (toast_xid_age) separately, with max_xid_age the worse of
+			the two and the default sort.
+
+			Read the percentages in this order. pct_of_wraparound is the age
+			against the 2^31 hard limit, where the server stops accepting
+			writes — the only number that means the cluster is in danger.
+			pct_of_failsafe is the age against vacuum_failsafe_age, where VACUUM
+			abandons its cost delay and index cleanup to catch up; approaching
+			100% there is the last comfortable warning. pct_freeze_max (hidden
+			by default, C to show) is the distance to the next *routine*
+			anti-wraparound autovacuum — it reaches 100% constantly on a busy
+			cluster and is not a problem signal.
+
+			So: ages climbing toward autovacuum_freeze_max_age are how freezing
+			is supposed to work. Investigate when an age is several times that
+			limit, which means a forced anti-wraparound cycle already ran without
+			advancing relfrozenxid. Two causes to separate. A large
+			toast_xid_age next to a small main_xid_age — especially with
+			toast_last_autovacuum empty and toast_autovacuum_count 0 — is a TOAST
+			relation autovacuum has never reached. Otherwise compare the age
+			with last_autovacuum and autovacuum_count: a recent, repeated
+			autovacuum that never drops the age means it could not freeze, which
+			is almost always the xmin horizon pinned by an idle transaction,
+			a replication slot or a prepared transaction (the system overview's
+			xmin_horizon finding names the holder). An old or absent
+			last_autovacuum means autovacuum is not reaching the table at all.
+			mxid_age tracks the independent multixact counter, driven by shared
+			row locks and FK checks, and can be old while the XID age is fine.`,
 	},
 }

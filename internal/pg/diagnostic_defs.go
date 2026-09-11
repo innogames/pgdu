@@ -37,6 +37,13 @@ type Diagnostic struct {
 	// plain VACUUM) — heavier remedies only as SQL comments.
 	Fix func(get func(col string) (string, bool)) (sql string, ok bool)
 
+	// Note is one short line rendered under the result table, in the slot the
+	// colour legends use. For the handful of diagnostics whose numbers are easy
+	// to misread at a glance — where the obvious reading of a column is the
+	// wrong one — it puts the caveat on screen instead of behind ?. Keep it to
+	// a single line; anything longer belongs in Help.
+	Note string
+
 	// Help is the long-form explanation shown in the ? reference overlay:
 	// what the diagnostic is for and how to interpret its result (which
 	// columns matter, what good/bad looks like, what action a bad row
