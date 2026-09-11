@@ -88,6 +88,14 @@ func (m *Model) drillIn() tea.Cmd {
 	case levelWALBlocks, levelWALRelBlocks:
 		return m.drillWALBlock(s, cur)
 	case levelStatements:
+		if s.stat.view.grouped() {
+			// A roll-up row narrows the list to its members in place (Esc widens).
+			s.stat.group = &stmtGroupFilter{view: s.stat.view, key: cur.stmtGroupKey}
+			s.stat.view = stmtViewQueries
+			m.rebuildStatementItems(s)
+			s.resetCursor()
+			return nil
+		}
 		return m.drillStatement(s, cur)
 	case levelSnapshots:
 		return m.loadSelectedSnapshot(s, cur)

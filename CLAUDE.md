@@ -191,3 +191,13 @@ fails (missing/corrupt → empty).
   start, and Back pops the unloaded table too. The session anchor is captured on the
   first live sample whatever base was picked, so `@session` exists after a snapshot or
   cumulative entry as well.
+- **Top-queries roll-ups are in-place views, not levels**: `Tab` cycles `stat.view`
+  (queries → by table → by type) on the one `levelStatements` screen and
+  `rebuildStatementItems` re-projects the same `stat.rows` (`queries_groups.go`: fold by
+  `stmtView.key`, metric columns wrapped from the list's registry, own picker
+  `stmtGroupTable`/`colPrefsQueryGroups`). Enter on a group row sets `stat.group`, a
+  structured narrowing of the list (a type group has no text the `/` filter could match);
+  Esc unwinds view, then narrowing, then pops. `time%` always divides by the whole window.
+  The grouped views' bar rides the sort column (`syncStmtBar`; the width memo must be
+  dirtied when it moves). Exactly one of `stat.cols`/`stat.groupCols` is non-nil, which is
+  how `cycleSort` picks the sort memory to write.

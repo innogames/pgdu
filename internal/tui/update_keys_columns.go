@@ -6,11 +6,16 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// handleColumnConfigKey drives the C picker on the top-queries table; planning
-// columns can't be shown while track_planning is off.
+// handleColumnConfigKey drives the C picker on the top-queries table — the
+// list's or the roll-ups', whichever view is up; planning columns can't be
+// shown while track_planning is off.
 func (m *Model) handleColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	ctx := stmtCtx{trackPlanning: s.stat.trackPlanning}
-	return stmtSpec.handleKey(m, &m.stmtTable, msg, ctx, func() { m.rebuildStatementItems(s) })
+	rebuild := func() { m.rebuildStatementItems(s) }
+	if v := s.stat.view; v.grouped() {
+		return stmtGroupSpec(v).handleKey(m, &m.stmtGroupTable, msg, ctx, rebuild)
+	}
+	return stmtSpec.handleKey(m, &m.stmtTable, msg, ctx, rebuild)
 }
 
 // handleActColumnConfigKey drives the C picker on the Activity table; the

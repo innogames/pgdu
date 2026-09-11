@@ -110,13 +110,26 @@ func stmtDescribeTarget(s *screen) (descTarget, bool) {
 	curItem := s.currentItem
 	switch s.level {
 	case levelStatements:
-		// item.name is the flattened statement text; parse out its main table and
-		// describe it by name (resolved server-side, since we have no OID here).
 		it, ok := curItem()
 		if !ok {
 			return descTarget{}, false
 		}
-		name := pg.MainTable(it.name)
+		var name string
+		switch s.stat.view {
+		case stmtViewByTable:
+			// A roll-up row carries its qualified table as the group key; the
+			// no-table bucket has nothing to describe.
+			if it.stmtGroupKey == stmtNoTable {
+				return descTarget{}, false
+			}
+			name = it.stmtGroupKey
+		case stmtViewByType:
+			return descTarget{}, false
+		default:
+			// item.name is the flattened statement text; parse out its main table and
+			// describe it by name (resolved server-side, since we have no OID here).
+			name = pg.MainTable(it.name)
+		}
 		if name == "" {
 			return descTarget{}, false
 		}

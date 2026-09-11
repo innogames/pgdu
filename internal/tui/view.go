@@ -167,7 +167,7 @@ func (m *Model) View() string {
 		b.WriteString(m.renderActColumnConfig(s, contentHeight))
 	case s.level == levelLogs && m.logTableFor(s.log.view).showCfg:
 		b.WriteString(m.renderLogColumnConfig(s.log.view, contentHeight))
-	case m.stmtTable.showCfg && s.level == levelStatements:
+	case (m.stmtTable.showCfg || m.stmtGroupTable.showCfg) && s.level == levelStatements:
 		b.WriteString(m.renderColumnConfig(s, contentHeight))
 	case m.tblTable.showCfg && s.level == levelTableStats:
 		b.WriteString(m.renderTblColumnConfig(s, contentHeight))

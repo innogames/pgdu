@@ -359,6 +359,13 @@ func (m *Model) cycleSort(s *screen, dir int) {
 		if s.stat.cols != nil && s.diagSortCol < len(s.stat.cols) {
 			m.stmtTable.sortColID = s.stat.cols[s.diagSortCol].id
 		}
+		if s.stat.groupCols != nil && s.diagSortCol < len(s.stat.groupCols) {
+			m.stmtGroupTable.sortColID = s.stat.groupCols[s.diagSortCol].id
+		}
+		if s.level == levelStatements {
+			// The grouped views' bar rides the sort column.
+			m.syncStmtBar(s)
+		}
 		if s.act.cols != nil && s.diagSortCol < len(s.act.cols) {
 			m.actTable.sortColID = s.act.cols[s.diagSortCol].id
 		}

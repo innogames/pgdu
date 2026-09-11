@@ -115,6 +115,10 @@ func enterLabel(s *screen) (label string, ok bool) {
 	case levelWALBlocks, levelWALRelBlocks:
 		return "block payload", true
 	case levelStatements:
+		// A roll-up row unfolds in place into the list narrowed to its members.
+		if v := s.stat.view; v.grouped() {
+			return "narrow to " + v.noun(), true
+		}
 		return "query detail", true
 	case levelStatementDetail, levelStatementSamples:
 		// ANALYZE executes the query, so the detail and captured-values views

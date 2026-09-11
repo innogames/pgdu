@@ -26,6 +26,7 @@ type keyMap struct {
 	DeleteSnapshot   key.Binding
 	Columns          key.Binding
 	ResetCols        key.Binding // r: reset column visibility to defaults (inside the C picker)
+	StmtView         key.Binding // tab (top queries): queries → by table → by type
 	Filter           key.Binding
 	Seek             key.Binding
 	Help             key.Binding
@@ -165,6 +166,7 @@ func defaultKeys() keyMap {
 		Snapshots:      key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "→ snapshots")),
 		DeleteSnapshot: key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete snapshot")),
 		Columns:        key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "configure columns")),
+		StmtView:       key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "queries/by table/by type")),
 		ResetCols:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reset to defaults")),
 		Filter:         key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		Seek:           key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "seek to key")),
@@ -228,6 +230,14 @@ func (k *keyMap) applyContext(s *screen) {
 
 	k.Rebaseline.SetEnabled(stmtTable)
 	k.Snapshots.SetEnabled(stmtTable)
+	// tab cycles the top-queries table through its roll-ups (by table / by
+	// type) and back; the physical key is the log analyzer's pane cycle
+	// elsewhere, gated to its own levels. Named for where it leads next so the
+	// footer reads like a jump.
+	k.StmtView.SetEnabled(stmtTable)
+	if stmtTable {
+		k.StmtView.SetHelp("tab", s.stat.view.next().label())
+	}
 	// C (Columns) is the column-config picker on the top-queries table, the
 	// activity table, the table overview, diagnostic results and the heap
 	// tuple list (where it picks the relation's own columns; TOAST relations
@@ -371,6 +381,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	if k.logInFooter {
 		b = append(b, k.LogPane, k.LogGroupMode, k.LogWindow)
 	}
+	if k.StmtView.Enabled() {
+		b = append(b, k.StmtView)
+	}
 	if k.logJumpInFooter {
 		b = append(b, k.LogJump)
 	}
@@ -421,7 +434,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Refresh, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
-		{k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
+		{k.StmtView, k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
 		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.JumpIO, k.Progress, k.Settings},
 		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump, k.LogParams, k.OpenLog},
 		{k.Help, k.Quit},

@@ -165,7 +165,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	// The column-config overlays are modal: while open they capture navigation
 	// and toggle keys instead of the normal list bindings (Quit still quits).
-	if m.stmtTable.showCfg && s.level == levelStatements {
+	if (m.stmtTable.showCfg || m.stmtGroupTable.showCfg) && s.level == levelStatements {
 		return m, m.handleColumnConfigKey(s, msg)
 	}
 	if m.tblTable.showCfg && s.level == levelTableStats {
@@ -453,6 +453,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case key.Matches(msg, m.keys.Install):
 		return m, m.triggerInstall(s)
+	case key.Matches(msg, m.keys.StmtView):
+		// Cycle the top-queries table through its roll-ups: the same window,
+		// re-projected in place (no reload), so the live tick keeps landing.
+		if s.level == levelStatements {
+			s.stat.view = s.stat.view.next()
+			m.rebuildStatementItems(s)
+			s.resetCursor()
+		}
 	case key.Matches(msg, m.keys.Rebaseline):
 		// Restart the top-queries window: clear the baseline so the next
 		// snapshot becomes the new "since" point. Also drops any loaded disk
@@ -527,7 +535,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// the cursor (log panes open theirs in handleLogKey).
 		switch s.level {
 		case levelStatements:
-			stmtSpec.open(m, &m.stmtTable)
+			if v := s.stat.view; v.grouped() {
+				stmtGroupSpec(v).open(m, &m.stmtGroupTable)
+			} else {
+				stmtSpec.open(m, &m.stmtTable)
+			}
 		case levelActivity:
 			actSpec.open(m, &m.actTable)
 		case levelTableStats:
@@ -739,6 +751,24 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.filter = ""
 			s.resetCursor()
 			break
+		}
+		// On the top-queries table Esc unwinds the in-place views one step at a
+		// time before it leaves: a roll-up returns to the list, then a group
+		// narrowing widens back to the whole window — the same one-undo-per-Esc
+		// the text filter gets.
+		if msg.Type == tea.KeyEsc && s.level == levelStatements {
+			if s.stat.view.grouped() {
+				s.stat.view = stmtViewQueries
+				m.rebuildStatementItems(s)
+				s.resetCursor()
+				break
+			}
+			if s.stat.group != nil {
+				s.stat.group = nil
+				m.rebuildStatementItems(s)
+				s.resetCursor()
+				break
+			}
 		}
 		if len(m.stack) > 1 {
 			m.stack = m.stack[:len(m.stack)-1]

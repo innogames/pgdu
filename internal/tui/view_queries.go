@@ -16,16 +16,13 @@ func (m *Model) statementColumns(trackPlanning bool) []pg.DiagColumn {
 }
 
 // buildStatementItems converts window-delta QueryStats into generic-table rows
-// (item.data = []pg.DiagCell) over the currently visible columns. It returns the
-// items, the projected column descriptors (parallel to each item's cells), the
-// summed window exec time (the time% denominator, also carried to the detail
-// view), and the cells for a pinned "← Sum" footer totalling the whole table
-// (nil when there are no rows).
-func (m *Model) buildStatementItems(rows []pg.QueryStat, trackPlanning bool) ([]item, []stmtColDesc, float64, []pg.DiagCell) {
-	var windowMs float64
-	for _, q := range rows {
-		windowMs += q.TotalExecTime
-	}
+// (item.data = []pg.DiagCell) over the currently visible columns. windowMs is
+// the whole window's exec time — the time% denominator — passed in rather than
+// summed here because rows may be the list narrowed to one group, whose shares
+// must still read against the window. It returns the items, the projected
+// column descriptors (parallel to each item's cells), and the cells for a
+// pinned "← Sum" footer totalling the rows given (nil when there are none).
+func (m *Model) buildStatementItems(rows []pg.QueryStat, windowMs float64, trackPlanning bool) ([]item, []stmtColDesc, []pg.DiagCell) {
 	ctx := stmtCtx{windowMs: windowMs, trackPlanning: trackPlanning}
 	descs := stmtSpec.visibleCols(&m.stmtTable, ctx)
 
@@ -39,49 +36,35 @@ func (m *Model) buildStatementItems(rows []pg.QueryStat, trackPlanning bool) ([]
 		})
 	}
 	if len(rows) == 0 {
-		return items, descs, windowMs, nil
+		return items, descs, nil
 	}
 	// Build the footer over a summed QueryStat so the ratio columns come out as
 	// true pooled totals for free: mean_ms = Σtotal_ms÷Σcalls, hit% the weighted
-	// ratio, blk/row Σblocks÷Σrows, and time% exactly 100 (Σtotal_ms == windowMs).
+	// ratio, blk/row Σblocks÷Σrows, and time% exactly 100 (Σtotal_ms == windowMs)
+	// on the unnarrowed list.
 	total := cellsFor(descs, sumQueryStats(rows), ctx)
 	labelStmtFooter(descs, total)
-	return items, descs, windowMs, total
+	return items, descs, total
 }
 
 // sumQueryStats totals every additive counter across rows into one aggregate
-// QueryStat (identity fields left zero). Summing all counters — not just those
-// any single column reads today — keeps the footer correct as opt-in columns are
-// enabled or new ones added to the registry.
+// QueryStat (identity fields left zero); see addQueryStat for the fold.
 func sumQueryStats(rows []pg.QueryStat) pg.QueryStat {
 	var t pg.QueryStat
 	for _, q := range rows {
-		t.Calls += q.Calls
-		t.Rows += q.Rows
-		t.TotalExecTime += q.TotalExecTime
-		t.Plans += q.Plans
-		t.TotalPlanTime += q.TotalPlanTime
-		t.SharedBlksHit += q.SharedBlksHit
-		t.SharedBlksRead += q.SharedBlksRead
-		t.SharedBlksDirtied += q.SharedBlksDirtied
-		t.SharedBlksWritten += q.SharedBlksWritten
-		t.LocalBlksHit += q.LocalBlksHit
-		t.LocalBlksRead += q.LocalBlksRead
-		t.LocalBlksDirtied += q.LocalBlksDirtied
-		t.LocalBlksWritten += q.LocalBlksWritten
-		t.TempBlksRead += q.TempBlksRead
-		t.TempBlksWritten += q.TempBlksWritten
-		t.SharedBlkReadTime += q.SharedBlkReadTime
-		t.SharedBlkWriteTime += q.SharedBlkWriteTime
-		t.LocalBlkReadTime += q.LocalBlkReadTime
-		t.LocalBlkWriteTime += q.LocalBlkWriteTime
-		t.TempBlkReadTime += q.TempBlkReadTime
-		t.TempBlkWriteTime += q.TempBlkWriteTime
-		t.WALRecords += q.WALRecords
-		t.WALFPI += q.WALFPI
-		t.WALBytes += q.WALBytes
+		addQueryStat(&t, q)
 	}
 	return t
+}
+
+// windowExecMs is the summed exec time of the whole window — the time%
+// denominator every view shares.
+func windowExecMs(rows []pg.QueryStat) float64 {
+	var ms float64
+	for _, q := range rows {
+		ms += q.TotalExecTime
+	}
+	return ms
 }
 
 func diagNum(display string, n float64) pg.DiagCell {
@@ -116,34 +99,38 @@ func planTimeMetric(q pg.QueryStat, trackPlanning bool, mu func(...string) strin
 
 func (m *Model) renderStatementsHeader(s *screen) string {
 	mu := styleMuted.Render
+	badge := styleHeader.Render(" " + s.stat.view.label() + " ")
 	if s.stat.baselineAt.IsZero() {
-		return "  " + styleHeader.Render(" queries ") + "  " + mu("opening window — run some queries…")
+		return "  " + badge + "  " + mu("opening window — run some queries…")
 	}
+	// The window span and the refresh state are the same whichever view is up;
+	// the count names what the view's rows are, and the key hints name the
+	// actions that apply to it.
 	var line string
 	switch {
 	case s.stat.endSnap != nil:
 		// Frozen A→B diff between two snapshots: no live "now", so the window is the
 		// fixed span between the two capture times and there's nothing to refresh.
-		line = "  " + styleHeader.Render(" queries ") + "  " +
+		line = "  " + badge + "  " +
 			styleSelected.Render(s.stat.baselineAt.Format("15:04:05")) + mu(" → ") +
 			styleSelected.Render(s.stat.sampledAt.Format("15:04:05")) +
-			mu(fmt.Sprintf("  ·  snapshot diff (frozen)  ·  %d queries  ·  R for live · ↵ for detail", len(s.stat.rows)))
+			mu("  ·  snapshot diff (frozen)  ·  "+m.statementsCount(s)+"  ·  "+m.statementsHints(s, "R for live"))
 	case s.stat.baseSnap != nil:
 		// Disk baseline, live end: the window runs from the snapshot's capture time
 		// up to the latest live sample.
 		elapsed := max(s.stat.sampledAt.Sub(s.stat.baselineAt), 0)
-		line = "  " + styleHeader.Render(" queries ") + "  " +
+		line = "  " + badge + "  " +
 			mu("over the last ") + styleSelected.Render(fmtDuration(elapsed)) +
 			mu(" (since "+s.stat.baselineAt.Format("2006-01-02 15:04:05")+" snapshot) · live") +
-			mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t cadence · C columns · R for live · ↵ for detail",
-				len(s.stat.rows), m.refreshLabel()))
+			mu(fmt.Sprintf("  ·  %s  ·  refresh %s  ·  %s", m.statementsCount(s), m.refreshLabel(),
+				m.statementsHints(s, "t cadence · C columns · R for live")))
 	default:
 		elapsed := max(s.stat.sampledAt.Sub(s.stat.baselineAt), 0)
-		line = "  " + styleHeader.Render(" queries ") + "  " +
+		line = "  " + badge + "  " +
 			mu("over the last ") + styleSelected.Render(fmtDuration(elapsed)) +
 			mu(" (since "+s.stat.baselineAt.Format("15:04:05")+")") +
-			mu(fmt.Sprintf("  ·  %d queries  ·  refresh %s  ·  t cadence · C columns · R resets · S saves · L loads · ↵ for detail",
-				len(s.stat.rows), m.refreshLabel()))
+			mu(fmt.Sprintf("  ·  %s  ·  refresh %s  ·  %s", m.statementsCount(s), m.refreshLabel(),
+				m.statementsHints(s, "t cadence · C columns · R resets · S saves · L loads")))
 	}
 	if !s.stat.trackPlanning {
 		// The planning-time column is hidden (it would always read 0); point the
@@ -152,6 +139,37 @@ func (m *Model) renderStatementsHeader(s *screen) string {
 			mu(": ALTER SYSTEM SET pg_stat_statements.track_planning = on; SELECT pg_reload_conf();")
 	}
 	return line
+}
+
+// statementsCount names the view's rows for the header: the window's
+// statement count on the list, "N tables of M queries" on a roll-up, and
+// "table production · 61 of 3524 queries · esc widens" while the list is
+// narrowed to one group.
+func (m *Model) statementsCount(s *screen) string {
+	all := len(s.stat.rows)
+	switch {
+	case s.stat.view.grouped():
+		noun := s.stat.view.noun()
+		if len(s.items) != 1 {
+			noun += "s"
+		}
+		return fmt.Sprintf("%d %s of %d queries", len(s.items), noun, all)
+	case s.stat.group != nil:
+		return fmt.Sprintf("%s %s · %d of %d queries · esc widens",
+			s.stat.group.view.noun(), s.stat.group.key, s.narrowedCount(), all)
+	}
+	return fmt.Sprintf("%d queries", all)
+}
+
+// statementsHints is the header's key list: the tab target first (where the
+// next view leads), the window keys the caller passes for its case, and what
+// Enter does on the view's rows.
+func (m *Model) statementsHints(s *screen, window string) string {
+	enter := "↵ for detail"
+	if s.stat.view.grouped() {
+		enter = "↵ narrows"
+	}
+	return "tab " + s.stat.view.next().label() + " · " + window + " · " + enter
 }
 
 // refreshLabel describes the current auto-refresh state for the header and the
@@ -226,6 +244,15 @@ func (m *Model) renderStatementsInfo(height int) string {
 	b.WriteString("    " + mu("The grade is relative to the largest value visible in each column, so colours re-scale as the") + "\n")
 	b.WriteString("    " + mu("window changes; an all-zero column stays green. The detail view's blk/row uses fixed thresholds instead.") + "\n\n")
 
+	b.WriteString("  " + styleHeader.Render(" roll-ups ") + "  " +
+		mu("press ") + styleBadge.Render("tab") + mu(" — the same window grouped by table, then by type") + "\n")
+	b.WriteString("    " + mu("One row per main table (or per command type) with the same metrics pooled over its statements,") + "\n")
+	b.WriteString("    " + mu("a queries count, and a bar on whichever column you sort by — the heavy tables per metric at a glance.") + "\n")
+	b.WriteString("    " + styleBadge.Render("↵") + mu(" on a row narrows the list to that group's statements (the header says so), ") +
+		styleBadge.Render("esc") + mu(" widens it again;") + "\n")
+	b.WriteString("    " + mu("esc on a roll-up returns to the list. ") + styleBadge.Render("C") +
+		mu(" picks the roll-ups' own columns; d / u work on a table row.") + "\n\n")
+
 	b.WriteString("  " + styleHeader.Render(" describe ") + "  " +
 		mu("press ") + styleBadge.Render("d") + mu(" on a row") + "\n")
 	b.WriteString("    " + mu("Opens the table's \\d view — columns, indexes and constraints — so you can see, e.g.,") + "\n")
@@ -293,5 +320,9 @@ func (m *Model) renderStatementsInfo(height int) string {
 // columns are toggled with space/Enter; the mandatory query column and the
 // planning columns when track_planning is off are shown but not toggleable.
 func (m *Model) renderColumnConfig(s *screen, height int) string {
-	return stmtSpec.renderConfig(m, &m.stmtTable, stmtCtx{trackPlanning: s.stat.trackPlanning}, height)
+	ctx := stmtCtx{trackPlanning: s.stat.trackPlanning}
+	if v := s.stat.view; v.grouped() {
+		return stmtGroupSpec(v).renderConfig(m, &m.stmtGroupTable, ctx, height)
+	}
+	return stmtSpec.renderConfig(m, &m.stmtTable, ctx, height)
 }
