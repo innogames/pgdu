@@ -104,3 +104,68 @@ func TestGroupParams(t *testing.T) {
 		t.Errorf("out-of-range group = %+v", got)
 	}
 }
+
+func TestSubstituteParams(t *testing.T) {
+	cases := []struct {
+		sql    string
+		vals   []string
+		want   string
+		filled int
+	}{
+		{
+			"SELECT * FROM t WHERE id = $1 AND name = $2",
+			[]string{"'1213929'", "NULL"},
+			"SELECT * FROM t WHERE id = '1213929' AND name = NULL", 2,
+		},
+		// $1 repeated, and an ordinal past the logged list stays a placeholder.
+		{
+			"SELECT $1, $1, $3",
+			[]string{"'a'", "'b'"},
+			"SELECT 'a', 'a', $3", 2,
+		},
+		// Two-digit ordinals must not be clobbered by the one-digit ones.
+		{
+			"SELECT $1, $10, $11",
+			[]string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"},
+			"SELECT 1, 10, 11", 3,
+		},
+		// Placeholders quoted, commented or dollar-quoted are text, not slots.
+		{
+			"SELECT '$1', \"$1\", $$body $1$$ -- $1\n/* $1 */ WHERE a = $1",
+			[]string{"'x'"},
+			"SELECT '$1', \"$1\", $$body $1$$ -- $1\n/* $1 */ WHERE a = 'x'", 1,
+		},
+		// Nothing to fill: the caller shows no sample call.
+		{"SELECT now()", []string{"'x'"}, "SELECT now()", 0},
+		{"SELECT $1", nil, "SELECT $1", 0},
+		// A doubled quote inside a value keeps the literal closed.
+		{"SELECT $1", []string{"'it''s'"}, "SELECT 'it''s'", 1},
+		// Unterminated literal in the statement: copied through, no panic.
+		{"SELECT 'oops $1", []string{"'x'"}, "SELECT 'oops $1", 0},
+		{"DO $$ unterminated $1", []string{"'x'"}, "DO $$ unterminated $1", 0},
+		// A stray $ that opens no dollar quote must not swallow later slots.
+		{"SELECT $notclosed $1", []string{"'x'"}, "SELECT $notclosed 'x'", 1},
+	}
+	for _, c := range cases {
+		got, filled := SubstituteParams(c.sql, c.vals)
+		if got != c.want || filled != c.filled {
+			t.Errorf("SubstituteParams(%q, %q) = %q, %d; want %q, %d", c.sql, c.vals, got, filled, c.want, c.filled)
+		}
+	}
+}
+
+func TestBoundParamsAndTruncation(t *testing.T) {
+	// The literal fallback of Params must not reach a $n substitution.
+	inl := &Entry{SQL: []byte("SELECT pg_advisory_xact_lock('0', '17071')")}
+	if _, ok := BoundParams(inl); ok {
+		t.Error("inlined literals reported as bound parameters")
+	}
+	e := &Entry{Detail: []byte("Parameters: $1 = 'abc"), SQL: []byte("SELECT $1")}
+	vals, ok := BoundParams(e)
+	if !ok || !ParamsTruncated(vals) {
+		t.Errorf("truncated value not detected: %q, %v", vals, ok)
+	}
+	if ParamsTruncated([]string{"'a'", "NULL", "''"}) {
+		t.Error("complete values reported as truncated")
+	}
+}

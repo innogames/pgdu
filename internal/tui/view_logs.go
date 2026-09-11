@@ -305,7 +305,7 @@ func (m *Model) renderLogParamsLine(s *screen) string {
 		key := pglog.FormatParamKey(s.log.paramKey, s.log.paramFirst)
 		return "  " + mu("parameters: ") + collapseWS(key, max(m.width-20, 20)) + mu(fmt.Sprintf("  ·  %d entries", len(s.items)))
 	case s.log.params != logParamsOff:
-		hint := "one row per distinct parameter tuple (DETAIL line, or literals inlined in the SQL)"
+		hint := "one row per distinct parameter tuple (DETAIL or CONTEXT line, or literals inlined in the SQL)"
 		if s.log.params == logParamsFirst {
 			hint = "one row per distinct $1 — later parameters ignored"
 		}
@@ -670,6 +670,34 @@ func (m *Model) renderLogEntry(s *screen, height int) string {
 			}
 		}
 	}
+	// sampleSection is the log's answer to the top-queries "sample call": the
+	// statement with every $n replaced by the value logged for it (the DETAIL
+	// list, or an error's CONTEXT one), so what is on screen is the call as it
+	// ran. Bound values only — a statement whose constants were inlined already
+	// reads literally, and Params' literal fallback must never be spliced back
+	// into its own SQL.
+	sampleSection := func(sql []byte) {
+		if len(sql) == 0 {
+			return
+		}
+		vals, ok := pglog.BoundParams(e)
+		if !ok {
+			return
+		}
+		text, filled := pglog.SubstituteParams(strings.TrimLeft(string(sql), "\n"), vals)
+		if filled == 0 {
+			return
+		}
+		b.WriteString("\n  " + styleHeader.Render(" SAMPLE CALL ") + "\n")
+		note := "logged parameter values spliced in"
+		if pglog.ParamsTruncated(vals) {
+			note += "  ·  a value was cut short by log_parameter_max_length"
+		}
+		b.WriteString("  " + mu(note) + "\n")
+		for _, l := range highlightSQL(dedent(text), width) {
+			b.WriteString("  " + l + "\n")
+		}
+	}
 	if len(e.SQL) > 0 {
 		// Keep only the lead-in ("duration: N ms" / "execute <unnamed>:") —
 		// the SQL itself gets its own highlighted section.
@@ -681,6 +709,7 @@ func (m *Model) renderLogEntry(s *screen, height int) string {
 		}
 		section("MESSAGE", []byte(head), false)
 		section("STATEMENT", e.SQL, true)
+		sampleSection(e.SQL)
 		planSection(e.Plan)
 	} else {
 		section("MESSAGE", e.Message, false)
@@ -689,6 +718,11 @@ func (m *Model) renderLogEntry(s *screen, height int) string {
 	section("HINT", e.Hint, false)
 	section("CONTEXT", e.Context, strings.HasPrefix(string(e.Context), "SQL statement"))
 	section("STATEMENT", e.Statement, true)
+	if len(e.SQL) == 0 {
+		// An error's STATEMENT carries the placeholders; the slow-query shape
+		// already had its sample printed next to e.SQL above.
+		sampleSection(e.Statement)
+	}
 	section("QUERY", e.Query, true)
 	section("LOCATION", e.Location, false)
 
@@ -798,7 +832,7 @@ func (m *Model) renderLogsInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" keys ") + "\n")
 	keys := []struct{ k, d string }{
-		{"↵", "groups pane: open the group's entries · entry rows: the full record (message, DETAIL, STATEMENT highlighted)"},
+		{"↵", "groups pane: open the group's entries · entry rows: the full record (message, DETAIL, STATEMENT highlighted, plus the statement with its bound parameters spliced in)"},
 		{"tab", "cycle the panes: aggregated groups → chronological timeline → slow queries by duration → pooler stats (pgbouncer logs; tables sortable, C picks columns)"},
 		{"m", "section mode: by category ⇄ flat"},
 		{"f", "narrow both panes to one category: all → errors → … → all (only categories the window has); the WAL inspector's l lands here on checkpoints"},

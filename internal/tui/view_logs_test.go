@@ -803,3 +803,77 @@ func TestJumpToLogEntryLiftsCategory(t *testing.T) {
 		t.Error("a narrowing that keeps the target visible must stay")
 	}
 }
+
+// A logged statement whose parameters were bound gets a SAMPLE CALL section
+// with the values spliced in; one whose DETAIL is not a parameter list doesn't.
+func TestLogEntrySampleCall(t *testing.T) {
+	text := strings.Join([]string{
+		`2026-09-02 01:16:09 UTC [872039-3] herocity0@host LOG:  duration: 249.502 ms  execute <unnamed>: SELECT a.award_id, count(*) FROM master_player_award a WHERE a.player_id = $1 AND a.level > $2 GROUP BY a.award_id`,
+		`2026-09-02 01:16:09 UTC [872039-4] herocity0@host DETAIL:  Parameters: $1 = '1213929', $2 = NULL`,
+	}, "\n") + "\n"
+	r, err := pglog.Load(t.Context(), &memLogSource{data: []byte(text)}, "", time.UTC, 0, pglog.AggOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Entries) != 1 {
+		t.Fatalf("entries = %d", len(r.Entries))
+	}
+	m := &Model{width: 200, height: 40}
+	parent := &screen{level: levelLogs, tool: toolLogs, log: logState{report: r}}
+	m.stack = []*screen{{level: levelTools}, parent}
+	es := m.logEntryScreen(parent, &r.Entries[0])
+	es.loaded = true
+	body := stripANSI(m.renderLogEntry(es, 40))
+	for _, want := range []string{
+		"SAMPLE CALL",
+		"logged parameter values spliced in",
+		"WHERE a.player_id = '1213929'",
+		"AND a.level > NULL",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("entry body missing %q:\n%s", want, body)
+		}
+	}
+	// The placeholder form is still shown above it, unsubstituted.
+	if !strings.Contains(body, "a.player_id = $1") || !strings.Contains(body, "a.level > $2") {
+		t.Errorf("original statement lost:\n%s", body)
+	}
+
+	// An error routes its parameter list through CONTEXT
+	// (log_parameter_max_length_on_error), and its STATEMENT gets the sample.
+	errText := strings.Join([]string{
+		`2026-09-02 00:15:25 UTC [872628-1] herocity0@host ERROR:  duplicate key value violates unique constraint "channel_name_plugin_idx"`,
+		`2026-09-02 00:15:25 UTC [872628-2] herocity0@host DETAIL:  Key (name, plugin)=(player-to-player-1-2, chat) already exists.`,
+		`2026-09-02 00:15:25 UTC [872628-3] herocity0@host CONTEXT:  unnamed portal with parameters: $1 = 'chat', $2 = 'player-to-player-1-2', $3 = 'f'`,
+		`2026-09-02 00:15:25 UTC [872628-4] herocity0@host STATEMENT:  INSERT INTO channel(plugin, name, ephemeral) VALUES ($1, $2, $3) RETURNING id`,
+	}, "\n") + "\n"
+	re, err := pglog.Load(t.Context(), &memLogSource{data: []byte(errText)}, "", time.UTC, 0, pglog.AggOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pe := &screen{level: levelLogs, tool: toolLogs, log: logState{report: re}}
+	me := &Model{width: 200, height: 40, stack: []*screen{{level: levelTools}, pe}}
+	ee := me.logEntryScreen(pe, &re.Entries[0])
+	ee.loaded = true
+	if out := stripANSI(me.renderLogEntry(ee, 40)); !strings.Contains(out, "VALUES ('chat', 'player-to-player-1-2', 'f')") {
+		t.Errorf("CONTEXT parameters not spliced into the STATEMENT:\n%s", out)
+	}
+
+	// An error entry with neither list keeps its $n text alone.
+	m2, s2 := newLogTestModel(t)
+	var errEntry *pglog.Entry
+	for i := range s2.log.report.Entries {
+		if e := &s2.log.report.Entries[i]; len(e.Statement) > 0 {
+			errEntry = e
+			break
+		}
+	}
+	if errEntry == nil {
+		t.Fatal("no entry with a STATEMENT in the fixture")
+	}
+	es2 := m2.logEntryScreen(s2, errEntry)
+	es2.loaded = true
+	if out := stripANSI(m2.renderLogEntry(es2, 40)); strings.Contains(out, "SAMPLE CALL") {
+		t.Errorf("sample call on an entry without bound parameters:\n%s", out)
+	}
+}

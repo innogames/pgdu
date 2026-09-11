@@ -162,6 +162,10 @@ fails (missing/corrupt → empty).
   `Entry.Group` indexes `Report.Groups` (set by `Aggregate`); use it to walk a group's
   full membership, `Group.Samples` is capped. The group screen's tab (`log.params`)
   swaps the entry list for a generic `diagCols` table keyed by `pglog.ParamKey`.
+  The entry view ends the statement with a `SAMPLE CALL`: `pglog.SubstituteParams`
+  splices the logged bind values (`BoundParams` — the `Parameters:` DETAIL line, or the
+  list an error carries on CONTEXT) into the `$n` placeholders. Bound values only, since
+  `Params`' inlined-literal fallback would otherwise be spliced back into its own SQL.
   `log.cat`/`catOn` narrow both panes to one category (`f` cycles it, distinct from
   the text filter). The `l` cross-links (`logLinkFor`/`openLogLink` in
   `update_keys_openlog.go`: WAL → checkpoints, top queries → slow queries on the slow
