@@ -42,6 +42,7 @@ func (c *Client) QualstatsSamples(ctx context.Context, db string, queryID int64)
 		func(row pgx.CollectableRow) (QualSample, error) {
 			var s QualSample
 			err := row.Scan(&s.Relation, &s.Column, &s.Operator, &s.ConstValue, &s.Position, &s.Occurrences)
+			s.Truncated = qualConstTruncated(s.ConstValue)
 			return s, err
 		})
 }
@@ -120,31 +121,75 @@ func BuildSampleCall(query string, params []ParamType, real map[int]string) stri
 // pg_qualstats constant captured for that column — the most-frequent one, since
 // samples arrive occurrences-DESC (sqlQualstatsSamples). Best-effort: ordinals
 // with no resolvable column or no matching captured qual are simply absent.
-// ConstValue is already a cast-carrying literal (e.g. `'{…}'::text[]`,
-// `true::boolean`), so the result splices straight into the sample call — an
-// array constant lands inside a `col = ANY($n)` form unchanged. Pure (no DB).
+//
+// ConstValue is a cast-carrying literal (e.g. `'{…}'::text[]`, `true::boolean`)
+// that splices straight into the sample call when its shape matches the slot:
+// an array constant lands inside a `col = ANY($n)` form unchanged. The planner
+// folds `col IN ($1,…,$n)` into a single `col = ANY('{…}')` qual, though, so
+// pg_qualstats then holds one array for a run of scalar placeholders; its
+// elements are dealt out across that column's ordinals in order, and any
+// ordinal beyond the last element stays absent for the caller's fallbacks.
+// Constants cut at PGQS_CONSTANT_SIZE (qualConstTruncated) are never spliced as
+// they are: a truncated scalar is skipped, a truncated array contributes only
+// its complete elements. Pure (no DB).
 func MapQualConstants(query string, params []ParamType, samples []QualSample) map[int]string {
 	cols := paramColumns(query)
 	if len(cols) == 0 || len(samples) == 0 {
 		return nil
 	}
-	// First value wins per column (samples are occurrences-DESC), matched
+	// First usable value wins per column (samples are occurrences-DESC), matched
 	// case-insensitively to the parsed column the same way SampleParamValues does.
+	// A truncated scalar is useless, so a rarer but complete value beats it; a
+	// truncated array still has real elements and is kept when nothing better comes.
 	byCol := make(map[string]string, len(samples))
 	for _, s := range samples {
 		if s.Column == "" || s.ConstValue == "" {
 			continue
 		}
 		k := strings.ToLower(s.Column)
-		if _, seen := byCol[k]; !seen {
+		prev, seen := byCol[k]
+		switch {
+		case !seen:
+			if _, _, _, isArr := qualArrayConst(s.ConstValue); isArr || !s.Truncated {
+				byCol[k] = s.ConstValue
+			}
+		case s.Truncated:
+		case qualConstTruncated(prev):
 			byCol[k] = s.ConstValue
 		}
 	}
-	out := map[int]string{}
+	// Ordinals per column in $n order, so array elements are dealt out the way
+	// the IN list spelled them.
+	typ := make(map[int]string, len(params))
+	byColOrds := map[string][]int{}
 	for _, p := range params {
 		if col, ok := cols[p.Ordinal]; ok {
-			if lit, ok := byCol[strings.ToLower(col)]; ok {
-				out[p.Ordinal] = lit
+			k := strings.ToLower(col)
+			if _, ok := byCol[k]; ok {
+				byColOrds[k] = append(byColOrds[k], p.Ordinal)
+				typ[p.Ordinal] = p.Type
+			}
+		}
+	}
+	out := map[int]string{}
+	for k, ords := range byColOrds {
+		slices.Sort(ords)
+		lit := byCol[k]
+		elems, _, complete, isArr := qualArrayConst(lit)
+		for i, ord := range ords {
+			switch {
+			case !isArr:
+				out[ord] = lit
+			case isArrayType(typ[ord]):
+				// `col = ANY($n)`: the whole array is the value. Re-encode a truncated
+				// one from its complete elements so the cast and closing quote are back.
+				if complete {
+					out[ord] = lit
+				} else if len(elems) > 0 {
+					out[ord] = arrayLiteral(elems, typ[ord])
+				}
+			case i < len(elems):
+				out[ord] = elemLiteral(elems[i], typ[ord])
 			}
 		}
 	}
@@ -152,6 +197,11 @@ func MapQualConstants(query string, params []ParamType, samples []QualSample) ma
 		return nil
 	}
 	return out
+}
+
+// isArrayType reports whether a regtype name from InferParams denotes an array.
+func isArrayType(regtype string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(regtype)), "[]")
 }
 
 // ResolveSampleParams decides the literal and source for each $n placeholder,

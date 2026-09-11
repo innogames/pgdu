@@ -60,11 +60,11 @@ func BoundParams(e *Entry) (vals []string, ok bool) {
 // text after "parameters: ", required to start at a $n so an unrelated mention
 // of the word cannot be mistaken for one.
 func contextParams(ctx []byte) ([]byte, bool) {
-	i := bytes.Index(ctx, ctxParamsMark)
-	if i < 0 {
+	_, after, ok := bytes.Cut(ctx, ctxParamsMark)
+	if !ok {
 		return nil, false
 	}
-	rest := bytes.TrimLeft(ctx[i+len(ctxParamsMark):], " ")
+	rest := bytes.TrimLeft(after, " ")
 	if len(rest) == 0 || rest[0] != '$' {
 		return nil, false
 	}

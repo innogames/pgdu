@@ -166,6 +166,12 @@ type item struct {
 	// drill can look the full QueryStat back up from screen.statRows.
 	statQueryID int64
 
+	// stmtGroupKey is the full aggregation key of a grouped top-queries row
+	// (Tab on levelStatements): the qualified pg.MainTable result or the
+	// QueryKind tag. item.name carries the display form (public. stripped) so
+	// the / filter matches what the user sees; Enter/d/u resolve by this key.
+	stmtGroupKey string
+
 	// diagRow is 1 + the row's index into screen.diagResult.Rows on
 	// levelDiagnosticResult (0 = not a diagnostic row). It survives sorting
 	// and lets actions read the full, unprojected row — item.data only holds
@@ -316,6 +322,17 @@ type stmtState struct {
 	// renderer's column index (diagSortCol) back to a stable column id so the
 	// cycle-sort can record the active column by identity (see m.stmtTable.sortColID).
 	cols []stmtColDesc
+
+	// view is the table's Tab-cycled projection of the same window: the
+	// per-statement list or a roll-up by main table / command type. group
+	// narrows the per-statement list to one roll-up row's members (Enter on a
+	// grouped row; Esc widens) — a structured filter, since a type group has
+	// no text the / filter could match. groupCols is the grouped views'
+	// counterpart of cols (exactly one of the two is non-nil after a rebuild,
+	// so cycleSort knows which picker's sort memory to write).
+	view      stmtView
+	group     *stmtGroupFilter
+	groupCols []stmtGroupColDesc
 
 	// Top-queries state (levelStatements). baseline is the snapshot taken
 	// when the tool was entered (or last re-baselined); every refresh diffs
@@ -891,9 +908,10 @@ type Model struct {
 	// visibility change; the projected index screen.diagSortCol is recomputed
 	// each rebuild — and the modal picker overlay flag + cursor. The static
 	// half (registry, prefs key, sort fallback) is each table's colSpec.
-	stmtTable colTable[stmtColID]
-	actTable  colTable[actColID]
-	tblTable  colTable[tblColID]
+	stmtTable      colTable[stmtColID]
+	stmtGroupTable colTable[stmtColID] // the by-table / by-type roll-ups (Tab on levelStatements)
+	actTable       colTable[actColID]
+	tblTable       colTable[tblColID]
 
 	// Tuple byte-layout overlay (Enter on levelHeapTuples). The cursor walks the
 	// legend rows; the offset is the legend's scroll window start. The loaded
@@ -1089,6 +1107,9 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 		}
 		if v := colPrefs.Columns(colPrefsQueries); len(v) > 0 {
 			m.stmtTable.visible = colVisFromStrings[stmtColID](v)
+		}
+		if v := colPrefs.Columns(colPrefsQueryGroups); len(v) > 0 {
+			m.stmtGroupTable.visible = colVisFromStrings[stmtColID](v)
 		}
 		if v := colPrefs.Columns(colPrefsTableStats); len(v) > 0 {
 			m.tblTable.visible = colVisFromStrings[tblColID](v)

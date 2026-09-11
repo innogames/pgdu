@@ -65,14 +65,7 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 		}
 		s.stat.baselineAt = s.stat.sampledAt
 		s.stat.rows = nil
-		s.items = s.items[:0]
-		s.stat.windowExecMs = 0
-		descs := stmtSpec.visibleCols(&m.stmtTable, stmtCtx{trackPlanning: s.stat.trackPlanning})
-		m.defaultStatementSort(s)
-		s.stat.cols = descs
-		s.diagCols = diagColumnsFrom(descs)
-		s.diagBarCol = -1
-		stmtSpec.syncSort(&m.stmtTable, s, descs)
+		m.rebuildStatementItems(s)
 		return nil
 	}
 
@@ -97,27 +90,64 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 }
 
 // rebuildStatementItems regenerates the top-queries table from the already-fetched
-// window deltas (s.statRows) for the current column-visibility set and
-// track_planning state — no DB round-trip. Used by every load site and by the C
-// column-config toggles so the columns, cells, footer and sort stay consistent.
+// window deltas (s.stat.rows) for the current view (Tab), group narrowing
+// (Enter/Esc), column-visibility set and track_planning state — no DB
+// round-trip. Used by every load site, the view/narrowing keys and the C
+// column-config toggles so the columns, cells, footer, bar and sort stay
+// consistent. The time% denominator is always the whole window, whichever
+// rows the view shows.
 func (m *Model) rebuildStatementItems(s *screen) {
 	// First population of this screen: a baseline installed by the entry picker
 	// (cumulative, disk snapshot, frozen window) bypasses the live first-load
 	// branch above, so the default sort has to be applied here as well —
 	// otherwise the screen keeps its zero-value ascending direction.
-	if s.stat.cols == nil {
+	if s.stat.cols == nil && s.stat.groupCols == nil {
 		m.defaultStatementSort(s)
 	}
-	items, descs, windowMs, total := m.buildStatementItems(s.stat.rows, s.stat.trackPlanning)
-	s.items = items
-	s.stat.cols = descs
-	s.diagCols = diagColumnsFrom(descs)
+	windowMs := windowExecMs(s.stat.rows)
+	var total []pg.DiagCell
+	if v := s.stat.view; v.grouped() {
+		var descs []stmtGroupColDesc
+		s.items, descs, total = m.buildStatementGroupItems(v, s.stat.rows, windowMs, s.stat.trackPlanning)
+		s.stat.groupCols, s.stat.cols = descs, nil
+		s.diagCols = diagColumnsFrom(descs)
+		stmtGroupSpec(v).syncSort(&m.stmtGroupTable, s, descs)
+	} else {
+		rows := s.stat.rows
+		if s.stat.group != nil {
+			rows = make([]pg.QueryStat, 0, len(s.stat.rows))
+			for _, q := range s.stat.rows {
+				if s.stat.group.matches(q) {
+					rows = append(rows, q)
+				}
+			}
+		}
+		var descs []stmtColDesc
+		s.items, descs, total = m.buildStatementItems(rows, windowMs, s.stat.trackPlanning)
+		s.stat.cols, s.stat.groupCols = descs, nil
+		s.diagCols = diagColumnsFrom(descs)
+		stmtSpec.syncSort(&m.stmtTable, s, descs)
+	}
 	s.stat.windowExecMs = windowMs
 	s.diagTotalRow = total
-	s.diagBarCol = -1
 	s.diagMetricsDirty = true
-	stmtSpec.syncSort(&m.stmtTable, s, descs)
+	m.syncStmtBar(s)
 	m.applySort(s)
+}
+
+// narrowedCount is the number of window rows the group narrowing keeps (the
+// header's "N of M queries"); the whole window when nothing is narrowed.
+func (s *screen) narrowedCount() int {
+	if s.stat.group == nil {
+		return len(s.stat.rows)
+	}
+	n := 0
+	for _, q := range s.stat.rows {
+		if s.stat.group.matches(q) {
+			n++
+		}
+	}
+	return n
 }
 
 // defaultStatementSort puts a freshly opened top-queries table in its default
@@ -468,10 +498,16 @@ func sampleItems(samples []pg.QualSample) []item {
 }
 
 // sampleLabel renders a captured qual as "table.column op value", falling back
-// to bare value (then "=") when pg_qualstats couldn't resolve the left side.
+// to bare value (then "=") when pg_qualstats couldn't resolve the left side. A
+// value cut at the extension's 80-byte constant buffer says so, since what is
+// shown is only the head of the real constant.
 func sampleLabel(sm pg.QualSample) string {
+	val := sm.ConstValue
+	if sm.Truncated {
+		val += "… (cut at 80 chars by pg_qualstats)"
+	}
 	if sm.Column == "" {
-		return sm.ConstValue
+		return val
 	}
 	col := sm.Column
 	if sm.Relation != "" {
@@ -481,7 +517,7 @@ func sampleLabel(sm pg.QualSample) string {
 	if op == "" {
 		op = "="
 	}
-	return col + " " + op + " " + sm.ConstValue
+	return col + " " + op + " " + val
 }
 
 func (m *Model) onStatementExplainLoaded(msg statementExplainLoadedMsg) tea.Cmd {

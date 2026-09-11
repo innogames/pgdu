@@ -768,3 +768,110 @@ func TestStatementsQueryVersionColumns(t *testing.T) {
 		t.Error("builder mangled the LIKE filter literal %")
 	}
 }
+
+// The IN-list case from the field: the planner folds `id IN ($1,…,$n)` into one
+// `id = ANY('{…}')` qual, so pg_qualstats holds a single array constant — cut at
+// its 80-byte buffer — for a run of scalar placeholders. The complete elements
+// must be dealt out across the ordinals, never the raw prefix into every slot.
+func TestMapQualConstantsINListArray(t *testing.T) {
+	query := "select id from woa_hero_snapshot w where w.id in ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"
+	params := make([]ParamType, 10)
+	for i := range params {
+		params[i] = ParamType{Ordinal: i + 1, Type: "bigint"}
+	}
+	cut := "'{18396145,18396144,18396161,18396164,18396162,18396142,18396154,18396166,18396"
+	if len(cut) != pgqsConstantSize-1 {
+		t.Fatalf("fixture is %d chars, want %d (as the extension truncates)", len(cut), pgqsConstantSize-1)
+	}
+	samples := []QualSample{{Column: "id", ConstValue: cut, Truncated: true, Occurrences: 1}}
+	want := map[int]string{
+		1: "'18396145'::bigint", 2: "'18396144'::bigint", 3: "'18396161'::bigint", 4: "'18396164'::bigint",
+		5: "'18396162'::bigint", 6: "'18396142'::bigint", 7: "'18396154'::bigint", 8: "'18396166'::bigint",
+		// $9 (the cut-off element) and $10 stay open for the live-table fallback.
+	}
+	if got := MapQualConstants(query, params, samples); !reflect.DeepEqual(got, want) {
+		t.Errorf("MapQualConstants()\n got: %+v\nwant: %+v", got, want)
+	}
+
+	// A complete short array dealt across a shorter IN list, and the same array
+	// spliced whole into an array slot; a truncated array in an array slot is
+	// re-encoded from its complete elements.
+	short := []QualSample{{Column: "id", ConstValue: "'{7,8,\"9,0\",NULL}'::bigint[]", Occurrences: 3}}
+	got := MapQualConstants("select 1 from t where id in ($1,$2)", params[:2], short)
+	if want := map[int]string{1: "'7'::bigint", 2: "'8'::bigint"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("short IN list\n got: %+v\nwant: %+v", got, want)
+	}
+	arr := []ParamType{{Ordinal: 1, Type: "bigint[]"}}
+	got = MapQualConstants("select 1 from t where id = any($1)", arr, short)
+	if want := map[int]string{1: short[0].ConstValue}; !reflect.DeepEqual(got, want) {
+		t.Errorf("complete array slot\n got: %+v\nwant: %+v", got, want)
+	}
+	got = MapQualConstants("select 1 from t where id = any($1)", arr, samples)
+	if want := map[int]string{1: `'{"18396145","18396144","18396161","18396164","18396162","18396142","18396154","18396166"}'::bigint[]`}; !reflect.DeepEqual(got, want) {
+		t.Errorf("truncated array slot\n got: %+v\nwant: %+v", got, want)
+	}
+
+	// A truncated scalar is dropped; a rarer complete one for the same column wins.
+	scal := []QualSample{
+		{Column: "name", ConstValue: "'" + strings.Repeat("x", 78), Truncated: true, Occurrences: 9},
+		{Column: "name", ConstValue: "'short'::text", Occurrences: 2},
+	}
+	got = MapQualConstants("select 1 from t where name = $1", []ParamType{{Ordinal: 1, Type: "text"}}, scal)
+	if want := map[int]string{1: "'short'::text"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("truncated scalar\n got: %+v\nwant: %+v", got, want)
+	}
+	if got := MapQualConstants("select 1 from t where name = $1", []ParamType{{Ordinal: 1, Type: "text"}}, scal[:1]); got != nil {
+		t.Errorf("lone truncated scalar: got %+v, want nil", got)
+	}
+}
+
+func TestQualArrayConst(t *testing.T) {
+	cases := []struct {
+		in       string
+		elems    []string
+		typ      string
+		complete bool
+		ok       bool
+	}{
+		{`'{a,b}'::text[]`, []string{"a", "b"}, "text", true, true},
+		{`'{"x,y","q\"z",NULL,"NULL"}'::text[]`, []string{"x,y", `q"z`, "NULL", `"NULL"`}, "text", true, true},
+		{`'{}'::int4[]`, nil, "int4", true, true},
+		{`'{1,2,3`, []string{"1", "2"}, "", false, true},
+		{`'{"ab","c`, []string{"ab"}, "", false, true},
+		{`'abc'::text`, nil, "", false, false},
+		{`42`, nil, "", false, false},
+	}
+	for _, c := range cases {
+		elems, typ, complete, ok := qualArrayConst(c.in)
+		if !reflect.DeepEqual(elems, c.elems) || typ != c.typ || complete != c.complete || ok != c.ok {
+			t.Errorf("qualArrayConst(%s) = %q %q %v %v, want %q %q %v %v", c.in, elems, typ, complete, ok, c.elems, c.typ, c.complete, c.ok)
+		}
+	}
+	if got := elemLiteral(`q"z`, "text"); got != `'q"z'::text` {
+		t.Errorf("elemLiteral = %s", got)
+	}
+	if got := elemLiteral(`"NULL"`, "text"); got != `'NULL'::text` {
+		t.Errorf("elemLiteral quoted NULL = %s", got)
+	}
+	if got := elemLiteral("it's", "text"); got != `'it''s'::text` {
+		t.Errorf("elemLiteral quote = %s", got)
+	}
+}
+
+func TestQualConstTruncated(t *testing.T) {
+	for v, want := range map[string]bool{
+		"'{1,2,3":                                 true,
+		"'" + strings.Repeat("x", 78):             true,
+		"'" + strings.Repeat("x", 77) + "'":       true, // cut right after the closing quote, cast lost
+		"'" + strings.Repeat("x", 70) + "'::text": false,
+		"'abc'::text":                             false,
+		"42":                                      false,
+		"true::boolean":                           false,
+		"'{a,b}'::text[]":                         false,
+		"'it''s'::text":                           false,
+	} {
+		if got := qualConstTruncated(v); got != want {
+			t.Errorf("qualConstTruncated(%q) = %v, want %v", v, got, want)
+		}
+	}
+}
