@@ -30,6 +30,7 @@ func (m *Model) openTupleLayout(s *screen, lp int32) tea.Cmd {
 	m.showTupleLayout = true
 	m.tupleLayoutCursor, m.tupleLayoutOffset = 0, 0
 	m.tupleLayoutSort, m.tupleLayoutSortDesc = pageinspect.SortOffset, false
+	m.showTupleValue = false
 	return m.reloadTupleAttrs(s, lp)
 }
 
@@ -48,6 +49,7 @@ func (m *Model) reloadTupleAttrs(s *screen, lp int32) tea.Cmd {
 // tupleAttrsLoadedMsg can't repopulate a closed overlay.
 func (m *Model) closeTupleLayout(s *screen) {
 	m.showTupleLayout = false
+	m.showTupleValue = false
 	s.pages.tupleAttrsLP = 0
 	s.pages.tupleAttrs = nil
 	s.pages.tupleAttrsErr = nil
@@ -57,7 +59,8 @@ func (m *Model) closeTupleLayout(s *screen) {
 // handleTupleLayoutKey drives the modal tuple byte-layout overlay (Enter on a
 // heap tuple): Up/Down/PgUp/PgDn/Top/Bottom move the legend cursor, ←/→ and r
 // control the sort, space reloads the split, ? toggles the reference overlay,
-// and enter/esc/q close. Everything else is swallowed so the list beneath
+// enter opens the value pane on a column (see handleTupleValueKey) and
+// esc/q close. Everything else is swallowed so the list beneath
 // never moves. Quit still quits. Cursor moves may overshoot — the renderer
 // clamps to the segment count (same contract as handleInfoKey/scrollWindow).
 func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyMsg) tea.Cmd {
@@ -65,6 +68,11 @@ func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 	// ?/esc dismiss it (back to the layout), exactly like the level infos.
 	if m.showInfo {
 		return m.handleInfoKey(msg)
+	}
+	// The value pane sits between the two: it captures the scroll keys, and the
+	// layout reference still opens on top of it.
+	if m.showTupleValue {
+		return m.handleTupleValueKey(msg)
 	}
 	switch {
 	case key.Matches(msg, m.keys.Quit):
@@ -74,11 +82,18 @@ func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 		m.infoOffset = 0
 	case key.Matches(msg, m.keys.Enter):
 		// ENTER on a TOAST-pointer row jumps to that value's TOAST relation in
-		// the page inspector; on any other row it just closes the overlay.
-		if oid, chunk, ok := m.tupleLayoutToastUnderCursor(s); ok {
+		// the page inspector; on a column holding bytes it opens the value pane,
+		// since the legend row only has room for a prefix of a long value; on
+		// any other row it just closes the overlay.
+		switch oid, chunk, ok := m.tupleLayoutToastUnderCursor(s); {
+		case ok:
 			return m.openToastChunkNav(s, oid, chunk)
+		case m.tupleLayoutValueUnderCursor(s):
+			m.showTupleValue = true
+			m.tupleValueOffset = 0
+		default:
+			m.closeTupleLayout(s)
 		}
-		m.closeTupleLayout(s)
 	case key.Matches(msg, m.keys.Back):
 		m.closeTupleLayout(s)
 	case key.Matches(msg, m.keys.Describe):
@@ -151,6 +166,54 @@ func (m *Model) tupleLayoutToastUnderCursor(s *screen) (toastOID, chunkID uint32
 	}
 	chunkID, toastOID, ok = pageinspect.ToastPointerRef(seg.Attr.Value)
 	return toastOID, chunkID, ok
+}
+
+// handleTupleValueKey drives the value pane nested in the layout overlay: the
+// scroll keys move its window (scrollWindow clamps, same contract as
+// handleInfoKey), ? opens the layout reference on top, enter/esc return to the
+// legend. Everything else is swallowed so neither the legend nor the list
+// beneath it moves. Quit still quits.
+func (m *Model) handleTupleValueKey(msg tea.KeyMsg) tea.Cmd {
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return tea.Quit
+	case key.Matches(msg, m.keys.Help):
+		m.showInfo = true
+		m.infoOffset = 0
+	case key.Matches(msg, m.keys.Enter), key.Matches(msg, m.keys.Back):
+		m.showTupleValue = false
+	case key.Matches(msg, m.keys.Up):
+		m.tupleValueOffset = max(m.tupleValueOffset-1, 0)
+	case key.Matches(msg, m.keys.Down):
+		m.tupleValueOffset++ // clamped by scrollWindow
+	case key.Matches(msg, m.keys.PageUp):
+		m.tupleValueOffset = max(m.tupleValueOffset-m.pageStep(), 0)
+	case key.Matches(msg, m.keys.PageDown):
+		m.tupleValueOffset += m.pageStep() // clamped by scrollWindow
+	case key.Matches(msg, m.keys.Top):
+		m.tupleValueOffset = 0
+	case key.Matches(msg, m.keys.Bottom):
+		m.tupleValueOffset = math.MaxInt32 // clamped by scrollWindow
+	}
+	return nil
+}
+
+// tupleLayoutValueUnderCursor reports whether the highlighted segment has
+// content a pane of its own can show more of: a column with stored bytes, whose
+// decoded value and hex the legend row can only spell a prefix of. Header
+// fields, padding and the null bitmap are already spelled out in place, so
+// ENTER keeps closing the overlay there.
+func (m *Model) tupleLayoutValueUnderCursor(s *screen) bool {
+	seg, ok := m.tupleLayoutSegUnderCursor(s)
+	return ok && tupleSegDrills(seg)
+}
+
+// tupleSegDrills is the legend's drill predicate — what paints the ↵ in front
+// of a row and what Enter acts on there: a column with stored bytes opens the
+// value pane (or, for a TOAST pointer, the chunk pages). Kept as one function
+// so the mark and the key can't disagree.
+func tupleSegDrills(seg pageinspect.Seg) bool {
+	return seg.Kind == pageinspect.SegColumn && seg.Attr != nil && len(seg.Attr.Value) > 0
 }
 
 // openToastChunkNav closes the overlay and pushes a loading heap-pages screen

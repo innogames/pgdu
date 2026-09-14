@@ -554,31 +554,9 @@ func decodeHeapAttr(b []byte, off int, a pg.WALHeapAttr) (string, int, bool) {
 // hexDumpItems renders bytes as classic 16-per-line hex + ASCII rows, one item
 // per line so the list core scrolls them.
 func hexDumpItems(b []byte) []item {
-	out := make([]item, 0, (len(b)+15)/16)
-	for off := 0; off < len(b); off += 16 {
-		end := min(off+16, len(b))
-		chunk := b[off:end]
-		var hx strings.Builder
-		for i := range 16 {
-			if i == 8 {
-				hx.WriteByte(' ')
-			}
-			if i < len(chunk) {
-				fmt.Fprintf(&hx, "%02x ", chunk[i])
-			} else {
-				hx.WriteString("   ")
-			}
-		}
-		ascii := make([]byte, len(chunk))
-		for i, c := range chunk {
-			if c >= 0x20 && c <= 0x7e {
-				ascii[i] = c
-			} else {
-				ascii[i] = '.'
-			}
-		}
-		key := fmt.Sprintf("%04x", off)
-		value := hx.String() + " " + styleMuted.Render("|"+string(ascii)+"|")
+	out := make([]item, 0, (len(b)+hexDumpWidth-1)/hexDumpWidth)
+	for off := 0; off < len(b); off += hexDumpWidth {
+		key, value := hexDumpRow(b[off:min(off+hexDumpWidth, len(b))], off)
 		out = append(out, item{name: key, detail: value, data: walDetailRow{key: key, value: value, styled: true}})
 	}
 	return out

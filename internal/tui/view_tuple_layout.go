@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -67,6 +69,7 @@ func (m *Model) renderTupleLayoutInfo(height int) string {
 	b.WriteString("    " + padRight("unaccounted", 14) + mu("bytes the walk couldn't attribute — shown red, never guessed at") + "\n\n")
 
 	b.WriteString("  " + mu("bar and rows share colours; ↑/↓ highlights a segment in both · ←/→ change sort, r reverses · Σ must equal lp_len · d describes the table") + "\n")
+	b.WriteString("  " + mu("enter on a column opens its whole value — wrapped instead of cut to one row, json re-indented, with the stored bytes dumped below it") + "\n")
 
 	return padInfo(&b, height)
 }
@@ -78,6 +81,9 @@ func (m *Model) renderTupleLayoutInfo(height int) string {
 func (m *Model) renderTupleLayout(s *screen, height int) string {
 	if m.showInfo {
 		return scrollWindow(m.renderTupleLayoutInfo(height), &m.infoOffset, height)
+	}
+	if m.showTupleValue {
+		return scrollWindow(m.renderTupleValue(s), &m.tupleValueOffset, height)
 	}
 	mu := styleMuted.Render
 	var b strings.Builder
@@ -104,6 +110,8 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 	title += mu("  ·  sort: "+m.tupleLayoutSort.Label()+arrow) + mu("  ·  ")
 	if _, _, ok := m.tupleLayoutToastUnderCursor(s); ok {
 		title += styleBadge.Render("↵") + mu(" → toast pages · ")
+	} else if m.tupleLayoutValueUnderCursor(s) {
+		title += styleBadge.Render("↵") + mu(" → value · ")
 	}
 	title += styleBadge.Render("d") + mu(" describe · ") +
 		styleBadge.Render("esc") + mu(" to dismiss · ") +
@@ -178,6 +186,7 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 	header := "      " +
 		padRight(sortMark("bytes", m.tupleLayoutSort == pageinspect.SortBytes, m.tupleLayoutSortDesc), 7) +
 		padRight(sortMark("offset", m.tupleLayoutSort == pageinspect.SortOffset, m.tupleLayoutSortDesc), atW+2) +
+		strings.Repeat(" ", colMark) + // drillMark slot ("↵ ")
 		padRight(sortMark("column", m.tupleLayoutSort == pageinspect.SortColumn, m.tupleLayoutSortDesc), nameW+2) +
 		padRight("type", typeW+2) + padRight("class", classW+2) + "value"
 	b.WriteString(mu(header) + "\n")
@@ -207,7 +216,7 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 		// The value column gets every remaining cell: the decoded value when
 		// the byte decoder managed one, otherwise a hex preview of the raw
 		// bytes ("\x" + 2 hex chars per byte + a possible ellipsis).
-		room := m.width - (6 + 7 + atW + 2 + nameW + 2 + typeW + 2 + classW + 2)
+		room := m.width - (6 + 7 + atW + 2 + colMark + nameW + 2 + typeW + 2 + classW + 2)
 		val := sg.Value
 		if val == "" && sg.Kind == pageinspect.SegColumn && len(sg.Attr.Value) > 0 {
 			val = previewBytes(sg.Attr.Value, max(4, (room-3)/2))
@@ -227,7 +236,7 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 
 		b.WriteString(cursor + styles[i].Render("▇") + "  " +
 			fmt.Sprintf("%4d B", sg.Bytes) + "  " + padRight(at, atW) + "  " +
-			nameCell + "  " + padRight(typ, typeW) + "  " +
+			drillMark(tupleSegDrills(sg)) + nameCell + "  " + padRight(typ, typeW) + "  " +
 			mu(padRight(sg.Class, classW)) + "  " + val + "\n")
 	}
 
@@ -270,4 +279,64 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 	}
 
 	return padInfo(&b, height)
+}
+
+// renderTupleValue is the value pane nested in the byte-layout overlay (Enter
+// on a column segment): the column's whole decoded value, wrapped to the
+// terminal instead of cut to the one legend row, followed by a hex dump of the
+// bytes it occupies on the page. Unscrolled — renderTupleLayout runs it through
+// scrollWindow.
+func (m *Model) renderTupleValue(s *screen) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+	b.WriteString("\n")
+
+	// The legend cursor can't move while the pane is up, so the segment only
+	// changes under it when a stale reload lands — say so instead of showing
+	// another column's bytes.
+	sg, ok := m.tupleLayoutSegUnderCursor(s)
+	if !ok || sg.Kind != pageinspect.SegColumn || sg.Attr == nil {
+		b.WriteString("  " + mu("value gone — the tuple was reloaded; esc goes back") + "\n")
+		return b.String()
+	}
+
+	title := "  " + styleSelected.Render("value") + mu("  ·  ") + styleColName.Render(sg.Name()) +
+		mu("  ·  "+sg.Attr.TypeName+"  ·  "+sg.Class+fmt.Sprintf("  ·  %d B", sg.Bytes))
+	if sg.Bytes > 0 {
+		title += mu(fmt.Sprintf("  ·  bytes %d–%d", sg.Start, sg.Start+sg.Bytes-1))
+	}
+	title += mu("  ·  ") + styleBadge.Render("esc") + mu(" back · ") +
+		styleBadge.Render("↑/↓") + mu(" scroll · ") + styleBadge.Render("?") + mu(" help")
+	b.WriteString(title + "\n\n")
+
+	// A value that only decoded to hex says nothing the dump below doesn't say
+	// better (offsets, ascii), so it's shown once, not twice.
+	if val := reindentJSON(sg.Value); val != "" && !strings.HasPrefix(val, `\x`) {
+		b.WriteString("  " + styleHeader.Render(" decoded ") + "\n")
+		for _, ln := range wrapPlain(val, max(m.width-4, 20)) {
+			b.WriteString("  " + ln + "\n")
+		}
+		b.WriteString("\n")
+	}
+	raw := sg.Attr.Value
+	b.WriteString("  " + styleHeader.Render(" stored bytes ") + "  " +
+		mu(fmt.Sprintf("%d B at tuple offset %d", len(raw), sg.Start)) + "\n")
+	for off := 0; off < len(raw); off += hexDumpWidth {
+		at, dump := hexDumpRow(raw[off:min(off+hexDumpWidth, len(raw))], off)
+		b.WriteString("  " + mu(at) + "  " + dump + "\n")
+	}
+	return b.String()
+}
+
+// reindentJSON re-indents a decoded value that happens to be a JSON document
+// (jsonb's binary tree comes back as one canonical line) so a nested document
+// reads as a tree. Best effort and shape-driven, not type-driven: anything
+// json.Indent rejects — a hex fallback, a plain string, a TOAST annotation —
+// comes back untouched.
+func reindentJSON(v string) string {
+	var out bytes.Buffer
+	if err := json.Indent(&out, []byte(v), "", "  "); err != nil {
+		return v
+	}
+	return out.String()
 }

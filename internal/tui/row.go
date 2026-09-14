@@ -459,6 +459,37 @@ func padInfo(b *strings.Builder, height int) string {
 	return b.String()
 }
 
+// hexDumpWidth is the bytes-per-line of the hex dumps (the classic 16).
+const hexDumpWidth = 16
+
+// hexDumpRow renders one classic hex-dump line for the bytes at offset off:
+// the offset label and the "hex … |ascii|" body, returned as two cells rather
+// than one string so a key/value list (hexDumpItems) and a plain pane (the
+// tuple value view) can each keep their own gutter. chunk may be short — the
+// last line pads its hex columns so the ascii block stays aligned.
+func hexDumpRow(chunk []byte, off int) (at, dump string) {
+	var hx strings.Builder
+	for i := range hexDumpWidth {
+		if i == 8 {
+			hx.WriteByte(' ')
+		}
+		if i < len(chunk) {
+			fmt.Fprintf(&hx, "%02x ", chunk[i])
+		} else {
+			hx.WriteString("   ")
+		}
+	}
+	ascii := make([]byte, len(chunk))
+	for i, c := range chunk {
+		if c >= 0x20 && c <= 0x7e {
+			ascii[i] = c
+		} else {
+			ascii[i] = '.'
+		}
+	}
+	return fmt.Sprintf("%04x", off), hx.String() + " " + styleMuted.Render("|"+string(ascii)+"|")
+}
+
 // swatch renders the legend colour block used by the `?` reference overlays.
 func swatch(style lipgloss.Style) string { return style.Render("▇") }
 
