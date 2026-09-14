@@ -118,10 +118,21 @@ func (m *Model) renderWALSummary(s *screen) string {
 	mu := styleMuted.Render
 	indent := strings.Repeat(" ", 8)
 
-	pos := "  " + styleHeader.Render(" WAL ") + "  " +
-		mu("insert ") + styleSelected.Render(sum.InsertLSN) +
-		mu("  ·  flush ") + sum.FlushLSN +
-		mu("  ·  segment ") + sum.CurrentFile +
+	// A standby has no write head: the two positions it does have are what
+	// the walreceiver has fetched and what recovery has replayed, and the
+	// analysed window ends at the latter.
+	head, insLabel, flushLabel := " WAL ", "insert ", "  ·  flush "
+	if sum.Standby {
+		head, insLabel, flushLabel = " WAL · standby ", "received ", "  ·  replayed "
+	}
+	segment := sum.CurrentFile
+	if segment == "" {
+		segment = "?"
+	}
+	pos := "  " + styleHeader.Render(head) + "  " +
+		mu(insLabel) + styleSelected.Render(sum.InsertLSN) +
+		mu(flushLabel) + sum.FlushLSN +
+		mu("  ·  segment ") + segment +
 		mu("  ·  wal_level=") + sum.WalLevel
 
 	dir := indent + mu(fmt.Sprintf("pg_wal: %s across %d segment files  ·  lifetime: %s WAL · %s records · %s FPI",

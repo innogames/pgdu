@@ -1,5 +1,7 @@
 package pg
 
+import "fmt"
+
 // --- WAL inspector (toolWAL) ---
 
 // sqlWALWindow resolves the [start, end] LSN window the WAL inspector
@@ -17,37 +19,64 @@ package pg
 // segment, `cur − $1` reaches back into the previous segment, which a
 // checkpoint may already have recycled — pg_get_wal_stats then fails with
 // "requested WAL segment … has already been removed".
+//
+// The head is walHeadLSN rather than pg_current_wal_lsn() directly: that
+// function raises "recovery is in progress" on a standby, where the readable
+// WAL ends at the replay position instead.
 const sqlWALWindow = `
 SELECT (CASE
           WHEN (cur - '0/0'::pg_lsn) > $1::numeric THEN cur - $1::numeric
           ELSE '0/0'::pg_lsn
         END)::text AS start_lsn,
        cur::text AS end_lsn
-FROM   (SELECT pg_current_wal_lsn() AS cur) q
+FROM   (SELECT ` + walHeadLSN + ` AS cur) q
 `
+
+// walHeadLSN is the end of the WAL a pg_walinspect scan may read: the flush
+// position on a primary, the replay position on a standby. pg_current_wal_lsn()
+// and friends raise during recovery, and pg_walinspect itself stops at the
+// replay LSN there, so every WAL-tool query that names "now" goes through this
+// expression. (Maintenance's sqlMaintHeadLSN prefers the *receive* LSN because
+// it measures replication lag, not what is readable.)
+const walHeadLSN = `CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END`
+
+// walSegmentSuffix yields the 16 hex digits of the segment file holding LSN
+// %s — the logid and segment-index halves of the 24-char WAL filename, minus
+// the leading timeline. It replaces pg_walfile_name(), which refuses to run
+// during recovery; leaving the timeline out is what makes the value usable on
+// a standby, whose timeline is only available through superuser-only
+// pg_control_checkpoint(). %[1]s is the LSN column, %[2]s the segment size in
+// bytes; pg_lsn subtraction is numeric, hence div/mod rather than integer
+// operators, and upper() because to_hex is lowercase while segment names are
+// uppercase.
+const walSegmentSuffix = `upper(lpad(to_hex(div(%[1]s - '0/0'::pg_lsn, 4294967296)::bigint), 8, '0') ||
+        lpad(to_hex(div(mod(%[1]s - '0/0'::pg_lsn, 4294967296), %[2]s)::bigint), 8, '0'))`
 
 // sqlWALWindowClamped is the preferred window resolver: like sqlWALWindow but
 // it floors `start` at the oldest WAL segment still present on disk rather than
 // at '0/0', so the window never reaches into a segment a checkpoint already
 // recycled. The real (still-readable) segments in pg_wal are those whose name
 // is <= the current write segment; recycled/future ones carry higher names, so
-// `min(name) <= pg_walfile_name(cur)` is the oldest readable segment. Its start
+// `min(name)` among those at or below the head's segment is the oldest
+// readable segment (compared on the 16-char logid/segidx suffix, since
+// pg_walfile_name is unavailable on a standby and timelines are only ever
+// mismatched across a promotion). Its start
 // LSN is reconstructed from the filename: name = TLI(8) || logid(8) ||
 // segidx(8) hex, and a segment's byte offset is logid·2³² + segidx·seg_size,
 // i.e. LSN '<logid>/<segidx·seg_size>'. GREATEST keeps the naive window when
 // older segments are still present and only lifts the floor when they're gone.
 // Needs pg_ls_waldir (pg_monitor / superuser); the caller falls back to
 // sqlWALWindow on a privilege error.
-const sqlWALWindowClamped = `
+var sqlWALWindowClamped = `
 WITH cur AS (
-  SELECT pg_current_wal_lsn() AS lsn,
+  SELECT ` + walHeadLSN + ` AS lsn,
          pg_size_bytes(current_setting('wal_segment_size')) AS seg
 ),
 oldest AS (
   SELECT min(name) AS nm
   FROM   pg_ls_waldir(), cur
   WHERE  name ~ '^[0-9A-F]{24}$'
-    AND  name <= pg_walfile_name(cur.lsn)
+    AND  substr(name, 9, 16) <= ` + fmt.Sprintf(walSegmentSuffix, "cur.lsn", "cur.seg") + `
 )
 SELECT GREATEST(
          CASE WHEN (cur.lsn - '0/0'::pg_lsn) > $1::numeric
@@ -72,10 +101,27 @@ FROM   cur, oldest
 // a sufficiently-privileged role, so the caller treats a failure as non-fatal.
 // wal_buffers_full rides on the same pg_stat_wal read (no extra privilege) — a
 // persistent non-zero value means backends stalled waiting for wal_buffers.
-const sqlWALSummary = `
-SELECT pg_current_wal_insert_lsn()::text                       AS insert_lsn,
-       pg_current_wal_lsn()::text                              AS flush_lsn,
-       pg_walfile_name(pg_current_wal_lsn())                   AS current_file,
+//
+// On a standby the write-position functions raise, so the "insert" slot
+// carries the receive LSN and "flush" the replay LSN — the two positions that
+// exist there — and the segment name is looked up in pg_ls_waldir by its
+// logid/segidx suffix instead of pg_walfile_name() (empty when the directory
+// is unreadable or the segment is not on disk).
+var sqlWALSummary = `
+WITH head AS (
+  SELECT pg_is_in_recovery() AS standby,
+         CASE WHEN pg_is_in_recovery() THEN COALESCE(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())
+              ELSE pg_current_wal_insert_lsn() END AS insert_lsn,
+         ` + walHeadLSN + ` AS flush_lsn,
+         pg_size_bytes(current_setting('wal_segment_size')) AS seg
+)
+SELECT head.standby,
+       head.insert_lsn::text                                   AS insert_lsn,
+       head.flush_lsn::text                                    AS flush_lsn,
+       COALESCE((SELECT max(name) FROM pg_ls_waldir()
+                 WHERE name ~ '^[0-9A-F]{24}$'
+                   AND substr(name, 9, 16) = ` + fmt.Sprintf(walSegmentSuffix, "head.flush_lsn", "head.seg") + `), '')
+                                                               AS current_file,
        current_setting('wal_level')                            AS wal_level,
        (SELECT count(*) FROM pg_ls_waldir())                   AS seg_files,
        (SELECT COALESCE(sum(size), 0)::bigint FROM pg_ls_waldir()) AS seg_bytes,
@@ -83,7 +129,7 @@ SELECT pg_current_wal_insert_lsn()::text                       AS insert_lsn,
        w.wal_fpi,
        w.wal_bytes::bigint                                     AS wal_bytes,
        w.wal_buffers_full
-FROM   pg_stat_wal w
+FROM   pg_stat_wal w, head
 `
 
 // sqlWALCheckpoint is the checkpoint-context block for the WAL header: how much
@@ -92,9 +138,11 @@ FROM   pg_stat_wal w
 // completed, and checkpoint_timeout in seconds (for the next-timed-checkpoint
 // ETA). Mirrors sqlMaintWALInFlight. pg_control_checkpoint() typically needs
 // superuser, a higher bar than the pg_monitor sources above, so the caller
-// loads this separately and treats a failure as non-fatal.
-const sqlWALCheckpoint = `
-SELECT (pg_current_wal_insert_lsn() - redo_lsn)::bigint                                            AS bytes_since_chkpt,
+// loads this separately and treats a failure as non-fatal. On a standby the
+// distance is measured from the replay position (the last restartpoint's REDO
+// is what pg_control_checkpoint reports there).
+var sqlWALCheckpoint = `
+SELECT (` + walHeadLSN + ` - redo_lsn)::bigint                                                     AS bytes_since_chkpt,
        COALESCE((SELECT setting::bigint * 1048576 FROM pg_settings WHERE name = 'max_wal_size'), 0) AS max_wal_bytes,
        checkpoint_time,
        COALESCE((SELECT setting::bigint FROM pg_settings WHERE name = 'checkpoint_timeout'), 0)     AS checkpoint_timeout_secs

@@ -51,7 +51,7 @@ func (c *Client) WALOverview(ctx context.Context, db string) (WALSummary, error)
 	}
 	var s WALSummary
 	if err := pool.QueryRow(ctx, sqlWALSummary).Scan(
-		&s.InsertLSN, &s.FlushLSN, &s.CurrentFile, &s.WalLevel,
+		&s.Standby, &s.InsertLSN, &s.FlushLSN, &s.CurrentFile, &s.WalLevel,
 		&s.SegmentFiles, &s.SegmentBytes,
 		&s.StatRecords, &s.StatFPI, &s.StatBytes, &s.StatBuffersFull,
 	); err != nil {

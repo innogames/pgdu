@@ -16,9 +16,14 @@ import (
 // breakdown load independently, so the window lives on the screen state and
 // the header reads it from there.
 type WALSummary struct {
+	// Standby is pg_is_in_recovery(): the server replays WAL rather than
+	// writing it, so InsertLSN is the last *received* and FlushLSN the last
+	// *replayed* position, and pg_stat_wal's generation counters stay at
+	// whatever the instance produced before it became a standby.
+	Standby      bool
 	InsertLSN    string
 	FlushLSN     string
-	CurrentFile  string
+	CurrentFile  string // 24-char segment name holding FlushLSN; "" when not resolvable
 	WalLevel     string
 	SegmentFiles int64
 	SegmentBytes int64
