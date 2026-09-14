@@ -912,6 +912,43 @@ func (c *Client) ListGinPages(ctx context.Context, r Relation, start, count int3
 		})
 }
 
+// NextGinDataLeaf returns the block number of the first compressed posting-tree
+// leaf page at or after `from`, wrapping around to the start of the index when
+// nothing follows — so repeated calls cycle through every data-leaf page. found
+// is false when the index has none at all (every posting list fits inline in
+// its entry tuple). The scan is server-side: see sqlGinNextDataLeaf.
+func (c *Client) NextGinDataLeaf(ctx context.Context, r Relation, from int32) (blkno int32, found bool, err error) {
+	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
+		return 0, false, err
+	}
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return 0, false, err
+	}
+	total, err := c.RelPages(ctx, Table{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
+	if err != nil {
+		return 0, false, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	op := fmt.Sprintf("find next gin data-leaf page in %q", r.Qualified())
+	from = max(from, 1)
+	for _, span := range [][2]int32{{from, total}, {1, min(from, total)}} {
+		if span[0] >= span[1] {
+			continue
+		}
+		err := pool.QueryRow(ctx, sqlGinNextDataLeaf, regclass, span[0], span[1]).Scan(&blkno)
+		switch {
+		case err == nil:
+			return blkno, true, nil
+		case errors.Is(err, pgx.ErrNoRows):
+			continue
+		default:
+			return 0, false, fmt.Errorf("%s: %w", op, err)
+		}
+	}
+	return 0, false, nil
+}
+
 // ListGinItems lists posting-list segments on a compressed GIN data-leaf page.
 // Returns a pageinspect error from the server for non-leaf/entry pages; callers
 // only drill data-leaf pages.

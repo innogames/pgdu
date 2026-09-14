@@ -387,10 +387,63 @@ func (m *Model) onGinPagesLoaded(msg ginPagesLoadedMsg) tea.Cmd {
 	if s == nil || s.pages.index.OID != msg.indexOID || s.pages.heapWindowStart != msg.start {
 		return nil
 	}
-	return m.applyAMPages(s, msg.err, msg.totalPages, msg.keyCols, msg.bufs, msg.bufsErr,
+	cmd := m.applyAMPages(s, msg.err, msg.totalPages, msg.keyCols, msg.bufs, msg.bufsErr,
 		len(msg.pages),
 		func(i int) item { return withPageBuf(ginPageToItem(msg.pages[i]), msg.bufs) },
 		func(s *screen) { s.pages.ginMeta = msg.meta })
+	focusGinBlkno(s)
+	return cmd
+}
+
+// focusGinBlkno lands the cursor on the page a GIN data-leaf jump asked for,
+// once its window has loaded and been sorted. Consumed on the first window
+// that arrives so a later PgDn/reload doesn't yank the cursor back.
+func focusGinBlkno(s *screen) {
+	want := s.pages.focusBlkno
+	if want == 0 || !s.loaded {
+		return
+	}
+	s.pages.focusBlkno = 0
+	for i, idx := range s.visibleIndexes() {
+		if p, ok := s.items[idx].data.(pg.GinPageStat); ok && p.Blkno == want {
+			s.cursor = i
+			return
+		}
+	}
+}
+
+// onGinDataLeafFound moves the GIN page window to the data-leaf page the
+// server-side search returned and marks it for the cursor. A search that
+// finds nothing is the normal shape of a GIN whose posting lists all fit
+// inline, so it gets an explanatory notice rather than an error.
+func (m *Model) onGinDataLeafFound(msg ginDataLeafFoundMsg) tea.Cmd {
+	s := m.findLevel(levelIndexPages)
+	if s == nil || s.pages.index.OID != msg.indexOID {
+		return nil
+	}
+	s.pages.ginSeeking = false
+	if msg.err != nil {
+		m.notice = "data-leaf search failed: " + msg.err.Error()
+		return nil
+	}
+	if !msg.found {
+		m.notice = "no data-leaf pages: every posting list fits inline in its entry tuple, so pageinspect can't itemize anything in this index"
+		return nil
+	}
+	if cur, ok := s.currentItem(); ok {
+		if p, ok := cur.data.(pg.GinPageStat); ok && p.Blkno == msg.blkno {
+			m.notice = fmt.Sprintf("page #%d is the only data-leaf page", msg.blkno)
+			return nil
+		}
+	}
+	s.pages.focusBlkno = msg.blkno
+	if msg.blkno < s.pages.heapWindowStart || msg.blkno >= s.pages.heapWindowStart+s.pages.heapWindowCount {
+		s.pages.heapWindowStart = msg.blkno
+		s.resetCursor()
+		return m.loadCurrent()
+	}
+	focusGinBlkno(s)
+	return nil
 }
 
 func (m *Model) onGinItemsLoaded(msg ginItemsLoadedMsg) tea.Cmd {

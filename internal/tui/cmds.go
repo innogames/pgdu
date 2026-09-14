@@ -210,6 +210,16 @@ type ginPagesLoadedMsg struct {
 	bufsErr    error
 	err        error
 }
+
+// ginDataLeafFoundMsg answers a GIN next-data-leaf search: blkno is the page
+// to move the window to; found=false means the index has no posting-tree
+// leaf pages at all.
+type ginDataLeafFoundMsg struct {
+	indexOID uint32
+	blkno    int32
+	found    bool
+	err      error
+}
 type ginItemsLoadedMsg struct {
 	indexOID uint32
 	blkno    int32
@@ -521,6 +531,16 @@ func (m *Model) loadGinPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 			meta = &gm
 		}
 		return ginPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta, bufs: bufs, bufsErr: bufsErr}
+	})
+}
+
+// findGinDataLeafCmd looks for the first data-leaf page at or after `from`
+// (wrapping), server-side. The 30 s query timeout applies: the scan reads
+// raw pages up to the hit, which for a huge all-entry index can take a while.
+func (m *Model) findGinDataLeafCmd(r pg.Relation, from int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		blkno, found, err := m.client.NextGinDataLeaf(ctx, r, from)
+		return ginDataLeafFoundMsg{indexOID: r.OID, blkno: blkno, found: found, err: err}
 	})
 }
 

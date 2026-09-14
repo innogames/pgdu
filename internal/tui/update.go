@@ -87,6 +87,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onBrinItemsLoaded(msg)
 	case ginPagesLoadedMsg:
 		return m, m.onGinPagesLoaded(msg)
+	case ginDataLeafFoundMsg:
+		return m, m.onGinDataLeafFound(msg)
 	case ginItemsLoadedMsg:
 		return m, m.onGinItemsLoaded(msg)
 	case describeLoadedMsg:

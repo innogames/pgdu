@@ -144,7 +144,11 @@ func heapPageWindowLabel(s *screen) string {
 		return ""
 	}
 	end := max(s.pages.heapWindowStart+int32(len(s.items))-1, s.pages.heapWindowStart)
-	return fmt.Sprintf("pages %d–%d / %d", s.pages.heapWindowStart, end, s.pages.heapPageCount)
+	label := fmt.Sprintf("pages %d–%d / %d", s.pages.heapWindowStart, end, s.pages.heapPageCount)
+	if s.pages.ginSeeking {
+		label += "  ·  searching for the next data-leaf page…"
+	}
+	return label
 }
 
 // renderHeapPagesList draws one row per heap page with a fixed-scale bar

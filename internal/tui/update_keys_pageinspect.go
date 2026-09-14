@@ -156,3 +156,27 @@ func pagesDescribeTarget(s *screen) (descTarget, bool) {
 	}
 	return descTarget{}, false
 }
+
+// jumpGinDataLeaf (n on a GIN page list) starts the server-side search for the
+// next posting-tree leaf page after the cursor's block — the only GIN pages
+// pageinspect can itemize, and typically a handful scattered through tens of
+// thousands of entry pages, so no in-window sort can surface them. The result
+// lands in onGinDataLeafFound, which moves the window and the cursor.
+func (m *Model) jumpGinDataLeaf(s *screen) tea.Cmd {
+	if s.level != levelIndexPages || s.pages.index.AccessMethod != "gin" || s.pages.ginSeeking {
+		return nil
+	}
+	from := s.pages.heapWindowStart
+	if cur, ok := s.currentItem(); ok {
+		if p, ok := cur.data.(pg.GinPageStat); ok {
+			from = p.Blkno + 1
+		}
+	}
+	if s.pages.ginMeta != nil && s.pages.ginMeta.DataPages == 0 {
+		// The metapage already says there is nothing to find; skip the scan.
+		m.notice = "no data-leaf pages: every posting list fits inline in its entry tuple, so pageinspect can't itemize anything in this index"
+		return nil
+	}
+	s.pages.ginSeeking = true
+	return m.findGinDataLeafCmd(s.pages.index, from)
+}

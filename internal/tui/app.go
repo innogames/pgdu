@@ -730,6 +730,13 @@ type pageState struct {
 	heapWindowStart int32
 	heapWindowCount int32
 	heapPageCount   int32
+	// focusBlkno, when non-zero, names the block to land the cursor on once
+	// the next page window arrives; consumed by that load. Set by the jumps
+	// that move the window to a page found server-side (GIN's n).
+	focusBlkno int32
+	// ginSeeking is true while a GIN next-data-leaf search (n) is in flight,
+	// so the status line can say so — the scan can take seconds on a big index.
+	ginSeeking bool
 
 	// pageBufs is the current window's block → shared-buffers state map from
 	// pg_buffercache (best-effort side load). Non-nil means temperature data
@@ -923,6 +930,14 @@ type Model struct {
 	tupleLayoutOffset   int
 	tupleLayoutSort     pageinspect.SegSort
 	tupleLayoutSortDesc bool
+
+	// Value pane nested inside that overlay (Enter on a column segment): the
+	// segment's whole decoded value plus a hex dump of its stored bytes, of
+	// which the legend row only ever shows a one-line prefix. It reads the
+	// segment under the legend cursor — which can't move while the pane is up —
+	// so there is nothing to key it to; tupleValueOffset is its scroll window.
+	showTupleValue   bool
+	tupleValueOffset int
 
 	// Table-column picker on the tuple list (C on levelHeapTuples). The column
 	// set is the relation's pg_attribute rows (screen.pages.tupleCols), so like

@@ -376,7 +376,7 @@ func (m *Model) drillGinPage(s *screen, cur item) tea.Cmd {
 	if !ginPageIsDataLeaf(p.Flags) {
 		// pageinspect can only list compressed data-leaf pages; entry-tree and
 		// meta pages aren't itemizable. Point the user at the drillable kind.
-		m.notice = "only data-leaf pages are itemizable (pageinspect can't read entry-tree keys) — sort by type (→) to find them"
+		m.notice = "only data-leaf pages are itemizable (pageinspect can't read entry-tree keys) — n jumps to the next one"
 		return nil
 	}
 	m.stack = append(m.stack, indexTuplesScreen(s, "gin posting lists", p.Blkno, "data-leaf"))

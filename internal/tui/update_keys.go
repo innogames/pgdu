@@ -233,6 +233,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.help.ShowAll = !m.help.ShowAll
 	case key.Matches(msg, m.keys.Filter):
 		s.filterFocused = true
+	case key.Matches(msg, m.keys.GinNextLeaf):
+		return m, m.jumpGinDataLeaf(s)
 	case key.Matches(msg, m.keys.Seek):
 		// Seek is enabled only on levelIndexTuples (see applyContext). Open the
 		// input fresh; mutually exclusive with the fuzzy filter.

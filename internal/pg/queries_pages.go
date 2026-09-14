@@ -761,6 +761,10 @@ FROM   gin_metapage_info(get_raw_page($1, 0))
 // sqlGinPagesSummary summarises GIN pages by opaque flags (entry/data/leaf/…) +
 // free space. The metapage (block 0) is skipped via GREATEST($2,1) — its opaque
 // area differs and it's already shown in the banner (mirrors B-tree's meta skip).
+// The item count is the opaque maxoff only on data pages (posting-tree pages
+// store PostingItems in the opaque area, so it's the real count there); entry
+// pages keep maxoff at 0 and hold ordinary line pointers, so their count comes
+// from the page header instead.
 // $1 index text; $2 start; $3 count.
 const sqlGinPagesSummary = `
 WITH pages AS (
@@ -769,13 +773,31 @@ WITH pages AS (
 )
 SELECT p.blkno::int,
        array_to_string(o.flags, ' ') AS flags,
-       o.maxoff::int                 AS maxoff,
+       CASE WHEN 'data' = ANY(o.flags) THEN o.maxoff::int
+            ELSE GREATEST((hdr.lower - 24) / 4, 0)::int END AS maxoff,
        (hdr.upper - hdr.lower)::int  AS free_size,
        hdr.pagesize::int             AS page_size
 FROM   pages p,
        LATERAL page_header(p.raw)           AS hdr,
        LATERAL gin_page_opaque_info(p.raw)  AS o
 ORDER  BY p.blkno
+`
+
+// sqlGinNextDataLeaf finds the first compressed posting-tree leaf page at or
+// after block $2 (exclusive upper bound $3, normally relpages). Data-leaf pages
+// are the only GIN pages pageinspect can itemize, and in a typical GIN they are
+// a handful lost among tens of thousands of entry pages — a client-side sort
+// only ever sees the loaded window, so the search has to run server-side.
+// LIMIT 1 stops the scan at the first hit; the pages read on the way still
+// land in shared buffers, the same cost a window load pays.
+// $1 index text; $2 first block to consider; $3 block count of the relation.
+const sqlGinNextDataLeaf = `
+SELECT g.blkno::int
+FROM   generate_series(GREATEST($2::int, 1), $3::int - 1) AS g(blkno),
+       LATERAL gin_page_opaque_info(get_raw_page($1, g.blkno)) AS o
+WHERE  o.flags @> ARRAY['data', 'leaf']::text[]
+ORDER  BY g.blkno
+LIMIT  1
 `
 
 // sqlGinItems lists posting-list segments on a compressed GIN data-leaf page via
