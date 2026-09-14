@@ -2,6 +2,7 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -138,4 +139,23 @@ func (c *Client) RunReadOnlyQuery(ctx context.Context, db, query string, maxRows
 		return nil, false, fmt.Errorf("execute query in %q: %w", db, err)
 	}
 	return &DiagResult{Columns: cols, Rows: resultRows, BarCol: -1, SortCol: -1}, truncated, nil
+}
+
+// SchemaDrift reports whether err is the server rejecting a normalized
+// statement because a relation, column or function it names no longer exists
+// (SQLSTATE 42P01 / 42703 / 42883). pg_stat_statements entries accumulate since
+// the last reset, so a hot entry can outlive the schema it was written against;
+// EXPLAIN and PREPARE then fail against the current catalog although the
+// statement itself was valid when it ran. The detail view turns that into a
+// hint rather than leaving the raw error to look like a pgdu bug.
+func SchemaDrift(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case "42P01", "42703", "42883":
+		return true
+	}
+	return false
 }

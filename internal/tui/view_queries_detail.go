@@ -150,6 +150,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 		b.WriteString("    " + mu("not a SELECT/DML statement — no parameters to fill") + "\n")
 	case s.stat.sampleErr != nil:
 		b.WriteString("    " + mu("could not infer parameters: "+s.stat.sampleErr.Error()) + "\n")
+		writeSchemaDriftHint(&b, s.stat.sampleErr)
 	case s.stat.sampleCall != "":
 		// Same highlighter as the query section: the literals substituted for
 		// $n land in the accent the whole block used to wear, so the colour now
@@ -181,6 +182,11 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 		b.WriteString("    " + mu("running EXPLAIN…") + "\n")
 	case s.stat.explainErr != nil:
 		b.WriteString("    " + styleErr.Render(s.stat.explainErr.Error()) + "\n")
+		// The sample-call section has already explained the drift when its
+		// PREPARE hit the same missing object; say it once.
+		if !pg.SchemaDrift(s.stat.sampleErr) {
+			writeSchemaDriftHint(&b, s.stat.explainErr)
+		}
 	case s.stat.explain != "":
 		for _, line := range m.colorizeExplain(s.stat.explain, s.stat.explainAnalyze) {
 			b.WriteString("    " + line + "\n")
@@ -376,4 +382,15 @@ func (m *Model) clipDetail(line string) string {
 		return line
 	}
 	return clipCells(line, w)
+}
+
+// writeSchemaDriftHint follows an EXPLAIN / PREPARE error that names a missing
+// column, table or function with the reason: the entry is older than the
+// schema, so the failure is expected rather than a pgdu bug.
+func writeSchemaDriftHint(b *strings.Builder, err error) {
+	if !pg.SchemaDrift(err) {
+		return
+	}
+	b.WriteString("    " + styleMuted.Render("the statement no longer matches the schema — this entry predates a column/table change") + "\n")
+	b.WriteString("    " + styleMuted.Render("(pg_stat_statements accumulates since the last reset; the current query text has a new query id)") + "\n")
 }
