@@ -23,7 +23,7 @@ func (m *Model) drillHeapPage(s *screen, cur item) tea.Cmd {
 	return m.loadCurrent()
 }
 
-// drillHeapTuple follows a REDIRECT hop, reassembles a TOAST value, or opens the tuple byte-layout overlay.
+// drillHeapTuple follows a REDIRECT hop or opens the tuple byte-layout overlay.
 func (m *Model) drillHeapTuple(s *screen, cur item) tea.Cmd {
 	ht, ok := cur.data.(pg.HeapTuple)
 	if !ok {
@@ -45,30 +45,9 @@ func (m *Model) drillHeapTuple(s *screen, cur item) tea.Cmd {
 	if ht.LPFlags != pg.LPNormal || ht.Ctid == nil {
 		return nil
 	}
-	// TOAST chunk rows: reassemble the full value from all chunks for this
-	// chunk_id instead of showing one chunk's raw bytes.
-	if ht.ChunkID != nil {
-		next := &screen{
-			level: levelTupleRow, title: "toast value", tool: s.tool,
-			db: s.db, schema: s.schema, table: s.table,
-			pages: pageState{toastChunkID: *ht.ChunkID},
-			sort:  sortByName, sortDesc: false}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
-	}
-	if s.table.Schema == "pg_toast" {
-		// A toast page whose LP didn't resolve to a chunk row (dead but
-		// stored) — the classic ctid row view still applies.
-		next := &screen{
-			level: levelTupleRow, title: "row", tool: s.tool,
-			db: s.db, schema: s.schema, table: s.table,
-			pages: pageState{tupleCtid: *ht.Ctid},
-			sort:  sortByName, sortDesc: false}
-		m.stack = append(m.stack, next)
-		return m.loadCurrent()
-	}
-	// Regular heap tuples open the byte-layout overlay in place instead of
-	// drilling — it shows the decoded values *and* their physical layout.
+	// Tuples open the byte-layout overlay in place instead of drilling — it
+	// shows the decoded values *and* their physical layout. TOAST chunk rows
+	// take the same path: the overlay's chunk_data pane reassembles the value.
 	if len(ht.Data) == 0 {
 		m.notice = "no tuple body on this line pointer"
 		return nil

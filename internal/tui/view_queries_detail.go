@@ -57,53 +57,72 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 		{"temp blocks", fmt.Sprintf("%s read · %s written", formatRows(q.TempBlksRead), formatRows(q.TempBlksWritten))},
 		{"WAL", fmt.Sprintf("%s · %s records · %s FPI", humanize.Bytes(q.WALBytes), formatRows(q.WALRecords), formatRows(q.WALFPI))},
 	}
+	// Size the label column from the static rows above so the joins value below
+	// knows how much width is left to wrap into; the pass after the appends
+	// widens it again should a later row ever carry a longer label.
+	labelW := 0
+	for _, kv := range metrics {
+		if n := lipgloss.Width(kv[0]); n > labelW {
+			labelW = n
+		}
+	}
 	// Identify the statement's main table (parsed from FROM/UPDATE/INTO), the
 	// same value shown in the overview's `table` column. Omitted when unparseable.
-	if t := pg.MainTable(q.Query); t != "" {
+	t := pg.MainTable(q.Query)
+	if t != "" {
 		metrics = append(metrics, [2]string{"table", mainTableDisplay(q.Query)})
-		// HOT update ratio for that table, fetched async into statHotStats. It's
-		// cumulative (since the last stats reset), not window-scoped like the rows
-		// above, so it's explicitly labelled "lifetime". Higher is better →
-		// percentStyle (green high). Shown only once loaded and the table has
-		// recorded updates; otherwise omitted (no row clutters a SELECT-only table).
-		if hs := s.stat.hotStats; hs != nil {
-			if ratio, ok := hs.HotRatio(); ok {
-				val := percentStyle(ratio).Render(fmtFloat(ratio)+"%") +
-					mu(fmt.Sprintf("  (%s HOT · %s non-HOT of %s updates)",
-						formatRows(hs.HotUpdates), formatRows(hs.NonHotUpdates()), formatRows(hs.Updates)))
-				metrics = append(metrics, [2]string{"HOT updates", val})
-				// Make clear this is a table-level counter (every update to the
-				// table since the last stats reset), not scoped to this query.
-				metrics = append(metrics, [2]string{"", mu("all updates to this table, since last stats reset")})
-			}
+	}
+	// The other relations the statement reads. Appended independently of the
+	// table row because the two parsers disagree by design — FROM
+	// generate_series(…) g, events e has no main table, but `events` is still
+	// worth naming — and wrapped onto continuation rows with an empty label,
+	// like the HOT caveat below, so a wide join list can't break the layout.
+	for i, line := range joinedTablesLines(q.Query, max(m.width-6-labelW, 20)) {
+		label := "joins"
+		if i > 0 {
+			label = ""
+		}
+		metrics = append(metrics, [2]string{label, line})
+	}
+	// HOT update ratio for the main table, fetched async into statHotStats. It's
+	// cumulative (since the last stats reset), not window-scoped like the rows
+	// above, so it's explicitly labelled "lifetime". Higher is better →
+	// percentStyle (green high). Shown only once loaded and the table has
+	// recorded updates; otherwise omitted (no row clutters a SELECT-only table).
+	if hs := s.stat.hotStats; t != "" && hs != nil {
+		if ratio, ok := hs.HotRatio(); ok {
+			val := percentStyle(ratio).Render(fmtFloat(ratio)+"%") +
+				mu(fmt.Sprintf("  (%s HOT · %s non-HOT of %s updates)",
+					formatRows(hs.HotUpdates), formatRows(hs.NonHotUpdates()), formatRows(hs.Updates)))
+			metrics = append(metrics, [2]string{"HOT updates", val})
+			// Make clear this is a table-level counter (every update to the
+			// table since the last stats reset), not scoped to this query.
+			metrics = append(metrics, [2]string{"", mu("all updates to this table, since last stats reset")})
 		}
 	}
-	// Verbose extras: counters/timings that the compact view collapses or omits.
-	// All read straight off the window-delta QueryStat (no extrema — those are
-	// cumulative-only and meaningless in a delta).
-	if s.stat.verbose {
-		metrics = append(metrics,
-			[2]string{"I/O breakdown", fmt.Sprintf("shared %s/%s · local %s/%s · temp %s/%s ms",
-				fmtMs(q.SharedBlkReadTime), fmtMs(q.SharedBlkWriteTime),
-				fmtMs(q.LocalBlkReadTime), fmtMs(q.LocalBlkWriteTime),
-				fmtMs(q.TempBlkReadTime), fmtMs(q.TempBlkWriteTime)) + mu("  (read/write)")},
-			[2]string{"local blocks", fmt.Sprintf("%s hit · %s read (miss) · %s dirtied · %s written",
-				formatRows(q.LocalBlksHit), formatRows(q.LocalBlksRead),
-				formatRows(q.LocalBlksDirtied), formatRows(q.LocalBlksWritten))},
-		)
-		if q.Calls > 0 {
-			c := float64(q.Calls)
-			metrics = append(metrics, [2]string{"per call", fmt.Sprintf("%s WAL · %s shared blocks · %s plans",
-				humanize.Bytes(int64(float64(q.WALBytes)/c)),
-				fmtFloat(float64(q.SharedBlksHit+q.SharedBlksRead)/c), fmtFloat(float64(q.Plans)/c))})
-		}
-		planDetail := formatRows(q.Plans) + " plans"
-		if q.Plans > 0 {
-			planDetail += mu(fmt.Sprintf("  (%s ms mean)", fmtMs(q.TotalPlanTime/float64(q.Plans))))
-		}
-		metrics = append(metrics, [2]string{"plan detail", planDetail})
+	// The breakdowns the rows above collapse. All read straight off the
+	// window-delta QueryStat (no extrema — those are cumulative-only and
+	// meaningless in a delta).
+	metrics = append(metrics,
+		[2]string{"I/O breakdown", fmt.Sprintf("shared %s/%s · local %s/%s · temp %s/%s ms",
+			fmtMs(q.SharedBlkReadTime), fmtMs(q.SharedBlkWriteTime),
+			fmtMs(q.LocalBlkReadTime), fmtMs(q.LocalBlkWriteTime),
+			fmtMs(q.TempBlkReadTime), fmtMs(q.TempBlkWriteTime)) + mu("  (read/write)")},
+		[2]string{"local blocks", fmt.Sprintf("%s hit · %s read (miss) · %s dirtied · %s written",
+			formatRows(q.LocalBlksHit), formatRows(q.LocalBlksRead),
+			formatRows(q.LocalBlksDirtied), formatRows(q.LocalBlksWritten))},
+	)
+	if q.Calls > 0 {
+		c := float64(q.Calls)
+		metrics = append(metrics, [2]string{"per call", fmt.Sprintf("%s WAL · %s shared blocks · %s plans",
+			humanize.Bytes(int64(float64(q.WALBytes)/c)),
+			fmtFloat(float64(q.SharedBlksHit+q.SharedBlksRead)/c), fmtFloat(float64(q.Plans)/c))})
 	}
-	labelW := 0
+	planDetail := formatRows(q.Plans) + " plans"
+	if q.Plans > 0 {
+		planDetail += mu(fmt.Sprintf("  (%s ms mean)", fmtMs(q.TotalPlanTime/float64(q.Plans))))
+	}
+	metrics = append(metrics, [2]string{"plan detail", planDetail})
 	for _, kv := range metrics {
 		if n := lipgloss.Width(kv[0]); n > labelW {
 			labelW = n
@@ -214,9 +233,9 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 			mu(" to browse the real values pg_qualstats captured for this query") + "\n")
 	}
 
-	verbHint := " to show verbose details (parameter sources, full metrics)"
+	verbHint := " to show where each parameter value came from"
 	if s.stat.verbose {
-		verbHint = " to hide verbose details"
+		verbHint = " to hide the parameter sources"
 	}
 	b.WriteString("    " + mu("press ") + styleBadge.Render("v") + mu(verbHint) + "\n")
 	// The u jump only resolves when the statement has a parseable main table —

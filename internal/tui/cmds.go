@@ -98,6 +98,7 @@ type heapPagesLoadedMsg struct {
 type toastTargetResolvedMsg struct {
 	table   pg.Table
 	block   int32
+	lp      int32 // 0 = the value's chunks are gone; only the page list opens
 	chunkID uint32
 	err     error
 }
@@ -113,16 +114,10 @@ type heapTuplesLoadedMsg struct {
 
 	err error
 }
-type tupleRowLoadedMsg struct {
-	tableOID uint32
-	ctid     string
-	cells    []pg.TupleCell
-	err      error
-}
 type toastValueLoadedMsg struct {
 	tableOID uint32
 	chunkID  uint32
-	cells    []pg.TupleCell
+	val      pg.ToastValue
 	err      error
 }
 type tupleAttrsLoadedMsg struct {
@@ -360,8 +355,8 @@ func (m *Model) loadHeapPagesCmd(t pg.Table, start, count int32) tea.Cmd {
 
 func (m *Model) resolveToastTargetCmd(db string, toastOID, chunkID uint32) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
-		t, blk, err := m.client.ToastChunkLocation(ctx, db, toastOID, chunkID)
-		return toastTargetResolvedMsg{table: t, block: blk, chunkID: chunkID, err: err}
+		t, blk, lp, err := m.client.ToastChunkLocation(ctx, db, toastOID, chunkID)
+		return toastTargetResolvedMsg{table: t, block: blk, lp: lp, chunkID: chunkID, err: err}
 	})
 }
 
@@ -369,13 +364,6 @@ func (m *Model) loadHeapTuplesCmd(t pg.Table, blkno int32, pick []string) tea.Cm
 	return query(func(ctx context.Context) tea.Msg {
 		page, err := m.client.ListHeapTuples(ctx, t, blkno, pick)
 		return heapTuplesLoadedMsg{tableOID: t.OID, blkno: blkno, page: page, pick: pick, err: err}
-	})
-}
-
-func (m *Model) loadTupleRowCmd(t pg.Table, ctid string) tea.Cmd {
-	return query(func(ctx context.Context) tea.Msg {
-		cells, err := m.client.ListTupleRow(ctx, t, ctid)
-		return tupleRowLoadedMsg{tableOID: t.OID, ctid: ctid, cells: cells, err: err}
 	})
 }
 
@@ -388,8 +376,8 @@ func (m *Model) loadTupleAttrsCmd(t pg.Table, blkno, lp int32) tea.Cmd {
 
 func (m *Model) loadToastValueCmd(t pg.Table, chunkID uint32) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
-		cells, err := m.client.ReadToastValue(ctx, t, chunkID)
-		return toastValueLoadedMsg{tableOID: t.OID, chunkID: chunkID, cells: cells, err: err}
+		val, err := m.client.ReadToastValue(ctx, t, chunkID)
+		return toastValueLoadedMsg{tableOID: t.OID, chunkID: chunkID, val: val, err: err}
 	})
 }
 

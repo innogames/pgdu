@@ -47,15 +47,15 @@ var sampleConnector = map[string]bool{
 
 // columnBefore walks backwards from the $n token at index i to the column
 // reference it is compared against, stepping over the connector keywords,
-// parentheses and earlier placeholders that can sit in between (col IN ($1,$2),
-// col = ANY($1), col BETWEEN $1 AND $2). It returns the first plain identifier
+// parentheses, commas and earlier placeholders that can sit in between
+// (col IN ($1,$2), col = ANY($1), col BETWEEN $1 AND $2). It returns the first plain identifier
 // it reaches, or "" if there is none. Whatever it returns is later checked
 // against the real catalog column list, so a wrong guess (e.g. landing on
 // VALUES) harmlessly resolves to "no real value".
 func columnBefore(toks []string, i int) string {
 	for j := i - 1; j >= 0; j-- {
 		t := toks[j]
-		if t == "(" || t == ")" || strings.HasPrefix(t, "$") || sampleConnector[strings.ToLower(t)] {
+		if t == "(" || t == ")" || t == "," || strings.HasPrefix(t, "$") || sampleConnector[strings.ToLower(t)] {
 			continue
 		}
 		return bareColumn(t)

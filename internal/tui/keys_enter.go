@@ -70,10 +70,6 @@ func enterLabel(s *screen) (label string, ok bool) {
 			return "follow hop", true
 		case t.LPFlags != pg.LPNormal || t.Ctid == nil:
 			return "", false
-		case t.ChunkID != nil:
-			return "toast value", true
-		case s.table.Schema == "pg_toast":
-			return "row", true
 		}
 		return "byte layout", true
 	case levelRelations:

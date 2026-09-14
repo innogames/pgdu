@@ -144,7 +144,7 @@ func pagesDescribeTarget(s *screen) (descTarget, bool) {
 			}, true
 		}
 		return descTarget{}, false
-	case levelHeapPages, levelHeapTuples, levelTupleRow:
+	case levelHeapPages, levelHeapTuples:
 		return descTarget{table: s.table}, true
 	case levelIndexPages, levelIndexTuples:
 		return descTarget{

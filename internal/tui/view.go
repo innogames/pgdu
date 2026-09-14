@@ -234,8 +234,6 @@ func (m *Model) View() string {
 			b.WriteString(m.renderHeapPagesList(s, contentHeight))
 		case levelHeapTuples:
 			b.WriteString(m.renderHeapTuplesList(s, contentHeight))
-		case levelTupleRow:
-			b.WriteString(m.renderTupleRowList(s, contentHeight))
 		case levelRelations:
 			b.WriteString(m.renderRelationsList(s, contentHeight))
 		case levelIndexPages:
@@ -535,11 +533,6 @@ func crumbText(sc, prev *screen, named crumbScope) (text string, names crumbScop
 			names.schema = sc.table.Schema
 		}
 		return text, names
-	case levelTupleRow:
-		if sc.pages.toastChunkID != 0 {
-			return fmt.Sprintf("chunk %d", sc.pages.toastChunkID), names
-		}
-		return "row " + sc.pages.tupleCtid, names
 	case levelIndexPages:
 		idx := sc.pages.index
 		return named.qualify(sc.db, idx.Schema, idx.Name), crumbScope{schema: idx.Schema}
@@ -647,7 +640,7 @@ func crumbText(sc, prev *screen, named crumbScope) (text string, names crumbScop
 // when the schema picker was skipped.
 func dbScopedLevel(l level) bool {
 	switch l {
-	case levelParts, levelColumns, levelHeapPages, levelHeapTuples, levelTupleRow,
+	case levelParts, levelColumns, levelHeapPages, levelHeapTuples,
 		levelIndexPages, levelIndexTuples, levelDescribe, levelBufferDetail,
 		levelStatementDetail, levelStatementSamples, levelStatementResult,
 		levelDiagnosticResult:

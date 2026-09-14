@@ -11,8 +11,12 @@ import (
 
 // onToastTargetResolved completes the "ENTER on a TOASTed value" jump: the
 // placeholder heap-pages screen (pushed with only the toast OID known) gets its
-// full resolved Table and the window positioned at the chunk's block, then the
-// normal heap-pages load runs. Matches the placeholder by OID via findLevel
+// full resolved Table and the window positioned at the chunk's block, and the
+// chunk's page is pushed on top with focusLP armed, so the tuple load lands the
+// cursor on the chunk row and opens its byte layout — the same landing the
+// index-entry drill uses. Back then unwinds chunk → toast pages → the original
+// tuple. When the chunks are gone (lp 0: vacuumed or updated since) only the
+// page list opens, with a notice. Matches the placeholder by OID via findLevel
 // (topmost), so a heap-pages screen for the original table deeper in the stack
 // is not disturbed.
 func (m *Model) onToastTargetResolved(msg toastTargetResolvedMsg) tea.Cmd {
@@ -28,8 +32,18 @@ func (m *Model) onToastTargetResolved(msg toastTargetResolvedMsg) tea.Cmd {
 	}
 	s.table = msg.table
 	s.pages.heapWindowStart = (msg.block / heapWindowDefault) * heapWindowDefault
-	m.notice = fmt.Sprintf("toast value %d — heap page %d", msg.chunkID, msg.block)
-	return m.loadHeapPagesCmd(s.table, s.pages.heapWindowStart, s.pages.heapWindowCount)
+	pagesCmd := m.loadHeapPagesCmd(s.table, s.pages.heapWindowStart, s.pages.heapWindowCount)
+	if msg.lp == 0 {
+		m.notice = fmt.Sprintf("toast value %d has no chunks left — showing the relation's pages", msg.chunkID)
+		return pagesCmd
+	}
+	next := &screen{
+		level: levelHeapTuples, title: "tuples", tool: s.tool,
+		db: s.db, schema: s.schema, table: s.table,
+		pages: pageState{heapPageBlkno: msg.block, focusLP: msg.lp},
+		sort:  sortByLP, sortDesc: sortByLP.defaultDesc()}
+	m.stack = append(m.stack, next)
+	return tea.Batch(pagesCmd, m.loadCurrent())
 }
 
 // pageTempHint surfaces the non-blocking "install pg_buffercache" hint when
@@ -109,35 +123,18 @@ func (m *Model) onHeapPagesLoaded(msg heapPagesLoadedMsg) tea.Cmd {
 	return nil
 }
 
-func (m *Model) onTupleRowLoaded(msg tupleRowLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelTupleRow)
-	if s == nil || s.table.OID != msg.tableOID || s.pages.tupleCtid != msg.ctid {
-		return nil
-	}
-	s.loading = false
-	s.loaded = true
-	s.err = msg.err
-	s.items = s.items[:0]
-	for _, c := range msg.cells {
-		s.items = append(s.items, tupleCellToItem(c))
-	}
-	m.applySort(s)
-	return nil
-}
-
+// onToastValueLoaded lands the reassembled TOAST value behind the chunk_data
+// value pane. The overlay it belongs to lives on the topmost levelHeapTuples
+// screen; the OID + chunk_id guard drops a load the user has moved away from
+// (overlay closed and reopened on another chunk, or another toast relation).
 func (m *Model) onToastValueLoaded(msg toastValueLoadedMsg) tea.Cmd {
-	s := m.findLevel(levelTupleRow)
-	if s == nil || s.table.OID != msg.tableOID || s.pages.toastChunkID != msg.chunkID {
+	s := m.findLevel(levelHeapTuples)
+	if s == nil || s.table.OID != msg.tableOID || s.pages.toastVal == nil || s.pages.toastVal.chunkID != msg.chunkID {
 		return nil
 	}
-	s.loading = false
-	s.loaded = true
-	s.err = msg.err
-	s.items = s.items[:0]
-	for _, c := range msg.cells {
-		s.items = append(s.items, tupleCellToItem(c))
-	}
-	m.applySort(s)
+	s.pages.toastVal.loading = false
+	s.pages.toastVal.val = msg.val
+	s.pages.toastVal.err = msg.err
 	return nil
 }
 

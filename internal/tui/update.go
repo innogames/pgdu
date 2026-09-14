@@ -63,8 +63,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onToastTargetResolved(msg)
 	case heapTuplesLoadedMsg:
 		return m, m.onHeapTuplesLoaded(msg)
-	case tupleRowLoadedMsg:
-		return m, m.onTupleRowLoaded(msg)
 	case toastValueLoadedMsg:
 		return m, m.onToastValueLoaded(msg)
 	case tupleAttrsLoadedMsg:

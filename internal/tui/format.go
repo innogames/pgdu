@@ -138,8 +138,6 @@ func levelLabel(l level) string {
 		return "heap-pages"
 	case levelHeapTuples:
 		return "heap-tuples"
-	case levelTupleRow:
-		return "tuple-row"
 	case levelRelations:
 		return "relations"
 	case levelIndexPages:

@@ -80,26 +80,13 @@ func heapTupleToItem(t pg.HeapTuple) item {
 	}
 	name += nameSb75.String()
 	// hasChildren is set only for NORMAL line pointers — DEAD/UNUSED have
-	// no row to fetch, and REDIRECT points at a target on (potentially)
-	// another page that we'd need to chase, which the row-detail view
-	// doesn't currently do.
+	// no tuple body to lay out, and Enter on a REDIRECT hops the cursor to
+	// its target instead of opening anything.
 	return item{
 		name:        name,
 		size:        int64(t.LPLen),
 		hasChildren: t.LPFlags == pg.LPNormal && t.Ctid != nil,
 		data:        t,
-	}
-}
-
-func tupleCellToItem(c pg.TupleCell) item {
-	v := "NULL"
-	if c.Value != nil {
-		v = *c.Value
-	}
-	return item{
-		name:   c.Name,
-		detail: v,
-		data:   c,
 	}
 }
 

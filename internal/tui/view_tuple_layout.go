@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"pgdu/internal/humanize"
 	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
 )
@@ -60,7 +61,8 @@ func (m *Model) renderTupleLayoutInfo(height int) string {
 	b.WriteString("    " + padRight("1B-hdr", 14) + mu("values up to 126 B: 1 header byte + payload, packed unaligned") + "\n")
 	b.WriteString("    " + padRight("4B-hdr", 14) + mu("longer inline values: 4 header bytes, aligned like the type demands") + "\n")
 	b.WriteString("    " + padRight("compressed", 14) + mu("inline but pglz/lz4-compressed; the value column shows the uncompressed size") + "\n")
-	b.WriteString("    " + padRight("TOAST pointer", 14) + mu("18 B stub — the value lives out-of-line in the TOAST relation under the chunk id shown; enter jumps to its page") + "\n\n")
+	b.WriteString("    " + padRight("TOAST pointer", 14) + mu("18 B stub — the value lives out-of-line in the TOAST relation under the chunk id shown; enter opens its first chunk") + "\n")
+	b.WriteString("    " + padRight("chunk_data", 14) + mu("a TOAST chunk row's slice (≤ 1996 B) of one value; enter reassembles every chunk, inflates pglz/lz4 and decodes it") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" other classes ") + "\n")
 	b.WriteString("    " + padRight("NULL", 14) + mu("0 B — only the bitmap records it") + "\n")
@@ -102,6 +104,11 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 			title += mu(fmt.Sprintf("  ·  stores %d of %d attrs",
 				t.Infomask2&pg.HeapNattsMask2, len(s.pages.tupleAttrs)))
 		}
+		// A TOAST chunk row's identity is the value it belongs to and its
+		// position in it — the trail names the relation and page, not the row.
+		if t.ChunkID != nil && t.ChunkSeq != nil {
+			title += mu(fmt.Sprintf("  ·  chunk %d · seq %d", *t.ChunkID, *t.ChunkSeq))
+		}
 	}
 	arrow := "↑"
 	if m.tupleLayoutSortDesc {
@@ -109,7 +116,9 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 	}
 	title += mu("  ·  sort: "+m.tupleLayoutSort.Label()+arrow) + mu("  ·  ")
 	if _, _, ok := m.tupleLayoutToastUnderCursor(s); ok {
-		title += styleBadge.Render("↵") + mu(" → toast pages · ")
+		title += styleBadge.Render("↵") + mu(" → toast chunk · ")
+	} else if _, ok := m.tupleLayoutToastValueUnderCursor(s); ok {
+		title += styleBadge.Render("↵") + mu(" → toast value · ")
 	} else if m.tupleLayoutValueUnderCursor(s) {
 		title += styleBadge.Render("↵") + mu(" → value · ")
 	}
@@ -284,7 +293,9 @@ func (m *Model) renderTupleLayout(s *screen, height int) string {
 // renderTupleValue is the value pane nested in the byte-layout overlay (Enter
 // on a column segment): the column's whole decoded value, wrapped to the
 // terminal instead of cut to the one legend row, followed by a hex dump of the
-// bytes it occupies on the page. Unscrolled — renderTupleLayout runs it through
+// bytes it occupies on the page. On a TOAST chunk's chunk_data the decoded
+// part is the whole reassembled value (renderToastValue) rather than the
+// slice this row stores. Unscrolled — renderTupleLayout runs it through
 // scrollWindow.
 func (m *Model) renderTupleValue(s *screen) string {
 	mu := styleMuted.Render
@@ -309,14 +320,12 @@ func (m *Model) renderTupleValue(s *screen) string {
 		styleBadge.Render("↑/↓") + mu(" scroll · ") + styleBadge.Render("?") + mu(" help")
 	b.WriteString(title + "\n\n")
 
-	// A value that only decoded to hex says nothing the dump below doesn't say
-	// better (offsets, ascii), so it's shown once, not twice.
-	if val := reindentJSON(sg.Value); val != "" && !strings.HasPrefix(val, `\x`) {
-		b.WriteString("  " + styleHeader.Render(" decoded ") + "\n")
-		for _, ln := range wrapPlain(val, max(m.width-4, 20)) {
-			b.WriteString("  " + ln + "\n")
-		}
-		b.WriteString("\n")
+	if _, ok := m.tupleLayoutToastValueUnderCursor(s); ok {
+		// This column is one slice of a bigger value: the whole value, inflated
+		// and decoded, is what the reader came for. Its own bytes still follow.
+		m.renderToastValue(&b, s.pages.toastVal)
+	} else {
+		m.renderDecodedBlock(&b, sg.Value)
 	}
 	raw := sg.Attr.Value
 	b.WriteString("  " + styleHeader.Render(" stored bytes ") + "  " +
@@ -326,6 +335,95 @@ func (m *Model) renderTupleValue(s *screen) string {
 		b.WriteString("  " + mu(at) + "  " + dump + "\n")
 	}
 	return b.String()
+}
+
+// renderDecodedBlock writes the pane's "decoded" section: the value wrapped to
+// the terminal, JSON re-indented. A value that only decoded to hex says nothing
+// the stored-bytes dump doesn't say better (offsets, ascii), so it's shown
+// once, not twice — the block is skipped then.
+func (m *Model) renderDecodedBlock(b *strings.Builder, value string) {
+	val := reindentJSON(value)
+	if val == "" || strings.HasPrefix(val, `\x`) {
+		return
+	}
+	b.WriteString("  " + styleHeader.Render(" decoded ") + "\n")
+	for _, ln := range wrapPlain(val, max(m.width-4, 20)) {
+		b.WriteString("  " + ln + "\n")
+	}
+	b.WriteString("\n")
+}
+
+// toastHexPreview bounds the hex dump of an assembled TOAST value that
+// decoded to nothing better than hex: enough lines to recognise the content,
+// not the whole megabyte.
+const toastHexPreview = 512
+
+// renderToastValue writes the chunk_data pane's "toast value" section: what
+// the TOAST table holds for this chunk_id (chunks, bytes on disk, the
+// compression the bytes turned out to carry and the size they inflate to),
+// then the decoded value. The load is async — the section spins until the
+// value lands and shows the error in place when it fails, so the per-chunk
+// bytes below stay readable either way.
+func (m *Model) renderToastValue(b *strings.Builder, tv *toastValueState) {
+	mu := styleMuted.Render
+	b.WriteString("  " + styleHeader.Render(" toast value "))
+	switch {
+	case tv == nil:
+		b.WriteString("\n\n")
+		return
+	case tv.loading:
+		b.WriteString("  " + m.spinner.View() + mu(" reassembling chunks…") + "\n\n")
+		return
+	case tv.err != nil:
+		b.WriteString("\n" + styleErr.Render("  error: "+tv.err.Error()) + "\n\n")
+		return
+	}
+	v := tv.val
+	if v.Chunks == 0 {
+		b.WriteString("  " + mu(fmt.Sprintf("chunk_id %d  ·  no chunks — the value was vacuumed away since the page was read", v.ChunkID)) + "\n\n")
+		return
+	}
+	d := pageinspect.DecodeToastValue(v)
+	meta := fmt.Sprintf("chunk_id %d  ·  %d chunks  ·  %s on disk", v.ChunkID, v.Chunks, humanize.Bytes(v.StoredBytes))
+	switch {
+	case d.Method != "":
+		pct := 100.0
+		if d.RawSize > 0 {
+			pct = 100 * float64(v.StoredBytes) / float64(d.RawSize)
+		}
+		meta += fmt.Sprintf("  ·  %s → %s raw (%.0f%%)", d.Method, humanize.Bytes(d.RawSize), pct)
+	case d.Unverified:
+		meta += "  ·  compression unknown"
+	default:
+		meta += "  ·  uncompressed"
+	}
+	b.WriteString("  " + mu(meta) + "\n")
+	if d.Note != "" {
+		b.WriteString("  " + styleBloat.Render("⚠ "+d.Note) + "\n")
+	}
+	b.WriteString("\n")
+
+	if d.Text != "" && !strings.HasPrefix(d.Text, `\x`) {
+		m.renderDecodedBlock(b, d.Text)
+		return
+	}
+	// Nothing better than hex: dump a recognisable prefix of the value's own
+	// bytes (inflated when they were compressed) instead of the wall of hex
+	// the legend would have shown.
+	if len(d.Payload) == 0 {
+		return
+	}
+	n := min(len(d.Payload), toastHexPreview)
+	label := fmt.Sprintf("first %d of %d B", n, len(d.Payload))
+	if n == len(d.Payload) {
+		label = fmt.Sprintf("%d B", n)
+	}
+	b.WriteString("  " + styleHeader.Render(" value bytes ") + "  " + mu(label) + "\n")
+	for off := 0; off < n; off += hexDumpWidth {
+		at, dump := hexDumpRow(d.Payload[off:min(off+hexDumpWidth, n)], off)
+		b.WriteString("  " + mu(at) + "  " + dump + "\n")
+	}
+	b.WriteString("\n")
 }
 
 // reindentJSON re-indents a decoded value that happens to be a JSON document

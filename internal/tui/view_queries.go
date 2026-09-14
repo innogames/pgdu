@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"pgdu/internal/pg"
 )
@@ -84,6 +85,35 @@ func flattenQuery(q string) string {
 // to_regclass isn't left to guess the schema from search_path.
 func mainTableDisplay(query string) string {
 	return strings.TrimPrefix(pg.MainTable(query), "public.")
+}
+
+// joinedTablesLines is the detail view's `joins` value: the other relations the
+// statement reads (pg.JoinedTables), public. stripped per name for the same
+// reason mainTableDisplay strips it and separated like the neighbouring
+// multi-value metric rows, wrapped to width. The break falls between names, not
+// inside the separator, so a continuation line never begins or ends on a
+// dangling "·". Nil when the statement joins nothing.
+func joinedTablesLines(query string, width int) []string {
+	joined := pg.JoinedTables(query)
+	if len(joined) == 0 {
+		return nil
+	}
+	const sep = " · "
+	var lines []string
+	var cur string
+	for _, t := range joined {
+		name := strings.TrimPrefix(t, "public.")
+		switch {
+		case cur == "":
+			cur = name
+		case utf8.RuneCountInString(cur+sep+name) <= width:
+			cur += sep + name
+		default:
+			lines = append(lines, cur)
+			cur = name
+		}
+	}
+	return append(lines, cur)
 }
 
 // planTimeMetric renders the detail-view plan-time line, distinguishing a real
@@ -265,7 +295,8 @@ func (m *Model) renderStatementsInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" detail ") + "  " +
 		mu("press ") + styleBadge.Render("↵") + mu(" on a row") + "\n")
-	b.WriteString("    " + mu("Shows the full text, the same metrics, a ‘sample call’ and its EXPLAIN, run automatically.") + "\n")
+	b.WriteString("    " + mu("Shows the full text, the same metrics, the other tables the statement joins to, and a") + "\n")
+	b.WriteString("    " + mu("‘sample call’ with its EXPLAIN, run automatically.") + "\n")
 	b.WriteString("    " + mu("For read-only SELECTs, ") + styleBadge.Render("↵") +
 		mu(" runs EXPLAIN (ANALYZE, VERBOSE, BUFFERS) and ") + styleBadge.Render("E") +
 		mu(" executes the query and shows the result rows — both execute the query.") + "\n\n")

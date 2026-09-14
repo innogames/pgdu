@@ -232,15 +232,33 @@ type IndexTuple struct {
 	Posting []IndexTuple
 }
 
-// TupleCell is one column of a heap row decoded for the row-detail view.
-// Value is nil for SQL NULLs so the renderer can show them distinctly from
-// empty strings or zero values. Value is capped server-side (tupleValueCap);
-// FullBytes is the untruncated value's octet_length, so FullBytes >
-// len(*Value) means the tail was dropped.
-type TupleCell struct {
-	Name      string
-	Value     *string
-	FullBytes int64
+// ToastValue is one out-of-line value reassembled from its TOAST table: the
+// chunk rows sharing a chunk_id, concatenated in chunk_seq order. Data holds
+// exactly what is on disk — for a compressed value that is the 4-byte
+// va_tcinfo header followed by the pglz/lz4 stream, for an uncompressed one
+// the bare payload; the TOAST table itself does not record which, so the
+// decoder (pageinspect.DecodeToastValue) has to sniff. Data is capped at
+// toastValueCap; Truncated says the value went on beyond it, in which case a
+// compressed stream cannot be inflated.
+//
+// OwnerTypes lists the distinct types of the owning table's toastable columns,
+// a best-effort hint for decoding the payload (a TOAST table serves every
+// varlena column of its owner, so the value's type is not knowable from the
+// chunk alone). Nil when the lookup failed.
+type ToastValue struct {
+	ChunkID     uint32
+	Chunks      int32
+	StoredBytes int64
+	Data        []byte
+	Truncated   bool
+	OwnerTypes  []ToastOwnerType
+}
+
+// ToastOwnerType is one candidate payload type of a TOAST value: the pg_type
+// name and category of a toastable column on the owning table.
+type ToastOwnerType struct {
+	TypName     string
+	TypCategory string
 }
 
 // TupleAttr is one column of a heap tuple split into raw bytes by

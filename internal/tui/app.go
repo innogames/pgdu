@@ -31,7 +31,6 @@ const (
 	levelColumns
 	levelHeapPages
 	levelHeapTuples
-	levelTupleRow
 	levelRelations
 	levelIndexPages
 	levelIndexTuples
@@ -397,7 +396,7 @@ type stmtState struct {
 	explainErr     error
 	explaining     bool
 	explainAnalyze bool
-	verbose        bool // v toggles the verbose detail view (parameter table + extra metric rows)
+	verbose        bool // v toggles the per-$n parameter source table under the sample call
 	// hotStats holds the main table's cumulative HOT-update counters
 	// (pg_stat_user_tables), fetched async on entry and rendered next to the
 	// parsed table name. nil until loaded or when the table didn't resolve;
@@ -780,14 +779,11 @@ type pageState struct {
 	tupleAttrsLoading bool
 	tupleAttrsErr     error
 
-	// levelTupleRow: the ctid we're showing. Carries (block,offset) text so
-	// the SQL bind doesn't have to re-derive it from heapPageBlkno + LP —
-	// the line pointer might be a REDIRECT pointing at a different page.
-	tupleCtid string
-	// toastChunkID, when non-zero on a levelTupleRow screen, means we are
-	// displaying the fully-assembled TOAST value for this chunk_id rather
-	// than a single-row ctid projection. Mutually exclusive with tupleCtid.
-	toastChunkID uint32
+	// toastVal, on a levelHeapTuples screen of a TOAST relation, is the
+	// reassembled value behind the chunk_data value pane: loaded async when the
+	// pane opens on a chunk_data column, kept while the overlay stays open so
+	// re-entering the pane doesn't refetch, dropped with the overlay.
+	toastVal *toastValueState
 
 	// Index page-inspector state. index identifies which B-tree we're
 	// looking at on levelIndexPages / levelIndexTuples. The window-state
@@ -836,6 +832,16 @@ type pageState struct {
 	btreeLevelsLoading bool
 	btreeLevelsDone    bool
 	btreeLevelsErr     error
+}
+
+// toastValueState is one TOAST value's load for the chunk_data value pane.
+// chunkID names the value so a stale toastValueLoadedMsg (another chunk, a
+// reopened overlay) is recognised and dropped.
+type toastValueState struct {
+	chunkID uint32
+	loading bool
+	err     error
+	val     pg.ToastValue
 }
 
 // reindexBloatThreshold is the bloat % above which the parts view offers an

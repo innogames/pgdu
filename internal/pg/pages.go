@@ -96,56 +96,30 @@ func (c *Client) ListHeapPages(ctx context.Context, t Table, start, count int32)
 		})
 }
 
-// ListTupleRow returns the column-by-column decoding of one heap row,
-// identified by ctid. Used by the row-detail view the user reaches by
-// pressing Enter on a NORMAL line pointer. Returns an empty slice (not an
-// error) when the ctid points to a row that's gone — e.g. the tuple was
-// updated or vacuumed after the page snapshot was taken.
-func (c *Client) ListTupleRow(ctx context.Context, t Table, ctid string) ([]TupleCell, error) {
-	pool, err := c.PoolFor(ctx, t.DB)
-	if err != nil {
-		return nil, err
-	}
-	regclass := qualifiedIdent(t.Schema, t.Name)
-	tmpl := sqlTupleRow
-	if t.Schema == "pg_toast" {
-		// TOAST tables lack a composite type so row_to_json fails; use the
-		// fixed-column query instead.
-		tmpl = sqlToastTupleRow
-	}
-	sql := fmt.Sprintf(tmpl, regclass)
-	return collect(ctx, pool, fmt.Sprintf("read tuple in %q ctid %s", t.Qualified(), ctid), sql, []any{ctid},
-		func(row pgx.CollectableRow) (TupleCell, error) {
-			var c TupleCell
-			err := row.Scan(&c.Name, &c.Value, &c.FullBytes)
-			return c, err
-		})
-}
+// toastValueCap bounds how much of one TOAST value ReadToastValue reassembles.
+// The value pane inflates and renders the whole thing, so a compressed value
+// beyond the cap stays compressed; 1 MiB covers documents while a multi-GB
+// bytea never crosses the wire whole.
+const toastValueCap = 1 << 20
 
-// ReadToastValue fetches the leading chunks of one out-of-line value from a
-// TOAST table (just enough for the hex preview — never the whole value),
-// assembles them in chunk_seq order, and returns a small slice of TupleCell
-// rows suitable for the row-detail view:
-//
-//	chunk_id   – the OID of the out-of-line value
-//	chunks     – number of chunks stored on disk
-//	total_bytes – assembled size in bytes
-//	data       – hex-encoded assembled bytes (truncated at 2 048 bytes)
-func (c *Client) ReadToastValue(ctx context.Context, t Table, chunkID uint32) ([]TupleCell, error) {
+// ReadToastValue fetches the chunks of one out-of-line value from a TOAST
+// table, assembles them in chunk_seq order (up to toastValueCap — Truncated
+// then says so) and attaches the owner's toastable column types as decoding
+// hints. Totals come from the query's window aggregates, which see every chunk
+// even when only a prefix ships. The hint lookup is best effort: a failure
+// leaves OwnerTypes nil, the value is still returned.
+func (c *Client) ReadToastValue(ctx context.Context, t Table, chunkID uint32) (ToastValue, error) {
 	pool, err := c.PoolFor(ctx, t.DB)
 	if err != nil {
-		return nil, err
+		return ToastValue{}, err
 	}
 	regclass := qualifiedIdent(t.Schema, t.Name)
 	sql := fmt.Sprintf(sqlToastValueChunks, regclass)
 
-	// The view previews at most maxHexBytes of the assembled value, so only
-	// the chunks covering that prefix are fetched — TOAST chunks are ~2000 B
-	// (TOAST_MAX_CHUNK_SIZE), so 2 always suffice; +1 spare in case the
-	// value was toasted with an unusually small chunk size. Totals come from
-	// the query's window aggregates, which see every chunk.
-	const maxHexBytes = 2048
-	const maxChunks = maxHexBytes/1500 + 2
+	// Chunks are ~2000 B (TOAST_MAX_CHUNK_SIZE on an 8 KiB build); dividing by
+	// a smaller figure leaves headroom for a value toasted with an unusually
+	// small chunk size, so the cap is reached before the LIMIT is.
+	const maxChunks = toastValueCap/1500 + 2
 
 	type chunk struct {
 		seq        int32
@@ -160,67 +134,59 @@ func (c *Client) ReadToastValue(ctx context.Context, t Table, chunkID uint32) ([
 			return ch, err
 		})
 	if err != nil {
-		return nil, err
+		return ToastValue{}, err
 	}
 
-	var assembled []byte
-	var nChunks int32
-	var totalBytes int64
+	v := ToastValue{ChunkID: chunkID}
 	for _, ch := range chunks {
-		if len(assembled) < maxHexBytes {
-			assembled = append(assembled, ch.data...)
+		if len(v.Data) < toastValueCap {
+			v.Data = append(v.Data, ch.data...)
 		}
-		nChunks, totalBytes = ch.chunks, ch.totalBytes
+		v.Chunks, v.StoredBytes = ch.chunks, ch.totalBytes
 	}
-
-	var hexData string
-	if int64(len(assembled)) >= totalBytes {
-		hexData = fmt.Sprintf(`\x%x`, assembled)
-	} else {
-		if len(assembled) > maxHexBytes {
-			assembled = assembled[:maxHexBytes]
-		}
-		hexData = fmt.Sprintf(`\x%x…`, assembled)
+	if len(v.Data) > toastValueCap {
+		v.Data = v.Data[:toastValueCap]
 	}
+	v.Truncated = int64(len(v.Data)) < v.StoredBytes
 
-	str := func(s string) *string { return &s }
-	return []TupleCell{
-		{Name: "chunk_id", Value: str(strconv.FormatUint(uint64(chunkID), 10))},
-		{Name: "chunks", Value: str(strconv.Itoa(int(nChunks)))},
-		{Name: "total_bytes", Value: str(strconv.FormatInt(totalBytes, 10))},
-		{Name: "data", Value: str(hexData)},
-	}, nil
+	v.OwnerTypes = collectBestEffort(ctx, pool, sqlToastOwnerTypes, []any{t.OID},
+		func(rows pgx.Rows) (ToastOwnerType, bool) {
+			var o ToastOwnerType
+			return o, rows.Scan(&o.TypName, &o.TypCategory) == nil
+		})
+	return v, nil
 }
 
 // ToastChunkLocation resolves an out-of-line value's TOAST pointer (the toast
 // relation's OID and the value's chunk_id) into the Table metadata the heap-page
-// inspector needs plus the heap block of the value's first chunk. It backs the
-// "ENTER on a TOASTed value jumps to its TOAST relation" shortcut: the pointer
-// carries an OID, not a name, so a catalog lookup is required. A missing chunk
-// (value vacuumed or updated since) is not an error — block 0 is returned.
-func (c *Client) ToastChunkLocation(ctx context.Context, db string, toastOID, chunkID uint32) (Table, int32, error) {
+// inspector needs plus the heap block and line pointer of the value's first
+// chunk. It backs the "ENTER on a TOASTed value opens its chunk" shortcut: the
+// pointer carries an OID, not a name, so a catalog lookup is required. A
+// missing chunk (value vacuumed or updated since) is not an error — block 0
+// and lp 0 come back, and lp 0 (offsets start at 1) tells the caller there is
+// no chunk to land on.
+func (c *Client) ToastChunkLocation(ctx context.Context, db string, toastOID, chunkID uint32) (t Table, blk, lp int32, err error) {
 	pool, err := c.PoolFor(ctx, db)
 	if err != nil {
-		return Table{}, 0, err
+		return Table{}, 0, 0, err
 	}
-	t := Table{DB: db, OID: toastOID}
+	t = Table{DB: db, OID: toastOID}
 	err = pool.QueryRow(ctx, sqlResolveRelByOID, toastOID).
 		Scan(&t.Schema, &t.Name, &t.HeapBytes, &t.EstRows)
 	if err != nil {
-		return Table{}, 0, fmt.Errorf("resolve toast relation %d in %q: %w", toastOID, db, err)
+		return Table{}, 0, 0, fmt.Errorf("resolve toast relation %d in %q: %w", toastOID, db, err)
 	}
 	t.TotalBytes = t.HeapBytes
 
-	var blk int32
 	sql := fmt.Sprintf(sqlToastChunkBlock, qualifiedIdent(t.Schema, t.Name))
-	err = pool.QueryRow(ctx, sql, chunkID).Scan(&blk)
+	err = pool.QueryRow(ctx, sql, chunkID).Scan(&blk, &lp)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return t, 0, nil
+		return t, 0, 0, nil
 	}
 	if err != nil {
-		return Table{}, 0, fmt.Errorf("locate toast chunk %d in %q: %w", chunkID, t.Qualified(), err)
+		return Table{}, 0, 0, fmt.Errorf("locate toast chunk %d in %q: %w", chunkID, t.Qualified(), err)
 	}
-	return t, blk, nil
+	return t, blk, lp, nil
 }
 
 // ListIndexPages returns up to `count` per-page summaries of a B-tree index

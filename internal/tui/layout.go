@@ -100,11 +100,6 @@ func barReserve(s *screen) int {
 		// cursor + mark + dot + lp idx + flag word + len + xmin + xmax + ctid + slack
 		const tupleReserve = colCursor + colMark + 2 + 6 + 10 + 8 + 12 + 12 + 14 + 6
 		return tupleReserve
-	case levelTupleRow:
-		// cursor + column-name col + value gutter. The renderer prints
-		// name and (potentially long) value as plain text — no bar, so
-		// the reserve is just the column-name budget.
-		return colCursor + tupleRowNameColW + colGutter
 	case levelRelations:
 		// Mirrors the page-inspector tables reserve, plus a parent-name
 		// budget for the muted "→ <table>" tail shown on index rows.
@@ -267,11 +262,6 @@ const relParentColW = 24
 // Type column on levelRelations: holds the kind tag ("heap"/"toast"/"btree"/
 // "gist"/"brin"/"gin") — 5 chars plus a sort-arrow allowance.
 const relTypeColW = 6
-
-// Column width for the tuple-row column-name slot. Wide enough for most
-// SQL identifiers without truncation; the value column gets all the
-// remaining horizontal space.
-const tupleRowNameColW = 28
 
 // truncateToWidth clips a rendered (ANSI-styled) line to at most width
 // terminal cells. It must be ANSI-aware: the input contains escape sequences

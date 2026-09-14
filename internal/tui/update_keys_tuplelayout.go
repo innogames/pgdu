@@ -42,6 +42,7 @@ func (m *Model) reloadTupleAttrs(s *screen, lp int32) tea.Cmd {
 	s.pages.tupleAttrs = nil
 	s.pages.tupleAttrsErr = nil
 	s.pages.tupleAttrsLoading = true
+	s.pages.toastVal = nil
 	return m.loadTupleAttrsCmd(s.table, s.pages.heapPageBlkno, lp)
 }
 
@@ -54,6 +55,7 @@ func (m *Model) closeTupleLayout(s *screen) {
 	s.pages.tupleAttrs = nil
 	s.pages.tupleAttrsErr = nil
 	s.pages.tupleAttrsLoading = false
+	s.pages.toastVal = nil
 }
 
 // handleTupleLayoutKey drives the modal tuple byte-layout overlay (Enter on a
@@ -82,15 +84,19 @@ func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 		m.infoOffset = 0
 	case key.Matches(msg, m.keys.Enter):
 		// ENTER on a TOAST-pointer row jumps to that value's TOAST relation in
-		// the page inspector; on a column holding bytes it opens the value pane,
-		// since the legend row only has room for a prefix of a long value; on
-		// any other row it just closes the overlay.
+		// the page inspector; on a TOAST chunk's chunk_data it opens the value
+		// pane over the whole reassembled value; on any other column holding
+		// bytes it opens the value pane, since the legend row only has room for
+		// a prefix of a long value; on any other row it just closes the overlay.
 		switch oid, chunk, ok := m.tupleLayoutToastUnderCursor(s); {
 		case ok:
 			return m.openToastChunkNav(s, oid, chunk)
 		case m.tupleLayoutValueUnderCursor(s):
 			m.showTupleValue = true
 			m.tupleValueOffset = 0
+			if chunkID, ok := m.tupleLayoutToastValueUnderCursor(s); ok {
+				return m.loadToastValue(s, chunkID)
+			}
 		default:
 			m.closeTupleLayout(s)
 		}
@@ -168,6 +174,39 @@ func (m *Model) tupleLayoutToastUnderCursor(s *screen) (toastOID, chunkID uint32
 	return toastOID, chunkID, ok
 }
 
+// tupleLayoutToastValueUnderCursor reports the chunk_id when the highlighted
+// segment is a TOAST chunk row's chunk_data — the one column whose bytes are a
+// slice of a bigger value, so its pane shows the whole value rather than the
+// stored slice alone. Keyed on the attribute name because a TOAST relation's
+// descriptor is fixed (chunk_id, chunk_seq, chunk_data); the schema and the
+// tuple's own chunk_id guard against a user table that merely names a column
+// chunk_data.
+func (m *Model) tupleLayoutToastValueUnderCursor(s *screen) (chunkID uint32, ok bool) {
+	if s.table.Schema != "pg_toast" {
+		return 0, false
+	}
+	t := s.tupleByLP(s.pages.tupleAttrsLP)
+	if t == nil || t.ChunkID == nil {
+		return 0, false
+	}
+	seg, ok := m.tupleLayoutSegUnderCursor(s)
+	if !ok || seg.Kind != pageinspect.SegColumn || seg.Attr == nil || seg.Attr.Name != "chunk_data" {
+		return 0, false
+	}
+	return *t.ChunkID, true
+}
+
+// loadToastValue arms the chunk_data pane's value load, unless the overlay
+// already holds (or is fetching) this very chunk — re-entering the pane after
+// esc must not refetch a value that hasn't changed under us.
+func (m *Model) loadToastValue(s *screen, chunkID uint32) tea.Cmd {
+	if tv := s.pages.toastVal; tv != nil && tv.chunkID == chunkID {
+		return nil
+	}
+	s.pages.toastVal = &toastValueState{chunkID: chunkID, loading: true}
+	return m.loadToastValueCmd(s.table, chunkID)
+}
+
 // handleTupleValueKey drives the value pane nested in the layout overlay: the
 // scroll keys move its window (scrollWindow clamps, same contract as
 // handleInfoKey), ? opens the layout reference on top, enter/esc return to the
@@ -217,10 +256,11 @@ func tupleSegDrills(seg pageinspect.Seg) bool {
 }
 
 // openToastChunkNav closes the overlay and pushes a loading heap-pages screen
-// for the TOAST relation, then resolves the OID→Table and the chunk's block
-// asynchronously (the pointer carries only the OID). The placeholder carries the
-// toast OID up front so findLevel + the OID guard target it, not the original
-// table's heap-pages screen deeper in the stack.
+// for the TOAST relation, then resolves the OID→Table and the chunk's block and
+// line pointer asynchronously (the pointer carries only the OID);
+// onToastTargetResolved pushes the chunk's page on top and opens its layout.
+// The placeholder carries the toast OID up front so findLevel + the OID guard
+// target it, not the original table's heap-pages screen deeper in the stack.
 func (m *Model) openToastChunkNav(s *screen, toastOID, chunkID uint32) tea.Cmd {
 	m.closeTupleLayout(s)
 	next := &screen{

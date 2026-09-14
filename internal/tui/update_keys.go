@@ -621,7 +621,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.loadStatementResultCmd(s.db, s.stat.detail.Query, s.stat.sampleCall)
 		}
 	case key.Matches(msg, m.keys.Verbose):
-		// Toggle the verbose detail view (parameter table + extra metric rows).
+		// Toggle the per-$n parameter source table under the sample call.
 		// Scoped to the detail level; the body re-renders in place and reflows
 		// through scrollWindow, so no offset reset is needed.
 		if s.level == levelStatementDetail {
@@ -895,7 +895,7 @@ func describeTarget(s *screen) (descTarget, bool) {
 
 	case levelRelations:
 		return pagesDescribeTarget(s)
-	case levelHeapPages, levelHeapTuples, levelTupleRow:
+	case levelHeapPages, levelHeapTuples:
 		return pagesDescribeTarget(s)
 	case levelIndexPages, levelIndexTuples:
 		return pagesDescribeTarget(s)

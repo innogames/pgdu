@@ -63,6 +63,13 @@ func jbWriteContainer(sb *strings.Builder, c []byte, depth int) bool {
 	count := int(header & jbCountMask)
 	isObject := header&jbFObject != 0
 	isScalar := header&jbFScalar != 0
+	// A container is exactly one of object/array (a scalar rides in a
+	// one-element array) and the bit above the flags is unused — anything else
+	// is not jsonb, however well the entries below happen to parse. Matters
+	// most to callers that sniff untyped bytes for jsonb.
+	if isObject == (header&jbFArray != 0) || header&0x80000000 != 0 {
+		return false
+	}
 
 	// Objects store 2×count JEntries (all keys, then all values); arrays and
 	// scalars store one per element.

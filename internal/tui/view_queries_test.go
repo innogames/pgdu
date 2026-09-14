@@ -24,7 +24,9 @@ func keyMsg(s string) tea.KeyMsg {
 // client is never used by the render path, so a non-connecting one is fine.
 func renderModel(top *screen) string {
 	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil, "", "")
-	m.width, m.height = 200, 40
+	// Tall enough that the detail body's footer hints aren't clipped by the
+	// viewport — in the app that panel scrolls, here it must render whole.
+	m.width, m.height = 200, 80
 	m.hostLabel = "db:5432"
 	m.stack = append(m.stack, top)
 	return m.View()
@@ -454,5 +456,43 @@ func TestRenderStatementsEmptyWindow(t *testing.T) {
 	out := renderModel(s)
 	if !strings.Contains(out, "queries") {
 		t.Error("empty-window render lost the header")
+	}
+}
+
+// The detail view lists the other relations the statement reads under its table
+// row — including one reached only through an EXISTS probe — and omits the row
+// entirely for a single-table statement.
+func TestRenderStatementDetailJoins(t *testing.T) {
+	detail := func(id int64, q string) *screen {
+		qs := pg.QueryStat{QueryID: id, Query: q, Calls: 1}
+		return &screen{
+			level: levelStatementDetail, title: "query", tool: toolQueries, db: "test",
+			loaded: true, stat: stmtState{detail: &qs, windowExecMs: 100}}
+	}
+
+	out := stripANSI(renderModel(detail(9,
+		"select b.x from battle b join player p on p.id = b.player_id"+
+			" where exists (select 1 from guild g where g.id = p.guild_id)")))
+	var joins string
+	for ln := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(ln), "joins ") {
+			joins = ln
+			break
+		}
+	}
+	if joins == "" {
+		t.Fatalf("detail view has no joins row:\n%s", out)
+	}
+	for _, want := range []string{"player", "guild"} {
+		if !strings.Contains(joins, want) {
+			t.Errorf("joins row %q missing %q", strings.TrimSpace(joins), want)
+		}
+	}
+
+	out = stripANSI(renderModel(detail(10, "select * from battle where id = $1")))
+	for ln := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(ln), "joins ") {
+			t.Errorf("single-table detail view should have no joins row, got %q", strings.TrimSpace(ln))
+		}
 	}
 }

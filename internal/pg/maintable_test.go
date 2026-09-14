@@ -1,6 +1,9 @@
 package pg
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestMainTable(t *testing.T) {
 	cases := map[string]string{
@@ -124,6 +127,91 @@ func TestMainIndex(t *testing.T) {
 	for q, want := range cases {
 		if got := MainIndex(q); got != want {
 			t.Errorf("MainIndex(%q) = %q, want %q", q, got, want)
+		}
+	}
+}
+
+func TestJoinedTables(t *testing.T) {
+	cases := map[string][]string{
+		// Explicit JOINs — every spelling reaches the same keyword.
+		"SELECT a FROM public.game_battle b JOIN other o ON o.id = b.id":               {"other"},
+		"SELECT e.id FROM game_citymap_entity e JOIN states st ON st.entity_id = e.id": {"states"},
+		"SELECT 1 FROM a INNER JOIN b ON a.id=b.id LEFT OUTER JOIN c ON c.id=a.id":     {"b", "c"},
+		"SELECT 1 FROM a NATURAL JOIN b":                                               {"b"},
+		// Schema qualification survives (to_regclass resolves it as-is); quoting
+		// does not, exactly as MainTable does it.
+		"SELECT 1 FROM public.a JOIN other.b ON a.id=b.id":           {"other.b"},
+		`SELECT 1 FROM "A" JOIN "MySchema"."Tbl" x ON x.id = "A".id`: {"MySchema.Tbl"},
+		// Comma FROM lists — the whole reason sqlWords emits ",". A bare word after
+		// a relation is its alias, not a second table.
+		"SELECT 1 FROM a, b WHERE a.id = b.id":           {"b"},
+		"SELECT 1 FROM a x, b y, c z WHERE x.id = $1":    {"b", "c"},
+		"SELECT 1 FROM a b WHERE b.id = $1":              nil,
+		"SELECT 1 FROM a AS x, public.b AS y ON true":    {"public.b"},
+		"SELECT 1 FROM a, b JOIN c ON b.id = c.id":       {"b", "c"},
+		"SELECT 1 FROM ONLY a, ONLY b WHERE a.id = b.id": {"b"},
+		// The DML join shapes: the second relation is introduced by FROM or USING,
+		// never by the statement keyword.
+		"UPDATE game_player p SET x = $1 FROM game_session s WHERE s.player_id = p.id":           {"game_session"},
+		"DELETE FROM game_session s USING game_player p WHERE s.player_id = p.id":                {"game_player"},
+		"MERGE INTO inventory t USING src s ON t.id = s.id WHEN MATCHED THEN UPDATE SET n = s.n": {"src"},
+		"INSERT INTO archive SELECT * FROM staging s JOIN players p ON p.id = s.id":              {"staging", "players"},
+		// An INSERT column list and a VALUES tuple are expressions, not relations.
+		"INSERT INTO game_event (a, b) VALUES ($1, $2)": nil,
+		// USING after JOIN is a column list; only a DELETE/MERGE USING names a table.
+		"SELECT 1 FROM a JOIN b USING (id, tenant_id)": {"b"},
+		// Subqueries anywhere: a semi-join probe reads a table just as a JOIN does.
+		"SELECT 1 FROM a WHERE EXISTS (SELECT 1 FROM b WHERE b.a_id = a.id)":             {"b"},
+		"SELECT 1 FROM a WHERE id IN (SELECT id FROM b WHERE x IN (SELECT y FROM c))":    {"b", "c"},
+		"SELECT x, (SELECT max(id) FROM b) FROM a":                                       {"b"},
+		"SELECT 1 FROM a JOIN (SELECT id FROM b JOIN c ON c.id = b.id) s ON s.id = a.id": {"b", "c"},
+		// The group isn't a subquery itself, so it has to be walked as an
+		// expression rather than skipped, or the buried SELECT is lost.
+		"SELECT coalesce((SELECT max(id) FROM b), $1) FROM a": {"b"},
+		// Every UNION arm is its own statement body, parenthesized or not.
+		"SELECT a FROM t1 UNION ALL SELECT a FROM t2":                       {"t2"},
+		"(SELECT a FROM t1) UNION (SELECT a FROM t2)":                       {"t1", "t2"},
+		"SELECT 1 FROM a, LATERAL (SELECT id FROM b WHERE b.a_id = a.id) s": {"b"},
+		// FROM-position keywords that are not relations: the operand of
+		// extract/substring is a column, and an SRF in FROM is a call.
+		"SELECT extract(epoch from created_at) FROM events JOIN e2 ON e2.id = events.id":           {"e2"},
+		"SELECT substring(x FROM $1 FOR $2) FROM t, u":                                             {"u"},
+		"SELECT wanted.id FROM unnest($1::int[]) AS wanted(id) JOIN players p ON p.id = wanted.id": {"players"},
+		"SELECT 1 FROM generate_series($1, $2) g, events e WHERE e.id = g":                         {"events"},
+		// CTE bodies are walked; the CTE names themselves are not relations.
+		"WITH d AS (SELECT id FROM tmp) DELETE FROM events WHERE id IN (SELECT id FROM d)":                              {"tmp"},
+		"WITH a AS (SELECT id FROM real_t), b AS (SELECT id FROM a) SELECT * FROM b":                                    nil,
+		"WITH x AS (SELECT id FROM a JOIN b ON b.id=a.id), y AS (SELECT id FROM c) SELECT * FROM x JOIN y ON y.id=x.id": {"b", "c"},
+		// A data-modifying CTE body must still be recognised as a query body.
+		"WITH moved AS (DELETE FROM staging WHERE id = $1 RETURNING *) INSERT INTO archive SELECT * FROM moved": {"staging"},
+		// A CTE column list is not a relation list, and a VALUES body has no tables.
+		"WITH units_to_delete (player_id, unit_id, count) AS (VALUES ($1,$2,$3)) UPDATE game_army_units u SET count = u.count - d.count FROM units_to_delete d WHERE u.player_id = d.player_id": nil,
+		// A RECURSIVE self-reference can't loop: the walk is structural and never
+		// follows a name (unlike MainTable's resolveThroughCTEs).
+		"WITH RECURSIVE t AS (SELECT $1 UNION ALL SELECT n FROM t JOIN edges e ON e.src = t.n) SELECT * FROM t": {"edges"},
+		// Dedup is case-insensitive and keeps first appearance, not sort order; a
+		// self-join adds nothing the table row doesn't already say.
+		"SELECT 1 FROM a x JOIN a y ON y.parent = x.id":           nil,
+		"SELECT 1 FROM a JOIN B ON B.id=a.id JOIN b ON b.id=a.id": {"B"},
+		"SELECT 1 FROM a JOIN c ON c.id=a.id JOIN b ON b.id=a.id": {"c", "b"},
+		// Gated out: no join list to find, and their USING/ON operands are indexes,
+		// access methods and files rather than tables.
+		"CREATE INDEX idx ON t USING btree (a)":        nil,
+		"CLUSTER VERBOSE player USING player_pkey":     nil,
+		"VACUUM (VERBOSE, ANALYZE) public.game_battle": nil,
+		"TRUNCATE a, b": nil,
+		"LOCK TABLE public.battle IN SHARE UPDATE EXCLUSIVE MODE": nil,
+		"COPY t FROM stdin":                             nil,
+		"autovacuum: VACUUM ANALYZE public.game_battle": nil,
+		"SET search_path = $1":                          nil,
+		"SELECT 1":                                      nil,
+		"":                                              nil,
+		// Leading ORM tags are stripped before the statement gate, like MainTable.
+		"/* Repo.find */ SELECT 1 FROM a JOIN b ON b.id = a.id": {"b"},
+	}
+	for q, want := range cases {
+		if got := JoinedTables(q); !slices.Equal(got, want) {
+			t.Errorf("JoinedTables(%q) = %q, want %q", q, got, want)
 		}
 	}
 }

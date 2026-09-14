@@ -720,34 +720,7 @@ func previewBytes(b []byte, n int) string {
 	return fmt.Sprintf("\\x%x…", b[:n])
 }
 
-// renderTupleRowList draws one row per column of the heap row the user
-// drilled into: the column name (padded) and the value (NULL rendered as
-// "NULL" in the muted style, the rest plain). Values are truncated to fit
-// the terminal so wide jsonb / bytea columns don't blow up the layout —
-// the user can still tell what they're looking at and how long it is.
-func (m *Model) renderTupleRowList(s *screen, height int) string {
-	// Value column gets every remaining cell.
-	valW := max(m.width-(colCursor+tupleRowNameColW+colGutter+colGutter), 16)
-	header := styleMuted.Render("  " + padRight("column", tupleRowNameColW) + "  " + "value")
-	return m.renderRowList(s, height, header,
-		func(it item, selected bool) string {
-			c, _ := it.data.(pg.TupleCell)
-			w := valW
-			tag := ""
-			// Value arrived truncated from the server (tupleValueCap) —
-			// surface the real size, since the on-screen "…" alone would
-			// undersell a 60 MB jsonb as merely "wider than the terminal".
-			if c.Value != nil && c.FullBytes > int64(len(*c.Value)) {
-				tag = "  · " + humanize.Bytes(c.FullBytes) + " total"
-				w = max(valW-lipgloss.Width(tag), 8)
-				tag = styleMuted.Render(tag)
-			}
-			value := truncateValue(c.Value, w) + tag
-			return selectedCursor(selected) + padRight(highlightName(c.Name, selected), tupleRowNameColW) + "  " + value
-		})
-}
-
-// truncateValue renders a column value for the row-detail view: NULL gets
+// truncateValue renders a decoded column value in a list row: NULL gets
 // the muted style, anything else is clipped to width with a trailing
 // ellipsis so wide jsonb/bytea columns don't break alignment. Embedded
 // newlines/tabs (multi-line text columns) are folded to single spaces —

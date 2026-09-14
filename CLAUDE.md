@@ -141,7 +141,14 @@ fails (missing/corrupt → empty).
   `sqlHeapTuplesDecode` → plain `sqlHeapTuples`) and the HOT-chain hop (`fillHotChains`,
   `sqlHeapRedirectKeys`) fall back to the plain view when the catalog lookup or join
   fails. The tuple list's `C` pick (`pages.tuplePick`) is part of that query, so a toggle
-  reloads the page; it is deliberately not persisted. For index entries,
+  reloads the page; it is deliberately not persisted. TOAST chunk tuples share the
+  byte-layout overlay (their descriptor is `chunk_id`/`chunk_seq`/`chunk_data`); the
+  `chunk_data` value pane reassembles the whole value (`ReadToastValue`, capped, owner
+  column types as hints) and `pageinspect.DecodeToastValue` sniffs the pglz/lz4
+  `va_tcinfo` header — the toast table doesn't record compression, so a value counts as
+  compressed only when the pure-Go decoder (`pglz.go`/`lz4.go`) inflates it to exactly
+  the declared size — then decodes jsonb/text/hex, degrading to a note + stored hex.
+  There is no separate toast-value screen. For index entries,
   a NULL heap projection means HOT-redirected, *not* dead — only `IndexTuple.Dead` earns
   the `dead` tag. The WAL block payload view (`pg.WALBlockDetail`, `tui/wal_detail.go`)
   is the same shape: the record bytes are mandatory, relation kind / column layout /

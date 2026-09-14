@@ -128,11 +128,6 @@ func (m *Model) loadCurrent() tea.Cmd {
 		return m.loadHeapPagesCmd(s.table, s.pages.heapWindowStart, s.pages.heapWindowCount)
 	case levelHeapTuples:
 		return m.loadHeapTuplesCmd(s.table, s.pages.heapPageBlkno, s.pages.tuplePick)
-	case levelTupleRow:
-		if s.pages.toastChunkID != 0 {
-			return m.loadToastValueCmd(s.table, s.pages.toastChunkID)
-		}
-		return m.loadTupleRowCmd(s.table, s.pages.tupleCtid)
 	case levelRelations:
 		return m.loadRelationsCmd(s.db, s.schema)
 	case levelIndexPages:

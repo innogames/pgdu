@@ -302,7 +302,7 @@ func validSorts(l level) []sortMode {
 		return []sortMode{sortByBlkno, sortBySize, sortByLiveLP, sortByRedirectLP, sortByDeadLP, sortByDeadRatio, sortByFreeSpace, sortByTemp}
 	case levelHeapTuples:
 		return []sortMode{sortByLP, sortBySize}
-	case levelTupleRow, levelWALBlockDetail:
+	case levelWALBlockDetail:
 		return []sortMode{sortByName}
 	case levelRelations:
 		return []sortMode{sortBySize, sortByRows, sortByType, sortByName}

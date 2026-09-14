@@ -275,7 +275,7 @@ func (k *keyMap) applyContext(s *screen) {
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
 	k.Params.SetEnabled(stmtDetail)
 	k.Execute.SetEnabled(stmtDetail)
-	// v is the verbose toggle on statement detail, the VACUUM trigger on parts
+	// v is the parameter-source toggle on statement detail, the VACUUM trigger on parts
 	// and the auxiliary-backend visibility toggle on the activity table.
 	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity)
 	k.DeleteSnapshot.SetEnabled(snapshots)

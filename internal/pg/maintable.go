@@ -359,9 +359,10 @@ func tableAfter(toks []string, kw int) string {
 }
 
 // cleanTable returns toks[i] as a relation name, or "" when it's absent or a
-// subquery marker ("(") rather than an identifier.
+// structural marker ("(" for a subquery, "," for an empty list item in a
+// truncated statement) rather than an identifier.
 func cleanTable(toks []string, i int) string {
-	if i < 0 || i >= len(toks) || toks[i] == "(" {
+	if i < 0 || i >= len(toks) || toks[i] == "(" || toks[i] == "," {
 		return ""
 	}
 	// ONLY is a no-inherit modifier, not a relation: FROM ONLY t, UPDATE ONLY t,
@@ -421,10 +422,10 @@ func indexOfFrom(toks []string, start int) int {
 // the token index of the keyword that opens its body — the token right after the
 // "(" following AS. It lets a main statement whose FROM names a CTE
 // (SELECT … FROM data) be resolved back to the relation the CTE reads from.
-// CTE definitions live at paren depth 0 between WITH and the main statement;
-// sqlWords drops the commas between them, so each definition runs until the next
-// depth-0 token that is a main statement keyword (the WITH's subject) — anything
-// else there starts the next CTE.
+// CTE definitions live at paren depth 0 between WITH and the main statement,
+// separated by commas; each definition runs until the next depth-0 token that is
+// a main statement keyword (the WITH's subject) — anything else there starts the
+// next CTE.
 func cteBodies(toks []string) map[string]int {
 	bodies := map[string]int{}
 	i := 1 // past "with"
@@ -432,6 +433,10 @@ func cteBodies(toks []string) map[string]int {
 		i++
 	}
 	for i < len(toks) && !isMainKeyword(toks[i]) {
+		if toks[i] == "," { // the separator before the next definition
+			i++
+			continue
+		}
 		name := strings.ToLower(strings.ReplaceAll(toks[i], `"`, ""))
 		i++
 		// Optional column-list: name (col, …) AS — skip the parenthesized group.
@@ -475,12 +480,14 @@ func skipParens(toks []string, open int) int {
 	return len(toks)
 }
 
-// sqlWords tokenizes a normalized statement into identifier words plus bare "("
-// and ")" markers for each parenthesis. Identifier characters are letters,
-// digits, underscore, dollar (placeholders), dot (schema qualification) and the
-// double quote (quoted identifiers); every other byte is a separator. The "("
-// marker lets callers tell `FROM (SELECT …)` (a subquery) apart from `FROM t`;
-// the matching ")" lets them track paren depth (e.g. to skip WITH CTE bodies).
+// sqlWords tokenizes a normalized statement into identifier words plus bare "(",
+// ")" and "," markers. Identifier characters are letters, digits, underscore,
+// dollar (placeholders), dot (schema qualification) and the double quote (quoted
+// identifiers); every other byte is a separator. The "(" marker lets callers tell
+// `FROM (SELECT …)` (a subquery) apart from `FROM t`; the matching ")" lets them
+// track paren depth (e.g. to skip WITH CTE bodies); the "," marker separates list
+// items, which is the only thing that tells `FROM a, b` (two relations) from
+// `FROM a b` (one relation and its alias).
 //
 // Comments are stripped first so an ORM tag like `/* update for … */` can't be
 // mistaken for the statement keyword or its table.
@@ -506,6 +513,9 @@ func sqlWords(s string) []string {
 		case c == ')':
 			flush()
 			out = append(out, ")")
+		case c == ',':
+			flush()
+			out = append(out, ",")
 		default:
 			flush()
 		}
@@ -560,4 +570,270 @@ func skipBlockComment(s string, start int) int {
 		}
 	}
 	return len(s)
+}
+
+// JoinedTables returns the other base relations a normalized statement reads —
+// the tables it joins to, beyond the one MainTable names. Like MainTable it is a
+// deliberately shallow keyword parse, not a SQL grammar: it walks FROM / JOIN /
+// USING item lists at every nesting level (subqueries, CTE bodies, EXISTS and
+// scalar-subquery probes, UNION arms) and collects the identifiers that sit in a
+// relation position.
+//
+// Names come back in order of first appearance, deduplicated case-insensitively,
+// with quoting and schema qualification handled exactly as MainTable does, so
+// each one resolves through to_regclass as-is. The MainTable result and any CTE
+// name defined in the statement's own WITH clause are excluded — a CTE is not a
+// relation, and the base tables behind it are collected from its body instead.
+// Set-returning functions in FROM (unnest, generate_series, jsonb_to_recordset)
+// are calls, not relations, and are skipped; only the subqueries among their
+// arguments are walked.
+//
+// It returns nil when there is nothing to show: a single-table statement, a
+// self-join, or any statement that cannot carry a join list at all (DDL and
+// maintenance commands, whose USING and ON operands name indexes and access
+// methods rather than tables — see joinableStmt).
+//
+// Two deliberate limitations: a parenthesized join, FROM (a JOIN b ON …), reads
+// as an expression and yields nothing, and dedup is textual — without a
+// search_path, public.t and t are two different names.
+//
+// The returned slice is memoized and shared; callers must not modify it.
+func JoinedTables(query string) []string {
+	if v, ok := joinedTablesMemo.Load(query); ok {
+		return v.([]string)
+	}
+	r := parseJoinedTables(query)
+	joinedTablesMemo.Store(query, r)
+	return r
+}
+
+func parseJoinedTables(query string) []string {
+	toks := sqlWords(query)
+	if !joinableStmt(toks) {
+		return nil
+	}
+	acc := &relAcc{skip: map[string]bool{}}
+	// A CTE name stands for a query, not a relation. Its body is walked like any
+	// other subquery, so the real tables behind it are collected on their own.
+	if strings.EqualFold(toks[0], "with") {
+		for name := range cteBodies(toks) {
+			acc.skip[name] = true // already lower-cased and unquoted
+		}
+	}
+	if mt := MainTable(query); mt != "" {
+		acc.skip[strings.ToLower(mt)] = true
+	}
+	collectRelations(toks, 0, len(toks), acc)
+	return acc.names
+}
+
+// joinableStmt reports whether the statement can carry a join list at all:
+// SELECT / INSERT / UPDATE / DELETE / MERGE, looking through the leading "(" of
+// a parenthesized UNION arm and, for a WITH query, through to the statement that
+// follows the CTE definitions. Everything else is excluded, and not merely as an
+// optimization: the USING and ON of the other commands name something that is
+// not a table — CLUSTER t USING t_pkey an index, CREATE INDEX … USING btree an
+// access method, COPY t FROM stdin a file.
+func joinableStmt(toks []string) bool {
+	i := 0
+	for i < len(toks) && toks[i] == "(" {
+		i++
+	}
+	if i >= len(toks) {
+		return false
+	}
+	if strings.EqualFold(toks[i], "with") {
+		// mainStmtAfterWith indexes from the "with" it is handed, so pass the
+		// slice that starts there.
+		k := mainStmtAfterWith(toks[i:])
+		if k < 0 {
+			return false
+		}
+		i += k
+	}
+	switch strings.ToLower(toks[i]) {
+	case "select", "insert", "update", "delete", "merge":
+		return true
+	}
+	return false
+}
+
+// relAcc accumulates relation names in first-appearance order, deduplicated by
+// lower-cased name, dropping the names in skip (the CTE names and the
+// MainTable, which the caller already shows).
+type relAcc struct {
+	names []string
+	seen  map[string]bool
+	skip  map[string]bool
+}
+
+func (a *relAcc) add(name string) {
+	if name == "" {
+		return
+	}
+	k := strings.ToLower(name)
+	if a.skip[k] || a.seen[k] {
+		return
+	}
+	if a.seen == nil {
+		a.seen = map[string]bool{}
+	}
+	a.seen[k] = true
+	a.names = append(a.names, name)
+}
+
+// collectRelations walks one statement body, toks[start:end), at its own paren
+// depth: it honours the FROM / JOIN / USING clause introducers found there and
+// descends into every parenthesized group. It is the statement-level half of a
+// mutual recursion with collectExpr.
+func collectRelations(toks []string, start, end int, acc *relAcc) {
+	for i := start; i < end; {
+		switch {
+		case toks[i] == "(":
+			i = descend(toks, i, end, acc)
+		case toks[i] == ")":
+			return // defensive: ranges are already bounded to the group
+		case isFromIntro(toks[i]):
+			// FROM takes a comma-separated list; JOIN and USING take one item.
+			i = collectFromItems(toks, i+1, end, !strings.EqualFold(toks[i], "from"), acc)
+		default:
+			i++
+		}
+	}
+}
+
+// collectExpr walks an expression, column list or function-argument range: it
+// ignores every keyword — so extract(epoch FROM ts), substring(x FROM $1) and
+// trim(both ' ' FROM x) contribute nothing — and only descends into nested
+// groups, so a subquery buried in a function argument is still found
+// (coalesce((SELECT max(id) FROM b), $1)).
+func collectExpr(toks []string, start, end int, acc *relAcc) {
+	for i := start; i < end; {
+		if toks[i] == "(" {
+			i = descend(toks, i, end, acc)
+		} else {
+			i++
+		}
+	}
+}
+
+// descend walks the group opening at toks[open] — a query body as a statement,
+// anything else as an expression — and returns the index just past its ")".
+func descend(toks []string, open, end int, acc *relAcc) int {
+	after := min(skipParens(toks, open), end)
+	inner, innerEnd := open+1, after
+	if innerEnd > inner && toks[innerEnd-1] == ")" {
+		innerEnd-- // drop the closing paren; a truncated run has none
+	}
+	if isSubqueryStart(toks, inner, innerEnd) {
+		collectRelations(toks, inner, innerEnd, acc)
+	} else {
+		collectExpr(toks, inner, innerEnd, acc)
+	}
+	return after
+}
+
+// isSubqueryStart reports whether a parenthesized group is a query body rather
+// than an expression, a column list or a function-argument list — the one
+// discriminator that keeps extract(… FROM …), INSERT INTO t (a, b) and
+// VALUES ($1, $2) from contributing bogus relations. The data-modifying keywords
+// count: a CTE body like WITH moved AS (DELETE FROM staging …) must be walked.
+func isSubqueryStart(toks []string, i, end int) bool {
+	if i >= end {
+		return false
+	}
+	switch strings.ToLower(toks[i]) {
+	case "select", "with", "values", "insert", "update", "delete", "merge", "table":
+		return true
+	}
+	return false
+}
+
+// isFromIntro reports whether tok introduces relation items. USING needs no
+// guard here: joinableStmt has already excluded the commands whose USING names
+// an index or an access method, and the JOIN … USING (col, …) form is a
+// parenthesized column list, which is never read as a relation.
+func isFromIntro(tok string) bool {
+	switch strings.ToLower(tok) {
+	case "from", "join", "using":
+		return true
+	}
+	return false
+}
+
+// collectFromItems reads the relation items introduced by a FROM / JOIN / USING
+// at i and returns the index of the token that ended the list. The caller's loop
+// re-examines that token, so a JOIN ending a FROM list immediately re-enters
+// item mode. single is set for JOIN and USING, which take exactly one item.
+//
+// An item is a bare relation, a parenthesized subquery, or a set-returning
+// function call; ONLY and LATERAL prefix it, and an alias, AS alias, column
+// alias list, WITH ORDINALITY or TABLESAMPLE clause may trail it.
+func collectFromItems(toks []string, i, end int, single bool, acc *relAcc) int {
+	for i < end {
+		for i < end && (strings.EqualFold(toks[i], "only") || strings.EqualFold(toks[i], "lateral")) {
+			i++
+		}
+		if i >= end {
+			return i
+		}
+		switch {
+		case toks[i] == ",":
+			i++ // empty item: a truncated statement text
+			continue
+		case isItemTerminator(toks[i]):
+			return i
+		case toks[i] == "(":
+			i = descend(toks, i, end, acc) // (SELECT …) s, or USING (col, …)
+		case i+1 < end && toks[i+1] == "(":
+			// A set-returning function — unnest(…), generate_series(…),
+			// jsonb_to_recordset(…) — is a call, not a relation. Postgres
+			// requires an alias before a column-alias list, so an identifier
+			// directly followed by "(" at an item position is always a call.
+			// Descend rather than skip: the arguments may hold a subquery.
+			i = descend(toks, i+1, end, acc)
+		default:
+			acc.add(cleanTable(toks, i)) // unquotes, steps over ONLY
+			i++
+		}
+		i = skipItemTrailer(toks, i, end, acc)
+		if i < end && toks[i] == "," && !single {
+			i++
+			continue
+		}
+		return i
+	}
+	return i
+}
+
+// skipItemTrailer steps over everything between a FROM item and the next item or
+// clause: an alias, AS alias, a (col, …) alias list, WITH ORDINALITY, a
+// TABLESAMPLE clause. Parenthesized groups are descended rather than skipped, so
+// a subquery inside one is still seen.
+func skipItemTrailer(toks []string, i, end int, acc *relAcc) int {
+	for i < end && toks[i] != "," && !isItemTerminator(toks[i]) {
+		if toks[i] == "(" {
+			i = descend(toks, i, end, acc)
+		} else {
+			i++
+		}
+	}
+	return i
+}
+
+// isItemTerminator reports whether tok ends a FROM item list. JOIN, FROM and
+// USING are terminators *and* introducers, so collectRelations re-enters item
+// mode on them; SET and RETURNING keep an UPDATE's assignment list and an
+// INSERT's output list out of item mode, INTO keeps SELECT … INTO out, and
+// WHEN / THEN bound a MERGE's USING source. It does double duty as the guard
+// that stops a keyword from being eaten as an item's alias.
+func isItemTerminator(tok string) bool {
+	switch strings.ToLower(tok) {
+	case "where", "group", "having", "order", "limit", "offset", "fetch", "window",
+		"union", "intersect", "except", "on", "using", "set", "returning", "into",
+		"values", "for", "when", "then", "join", "from",
+		"select", "insert", "update", "delete", "merge", "with":
+		return true
+	}
+	return false
 }
