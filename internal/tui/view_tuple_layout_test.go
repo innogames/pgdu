@@ -129,7 +129,7 @@ func TestTupleLayoutDrillMark(t *testing.T) {
 
 	got := stripANSI(m.renderTupleLayout(s, 30))
 	var marked, plain []string
-	for _, ln := range strings.Split(got, "\n") {
+	for ln := range strings.SplitSeq(got, "\n") {
 		switch {
 		case strings.Contains(ln, "↵ note"):
 			marked = append(marked, ln)
