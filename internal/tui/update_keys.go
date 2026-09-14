@@ -642,6 +642,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.act.verbose = !s.act.verbose
 			m.rebuildActivityItems(s)
 		}
+		// On the system overview, `v` shows every row (default-valued settings,
+		// healthy checks) or folds them back into the section headers. The
+		// choice is a user preference, so it persists.
+		if s.level == levelMaintenance {
+			m.maintVerbose = !m.maintVerbose
+			s.maintenance.follow = true
+			if m.colPrefs != nil {
+				m.colPrefs.OverviewVerbose = m.maintVerbose
+				if err := m.colPrefs.Save(); err != nil {
+					m.notice = "could not save prefs: " + err.Error()
+				}
+			}
+		}
 	case key.Matches(msg, m.keys.Export):
 		// Write the current table/view to pgdu-<tool>-<datetime>.csv. Returns nil
 		// (→ a hint) on screens with nothing tabular to export.

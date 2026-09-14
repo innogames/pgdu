@@ -32,6 +32,10 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 		}
 	}
 	info.Tuning = parseMaintTuning(settingsMap(ctx, pool, sqlMaintSettingsRaw, maintSettingsRawKeys))
+	info.SettingDefault = make(map[string]bool)
+	for k, v := range settingsMap(ctx, pool, sqlMaintSettingsDefault, maintSettingsKeys) {
+		info.SettingDefault[k] = v == "true"
+	}
 
 	// --- max_connections (also in Settings, but parse once to int) ---
 	_ = pool.QueryRow(ctx, sqlMaintMaxConns).Scan(&info.MaxConns)
@@ -217,12 +221,20 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	})
 
 	// --- WAL receiver (standby-side) ---
-	var recvStatus string
-	var recvMsgAgeSec float64
-	if pool.QueryRow(ctx, sqlMaintWalReceiver).Scan(&recvStatus, &recvMsgAgeSec) == nil {
+	var recvStatus, recvHost, recvSlot string
+	var recvMsgAgeSec, recvReplaySec float64
+	var recvPort int
+	var recvByteLag int64
+	if pool.QueryRow(ctx, sqlMaintWalReceiver).Scan(&recvStatus, &recvMsgAgeSec,
+		&recvHost, &recvPort, &recvSlot, &recvByteLag, &recvReplaySec) == nil {
 		info.WalReceiver = &WalReceiverStat{
-			Status:     recvStatus,
-			LastMsgAge: time.Duration(recvMsgAgeSec * float64(time.Second)),
+			Status:      recvStatus,
+			LastMsgAge:  time.Duration(recvMsgAgeSec * float64(time.Second)),
+			SenderHost:  recvHost,
+			SenderPort:  recvPort,
+			SlotName:    recvSlot,
+			ByteLag:     max(recvByteLag, 0),
+			ReplayDelay: time.Duration(recvReplaySec * float64(time.Second)),
 		}
 	}
 

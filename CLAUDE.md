@@ -188,6 +188,17 @@ fails (missing/corrupt → empty).
   `diagres.Result` (aliased as `pg.DiagResult`) and ride the diagnostic-result machinery
   keyed by `screen.diagVisKey()`. Only `pg.Client.DiscoverPgBouncers` stays in pg: it
   adds the "is my own connection behind a pooler" source, which needs the pool.
+- **System overview is quiet by default** (`view_maintenance*.go`): a finding is printed once —
+  in the recommendations panel when it is actionable (`maintView.panel`), inline via `note()`
+  only when it is an Info note without a fix — and the metric it is about is only coloured
+  (`graded`/`fill`). A setting row goes through `v.guc(label, guc, adviceKey)`, which drops a
+  default-valued knob (`pg_settings.reset_val = boot_val` → `MaintenanceInfo.SettingDefault`)
+  nothing grades; a check that passed appends its label to the section's `ok` list and
+  `v.section()` folds it into the title as `✓ a · b`. `v` (`Model.maintVerbose`, persisted as
+  `prefs.OverviewVerbose`) shows every row, including the verbose-only observability section.
+  Adding a row means deciding which of the three it is. Action rows are the recommendations
+  first, then the four stats-reset rows of the closing statistics block (`actionRows`); the fix
+  line renders under the cursor row only.
 - **Top-queries snapshots**: the `L` browser carries virtual anchors (`@now`,
   `@session`, `@reset` in `cmds.go`) that are never backed by a file — every path that
   loads or diffs a snapshot must special-case them. Snapshots older than the live

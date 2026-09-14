@@ -51,15 +51,17 @@ func TestRenderMaintenanceBars(t *testing.T) {
 	info.SeqScans, info.IdxScans = 100, 900
 	info.LiveTuples, info.DeadTuples = 9000, 1000
 	for _, width := range []int{200, 120} {
-		m := &Model{width: width}
+		// Verbose, so the lightly used connection pool and the full-page
+		// image share draw their bars too.
+		m := &Model{width: width, maintVerbose: true}
 		raw := stripANSI(m.renderMaintenance(overviewScreen(info), 400))
 		out := squashSpaces(raw)
 		for _, want := range []string{
 			"pg_stat_statements [▇░░░░░░░░░░░░░░░░░░░] 100/5.0k 2.0%",
 			"connections [▇▇░░░░░░░░░░░░░░░░░░] 7/100 7% (2 active · 5 idle)",
-			"xid age [▇▇▇▇▇░░░░░░░░░░░░░░░] 50.0M / 200.0M 25.0% in shop",
-			"occupancy [▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇░] 1.0M / 1.0M buffers 95% · avg usage 2.4",
-			"dirty ▇ 20.0k 2.0%",
+			"xid age · shop [▇░░░░░░░░░░░░░░░░░░░] 50.0M 3.1% failsafe · 25% freeze_max_age",
+			"occupancy 1.0M / 1.0M buffers 95% · avg usage 2.4",
+			"dirty 20.0k 2.0%",
 			"checkpoints [▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇] 140 timed 4 requested 2.8% requested",
 			"swap [▇░░░░░░░░░░░░░░░░░░░] 80.00 MB / 8.00 GB 1.0%",
 			"workers [▇▇▇▇▇▇░░░░░░░░░░░░░░] 1 / 3 busy",
@@ -99,11 +101,12 @@ func TestRenderMaintenanceBars(t *testing.T) {
 				rest, off = rest[j+1:], off+j+1
 			}
 		}
-		// capacity, connections, hot/index/dead, occupancy, temperature, host
-		// memory, swap, workers, xid age, fpi, checkpoints, avg interval,
-		// dirty-page writes — the fixture has no mxid age or WAL-in-flight.
-		if bars != 15 {
-			t.Errorf("width %d: %d bars rendered, want 15\n%s", width, bars, raw)
+		// capacity, connections, hot/index/dead, temperature, host memory,
+		// swap, workers, xid age, fpi, checkpoints, avg interval, dirty-page
+		// writes — the fixture has no mxid age or WAL-in-flight, and the
+		// always-full occupancy carries no bar.
+		if bars != 14 {
+			t.Errorf("width %d: %d bars rendered, want 14\n%s", width, bars, raw)
 		}
 	}
 }
@@ -139,7 +142,7 @@ func TestRenderMaintenanceDBFallback(t *testing.T) {
 // Section titles carry the panel's glyph for the worst finding they hold, and
 // nothing on a healthy cluster.
 func TestRenderMaintenanceSectionMarkers(t *testing.T) {
-	m := &Model{width: 120}
+	m := &Model{width: 120, maintVerbose: true} // verbose: no ✓ summary trails the titles
 	out := squashSpaces(stripANSI(m.renderMaintenance(overviewScreen(overviewInfo()), 400)))
 	for _, h := range []string{"server", "observability", "autovacuum & wraparound", "wal & checkpoints"} {
 		if !strings.Contains(out, "\n"+h+"\n") {
@@ -162,14 +165,14 @@ func TestRenderMaintenanceSectionMarkers(t *testing.T) {
 // bar stays plain however full it is.
 func TestFreezeAgeBarFollowsAdvice(t *testing.T) {
 	info := overviewInfo()
-	info.XidAge = 198_000_000
+	info.XidAge = 198_000_000 // 99 % of freeze_max_age, 12 % of the failsafe
 	raw := renderMaintAutovacuum(newMaintView(overviewScreen(info)), maintBarW)
-	if !strings.Contains(raw, styleBar.Render(strings.Repeat("▇", 19))) {
-		t.Errorf("99%% of freeze_max_age must paint a plain bar\n%s", raw)
+	if !strings.Contains(raw, styleBar.Render(strings.Repeat("▇", 2))) {
+		t.Errorf("99%% of freeze_max_age must paint a plain, short bar\n%s", raw)
 	}
 	info.XidAge = 900_000_000 // past half of vacuum_failsafe_age: crit
 	raw = renderMaintAutovacuum(newMaintView(overviewScreen(info)), maintBarW)
-	if !strings.Contains(raw, adviceStyle(pg.AdviceCrit).Render(strings.Repeat("▇", 20))) {
+	if !strings.Contains(raw, adviceStyle(pg.AdviceCrit).Render(strings.Repeat("▇", 11))) {
 		t.Errorf("a critical wraparound finding must paint the bar in its colour\n%s", raw)
 	}
 }

@@ -302,6 +302,7 @@ type MaintRates struct {
 	ReadsPerMin       float64
 	WritesPerMin      float64
 	EvictionsPerMin   float64
+	XactsPerMin       float64 // commits + rollbacks over pg_stat_database
 	WALBytesPerMin    float64 // from the LSN delta, so it includes replayed WAL on a standby
 	TempBytesPerMin   float64
 	CheckpointsPerMin float64
@@ -338,6 +339,7 @@ func ComputeMaintRates(prev, cur *MaintenanceInfo) MaintRates {
 		r.WALBytesPerMin = per(prev.WAL.CurrentLSNBytes, cur.WAL.CurrentLSNBytes)
 	}
 	r.TempBytesPerMin = per(prev.TempBytes, cur.TempBytes)
+	r.XactsPerMin = per(prev.XactCommit+prev.XactRollback, cur.XactCommit+cur.XactRollback)
 	if prev.Checkpointer.HasData && cur.Checkpointer.HasData {
 		r.CheckpointsPerMin = per(prev.Checkpointer.Timed+prev.Checkpointer.Requested,
 			cur.Checkpointer.Timed+cur.Checkpointer.Requested)

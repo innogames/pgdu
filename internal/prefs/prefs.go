@@ -19,6 +19,9 @@ import (
 type Prefs struct {
 	Version int                   `json:"version"`
 	Tables  map[string]TablePrefs `json:"tables,omitempty"`
+	// OverviewVerbose is the system overview's "show every row" toggle (v);
+	// off, the page hides default-valued settings and healthy checks.
+	OverviewVerbose bool `json:"overview_verbose,omitempty"`
 
 	// path is where Save writes. Empty means the config dir could not be
 	// resolved, so Save becomes a no-op rather than erroring on every keystroke.

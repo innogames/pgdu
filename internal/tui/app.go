@@ -585,8 +585,8 @@ type maintState struct {
 	// first is the sample taken when the screen was opened, the base of the
 	// since-open rates; same lifetime as prev.
 	first *pg.MaintenanceInfo
-	// cursor is the action row ↑↓ move over: the four extension-capacity
-	// reset rows (maintResetRows) followed by the recommendations (actionRows).
+	// cursor is the action row ↑↓ move over: the recommendations followed by
+	// the four stats-reset rows of the statistics block (actionRows).
 	// cursorKey is that row's identity (reset name or Advice.Key) so a reload
 	// that reshuffles the recommendations puts the cursor back on the same
 	// finding; cursorLine is the line it was rendered on (-1 unknown) and
@@ -988,6 +988,10 @@ type Model struct {
 	// cumulative counters into per-minute rates. Cycled by t.
 	maintTicking bool
 	maintRefresh time.Duration
+	// maintVerbose is the overview's v toggle: every row, including
+	// default-valued settings and checks that came back healthy. Off, those
+	// fold into their section header. Persisted in prefs (OverviewVerbose).
+	maintVerbose bool
 
 	// statTicking is true while a self-rescheduling refresh tick is running for
 	// the top-queries tool, so re-entering levelStatements doesn't spawn a
@@ -1123,6 +1127,7 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 	// is fine: actColEnabled/stmtColEnabled fall back to registry defaults for any
 	// id the user never touched, so columns added in a later build still appear.
 	if colPrefs != nil {
+		m.maintVerbose = colPrefs.OverviewVerbose
 		if v := colPrefs.Columns(colPrefsActivity); len(v) > 0 {
 			m.actTable.visible = colVisFromStrings[actColID](v)
 		}

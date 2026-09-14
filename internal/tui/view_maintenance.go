@@ -35,7 +35,9 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	info := s.maintenance.info
 	st := &s.maintenance
 	v := newMaintView(s)
+	v.verbose = m.maintVerbose
 	rows := st.actionRows()
+	recs := rows[:len(rows)-len(maintResetRows)]
 
 	var body strings.Builder
 	// cursorLine is the body line the cursor's action row lands on (and span
@@ -48,10 +50,9 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 		}
 	}
 
-	// ── EXTENSION CAPACITY + RECOMMENDATIONS ──────────────────────────
-	// The action rows come first: the capacity rows own the reset flow and
-	// every recommendation opens the screen behind it, so all of them stay
-	// reachable without scrolling past the read-only status sections below.
+	// ── RECOMMENDATIONS ──────────────────────────────────────────────
+	// The findings come first: they are what the page is for, and every one
+	// is an action row that opens the screen behind it.
 	// One bar width for the whole page, decided by the narrower pane, so
 	// every gauge on the screen sits in the same column.
 	paned := m.width >= 160
@@ -67,25 +68,9 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	}
 	db := v.dbName()
 
-	body.WriteString("  " + styleHeader.Render(" extension capacity ") + "\n")
-	var stmtsCap, qualsCap pg.ExtCapacity
-	if info != nil {
-		stmtsCap = info.Statements
-		qualsCap = info.Qualstats
-	}
-	markCursor(0)
-	body.WriteString(m.renderCapacityRow(s, db, 0, "pg_stat_statements", stmtsCap, barW) + "\n")
-	markCursor(1)
-	body.WriteString(m.renderCapacityRow(s, db, 1, "pg_qualstats", qualsCap, barW) + "\n")
-	markCursor(2)
-	body.WriteString(m.renderTableStatsRow(s, info, db, 2) + "\n")
-	markCursor(3)
-	body.WriteString(m.renderTableStatsAllRow(s, 3) + "\n")
-	body.WriteString("\n")
-
-	rec, at, span := renderMaintRecommendations(v, rows, len(maintResetRows), st.cursor)
+	rec, at, span := renderMaintRecommendations(v, recs, st.cursor)
 	if at >= 0 {
-		cursorLine, cursorSpan = strings.Count(body.String(), "\n")+at, span
+		cursorLine, cursorSpan = at, span
 	}
 	body.WriteString(rec)
 
@@ -95,27 +80,51 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 	// annotated rows of up to ~80 cols (host memory, advice notes), so the
 	// split only pays off from 160 cols; narrower terminals stack everything.
 	if paned {
-		// Column heights are balanced by hand: server + transactions + table
-		// activity are short, so the buffer cache goes left; the settings-heavy
-		// memory + autovacuum + observability stack goes right.
-		left := renderMaintServer(v, barW) + renderMaintTransactions(v) + renderMaintTableActivity(v, barW) +
-			renderMaintBufferCache(v, barW)
-		right := renderMaintMemory(v, barW) + renderMaintAutovacuum(v, barW) + renderMaintObservability(v)
+		// Column heights are balanced by hand: server + table activity are
+		// short, so the buffer cache goes left; the settings-heavy memory +
+		// autovacuum stack (+ observability when verbose) goes right.
+		left := renderMaintServer(v, barW) + renderMaintTableActivity(v, barW) + renderMaintBufferCache(v, barW)
+		right := renderMaintMemory(v, barW) + renderMaintAutovacuum(v, barW)
+		if v.verbose {
+			right += renderMaintObservability(v)
+		}
 		body.WriteString(renderColumns(left, right, leftW, rightW))
 		body.WriteString("\n")
 	} else {
 		body.WriteString(renderMaintServer(v, barW))
-		body.WriteString(renderMaintTransactions(v))
 		body.WriteString(renderMaintTableActivity(v, barW))
 		body.WriteString(renderMaintBufferCache(v, barW))
 		body.WriteString(renderMaintMemory(v, barW))
 		body.WriteString(renderMaintAutovacuum(v, barW))
-		body.WriteString(renderMaintObservability(v))
+		if v.verbose {
+			body.WriteString(renderMaintObservability(v))
+		}
 	}
 	body.WriteString(renderMaintReplication(v))
 	body.WriteString(renderMaintWAL(v, barW))
 	body.WriteString(renderMaintHealth(v))
 	body.WriteString(renderMaintSchemaHealth(v))
+
+	// ── STATISTICS ───────────────────────────────────────────────────
+	// The stats-reset action rows close the page: the capacity bars are
+	// status (an evicting extension is a recommendation above already) and
+	// a reset is a rare, deliberate act, so neither earns the top of the page.
+	body.WriteString("  " + styleHeader.Render(" statistics ") + "  " + mu("↵ resets the row's counters") + "\n")
+	var stmtsCap, qualsCap pg.ExtCapacity
+	if info != nil {
+		stmtsCap = info.Statements
+		qualsCap = info.Qualstats
+	}
+	base := len(recs)
+	markCursor(base)
+	body.WriteString(m.renderCapacityRow(s, db, base, "pg_stat_statements", stmtsCap, barW) + "\n")
+	markCursor(base + 1)
+	body.WriteString(m.renderCapacityRow(s, db, base+1, "pg_qualstats", qualsCap, barW) + "\n")
+	markCursor(base + 2)
+	body.WriteString(m.renderTableStatsRow(s, info, db, base+2) + "\n")
+	markCursor(base + 3)
+	body.WriteString(m.renderTableStatsAllRow(s, base+3) + "\n")
+	body.WriteString("\n")
 
 	hintLine := m.renderMaintHint(s)
 
@@ -125,7 +134,12 @@ func (m *Model) renderMaintenance(s *screen, height int) string {
 		full.WriteString(hintLine + "\n")
 		prefix++
 	}
-	full.WriteString("  " + mu("↑↓ action row / scroll  ·  pgdn g G  ·  ↵ reset / open  ·  ") +
+	verboseHint := " every row"
+	if m.maintVerbose {
+		verboseHint = " quiet"
+	}
+	full.WriteString("  " + mu("↑↓ action row / scroll  ·  pgdn g G  ·  ↵ open / reset  ·  ") +
+		styleBadge.Render("v") + mu(verboseHint+"  ·  ") +
 		styleBadge.Render("s") + mu(" → settings  ·  ") +
 		styleBadge.Render("a") + mu(" → activity  ·  ") +
 		styleBadge.Render("w") + mu(" → wal  ·  ") +
@@ -449,21 +463,28 @@ func (m *Model) renderMaintenanceInfo(height int) string {
 	var b strings.Builder
 	infoHeader(&b, "system overview reference")
 
-	b.WriteString("  " + styleHeader.Render(" extension capacity ") + "\n")
+	b.WriteString("  " + styleHeader.Render(" quiet mode ") + "\n")
+	b.WriteString("    " + mu("The page shows what needs a look: a finding is printed once, in the recommendations,") + "\n")
+	b.WriteString("    " + mu("and the metric it is about is coloured to match. A setting still at its compiled-in") + "\n")
+	b.WriteString("    " + mu("default that nothing grades is left out (s browses them all); a check that passed folds") + "\n")
+	b.WriteString("    " + mu("into its section title as ✓ <name>. v shows every row, and the choice is remembered.") + "\n\n")
+
+	b.WriteString("  " + styleHeader.Render(" statistics ") + "\n")
 	b.WriteString("    " + mu("pg_stat_statements and pg_qualstats both pre-allocate a fixed shared-memory array (the .max") + "\n")
 	b.WriteString("    " + mu("GUC). Once the array is full, new queries either evict old entries (pg_stat_statements)") + "\n")
 	b.WriteString("    " + mu("or are silently dropped (pg_qualstats). A bar near 100% means the tool is losing data.") + "\n")
 	b.WriteString("    " + mu("Reset clears the array; raise .max + restart to prevent recurrence. The memory figure is") + "\n")
-	b.WriteString("    " + mu("the reserved shared memory (+ deduplicated query-text bytes for pg_stat_statements).") + "\n\n")
+	b.WriteString("    " + mu("the reserved shared memory (+ deduplicated query-text bytes for pg_stat_statements).") + "\n")
+	b.WriteString("    " + mu("The table-statistics rows reset pg_stat_reset() counters, for one database or all.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" xid age ") + "\n")
 	b.WriteString("    " + mu("Postgres uses 32-bit transaction IDs. After ~2 billion transactions the counter wraps") + "\n")
 	b.WriteString("    " + mu("around — rows whose XID is older than the horizon would appear to be 'in the future'") + "\n")
 	b.WriteString("    " + mu("and become invisible. VACUUM FREEZE prevents this by rewriting old XIDs to a special") + "\n")
 	b.WriteString("    " + mu("'frozen' value. autovacuum_freeze_max_age (typically 200 M) is the point at which") + "\n")
-	b.WriteString("    " + mu("autovacuum is forced to run regardless of other settings. At ~80% of that limit,") + "\n")
-	b.WriteString("    " + mu("autovacuum starts 'emergency' freezing that can overwhelm I/O. At 100% Postgres") + "\n")
-	b.WriteString("    " + mu("halts all writes until freeze completes.") + "\n\n")
+	b.WriteString("    " + mu("autovacuum is forced to run regardless of other settings — routine maintenance, not a") + "\n")
+	b.WriteString("    " + mu("fault, which is why the bar measures the age against vacuum_failsafe_age instead: past") + "\n")
+	b.WriteString("    " + mu("that VACUUM drops its cost delay and index cleanup, and at 2^31 Postgres stops writes.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" rollback ratio ") + "\n")
 	b.WriteString("    " + mu("A high rollback% (> 5%) usually means application errors or contention. Rollbacks are") + "\n")
@@ -513,13 +534,14 @@ func (m *Model) renderMaintenanceInfo(height int) string {
 	b.WriteString("    " + mu("(raise bgwriter_lru_maxpages). Full-page images are the WAL cost of frequent checkpoints.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" observability ") + "\n")
-	b.WriteString("    " + mu("track_io_timing off leaves pg_stat_io and EXPLAIN (BUFFERS) without timings.") + "\n")
-	b.WriteString("    " + mu("pg_stat_statements.track = none keeps the extension installed but empty; a fill level") + "\n")
-	b.WriteString("    " + mu("past 90% means the least-used entries are being evicted (raise .max or reset).") + "\n\n")
+	b.WriteString("    " + mu("The track_*/log_* knobs and the extension settings only appear in verbose mode (v);") + "\n")
+	b.WriteString("    " + mu("one that is off shows up as a recommendation. track_io_timing off leaves pg_stat_io and") + "\n")
+	b.WriteString("    " + mu("EXPLAIN (BUFFERS) without timings; pg_stat_statements.track = none keeps the extension") + "\n")
+	b.WriteString("    " + mu("installed but empty; a fill level past 90% means entries are being evicted.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" recommendations ") + "\n")
 	b.WriteString("    " + mu("Every red/yellow note (and informational ones with a concrete change) collected worst") + "\n")
-	b.WriteString("    " + mu("first, with a copyable ALTER SYSTEM line. pg_reload_conf() applies reload-level GUCs;") + "\n")
+	b.WriteString("    " + mu("first; the highlighted one shows its copyable ALTER SYSTEM line. pg_reload_conf() applies reload-level GUCs;") + "\n")
 	b.WriteString("    " + mu("'restart required' ones wait for the next restart. sysctl lines are host-side.") + "\n")
 	b.WriteString("    " + mu("Nothing is applied by pgdu. Each line is an action row: ↵ opens what explains it —") + "\n")
 	b.WriteString("    " + mu("the diagnostic listing the offenders, the lock tree, the activity list, or the") + "\n")

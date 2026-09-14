@@ -19,6 +19,16 @@ FROM   pg_settings
 WHERE  name = ANY($1)
 ORDER  BY name`
 
+	// sqlMaintSettingsDefault lists which of the curated GUCs still sit at
+	// their compiled-in default (reset_val, not setting, so pgdu's own session
+	// overrides do not count). The overview hides a default-valued knob the
+	// advice has nothing to say about: it is exactly the row an operator has
+	// never had a reason to look at.
+	sqlMaintSettingsDefault = `
+SELECT name, (reset_val IS NOT DISTINCT FROM boot_val)::text
+FROM   pg_settings
+WHERE  name = ANY($1)`
+
 	// sqlStatementsCount reads the current entry count and the .max GUC together.
 	// Any user who can see pg_stat_statements can run this query.
 	sqlStatementsCount = `
@@ -522,11 +532,20 @@ ORDER  BY active DESC, slot_name`
 	sqlMaintHeadLSN = `CASE WHEN pg_is_in_recovery() THEN pg_last_wal_receive_lsn() ELSE pg_current_wal_lsn() END`
 
 	// sqlMaintWalReceiver reads the standby-side WAL receiver status.
-	// Returns no rows on a primary. latest_end_lsn is the last LSN reported
-	// to the primary; last_msg_receipt_time tells how stale the stream is.
+	// Returns no rows on a primary. last_msg_receipt_time tells how stale the
+	// stream is; sender_host/port name the upstream (a standby otherwise has
+	// no way to say which primary it follows), slot_name is the slot it holds
+	// there. The replay gap is what the receiver has flushed that this standby
+	// has not yet applied; the replay delay is how old the last replayed
+	// commit is — both zero when the standby is caught up or idle.
 	sqlMaintWalReceiver = `
 SELECT COALESCE(status, ''),
-       COALESCE(EXTRACT(epoch FROM (now() - last_msg_receipt_time)), 0)::float8
+       COALESCE(EXTRACT(epoch FROM (now() - last_msg_receipt_time)), 0)::float8,
+       COALESCE(sender_host, ''),
+       COALESCE(sender_port, 0),
+       COALESCE(slot_name, ''),
+       COALESCE(pg_wal_lsn_diff(flushed_lsn, pg_last_wal_replay_lsn()), 0)::bigint,
+       COALESCE(EXTRACT(epoch FROM (now() - pg_last_xact_replay_timestamp())), 0)::float8
 FROM   pg_stat_wal_receiver
 LIMIT  1`
 

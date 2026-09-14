@@ -275,9 +275,10 @@ func (k *keyMap) applyContext(s *screen) {
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
 	k.Params.SetEnabled(stmtDetail)
 	k.Execute.SetEnabled(stmtDetail)
-	// v is the parameter-source toggle on statement detail, the VACUUM trigger on parts
-	// and the auxiliary-backend visibility toggle on the activity table.
-	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity)
+	// v is the parameter-source toggle on statement detail, the VACUUM trigger on parts,
+	// the auxiliary-backend visibility toggle on the activity table and the
+	// every-row toggle on the system overview.
+	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity || s.level == levelMaintenance)
 	k.DeleteSnapshot.SetEnabled(snapshots)
 	// Install is only actionable when the screen offers an installable extension
 	// (the prompt renders its own `i` hint); keep it out of the footer otherwise.

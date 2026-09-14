@@ -17,14 +17,22 @@ const overviewLabelW = 24
 
 // maintView bundles what every overview section renders from: the snapshot,
 // the two-sample rates against the previous snapshot, and the advice derived
-// from it. Sections pull their inline coloured notes out of advice by key, so
-// a note next to a metric and the line in the recommendations panel are the
-// same value and can never disagree.
+// from it. Sections colour their values by advice key (graded/fill) and add
+// inline notes for the advice the recommendations panel does not list, so a
+// finding is printed exactly once: in the panel when it is actionable, next
+// to its metric when it is only explanatory.
 type maintView struct {
 	db     string
 	info   *pg.MaintenanceInfo
 	rates  pg.MaintRates
 	advice pg.AdviceSet
+	// panel is the set of advice keys the recommendations panel lists; note()
+	// stays silent for them so the reason is not printed twice.
+	panel map[string]bool
+	// verbose shows every row. Off (the default), a setting at its compiled-in
+	// default that no advice grades is left out, and a check that came back
+	// healthy folds into its section header as "✓ <label>".
+	verbose bool
 	// sinceOpen are the same rates measured from the first sample of this
 	// screen; zero while that is also the previous sample, when both windows
 	// would say the same thing.
@@ -40,6 +48,10 @@ type maintView struct {
 func newMaintView(s *screen) maintView {
 	st := &s.maintenance
 	v := maintView{db: s.db, info: st.info, advice: st.advice, schema: st.schema, schemaLoading: st.schemaLoading}
+	v.panel = make(map[string]bool)
+	for _, a := range st.advice.Actionable() {
+		v.panel[a.Key] = true
+	}
 	if v.info != nil {
 		v.rates = pg.ComputeMaintRates(st.prev, v.info)
 		if st.first != st.prev {
@@ -49,14 +61,21 @@ func newMaintView(s *screen) maintView {
 	return v
 }
 
-// note returns the advice reason for key as a coloured inline note ("  reason"),
-// or "" when no advice fired for it.
+// note returns the advice reason for key as a coloured inline note ("  reason")
+// when the advice is explanatory only — an informational note without a fix.
+// Advice the recommendations panel lists returns "": the value is still
+// coloured (graded) but the sentence lives in the panel alone.
 func (v maintView) note(key string) string {
 	a := v.advice.Find(key)
-	if a == nil {
+	if a == nil || v.panel[key] {
 		return ""
 	}
 	return "  " + adviceStyle(a.Level).Render(a.Reason)
+}
+
+// flagged reports whether any advice fired for key, whatever its level.
+func (v maintView) flagged(key string) bool {
+	return v.advice.Find(key) != nil
 }
 
 // graded renders value in the colour of the advice that fired for key, plain
@@ -92,6 +111,34 @@ func gucRow(settings map[string]string, label, key, note string) string {
 	return maintRow(label, settingOr(settings, key)+note)
 }
 
+// guc renders a setting row when it has something to say: the value is tuned
+// away from its compiled-in default, advice fired for adviceKey (the value is
+// then graded and the explanatory note appended), or verbose mode is on. A
+// default-valued knob nothing grades is left out: it is the row the s
+// settings browser exists for. adviceKey may be "" for an ungraded setting.
+func (v maintView) guc(label, name, adviceKey string) string {
+	if adviceKey == "" {
+		adviceKey = name
+	}
+	if !v.verbose && !v.flagged(adviceKey) && v.info.IsDefaultSetting(name) {
+		return ""
+	}
+	return maintRow(label, v.graded(adviceKey, settingOr(v.info.Settings, name))+v.note(adviceKey))
+}
+
+// section assembles one overview section: the title carrying the panel's
+// glyph for the worst finding among keys, then the body. ok names the checks
+// that came back healthy and were folded out of the body in quiet mode; they
+// follow the title as a muted "✓ a · b", so the reader still sees what was
+// checked without spending a row on each.
+func (v maintView) section(name string, keys []string, ok []string, body string) string {
+	h := v.header(name, keys...)
+	if len(ok) > 0 {
+		h += "  " + styleMuted.Render("✓ "+strings.Join(ok, " · "))
+	}
+	return h + "\n" + body + "\n"
+}
+
 // counterLegend labels a section's cumulative counters with the window they
 // cover and, once two samples exist, the window the /min rates cover — so a
 // lifetime total is never mistaken for current behaviour.
@@ -124,16 +171,18 @@ func (v maintView) rateSuffix(perMin float64, fmtFn func(int64) string) string {
 	return "  " + styleMuted.Render("·  "+fmtFn(int64(perMin))+"/min")
 }
 
-// renderMaintServer renders the "server" section: identity, uptime,
-// connections and the session-hygiene extremes.
+// renderMaintServer renders the "server" section — the vitals: identity and
+// role, uptime, connections, throughput and cache hit, then the session
+// extremes and the session counters only when they are worth a look.
 func renderMaintServer(v maintView, barW int) string {
 	mu := styleMuted.Render
 	info := v.info
-	var b strings.Builder
-	b.WriteString(v.header("server", "data_checksums", "max_connections", "long_xact", "idle_in_transaction") + "\n")
+	keys := []string{"data_checksums", "max_connections", "cache_hit", "rollback_ratio", "deadlocks", "long_xact", "idle_in_transaction"}
 	if info == nil {
-		return b.String()
+		return v.section("server", keys, nil, "")
 	}
+	var b strings.Builder
+	var ok []string
 	version := info.Version
 	if len(version) > 60 {
 		if i := strings.Index(version, ","); i > 0 {
@@ -146,10 +195,13 @@ func renderMaintServer(v maintView, barW int) string {
 	}
 	b.WriteString(maintRow("version", version+"  "+mu("(")+roleStr+mu(")")+v.note("data_checksums")))
 	if !info.StartTime.IsZero() {
-		b.WriteString(maintRow("uptime", formatUptime(time.Since(info.StartTime))))
-	}
-	if !info.ConfLoad.IsZero() {
-		b.WriteString(maintRow("config reload", relativeAge(time.Since(info.ConfLoad))))
+		up := formatUptime(time.Since(info.StartTime))
+		// The reload age only matters next to a pending reload, which the
+		// operational-health section reports; verbose keeps it in view.
+		if v.verbose && !info.ConfLoad.IsZero() {
+			up += "  " + mu("·  config reloaded "+relativeAge(time.Since(info.ConfLoad)))
+		}
+		b.WriteString(maintRow("uptime", up))
 	}
 	total := info.TotalConns()
 	active := info.ConnByState["active"]
@@ -178,34 +230,92 @@ func renderMaintServer(v maintView, barW int) string {
 	connLine := fmt.Sprintf("%d/%d", total, info.MaxConns)
 	if info.MaxConns > 0 {
 		pct := 100 * float64(total) / float64(info.MaxConns)
-		// Anything else (autovacuum workers, fastpath calls) is the plain bar
-		// colour; the tail is the headroom under max_connections.
-		bar := shareBar(int64(info.MaxConns), barW,
-			barPart{int64(active), activeSt},
-			barPart{int64(idleTxn), idleTxnSt},
-			barPart{int64(idle), idleSt},
-			barPart{int64(max(total-active-idle-idleTxn, 0)), styleBar})
-		connLine = bar + "  " + connLine + "  " + gradeStyle(pct, 80, 95).Render(fmt.Sprintf("%.0f%%", pct))
+		pctStr := gradeStyle(pct, 80, 95).Render(fmt.Sprintf("%.0f%%", pct))
+		// The bar earns its cells once the pool is half used (or the advice
+		// grades it); below that the headroom is the whole story and the
+		// number says it.
+		if pct >= 50 || v.flagged("max_connections") || v.verbose {
+			// Anything else (autovacuum workers, fastpath calls) is the plain bar
+			// colour; the tail is the headroom under max_connections.
+			bar := shareBar(int64(info.MaxConns), barW,
+				barPart{int64(active), activeSt},
+				barPart{int64(idleTxn), idleTxnSt},
+				barPart{int64(idle), idleSt},
+				barPart{int64(max(total-active-idle-idleTxn, 0)), styleBar})
+			connLine = bar + "  " + connLine + "  " + pctStr
+		} else {
+			connLine += "  " + pctStr
+		}
 	}
 	b.WriteString(maintRow("connections", connLine+legend+v.note("max_connections")))
-	if info.LongestXactSec > 0 {
+
+	if info.XactCommit+info.XactRollback > 0 {
+		total := info.XactCommit + info.XactRollback
+		rollPct := float64(info.XactRollback) / float64(total) * 100
+		// Two decimals below 1 % so a healthy ratio reads 0.07 %, not 0.0 %;
+		// a handful of rollbacks in billions of commits is "<0.01 %", not zero.
+		pctStr := fmt1(rollPct)
+		switch {
+		case rollPct > 0 && rollPct < 0.01:
+			pctStr = "<0.01"
+		case rollPct < 1:
+			pctStr = strconv.FormatFloat(rollPct, 'f', 2, 64)
+		}
+		txnLine := fmt.Sprintf("%s commit  %s rollback  ", formatRows(info.XactCommit), formatRows(info.XactRollback)) +
+			gradeStyle(rollPct, 5, 20).Render(pctStr+"% rollback")
+		// Throughput per second, the unit everyone quotes tps in; the
+		// section-wide "/min" suffix would read oddly here.
+		if v.rates.OK && v.rates.XactsPerMin > 0 {
+			txnLine += "  " + mu(fmt.Sprintf("·  %s xact/s (last %s)", formatRows(int64(v.rates.XactsPerMin/60)), shortDuration(v.rates.Window)))
+		}
+		b.WriteString(maintRow("transactions", txnLine+v.note("rollback_ratio")))
+	}
+	b.WriteString(maintRow("cache hit %", gradedPercentStyle(info.CacheHitRatio).Render(fmt1(info.CacheHitRatio)+"%")+v.note("cache_hit")))
+	switch {
+	case info.Deadlocks > 0:
+		// The advice grades the per-day rate, so a handful of deadlocks in
+		// months of uptime reads plain, a daily one coloured.
+		b.WriteString(maintRow("deadlocks", v.graded("deadlocks", formatRows(info.Deadlocks)+" detected")+v.note("deadlocks")))
+	case v.verbose:
+		b.WriteString(maintRow("deadlocks", lipgloss.NewStyle().Foreground(colorOK).Render("0")))
+	default:
+		ok = append(ok, "deadlocks")
+	}
+	if info.Conflicts > 0 {
+		b.WriteString(maintRow("conflicts", lipgloss.NewStyle().Foreground(colorAccent).Render(formatRows(info.Conflicts))))
+	}
+
+	// Session extremes: a transaction open for a minute, an idle-in-txn or a
+	// query past the advice thresholds is worth a row; anything shorter is
+	// the normal churn of a busy server and folds away.
+	switch {
+	case info.LongestXactSec >= 60 || v.flagged("long_xact") || (v.verbose && info.LongestXactSec > 0):
 		b.WriteString(maintRow("longest xact",
 			maintDurationStyle(info.LongestXactSec).Render(fmtSecsDuration(info.LongestXactSec))+v.note("long_xact")))
+	case !v.verbose:
+		ok = append(ok, "longest xact")
 	}
 	// The idle-in-txn row carries pid/app itself; the advice reason repeats
 	// them for the panel, so it is not appended here.
-	if s := info.Sess; s.IdleXactPID > 0 {
+	s := info.Sess
+	switch {
+	case s.IdleXactPID > 0 && (s.IdleXactSecs >= pg.IdleXactWarnSecs || v.flagged("idle_in_transaction") || v.verbose):
 		b.WriteString(maintRow("idle in txn",
 			gradeStyle(s.IdleXactSecs, pg.IdleXactWarnSecs, pg.IdleXactCritSecs).Render(fmtSecsDuration(s.IdleXactSecs))+
 				"  "+mu(pidApp(s.IdleXactPID, s.IdleXactApp))))
+	case !v.verbose:
+		ok = append(ok, "idle in txn")
 	}
-	if s := info.Sess; s.LongQueryPID > 0 {
+	switch {
+	case s.LongQueryPID > 0 && (s.LongQuerySecs >= pg.LongQueryWarnSecs || v.verbose):
 		line := gradeStyle(s.LongQuerySecs, pg.LongQueryWarnSecs, 10*pg.LongQueryWarnSecs).Render(fmtSecsDuration(s.LongQuerySecs)) +
 			"  " + mu(pidApp(s.LongQueryPID, s.LongQueryApp))
 		if s.LongQueryText != "" {
 			line += "  " + mu(oneLineQuery(s.LongQueryText))
 		}
 		b.WriteString(maintRow("longest query", line))
+	case !v.verbose:
+		ok = append(ok, "longest query")
 	}
 	if info.Sessions > 0 {
 		sessLine := formatRows(info.Sessions) + " total"
@@ -219,13 +329,16 @@ func renderMaintServer(v maintView, barW int) string {
 		if info.SessKilled > 0 {
 			sessBad = append(sessBad, styleErr.Render(formatRows(info.SessKilled))+" killed")
 		}
-		if len(sessBad) > 0 {
-			sessLine += "  " + strings.Join(sessBad, "  ")
+		switch {
+		case len(sessBad) > 0:
+			b.WriteString(maintRow("sessions", sessLine+"  "+strings.Join(sessBad, "  ")))
+		case v.verbose:
+			b.WriteString(maintRow("sessions", sessLine))
+		default:
+			ok = append(ok, "sessions")
 		}
-		b.WriteString(maintRow("sessions", sessLine))
 	}
-	b.WriteString("\n")
-	return b.String()
+	return v.section("server", keys, ok, b.String())
 }
 
 // avgMsTUI is time/count with an ok flag, for the timed pg_stat_io counters.
@@ -249,46 +362,6 @@ func oneLineQuery(q string) string {
 	return strings.Join(strings.Fields(q), " ")
 }
 
-// renderMaintTransactions renders the "transactions" section.
-func renderMaintTransactions(v maintView) string {
-	info := v.info
-	var b strings.Builder
-	b.WriteString(v.header("transactions", "cache_hit", "rollback_ratio", "deadlocks") + "\n")
-	if info == nil {
-		b.WriteString("\n")
-		return b.String()
-	}
-	b.WriteString(maintRow("cache hit %", gradedPercentStyle(info.CacheHitRatio).Render(fmt1(info.CacheHitRatio)+"%")+v.note("cache_hit")))
-	if info.XactCommit+info.XactRollback > 0 {
-		total := info.XactCommit + info.XactRollback
-		rollPct := float64(info.XactRollback) / float64(total) * 100
-		// Two decimals below 1 % so a healthy ratio reads 0.07 %, not 0.0 %;
-		// a handful of rollbacks in billions of commits is "<0.01 %", not zero.
-		pctStr := fmt1(rollPct)
-		switch {
-		case rollPct > 0 && rollPct < 0.01:
-			pctStr = "<0.01"
-		case rollPct < 1:
-			pctStr = strconv.FormatFloat(rollPct, 'f', 2, 64)
-		}
-		txnLine := fmt.Sprintf("%s commit  %s rollback  ", formatRows(info.XactCommit), formatRows(info.XactRollback)) +
-			gradeStyle(rollPct, 5, 20).Render(pctStr+"% rollback")
-		b.WriteString(maintRow("transactions", txnLine+v.note("rollback_ratio")))
-	}
-	if info.Deadlocks > 0 {
-		// The advice grades the per-day rate, so a handful of deadlocks in
-		// months of uptime reads plain, a daily one coloured.
-		b.WriteString(maintRow("deadlocks", v.graded("deadlocks", formatRows(info.Deadlocks)+" detected")+v.note("deadlocks")))
-	} else {
-		b.WriteString(maintRow("deadlocks", lipgloss.NewStyle().Foreground(colorOK).Render("0")))
-	}
-	if info.Conflicts > 0 {
-		b.WriteString(maintRow("conflicts", lipgloss.NewStyle().Foreground(colorAccent).Render(formatRows(info.Conflicts))))
-	}
-	b.WriteString("\n")
-	return b.String()
-}
-
 // renderMaintTableActivity renders the "table activity" section: tuple-level
 // write/scan counters aggregated across pg_stat_user_tables for the current
 // database. Ratios are derived here from the raw counters; each gauge fills
@@ -296,12 +369,10 @@ func renderMaintTransactions(v maintView) string {
 func renderMaintTableActivity(v maintView, barW int) string {
 	mu := styleMuted.Render
 	info := v.info
-	var b strings.Builder
-	b.WriteString(v.header("table activity") + "\n")
 	if info == nil {
-		b.WriteString("\n")
-		return b.String()
+		return v.section("table activity", nil, nil, "")
 	}
+	var b strings.Builder
 
 	// Freshly reset counters make every ratio below look alarming or perfect
 	// for no reason; say so before the numbers.
@@ -358,15 +429,14 @@ func renderMaintTableActivity(v maintView, barW int) string {
 	if rows == 0 {
 		b.WriteString(maintRow("", mu("no user-table counters"+inDB(v.dbName()))))
 	}
-
-	b.WriteString("\n")
-	return b.String()
+	return v.section("table activity", nil, nil, b.String())
 }
 
 // renderMaintReplication renders the "replication & slots" section as one
 // table: a row per replica carrying the slot its walsender holds, then the
-// slots nobody is streaming from with the node cells empty. Returns "" when
-// there is no replication data to show.
+// slots nobody is streaming from with the node cells empty. On a standby the
+// rows above the table name the primary it follows. Returns "" when there is
+// no replication data to show.
 func renderMaintReplication(v maintView) string {
 	info := v.info
 	if info == nil || (len(info.Replicas) == 0 && len(info.ReplSlots) == 0 && info.WalReceiver == nil) {
@@ -374,7 +444,7 @@ func renderMaintReplication(v maintView) string {
 	}
 	mu := styleMuted.Render
 	var b strings.Builder
-	b.WriteString(v.header("replication & slots", "synchronous_standby_names", "replication_lag", "replication_slots", "wal_receiver") + "\n")
+	keys := []string{"synchronous_standby_names", "replication_lag", "replication_slots", "wal_receiver", "hot_standby_feedback"}
 	// The table cells have no room for a note, so the replication findings
 	// get their own lines under the header.
 	for _, key := range []string{"synchronous_standby_names", "replication_lag", "replication_slots"} {
@@ -387,11 +457,39 @@ func renderMaintReplication(v maintView) string {
 	}
 	if info.WalReceiver != nil {
 		wr := info.WalReceiver
-		wrLine := wr.Status
+		wrLine := v.graded("wal_receiver", wr.Status)
 		if wr.LastMsgAge > 0 {
 			wrLine += "  " + mu("last msg "+relativeAge(wr.LastMsgAge))
 		}
 		b.WriteString(maintRow("wal receiver", wrLine+v.note("wal_receiver")))
+		// The standby's own upstream: without it the section says "streaming"
+		// but not from where, which is the first thing a failover check needs.
+		if wr.SenderHost != "" {
+			primary := wr.SenderHost
+			if wr.SenderPort > 0 {
+				primary += ":" + strconv.Itoa(wr.SenderPort)
+			}
+			if wr.SlotName != "" {
+				primary += "  " + mu("slot "+wr.SlotName)
+			}
+			b.WriteString(maintRow("primary", primary))
+		}
+		if wr.ByteLag > 0 || wr.ReplayDelay > 0 {
+			var parts []string
+			if wr.ByteLag > 0 {
+				parts = append(parts, humanize.Bytes(wr.ByteLag)+" "+mu("received, not yet replayed"))
+			}
+			if wr.ReplayDelay > 0 {
+				parts = append(parts, "last replayed commit "+fmtSecsDuration(wr.ReplayDelay.Seconds())+" "+mu("old"))
+			}
+			b.WriteString(maintRow("replay", strings.Join(parts, "  ·  ")))
+		}
+		b.WriteString(v.guc("hot_standby_feedback", "hot_standby_feedback", ""))
+	}
+	// A plain standby has neither walsenders nor slots: the table below would
+	// be an empty header.
+	if len(info.Replicas) == 0 && len(info.ReplSlots) == 0 {
+		return v.section("replication & slots", keys, nil, b.String())
 	}
 
 	header := []string{"node", "address", "state", "sync", "lag", "behind",
@@ -444,8 +542,7 @@ func renderMaintReplication(v maintView) string {
 		}
 	}
 	b.WriteString(renderCellTable("  ", header, rows))
-	b.WriteString("\n")
-	return b.String()
+	return v.section("replication & slots", keys, nil, b.String())
 }
 
 // renderCellTable lays cells out in aligned columns under a muted header;
@@ -557,12 +654,12 @@ func slotKeepSizeText(info *pg.MaintenanceInfo) string {
 func renderMaintMemory(v maintView, barW int) string {
 	mu := styleMuted.Render
 	info := v.info
-	var b strings.Builder
-	b.WriteString(v.header("memory & resources", "shared_buffers", "work_mem", "effective_cache_size", "huge_pages", "swap") + "\n")
+	keys := []string{"shared_buffers", "work_mem", "effective_cache_size", "huge_pages", "swap"}
 	if info == nil {
-		b.WriteString("\n")
-		return b.String()
+		return v.section("memory & resources", keys, nil, "")
 	}
+	var b strings.Builder
+	var ok []string
 	host := info.Host
 	set := info.Settings
 
@@ -572,52 +669,70 @@ func renderMaintMemory(v maintView, barW int) string {
 	if sb := info.SettingBytes["shared_buffers"]; sbNote == "" && host.Total > 0 && sb > 0 {
 		sbNote = "  " + mu(fmt.Sprintf("%.0f%% of host RAM", 100*float64(sb)/float64(host.Total)))
 	}
-	b.WriteString(gucRow(set, "shared_buffers", "shared_buffers", sbNote))
+	b.WriteString(maintRow("shared_buffers", v.graded("shared_buffers", settingOr(set, "shared_buffers"))+sbNote))
 
 	wmNote := v.note("work_mem")
 	if wm := info.SettingBytes["work_mem"]; wmNote == "" && wm > 0 && info.MaxConns > 0 {
 		wmNote = "  " + mu(fmt.Sprintf("× %d conns = %s", info.MaxConns, humanize.Bytes(wm*int64(info.MaxConns))))
 	}
-	b.WriteString(gucRow(set, "work_mem", "work_mem", wmNote))
-	b.WriteString(gucRow(set, "maintenance_work_mem", "maintenance_work_mem", ""))
+	b.WriteString(maintRow("work_mem", v.graded("work_mem", settingOr(set, "work_mem"))+wmNote))
+	b.WriteString(v.guc("maintenance_work_mem", "maintenance_work_mem", ""))
 
-	avwm := settingOr(set, "autovacuum_work_mem")
-	if eff, ok := info.EffectiveAutovacWorkMem(); ok && info.SettingBytes["autovacuum_work_mem"] < 0 {
-		avwm += "  " + mu("→ "+humanize.Bytes(eff)+" (maintenance_work_mem)")
+	// -1 inherits maintenance_work_mem; spelled out when the row shows.
+	if v.verbose || !info.IsDefaultSetting("autovacuum_work_mem") {
+		avwm := settingOr(set, "autovacuum_work_mem")
+		if eff, ok := info.EffectiveAutovacWorkMem(); ok && info.SettingBytes["autovacuum_work_mem"] < 0 {
+			avwm += "  " + mu("→ "+humanize.Bytes(eff)+" (maintenance_work_mem)")
+		}
+		b.WriteString(maintRow("autovacuum_work_mem", avwm))
 	}
-	b.WriteString(maintRow("autovacuum_work_mem", avwm))
 
 	ecsNote := v.note("effective_cache_size")
 	if sb := info.SettingBytes["shared_buffers"]; ecsNote == "" && host.Cached > 0 && sb > 0 {
 		ecsNote = "  " + mu("host cache ~"+humanize.Bytes(sb+host.Cached))
 	}
-	b.WriteString(gucRow(set, "effective_cache_size", "effective_cache_size", ecsNote))
-	inUse := fmt.Sprintf("%d in use", info.TotalConns())
-	if info.MaxConns > 0 {
-		inUse += fmt.Sprintf(" (%.0f%%)", 100*float64(info.TotalConns())/float64(info.MaxConns))
+	if v.verbose || ecsNote != "" || v.flagged("effective_cache_size") || !info.IsDefaultSetting("effective_cache_size") {
+		b.WriteString(maintRow("effective_cache_size", v.graded("effective_cache_size", settingOr(set, "effective_cache_size"))+ecsNote))
 	}
-	b.WriteString(gucRow(set, "max_connections", "max_connections", "  "+mu(inUse)))
+	// max_connections is the connections row's denominator up in the server
+	// section; verbose repeats it here with the in-use share.
+	if v.verbose {
+		inUse := fmt.Sprintf("%d in use", info.TotalConns())
+		if info.MaxConns > 0 {
+			inUse += fmt.Sprintf(" (%.0f%%)", 100*float64(info.TotalConns())/float64(info.MaxConns))
+		}
+		b.WriteString(gucRow(set, "max_connections", "max_connections", "  "+mu(inUse)))
+	}
 
 	// Huge pages: the setting alone says nothing — "try" silently falls back
-	// when the kernel pool is empty, which only the host can tell.
+	// when the kernel pool is empty, which only the host can tell. The row
+	// shows when the host has that story to tell, when the advice fired, or
+	// when the operator set the knob; a default "try" on a remote host is a
+	// bare word.
 	hp := settingOr(set, "huge_pages")
+	hostTells := false
 	if host.Total > 0 && (hp == "try" || hp == "on") {
 		if host.HugePagesTotal > 0 {
 			hp += "  " + mu(fmt.Sprintf("host pool %d × %s, %d free", host.HugePagesTotal,
 				humanize.Bytes(host.HugePageSize), host.HugePagesFree))
+			hostTells = true
 		}
-		if n := info.Tuning.ShmemHugePages; n > 0 && v.advice.Find("huge_pages") == nil {
+		if n := info.Tuning.ShmemHugePages; n > 0 && !v.flagged("huge_pages") {
 			hp += "  " + mu(fmt.Sprintf("needs %d", n))
+			hostTells = true
 		}
 	}
-	b.WriteString(maintRow("huge_pages", hp+v.note("huge_pages")))
+	if v.verbose || hostTells || v.flagged("huge_pages") || !info.IsDefaultSetting("huge_pages") {
+		b.WriteString(maintRow("huge_pages", v.graded("huge_pages", hp)+v.note("huge_pages")))
+	}
 
 	if host.Total > 0 {
 		b.WriteString(hostMemoryRows(info, barW))
-		if host.SwapTotal == 0 {
+		used := host.SwapUsed()
+		switch {
+		case host.SwapTotal == 0 && v.verbose:
 			b.WriteString(maintRow("swap", mu("none")))
-		} else {
-			used := host.SwapUsed()
+		case host.SwapTotal > 0 && (used > 0 || v.verbose || v.flagged("swap")):
 			st := v.fill("swap")
 			pctStr := fmt1(100*float64(used)/float64(host.SwapTotal)) + "%"
 			if used > 0 {
@@ -627,10 +742,11 @@ func renderMaintMemory(v maintView, barW int) string {
 			}
 			b.WriteString(barRow("swap", gaugeBar(float64(used)/float64(host.SwapTotal), st, barW),
 				humanize.Bytes(used)+" / "+humanize.Bytes(host.SwapTotal), pctStr, v.note("swap")))
+		case !v.verbose:
+			ok = append(ok, "swap")
 		}
 	}
-	b.WriteString("\n")
-	return b.String()
+	return v.section("memory & resources", keys, ok, b.String())
 }
 
 // hostMemoryRows are the "host memory" rows: the host-RAM composition the
@@ -679,13 +795,12 @@ func hostMemoryRows(info *pg.MaintenanceInfo, barW int) string {
 func renderMaintAutovacuum(v maintView, barW int) string {
 	mu := styleMuted.Render
 	info := v.info
-	var b strings.Builder
-	b.WriteString(v.header("autovacuum & wraparound", "autovacuum", "autovacuum_cost", "autovacuum_backlog", "wraparound",
-		"mxid_wraparound", "xmin_horizon") + "\n")
+	keys := []string{"autovacuum", "autovacuum_cost", "autovacuum_backlog", "wraparound", "mxid_wraparound", "xmin_horizon"}
 	if info == nil {
-		b.WriteString("\n")
-		return b.String()
+		return v.section("autovacuum & wraparound", keys, nil, "")
 	}
+	var b strings.Builder
+	var ok []string
 	set := info.Settings
 	// autovacuum = on is the only sane state and not worth a row; off is.
 	if av := set["autovacuum"]; av != "" && av != "on" {
@@ -704,85 +819,109 @@ func renderMaintAutovacuum(v maintView, barW int) string {
 	} else {
 		b.WriteString(maintRow("workers", workers))
 	}
-	b.WriteString(gucRow(set, "naptime", "autovacuum_naptime", ""))
+	b.WriteString(v.guc("naptime", "autovacuum_naptime", ""))
 	// -1 means "inherit the plain VACUUM setting"; spell out what that is.
-	costDelay := settingOr(set, "autovacuum_vacuum_cost_delay")
-	if info.Tuning.AutovacCostDelayMs < 0 {
-		costDelay += "  " + mu(fmt.Sprintf("→ %gms (vacuum_cost_delay)", info.Tuning.VacuumCostDelayMs))
+	if v.verbose || !info.IsDefaultSetting("autovacuum_vacuum_cost_delay") {
+		costDelay := settingOr(set, "autovacuum_vacuum_cost_delay")
+		if info.Tuning.AutovacCostDelayMs < 0 {
+			costDelay += "  " + mu(fmt.Sprintf("→ %gms (vacuum_cost_delay)", info.Tuning.VacuumCostDelayMs))
+		}
+		b.WriteString(maintRow("cost_delay", costDelay))
 	}
-	b.WriteString(maintRow("cost_delay", costDelay))
-	costLimit := settingOr(set, "autovacuum_vacuum_cost_limit")
-	if info.Tuning.AutovacCostLimit < 0 {
-		costLimit += "  " + mu(fmt.Sprintf("→ %d (vacuum_cost_limit)", info.Tuning.VacuumCostLimit))
+	if v.verbose || v.flagged("autovacuum_cost") || !info.IsDefaultSetting("autovacuum_vacuum_cost_limit") {
+		costLimit := settingOr(set, "autovacuum_vacuum_cost_limit")
+		if info.Tuning.AutovacCostLimit < 0 {
+			costLimit += "  " + mu(fmt.Sprintf("→ %d (vacuum_cost_limit)", info.Tuning.VacuumCostLimit))
+		}
+		b.WriteString(maintRow("cost_limit", v.graded("autovacuum_cost", costLimit)+v.note("autovacuum_cost")))
 	}
-	b.WriteString(maintRow("cost_limit", costLimit+v.note("autovacuum_cost")))
 
-	over := mu("0 tables")
-	if n := info.Autovac.OverThreshold; n > 0 {
-		over = formatRows(n) + " tables"
+	switch n := info.Autovac.OverThreshold; {
+	case n > 0:
+		over := formatRows(n) + " tables"
 		if n == 1 {
 			over = "1 table"
 		}
+		over = v.graded("autovacuum_backlog", over)
 		if note := v.note("autovacuum_backlog"); note != "" {
 			over += note
 		} else if len(info.Autovac.OverTop) > 0 {
 			over += "  " + mu(strings.Join(info.Autovac.OverTop, ", "))
 		}
+		b.WriteString(maintRow("over threshold", over))
+	case v.verbose:
+		b.WriteString(maintRow("over threshold", mu("0 tables")))
+	default:
+		ok = append(ok, "over threshold")
 	}
-	b.WriteString(maintRow("over threshold", over))
 
-	b.WriteString(gucRow(set, "freeze_max_age", "autovacuum_freeze_max_age", ""))
-	b.WriteString(gucRow(set, "mxid_freeze_max_age", "autovacuum_multixact_freeze_max_age", ""))
-	b.WriteString(gucRow(set, "failsafe_age", "vacuum_failsafe_age", ""))
-	b.WriteString(v.freezeAgeLine("xid age", info.XidAge, info.FreezeMaxAge, info.XidAgeDB, "wraparound", barW))
-	b.WriteString(v.freezeAgeLine("mxid age", info.MxidAge, info.MxidFreezeMaxAge, info.MxidAgeDB, "mxid_wraparound", barW))
-	b.WriteString(v.horizonLine())
-	b.WriteString("\n")
-	return b.String()
+	b.WriteString(v.guc("freeze_max_age", "autovacuum_freeze_max_age", ""))
+	b.WriteString(v.guc("mxid_freeze_max_age", "autovacuum_multixact_freeze_max_age", ""))
+	b.WriteString(v.guc("failsafe_age", "vacuum_failsafe_age", ""))
+	b.WriteString(v.freezeAgeLine("xid age", info.XidAge, info.FreezeMaxAge, info.FailsafeAge, info.XidAgeDB, "wraparound", barW))
+	// The multixact age is a rarity worth a row only once it is on its way to
+	// a freeze cycle; the usual tiny fraction folds away.
+	if v.verbose || v.flagged("mxid_wraparound") || (info.MxidFreezeMaxAge > 0 && info.MxidAge*2 >= info.MxidFreezeMaxAge) {
+		b.WriteString(v.freezeAgeLine("mxid age", info.MxidAge, info.MxidFreezeMaxAge, info.MxidFailsafeAge, info.MxidAgeDB, "mxid_wraparound", barW))
+	} else if info.MxidAge > 0 {
+		ok = append(ok, "mxid age")
+	}
+	if line := v.horizonLine(); line != "" {
+		b.WriteString(line)
+	} else {
+		ok = append(ok, "xmin horizon")
+	}
+	return v.section("autovacuum & wraparound", keys, ok, b.String())
 }
 
-// freezeAgeLine renders one "<label>  [bar]  age / max  pct%  (db)  note"
-// overview line, naming the database that holds the oldest horizon
-// (template0/postgres often turn out to be the culprit). Empty when the age is
-// unknown; bare age when the max is.
+// freezeAgeLine renders one "<label> · <db>  [bar]  age  pct% failsafe ·
+// pct% freeze_max_age  note" overview line. The database holding the oldest
+// horizon rides in the label column (template0/postgres often turn out to be
+// the culprit); when an explanatory note fires it names the database itself.
+// Empty when the age is unknown; bare age when the limits are.
 //
-// The bar and the percentage are coloured by the advice that fired for key,
-// not by thresholds of their own: reaching 100% of *_freeze_max_age is the
-// trigger for the routine anti-wraparound autovacuum, so an absolute scale
-// over this ratio paints a healthy cluster red. Deferring to the advice keeps
-// the row coloured exactly where the recommendations panel says something is
-// wrong.
-func (v maintView) freezeAgeLine(label string, age, maxAge int64, db, key string, barW int) string {
+// The bar measures the distance to the vacuum failsafe (the 2^31 limit when
+// that GUC is unknown), not to *_freeze_max_age: reaching 100% of
+// freeze_max_age is the trigger for the routine anti-wraparound autovacuum,
+// so a bar over that ratio paints a healthy cluster full. The freeze_max_age
+// share is still spelled out as a figure, and bar and percentage take their
+// colour from the advice that fired for key, so the row is coloured exactly
+// where the recommendations panel says something is wrong.
+func (v maintView) freezeAgeLine(label string, age, maxAge, failsafe int64, db, key string, barW int) string {
 	mu := styleMuted.Render
 	note := v.note(key)
-	// The note already ends in "(in <db>)", so naming the database twice on one
-	// row is just noise; the bare row still needs it.
-	dbStr := ""
 	if db != "" && note == "" {
-		dbStr = "  " + mu("in "+db)
+		label += " · " + db
 	}
 	switch {
 	case age <= 0:
 		return ""
 	case maxAge <= 0:
-		return maintRow(label, formatRows(age)+dbStr+note)
+		return maintRow(label, formatRows(age)+note)
 	}
-	pct := float64(age) / float64(maxAge) * 100
-	return barRow(label, gaugeBar(pct/100, v.fill(key), barW), formatRows(age)+" / "+formatRows(maxAge),
-		v.graded(key, fmt1(pct)+"%"), dbStr+note)
+	if failsafe <= 0 {
+		failsafe = 1 << 31
+	}
+	fsPct := float64(age) / float64(failsafe) * 100
+	fmPct := float64(age) / float64(maxAge) * 100
+	fig := formatRows(age) + "  " + v.graded(key, fmt1(fsPct)+"% failsafe") + mu(fmt.Sprintf(" · %.0f%% freeze_max_age", fmPct))
+	return maintRow(label, gaugeBar(fsPct/100, v.fill(key), barW)+"  "+fig+note)
 }
 
 // horizonLine renders the oldest live xmin and what pins it. It sits with the
 // freeze ages because it is the reason they move: vacuum cannot freeze past the
 // horizon, so while one is pinned no vacuum advances relfrozenxid anywhere.
+// "" when nothing pins a snapshot and the page is in quiet mode.
 func (v maintView) horizonLine() string {
 	mu := styleMuted.Render
 	h := v.info.Horizon
 	switch {
 	case h.Age <= 0 && h.Restricted:
 		return maintRow("xmin horizon", mu("n/a (needs pg_read_all_stats)")+v.note("xmin_horizon"))
-	case h.Age <= 0:
+	case h.Age <= 0 && v.verbose:
 		return maintRow("xmin horizon", mu("none — nothing pins a snapshot"))
+	case h.Age <= 0:
+		return ""
 	}
 	val := v.graded("xmin_horizon", formatRows(h.Age))
 	note := v.note("xmin_horizon")
@@ -807,12 +946,12 @@ func (v maintView) horizonLine() string {
 func renderMaintBufferCache(v maintView, barW int) string {
 	mu := styleMuted.Render
 	info := v.info
-	var b strings.Builder
-	b.WriteString(v.header("buffer cache", "buffercache_dirty", "buffercache_tight", "buffercache_slack", "slru", "backend_fsyncs") + "\n")
+	keys := []string{"buffercache_dirty", "buffercache_tight", "buffercache_slack", "slru", "backend_fsyncs"}
 	if info == nil {
-		b.WriteString("\n")
-		return b.String()
+		return v.section("buffer cache", keys, nil, "")
 	}
+	var b strings.Builder
+	var ok []string
 	bc := info.BufCache
 	switch {
 	case !bc.Installed:
@@ -820,25 +959,19 @@ func renderMaintBufferCache(v maintView, barW int) string {
 	case !bc.HasData:
 		b.WriteString(maintRow("occupancy", mu("n/a (needs pg_monitor)")))
 	default:
+		// A warm server's pool is always full, so the occupancy carries no
+		// bar: the figures and the usage count are the information.
 		total := bc.Used + bc.Unused
 		occ := fmt.Sprintf("%s / %s buffers", formatRows(bc.Used), formatRows(total))
 		if total > 0 {
-			// Used pages split into clean and dirty; the dirty row below is
-			// the legend of the magenta segment. A full pool is the normal
-			// state, so the percentage stays muted.
-			bar := shareBar(total, barW,
-				barPart{max(bc.Used-bc.Dirty, 0), styleBar},
-				barPart{bc.Dirty, styleDirty})
-			b.WriteString(maintRow("occupancy", bar+"  "+occ+"  "+mu(fmt.Sprintf("%.0f%%  ·  avg usage %.1f",
-				100*float64(bc.Used)/float64(total), bc.UsageAvg))))
-		} else {
-			b.WriteString(maintRow("occupancy", occ))
+			occ += "  " + mu(fmt.Sprintf("%.0f%%  ·  avg usage %.1f", 100*float64(bc.Used)/float64(total), bc.UsageAvg))
 		}
-		dirty := swatch(styleDirty) + " " + formatRows(bc.Dirty)
+		b.WriteString(maintRow("occupancy", occ))
+		dirty := formatRows(bc.Dirty)
 		if bc.Used > 0 {
 			pct := fmt1(bc.DirtyFrac()*100) + "%"
-			if note := v.note("buffercache_dirty"); note != "" {
-				dirty += "  " + adviceStyle(pg.AdviceWarn).Render(pct) + note
+			if v.flagged("buffercache_dirty") {
+				dirty += "  " + v.graded("buffercache_dirty", pct) + v.note("buffercache_dirty")
 			} else {
 				dirty += "  " + mu(pct)
 			}
@@ -855,15 +988,20 @@ func renderMaintBufferCache(v maintView, barW int) string {
 		}
 	}
 
+	// The SLRU caches only matter when one of them misses; a healthy hit
+	// ratio on the busiest is a check that passed.
 	if line := slruLine(v); line != "" {
-		b.WriteString(maintRow("slru", line))
+		if v.verbose || v.flagged("slru") {
+			b.WriteString(maintRow("slru", line))
+		} else {
+			ok = append(ok, "slru")
+		}
 	}
 
 	io := info.IO
 	if !io.HasData {
 		b.WriteString(maintRow("i/o", mu("n/a (pg_stat_io unreadable)")))
-		b.WriteString("\n")
-		return b.String()
+		return v.section("buffer cache", keys, ok, b.String())
 	}
 	b.WriteString(v.counterLegend(time.Time{}))
 	b.WriteString(maintRow("reads", formatRows(io.Reads)+"  "+mu("hits ")+formatRows(io.Hits)+
@@ -897,12 +1035,17 @@ func renderMaintBufferCache(v maintView, barW int) string {
 			b.WriteString(maintRow("read latency", mu("no timed reads yet")))
 		}
 		if sp.RelationReads > 0 {
+			// The ring-buffer share is a hint at missing indexes only once it
+			// is large; a small share is the normal cost of the odd seq scan.
 			pct := 100 * float64(sp.BulkReads) / float64(sp.RelationReads)
-			line := fmt1(pct) + "%"
-			if pct > 30 {
-				line += "  " + mu("large sequential scans (ring buffer) — check for missing indexes")
+			switch {
+			case pct > 30:
+				b.WriteString(maintRow("bulkread share", fmt1(pct)+"%  "+mu("large sequential scans (ring buffer) — check for missing indexes")))
+			case v.verbose:
+				b.WriteString(maintRow("bulkread share", fmt1(pct)+"%"))
+			default:
+				ok = append(ok, "bulkread share")
 			}
-			b.WriteString(maintRow("bulkread share", line))
 		}
 		if r, w, ok := sp.VacuumFracs(); ok {
 			b.WriteString(maintRow("vacuum share", fmt1(r*100)+"% of reads  "+fmt1(w*100)+"% of writes"))
@@ -933,13 +1076,17 @@ func renderMaintBufferCache(v maintView, barW int) string {
 		}
 	}
 
-	fsyncs := formatRows(io.Fsyncs)
-	if io.BackendFsyncs > 0 {
-		fsyncs += "  " + styleErr.Render(formatRows(io.BackendFsyncs)+" by backends") + v.note("backend_fsyncs")
+	// The fsync total is bookkeeping; a backend doing its own fsync is the
+	// finding, and the only reason the row earns its place.
+	switch {
+	case io.BackendFsyncs > 0:
+		b.WriteString(maintRow("fsyncs", formatRows(io.Fsyncs)+"  "+styleErr.Render(formatRows(io.BackendFsyncs)+" by backends")+v.note("backend_fsyncs")))
+	case v.verbose:
+		b.WriteString(maintRow("fsyncs", formatRows(io.Fsyncs)))
+	default:
+		ok = append(ok, "backend fsyncs")
 	}
-	b.WriteString(maintRow("fsyncs", fsyncs))
-	b.WriteString("\n")
-	return b.String()
+	return v.section("buffer cache", keys, ok, b.String())
 }
 
 // slruLine summarises the SLRU caches: the one the advice flagged, otherwise
@@ -967,13 +1114,13 @@ func slruLine(v maintView) string {
 func renderMaintWAL(v maintView, barW int) string {
 	mu := styleMuted.Render
 	info := v.info
-	var b strings.Builder
-	b.WriteString(v.header("wal & checkpoints", "wal_buffers", "wal_fpi", "checkpoint_completion_target", "max_wal_size",
-		"checkpoint_sync", "bgwriter_lru_maxpages") + "\n")
+	keys := []string{"wal_buffers", "wal_fpi", "checkpoint_completion_target", "max_wal_size", "checkpoint_sync", "bgwriter_lru_maxpages",
+		"fsync", "full_page_writes", "archive_mode"}
 	if info == nil {
-		b.WriteString("\n")
-		return b.String()
+		return v.section("wal & checkpoints", keys, nil, "")
 	}
+	var b strings.Builder
+	var ok []string
 	set := info.Settings
 	cp, w := info.Checkpointer, info.WAL
 	switch {
@@ -984,7 +1131,11 @@ func renderMaintWAL(v maintView, barW int) string {
 	}
 
 	// --- WAL ---
-	b.WriteString(gucRow(set, "wal_level", "wal_level", ""))
+	b.WriteString(v.guc("wal_level", "wal_level", ""))
+	// The durability knobs are only ever worth a row when they are off; the
+	// safety advice grades that.
+	b.WriteString(v.guc("fsync", "fsync", ""))
+	b.WriteString(v.guc("full_page_writes", "full_page_writes", ""))
 	if w.HasData {
 		rate := ""
 		if bps, ok := info.WALBytesPerSecSinceReset(); ok {
@@ -1001,9 +1152,16 @@ func renderMaintWAL(v maintView, barW int) string {
 		}
 		b.WriteString(maintRow("wal rate", rate))
 		b.WriteString(maintRow("wal generated", humanize.Bytes(w.Bytes)+"  "+mu(formatRows(w.Records)+" records")))
-		if frac, ok := w.FPIFrac(); ok {
-			b.WriteString(maintRow("full-page images", gaugeBar(frac, v.fill("wal_fpi"), barW)+"  "+
-				v.graded("wal_fpi", fmt1(frac*100)+"%")+"  "+mu("of records")+v.note("wal_fpi")))
+		// Full-page images are the WAL cost of frequent checkpoints; the
+		// share is a finding only once the advice says it is high.
+		if frac, ok2 := w.FPIFrac(); ok2 {
+			switch {
+			case v.verbose || v.flagged("wal_fpi"):
+				b.WriteString(maintRow("full-page images", gaugeBar(frac, v.fill("wal_fpi"), barW)+"  "+
+					v.graded("wal_fpi", fmt1(frac*100)+"%")+"  "+mu("of records")+v.note("wal_fpi")))
+			default:
+				ok = append(ok, "full-page images")
+			}
 		}
 	}
 	if d := info.WALDir; d.HasData {
@@ -1011,13 +1169,14 @@ func renderMaintWAL(v maintView, barW int) string {
 	} else {
 		b.WriteString(maintRow("pg_wal on disk", mu("n/a (needs pg_monitor)")))
 	}
-	b.WriteString(gucRow(set, "wal_buffers", "wal_buffers", v.note("wal_buffers")))
+	b.WriteString(v.guc("wal_buffers", "wal_buffers", ""))
+	b.WriteString(v.guc("archive_mode", "archive_mode", ""))
 
 	// --- checkpoints ---
-	b.WriteString(gucRow(set, "checkpoint_timeout", "checkpoint_timeout", ""))
-	b.WriteString(gucRow(set, "completion_target", "checkpoint_completion_target", v.note("checkpoint_completion_target")))
-	b.WriteString(gucRow(set, "max_wal_size", "max_wal_size", v.note("max_wal_size")))
-	b.WriteString(gucRow(set, "min_wal_size", "min_wal_size", ""))
+	b.WriteString(v.guc("checkpoint_timeout", "checkpoint_timeout", ""))
+	b.WriteString(v.guc("completion_target", "checkpoint_completion_target", ""))
+	b.WriteString(v.guc("max_wal_size", "max_wal_size", ""))
+	b.WriteString(v.guc("min_wal_size", "min_wal_size", ""))
 
 	if !cp.HasData {
 		b.WriteString(maintRow("checkpoints", mu("no data")))
@@ -1038,7 +1197,7 @@ func renderMaintWAL(v maintView, barW int) string {
 			cpLine += "  " + mu(fmt.Sprintf("·  %.1f/min", v.rates.CheckpointsPerMin))
 		}
 		b.WriteString(maintRow("checkpoints", cpLine))
-		if iv, ok := info.AvgCheckpointInterval(); ok {
+		if iv, ok2 := info.AvgCheckpointInterval(); ok2 {
 			if t := info.Tuning.CheckpointTimeoutSecs; t > 0 {
 				// Checkpoints arriving well ahead of the timeout are WAL-driven:
 				// amber once they come at less than half the interval.
@@ -1058,7 +1217,7 @@ func renderMaintWAL(v maintView, barW int) string {
 		if total > 0 {
 			line := fmt.Sprintf("write %s  sync %s  %s buffers", fmtAge(cp.WriteTimeMs/float64(total)),
 				fmtAge(cp.SyncTimeMs/float64(total)), formatRows(cp.BuffersWritten/total))
-			b.WriteString(maintRow("per checkpoint", line+v.note("checkpoint_sync")))
+			b.WriteString(maintRow("per checkpoint", v.graded("checkpoint_sync", line)+v.note("checkpoint_sync")))
 		}
 	}
 
@@ -1097,36 +1256,149 @@ func renderMaintWAL(v maintView, barW int) string {
 		if note := v.note("bgwriter_lru_maxpages"); note != "" {
 			bgLine += note
 		} else if bg.MaxwrittenClean > 0 {
-			bgLine += "  " + mu(fmt.Sprintf("%s sweeps stopped at bgwriter_lru_maxpages (%s)",
+			bgLine += "  " + v.graded("bgwriter_lru_maxpages", fmt.Sprintf("%s sweeps stopped at bgwriter_lru_maxpages (%s)",
 				formatRows(bg.MaxwrittenClean), settingOr(set, "bgwriter_lru_maxpages")))
 		}
 		b.WriteString(maintRow("bgwriter", bgLine))
 	}
-	b.WriteString("\n")
-	return b.String()
+	return v.section("wal & checkpoints", keys, ok, b.String())
+}
+
+// renderMaintHealth renders the "operational health" section: the checks
+// that are either fine or need a hand right now. Every one of them folds into
+// the header when it passes.
+func renderMaintHealth(v maintView) string {
+	mu := styleMuted.Render
+	info := v.info
+	keys := []string{"pending_restart", "pending_reload", "lock_waits", "prepared_xacts", "temp_files", "wal_archiver"}
+	if info == nil {
+		return v.section("operational health", keys, nil, "")
+	}
+	var b strings.Builder
+	var ok []string
+
+	restartStr := mu("0 need restart")
+	if info.PendingRestart > 0 {
+		restartStr = v.graded("pending_restart", fmt.Sprintf("%d need restart", info.PendingRestart))
+		if len(info.PendingRestartSettings) > 0 {
+			restartStr += mu("  (" + strings.Join(info.PendingRestartSettings, ", ") + ")")
+		}
+	}
+	reloadStr := mu("0 need reload")
+	if info.PendingReload > 0 {
+		reloadStr = v.graded("pending_reload", fmt.Sprintf("%d need reload", info.PendingReload))
+		if len(info.PendingReloadSettings) > 0 {
+			reloadStr += mu("  (" + strings.Join(info.PendingReloadSettings, ", ") + ")")
+		}
+	}
+	switch {
+	case v.verbose:
+		b.WriteString(maintRow("pending config", restartStr))
+		b.WriteString(maintRow("", reloadStr+mu("  ·  s browses pg_settings")))
+	case info.PendingRestart > 0 && info.PendingReload > 0:
+		b.WriteString(maintRow("pending config", restartStr))
+		b.WriteString(maintRow("", reloadStr))
+	case info.PendingRestart > 0:
+		b.WriteString(maintRow("pending config", restartStr))
+	case info.PendingReload > 0:
+		b.WriteString(maintRow("pending config", reloadStr))
+	default:
+		ok = append(ok, "pending config")
+	}
+
+	switch {
+	case info.LockWaits > 0 || len(info.Blocked) > 0:
+		b.WriteString(maintRow("lock waits", v.graded("lock_waits", fmt.Sprintf("%d waiting", max(info.LockWaits, len(info.Blocked))))+v.note("lock_waits")))
+	case v.verbose:
+		b.WriteString(maintRow("lock waits", mu("0 waiting")))
+	default:
+		ok = append(ok, "lock waits")
+	}
+	for _, bl := range info.Blocked {
+		blockers := make([]string, len(bl.BlockedBy))
+		for i, pid := range bl.BlockedBy {
+			blockers[i] = strconv.Itoa(int(pid))
+		}
+		b.WriteString(maintRow("", styleErr.Render("▸ ")+fmt.Sprintf("pid %d blocked by %s  %s  %s",
+			bl.PID, strings.Join(blockers, ","), fmtSecsDuration(bl.WaitSec), mu(bl.Query))))
+	}
+
+	if info.PreparedXacts > 0 {
+		prepLine := v.graded("prepared_xacts", fmt.Sprintf("%d prepared xact(s)", info.PreparedXacts))
+		if info.OldestPrepSec > 0 {
+			prepLine += mu("  oldest: " + fmtSecsDuration(info.OldestPrepSec))
+		}
+		b.WriteString(maintRow("prepared xacts", prepLine+v.note("prepared_xacts")))
+	}
+
+	switch {
+	case info.TempFiles > 0:
+		tmp := fmt.Sprintf("%s files  %s", formatRows(info.TempFiles), humanize.Bytes(info.TempBytes))
+		if v.rates.OK && v.rates.TempBytesPerMin > 0 {
+			tmp += "  " + mu("·  "+humanize.Bytes(int64(v.rates.TempBytesPerMin))+"/min (last "+
+				shortDuration(v.rates.Window)+")")
+		}
+		b.WriteString(maintRow("temp files", v.graded("temp_files", tmp)+v.note("temp_files")))
+		for _, t := range info.TempByDB {
+			fileWord := "files"
+			if t.Files == 1 {
+				fileWord = "file"
+			}
+			line := fmt.Sprintf("  %s:  %s %s  %s", t.DB, formatRows(t.Files), fileWord, humanize.Bytes(t.Bytes))
+			if w, ok := info.StatsWindow(t.StatsReset); ok && w > time.Hour {
+				line += fmt.Sprintf("  (%s/day, %s)", humanize.Bytes(int64(float64(t.Bytes)/w.Hours()*24)),
+					sinceResetLabel(t.StatsReset, info.StartTime))
+			}
+			b.WriteString(maintRow("", mu(line)))
+		}
+	case v.verbose:
+		b.WriteString(maintRow("temp files", mu("none")))
+	default:
+		ok = append(ok, "temp files")
+	}
+
+	if info.ArchiveFailed > 0 {
+		line := v.graded("wal_archiver", fmt.Sprintf("%s archived  %s failed", formatRows(info.ArchiveCount), formatRows(info.ArchiveFailed)))
+		if info.ArchiveLastFailed != "" {
+			line += mu("  last: " + info.ArchiveLastFailed)
+		}
+		b.WriteString(maintRow("wal archiver", line+v.note("wal_archiver")))
+	} else if info.ArchiveCount > 0 {
+		archiveAge := ""
+		if !info.ArchiveLastTime.IsZero() && info.ArchiveLastTime.Year() > 1 {
+			archiveAge = "  " + mu("last "+relativeAge(time.Since(info.ArchiveLastTime)))
+		}
+		b.WriteString(maintRow("wal archiver",
+			lipgloss.NewStyle().Foreground(colorOK).Render(formatRows(info.ArchiveCount)+" archived")+archiveAge))
+	}
+	return v.section("operational health", keys, ok, b.String())
 }
 
 // renderMaintObservability renders the "observability" section: the settings
-// that decide whether the rest of pgdu has data to show. The extension blocks
-// follow the extension probe, not the GUC's presence — a preloaded library
-// whose extension isn't created in this db shows as not installed above and
-// must not print a settings block here.
+// that decide whether the rest of pgdu has data to show. It is a verbose-only
+// section — a knob that is off shows up as a recommendation, so in quiet mode
+// the list of ones that are on says nothing. The extension blocks follow the
+// extension probe, not the GUC's presence — a preloaded library whose
+// extension isn't created in this db shows as not installed in the
+// statistics section and must not print a settings block here.
 func renderMaintObservability(v maintView) string {
 	info := v.info
-	var b strings.Builder
-	b.WriteString(v.header("observability", "track_io_timing", "log_checkpoints", "pg_stat_statements.track",
-		"pg_stat_statements.max", "pg_qualstats.max") + "\n")
+	keys := []string{"track_io_timing", "log_checkpoints", "log_lock_waits", "log_temp_files", "track_counts",
+		"pg_stat_statements.track", "pg_stat_statements.max", "pg_qualstats.max"}
 	if info == nil {
-		b.WriteString("\n")
-		return b.String()
+		return v.section("observability", keys, nil, "")
 	}
+	var b strings.Builder
 	set := info.Settings
 	b.WriteString(gucRow(set, "track_io_timing", "track_io_timing", v.note("track_io_timing")))
 	b.WriteString(gucRow(set, "track_wal_io_timing", "track_wal_io_timing", ""))
 	b.WriteString(gucRow(set, "track_functions", "track_functions", ""))
+	b.WriteString(gucRow(set, "track_counts", "track_counts", v.note("track_counts")))
 	b.WriteString(gucRow(set, "log_min_duration_stmt", "log_min_duration_statement", ""))
 	b.WriteString(gucRow(set, "log_autovacuum_min_dur", "log_autovacuum_min_duration", ""))
 	b.WriteString(gucRow(set, "log_checkpoints", "log_checkpoints", v.note("log_checkpoints")))
+	b.WriteString(gucRow(set, "log_lock_waits", "log_lock_waits", v.note("log_lock_waits")))
+	b.WriteString(gucRow(set, "log_temp_files", "log_temp_files", v.note("log_temp_files")))
 
 	if info.Statements.Installed {
 		b.WriteString("\n  " + styleHeader.Render(" pg_stat_statements ") + "\n")
@@ -1141,109 +1413,20 @@ func renderMaintObservability(v maintView) string {
 		b.WriteString(gucRow(set, "sample_rate", "pg_qualstats.sample_rate", ""))
 		b.WriteString(gucRow(set, "track_constants", "pg_qualstats.track_constants", ""))
 	}
-	b.WriteString("\n")
-	return b.String()
-}
-
-// renderMaintHealth renders the "operational health" section.
-func renderMaintHealth(v maintView) string {
-	mu := styleMuted.Render
-	info := v.info
-	var b strings.Builder
-	b.WriteString(v.header("operational health", "pending_restart", "pending_reload", "lock_waits", "prepared_xacts",
-		"temp_files", "wal_archiver") + "\n")
-	if info != nil {
-		restartStr := mu("0 need restart")
-		if info.PendingRestart > 0 {
-			restartStr = v.graded("pending_restart", fmt.Sprintf("%d need restart", info.PendingRestart))
-			if len(info.PendingRestartSettings) > 0 {
-				restartStr += mu("  (" + strings.Join(info.PendingRestartSettings, ", ") + ")")
-			}
-		}
-		reloadStr := mu("0 need reload")
-		if info.PendingReload > 0 {
-			reloadStr = lipgloss.NewStyle().Foreground(colorAccent).Render(fmt.Sprintf("%d need reload", info.PendingReload))
-			if len(info.PendingReloadSettings) > 0 {
-				reloadStr += mu("  (" + strings.Join(info.PendingReloadSettings, ", ") + ")")
-			}
-		}
-		b.WriteString(maintRow("pending config", restartStr))
-		b.WriteString(maintRow("", reloadStr+mu("  ·  s browses pg_settings")))
-
-		lockStr := mu("0 waiting")
-		if info.LockWaits > 0 || len(info.Blocked) > 0 {
-			lockStr = v.graded("lock_waits", fmt.Sprintf("%d waiting", max(info.LockWaits, len(info.Blocked)))) + v.note("lock_waits")
-		}
-		b.WriteString(maintRow("lock waits", lockStr))
-
-		for _, bl := range info.Blocked {
-			blockers := make([]string, len(bl.BlockedBy))
-			for i, pid := range bl.BlockedBy {
-				blockers[i] = strconv.Itoa(int(pid))
-			}
-			b.WriteString(maintRow("", styleErr.Render("▸ ")+fmt.Sprintf("pid %d blocked by %s  %s  %s",
-				bl.PID, strings.Join(blockers, ","), fmtSecsDuration(bl.WaitSec), mu(bl.Query))))
-		}
-
-		if info.PreparedXacts > 0 {
-			prepLine := v.graded("prepared_xacts", fmt.Sprintf("%d prepared xact(s)", info.PreparedXacts))
-			if info.OldestPrepSec > 0 {
-				prepLine += mu("  oldest: " + fmtSecsDuration(info.OldestPrepSec))
-			}
-			b.WriteString(maintRow("prepared xacts", prepLine+v.note("prepared_xacts")))
-		}
-
-		if info.TempFiles > 0 {
-			tmp := fmt.Sprintf("%s files  %s", formatRows(info.TempFiles), humanize.Bytes(info.TempBytes))
-			if v.rates.OK && v.rates.TempBytesPerMin > 0 {
-				tmp += "  " + mu("·  "+humanize.Bytes(int64(v.rates.TempBytesPerMin))+"/min (last "+
-					shortDuration(v.rates.Window)+")")
-			}
-			b.WriteString(maintRow("temp files", tmp+v.note("temp_files")))
-			for _, t := range info.TempByDB {
-				fileWord := "files"
-				if t.Files == 1 {
-					fileWord = "file"
-				}
-				line := fmt.Sprintf("  %s:  %s %s  %s", t.DB, formatRows(t.Files), fileWord, humanize.Bytes(t.Bytes))
-				if w, ok := info.StatsWindow(t.StatsReset); ok && w > time.Hour {
-					line += fmt.Sprintf("  (%s/day, %s)", humanize.Bytes(int64(float64(t.Bytes)/w.Hours()*24)),
-						sinceResetLabel(t.StatsReset, info.StartTime))
-				}
-				b.WriteString(maintRow("", mu(line)))
-			}
-		} else {
-			b.WriteString(maintRow("temp files", mu("none")))
-		}
-
-		if info.ArchiveFailed > 0 {
-			line := v.graded("wal_archiver", fmt.Sprintf("%s archived  %s failed", formatRows(info.ArchiveCount), formatRows(info.ArchiveFailed)))
-			if info.ArchiveLastFailed != "" {
-				line += mu("  last: " + info.ArchiveLastFailed)
-			}
-			b.WriteString(maintRow("wal archiver", line+v.note("wal_archiver")))
-		} else if info.ArchiveCount > 0 {
-			archiveAge := ""
-			if !info.ArchiveLastTime.IsZero() && info.ArchiveLastTime.Year() > 1 {
-				archiveAge = "  " + mu("last "+relativeAge(time.Since(info.ArchiveLastTime)))
-			}
-			b.WriteString(maintRow("wal archiver",
-				lipgloss.NewStyle().Foreground(colorOK).Render(formatRows(info.ArchiveCount)+" archived")+archiveAge))
-		}
-	}
-	b.WriteString("\n")
-	return b.String()
+	return v.section("observability", keys, nil, b.String())
 }
 
 // renderMaintRecommendations lists the actionable advice — every warning and
 // critical note plus informational ones that come with a concrete change —
-// worst first, each with its copyable fix line. It is the same advice the
-// sections annotate inline, collected in one place, and every line is an
-// action row: rows[first:] are the recommendations, cursor the highlighted
-// action row. cursorAt is the block-relative line of the cursor row (-1 when
-// the cursor is not on a recommendation) and span the lines it occupies (two
-// with a fix line), so the caller can scroll the whole row into view.
-func renderMaintRecommendations(v maintView, rows []maintAction, first, cursor int) (block string, cursorAt, span int) {
+// worst first. It is the one place a finding's sentence is printed; the
+// sections only colour the value it is about. Every line is an action row:
+// recs are the recommendation rows (the leading rows of actionRows, so their
+// indexes are cursor positions) and cursor the highlighted action row. The
+// copyable fix line is shown under the cursor row only, so the list stays one
+// line per finding. cursorAt is the block-relative line of the cursor row (-1
+// when the cursor is not on a recommendation) and span the lines it occupies
+// (two with a fix line), so the caller can scroll the whole row into view.
+func renderMaintRecommendations(v maintView, recs []maintAction, cursor int) (block string, cursorAt, span int) {
 	mu := styleMuted.Render
 	var b strings.Builder
 	cursorAt, span = -1, 1
@@ -1252,11 +1435,11 @@ func renderMaintRecommendations(v maintView, rows []maintAction, first, cursor i
 		b.WriteString("\n")
 		return b.String(), cursorAt, span
 	}
-	if len(rows) <= first {
+	if len(recs) == 0 {
 		b.WriteString("  " + mu("none — nothing graded worse than informational") + "\n\n")
 		return b.String(), cursorAt, span
 	}
-	for i, row := range rows[first:] {
+	for i, row := range recs {
 		a := row.advice
 		st := adviceStyle(a.Level)
 		glyph := adviceGlyph(a.Level)
@@ -1272,7 +1455,8 @@ func renderMaintRecommendations(v maintView, rows []maintAction, first, cursor i
 			head += " → " + a.Suggested
 		}
 		mark := "  "
-		if first+i == cursor {
+		selected := i == cursor
+		if selected {
 			mark = styleSelected.Render("▶ ")
 			cursorAt = strings.Count(b.String(), "\n")
 			if a.Fix != "" {
@@ -1280,10 +1464,10 @@ func renderMaintRecommendations(v maintView, rows []maintAction, first, cursor i
 			}
 		}
 		// The ↵ mark says Enter opens something for this row; the reset rows
-		// above arm a confirm instead and carry none.
+		// in the statistics section arm a confirm instead and carry none.
 		_, drills := row.enterLabel()
 		b.WriteString(mark + drillMark(drills) + st.Render(glyph) + " " + padRight(st.Render(head), 44) + "  " + mu(a.Reason) + "\n")
-		if a.Fix != "" {
+		if a.Fix != "" && selected {
 			b.WriteString("        " + mu(a.Fix) + "\n")
 		}
 	}
@@ -1292,40 +1476,39 @@ func renderMaintRecommendations(v maintView, rows []maintAction, first, cursor i
 }
 
 // renderMaintSchemaHealth renders the per-database catalog sweep: one row per
-// check with its count and, where the advice fired, the coloured reason. The
+// check that found something, with its count and, where the advice fired, the
+// coloured figure; the checks that came back clean fold into the header. The
 // sweep loads separately from the snapshot, so the section shows "loading…"
 // until it lands and keeps the previous result while a re-sweep runs.
 func renderMaintSchemaHealth(v maintView) string {
 	mu := styleMuted.Render
-	var b strings.Builder
 	name := "schema health"
 	if db := v.dbName(); db != "" {
 		name += " (" + db + ")"
 	}
-	header := v.header(name, "schema_sequences", "schema_stale_stats", "schema_fk_index", "schema_bloat_table",
-		"schema_bloat_index", "schema_index_invalid", "schema_index_duplicate")
-	if v.schemaLoading && v.schema != nil {
-		header += "  " + mu("refreshing…")
-	}
-	b.WriteString(header + "\n")
+	keys := []string{"schema_sequences", "schema_stale_stats", "schema_fk_index", "schema_bloat_table",
+		"schema_bloat_index", "schema_index_invalid", "schema_index_duplicate"}
 	if v.schema == nil {
-		b.WriteString(maintRow("", mu("loading…")))
-		b.WriteString("\n")
-		return b.String()
+		return v.section(name, keys, nil, maintRow("", mu("loading…")))
 	}
+	var b strings.Builder
+	var ok []string
 	h := v.schema
-	// check renders one row: the error, the zero text, or the finding with
-	// its note — and the top names only when no note already lists them.
+	// check renders one row: the error, the zero text (verbose) or the
+	// finding with its note — and the top names only when no note lists them.
 	check := func(label, key string, c pg.SchemaCheck, zero, some string) {
 		var val string
 		switch {
 		case c.Err != nil:
 			val = styleErr.Render("could not evaluate") + "  " + mu(oneLineQuery(c.Err.Error()))
+		case c.Rows == 0 && !v.verbose:
+			ok = append(ok, label)
+			return
 		case c.Rows == 0:
 			val = mu(zero)
 		default:
 			val = v.graded(key, some) + v.note(key)
-			if v.advice.Find(key) == nil && len(c.Top) > 0 {
+			if v.note(key) == "" && len(c.Top) > 0 {
 				val += "  " + mu(strings.Join(c.Top, ", "))
 			}
 		}
@@ -1348,6 +1531,10 @@ func renderMaintSchemaHealth(v maintView) string {
 	check("invalid indexes", "schema_index_invalid", h.InvalidIndexes, "none", plural(h.InvalidIndexes.Rows, "index", "indexes"))
 	check("duplicate indexes", "schema_index_duplicate", h.DuplicateIndexes, "none",
 		plural(h.DuplicateIndexes.Rows, "group", "groups")+" · ~"+humanize.Bytes(h.DuplicateIndexes.Bytes)+" redundant")
-	b.WriteString("\n")
-	return b.String()
+	out := v.section(name, keys, ok, b.String())
+	if v.schemaLoading {
+		// The refreshing mark rides the header line, before the fold summary.
+		out = strings.Replace(out, "\n", "  "+mu("refreshing…")+"\n", 1)
+	}
+	return out
 }

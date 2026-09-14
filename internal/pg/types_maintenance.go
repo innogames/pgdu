@@ -195,6 +195,16 @@ type MaintenanceInfo struct {
 
 	// Curated GUCs (name → raw setting string from pg_settings)
 	Settings map[string]string
+	// SettingDefault marks the curated GUCs whose server-wide value is the
+	// compiled-in default (reset_val = boot_val). A GUC missing from the map
+	// is treated as tuned, so an unreadable pg_settings never hides a row.
+	SettingDefault map[string]bool
+}
+
+// IsDefaultSetting reports whether name is known to sit at its compiled-in
+// default; unknown names count as tuned.
+func (i *MaintenanceInfo) IsDefaultSetting(name string) bool {
+	return i != nil && i.SettingDefault[name]
 }
 
 // MaintTuning holds the numeric GUCs the advice rules do arithmetic on, parsed
@@ -624,8 +634,17 @@ func (s SLRUStat) BuffersGUC() string {
 // WalReceiverStat holds the standby-side view from pg_stat_wal_receiver.
 type WalReceiverStat struct {
 	Status     string        // stopped / starting / streaming / …
-	ByteLag    int64         // latest_end_lsn - received_lsn (approximate)
+	ByteLag    int64         // flushed_lsn - pg_last_wal_replay_lsn(): received but not yet replayed
 	LastMsgAge time.Duration // how long since the last message from primary
+	// SenderHost/SenderPort name the primary the receiver is connected to;
+	// SlotName the replication slot it holds there ("" when none).
+	SenderHost string
+	SenderPort int
+	SlotName   string
+	// ReplayDelay is how old the last replayed commit is (now() -
+	// pg_last_xact_replay_timestamp()). Zero when nothing has been replayed;
+	// it also grows on an idle primary, so it is a delay, not a lag verdict.
+	ReplayDelay time.Duration
 }
 
 // IOStat holds aggregate I/O counters from pg_stat_io (PG 16+).

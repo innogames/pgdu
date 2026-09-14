@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"pgdu/internal/pg"
+	"pgdu/internal/prefs"
 	"pgdu/internal/sysmem"
 )
 
@@ -28,6 +31,17 @@ func overviewInfo() *pg.MaintenanceInfo {
 			"track_io_timing": "on", "log_checkpoints": "on",
 			"pg_stat_statements.track": "top", "pg_stat_statements.max": "5000",
 			"pg_qualstats.max": "1000", "pg_qualstats.enabled": "on",
+		},
+		// The knobs the fixture leaves at their compiled-in default; the rest
+		// count as tuned by the operator and always earn a row.
+		SettingDefault: map[string]bool{
+			"autovacuum_work_mem": true, "max_connections": true, "huge_pages": true, "autovacuum": true,
+			"autovacuum_max_workers": true, "wal_level": true, "min_wal_size": true, "checkpoint_completion_target": true,
+			"log_checkpoints": true, "pg_stat_statements.track": true, "pg_stat_statements.max": true,
+			"pg_qualstats.max": true, "pg_qualstats.enabled": true,
+			"autovacuum_naptime": true, "autovacuum_vacuum_cost_delay": true, "autovacuum_vacuum_cost_limit": true,
+			"autovacuum_freeze_max_age": true, "autovacuum_multixact_freeze_max_age": true, "vacuum_failsafe_age": true,
+			"fsync": true, "full_page_writes": true, "archive_mode": true, "hot_standby_feedback": true,
 		},
 		SettingBytes: map[string]int64{
 			"shared_buffers": 8 << 30, "work_mem": 16 << 20, "maintenance_work_mem": 1 << 30,
@@ -65,8 +79,9 @@ func overviewScreen(info *pg.MaintenanceInfo) *screen {
 	return s
 }
 
-func TestRenderMaintenanceHealthy(t *testing.T) {
-	m := &Model{width: 200}
+// Verbose mode is the whole page: every setting, every check as a row.
+func TestRenderMaintenanceHealthyVerbose(t *testing.T) {
+	m := &Model{width: 200, maintVerbose: true}
 	out := stripANSI(m.renderMaintenance(overviewScreen(overviewInfo()), 200))
 	for _, want := range []string{
 		" recommendations ", "none — nothing graded worse than informational",
@@ -76,21 +91,146 @@ func TestRenderMaintenanceHealthy(t *testing.T) {
 		"huge_pages", "host pool 4200", "host memory", "32.00 GB total", "swap", "25% of host RAM",
 		"× 100 conns = 1.56 GB", "→ 1.00 GB (maintenance_work_mem)",
 		"workers", "1 / 3 busy", "over threshold", "2 tables", "public.orders",
-		"in shop", "wal rate", "since reset", "pg_wal on disk", "2.00 GB", "128 segments",
+		"xid age · shop", "wal rate", "since reset", "pg_wal on disk", "2.00 GB", "128 segments",
 		"dirty-page writes", "checkpointer 75.0%", "avg interval", "per checkpoint",
-		"counters since reset", "auto-refresh off",
+		"counters since reset", "auto-refresh off", "v quiet",
+		"wal_level", "min_wal_size", "deadlocks", "lock waits", "pending config",
 		" schema health (postgres) ", "loading…",
+		" statistics ", "pg_stat_statements", "table statistics", "table stats · all dbs",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered overview lacks %q\n%s", want, out)
 		}
 	}
 	// The healthy snapshot has no rate window yet (the since-reset WAL rate is
-	// the only /min figure) and no qualstats settings block.
-	for _, absent := range []string{"(last ", "rates over", "sample_rate", "n/a"} {
+	// the only /min figure) and no qualstats settings block; nothing folds.
+	for _, absent := range []string{"(last ", "rates over", "sample_rate", "n/a", "✓"} {
 		if strings.Contains(out, absent) {
 			t.Errorf("rendered overview unexpectedly contains %q", absent)
 		}
+	}
+}
+
+// Quiet mode (the default) drops default-valued settings nothing grades,
+// folds the checks that passed into their section titles and keeps every
+// measurement and every tuned knob.
+func TestRenderMaintenanceHealthyQuiet(t *testing.T) {
+	m := &Model{width: 200}
+	raw := stripANSI(m.renderMaintenance(overviewScreen(overviewInfo()), 300))
+	out := squashSpaces(raw)
+	for _, want := range []string{
+		"server ✓ deadlocks · longest xact · idle in txn · longest query",
+		"buffer cache ✓ bulkread share · backend fsyncs",
+		"memory & resources ✓ swap",
+		"autovacuum & wraparound ✓ xmin horizon",
+		"wal & checkpoints ✓ full-page images",
+		"operational health ✓ pending config · lock waits · temp files",
+		// Tuned knobs and measurements stay.
+		"shared_buffers 8GB", "work_mem 16MB", "maintenance_work_mem 1GB", "checkpoint_timeout 30min", "max_wal_size 4GB", "wal_buffers 16MB",
+		"occupancy 1.0M / 1.0M buffers", "read latency", "vacuum share", "wal rate", "checkpoints [", "over threshold 2 tables",
+		"xid age · shop [", "v every row",
+		// The connections pool is 7 % used: no bar, the figure says it all.
+		"connections 7/100 7% (2 active · 5 idle)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("quiet overview lacks %q\n%s", want, raw)
+		}
+	}
+	for _, absent := range []string{
+		"observability", "track_planning", "log_min_duration", "track_io_timing", // verbose-only section
+		"wal_level", "min_wal_size", "completion_target", "naptime", "cost_delay", "freeze_max_age unknown", "failsafe_age",
+		"autovacuum_work_mem", "max_connections 100", // defaults nothing grades
+		"none — nothing pins", "0 waiting", "0 need restart", "fsyncs 300", "bulkread share 1.0%", "config reloaded",
+		"deadlocks 0",
+	} {
+		if strings.Contains(out, absent) {
+			t.Errorf("quiet overview must not contain %q\n%s", absent, raw)
+		}
+	}
+}
+
+// Quiet mode still shows a default-valued knob once advice grades it, and a
+// healthy check once it stops being healthy.
+func TestRenderMaintenanceQuietKeepsFindings(t *testing.T) {
+	info := overviewInfo()
+	info.SettingDefault["max_wal_size"] = true
+	info.Checkpointer.Requested = 200 // max_wal_size crit
+	info.LockWaits = 3
+	info.Deadlocks, info.DeadlocksPerDay = 40, 5
+	info.ConnByState["idle"] = 60 // 62 % used: the bar is back
+	m := &Model{width: 200}
+	out := stripANSI(m.renderMaintenance(overviewScreen(info), 300))
+	for _, want := range []string{
+		ovRow("max_wal_size", "4GB"),
+		ovRow("lock waits", "3 waiting"),
+		"deadlocks               40 detected",
+		"connections             [",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("quiet overview with findings lacks %q\n%s", want, out)
+		}
+	}
+	for _, absent := range []string{"✓ pending config · lock waits", "✓ deadlocks", "of checkpoints WAL-driven  "} {
+		if strings.Contains(out, absent) {
+			t.Errorf("a finding must not fold, found %q\n%s", absent, out)
+		}
+	}
+	// The reason is printed once, in the panel.
+	if n := strings.Count(out, "of checkpoints WAL-driven"); n != 1 {
+		t.Errorf("max_wal_size reason printed %d times, want once (panel only)\n%s", n, out)
+	}
+}
+
+// The v toggle flips the page and is remembered across sessions.
+func TestMaintVerboseTogglePersists(t *testing.T) {
+	t.Setenv("PGDU_CONFIG_DIR", t.TempDir())
+	p := prefs.Load()
+	s := overviewScreen(overviewInfo())
+	m := newTestModel(s)
+	m.colPrefs = p
+	if m.maintVerbose {
+		t.Fatal("quiet is the default")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if !m.maintVerbose || !s.maintenance.follow {
+		t.Errorf("v must switch to verbose and re-follow the cursor (verbose %v, follow %v)", m.maintVerbose, s.maintenance.follow)
+	}
+	if !prefs.Load().OverviewVerbose {
+		t.Error("the toggle must be saved to prefs")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if m.maintVerbose || prefs.Load().OverviewVerbose {
+		t.Error("v again must switch back and save that too")
+	}
+}
+
+// On a standby the replication section names the primary the receiver is
+// connected to and what is still to be replayed; a plain standby draws no
+// empty replica table.
+func TestRenderMaintenanceStandbyReceiver(t *testing.T) {
+	info := overviewInfo()
+	info.InRecovery = true
+	info.WalReceiver = &pg.WalReceiverStat{Status: "streaming", LastMsgAge: 2 * time.Second,
+		SenderHost: "db2.example", SenderPort: 5432, SlotName: "repmgr_slot_2", ByteLag: 1200 << 10, ReplayDelay: 3 * time.Second}
+	m := &Model{width: 200}
+	raw := stripANSI(m.renderMaintenance(overviewScreen(info), 300))
+	out := squashSpaces(raw)
+	for _, want := range []string{
+		"wal receiver streaming last msg 2s ago\n",
+		"primary db2.example:5432 slot repmgr_slot_2\n",
+		"replay 1.17 MB received, not yet replayed · last replayed commit 3s old\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("standby replication section lacks %q\n%s", want, raw)
+		}
+	}
+	if strings.Contains(out, "node address state") {
+		t.Errorf("a standby without walsenders or slots must not draw the replica table\n%s", raw)
+	}
+	info.WalReceiver.SenderHost, info.WalReceiver.ByteLag, info.WalReceiver.ReplayDelay = "", 0, 0
+	out = squashSpaces(stripANSI(m.renderMaintenance(overviewScreen(info), 300)))
+	if strings.Contains(out, "primary ") || strings.Contains(out, "replay ") {
+		t.Errorf("unknown sender and no replay gap must leave no rows behind\n%s", out)
 	}
 }
 
@@ -107,8 +247,8 @@ func TestRenderMaintenanceDegrades(t *testing.T) {
 		ovRow("pg_buffercache", "not installed — needed for cache analysis"),
 		ovRow("pg_wal on disk", "n/a (needs pg_monitor)"),
 		"n/a — track_io_timing is off",
-		"~ track_io_timing off → on",
-		"ALTER SYSTEM SET track_io_timing = 'on'; SELECT pg_reload_conf();",
+		"▶ ↵ ~ track_io_timing off → on",                                    // the first (and only) recommendation holds the cursor…
+		"ALTER SYSTEM SET track_io_timing = 'on'; SELECT pg_reload_conf();", // …so its fix line shows
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("degraded overview lacks %q\n%s", want, out)
@@ -132,7 +272,7 @@ func TestRenderMaintenanceDegrades(t *testing.T) {
 func TestRenderMaintenanceExtensionBlocksFollowInstall(t *testing.T) {
 	info := overviewInfo()
 	info.Statements.Installed = false
-	m := &Model{width: 200}
+	m := &Model{width: 200, maintVerbose: true}
 	out := stripANSI(m.renderMaintenance(overviewScreen(info), 200))
 	if strings.Contains(out, " pg_stat_statements \n") || strings.Contains(out, "track_planning") {
 		t.Errorf("pg_stat_statements settings block rendered while not installed\n%s", out)
@@ -158,17 +298,19 @@ func TestRenderMaintenanceRatesAndAdvice(t *testing.T) {
 	out := stripANSI(m.renderMaintenance(s, 200))
 	for _, want := range []string{
 		"rates over the last 30s", "6.0k/min", "(last 30s)", "120.00 MB/min",
-		"~ huge_pages try → vm.nr_hugepages=4200", "sysctl -w vm.nr_hugepages=4200",
-		"! max_wal_size 4GB", "of checkpoints WAL-driven",
+		"~ huge_pages try → vm.nr_hugepages=4200",
+		"▶ ↵ ! max_wal_size 4GB", "of checkpoints WAL-driven",
+		"ALTER SYSTEM SET max_wal_size", // the cursor row's fix
 		"auto-refresh 10s",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("overview with rates lacks %q\n%s", want, out)
 		}
 	}
-	// The inline note on the max_wal_size row and the panel line say the same thing.
-	if strings.Count(out, "of checkpoints WAL-driven") != 2 {
-		t.Errorf("expected the max_wal_size reason inline and in the panel\n%s", out)
+	// The reason is printed in the panel only; the max_wal_size row is just
+	// coloured. The huge_pages fix waits for the cursor.
+	if strings.Count(out, "of checkpoints WAL-driven") != 1 || strings.Contains(out, "sysctl -w") {
+		t.Errorf("expected the max_wal_size reason once and no fix line off the cursor\n%s", out)
 	}
 }
 
@@ -332,13 +474,15 @@ func TestRenderMaintenanceRoutineFreezeIsNotRed(t *testing.T) {
 
 	raw := renderMaintAutovacuum(newMaintView(s), maintBarW)
 	out := stripANSI(raw)
-	if !strings.Contains(out, ovRow("xid age", "[▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇░]  198.0M / 200.0M   99.0%")) {
+	// The bar measures the distance to the failsafe, so the routine trigger
+	// reads as the small fraction it is; the freeze_max_age share is a figure.
+	if !strings.Contains(out, ovRow("xid age", "[▇▇░░░░░░░░░░░░░░░░░░]  198.0M  12.4% failsafe · 99% freeze_max_age")) {
 		t.Errorf("xid age row missing from:\n%s", out)
 	}
 	if !strings.Contains(out, "routine anti-wraparound autovacuum is due") {
 		t.Error("routine freezing is not explained on the row")
 	}
-	if strings.Contains(raw, styleErr.Render("99.0%")) {
+	if strings.Contains(raw, styleErr.Render("12.4% failsafe")) {
 		t.Error("99% of freeze_max_age is rendered as an error")
 	}
 	// And nothing to do about it.
@@ -354,18 +498,31 @@ func TestRenderMaintenanceRoutineFreezeIsNotRed(t *testing.T) {
 func TestRenderMaintenanceHorizonRow(t *testing.T) {
 	info := overviewInfo()
 	out := stripANSI(renderMaintAutovacuum(newMaintView(overviewScreen(info)), maintBarW))
-	if !strings.Contains(out, ovRow("xmin horizon", "none — nothing pins a snapshot")) {
+	if strings.Contains(out, "xmin horizon  ") || !strings.Contains(out, "✓ xmin horizon") {
+		t.Errorf("an unpinned horizon folds into the title in quiet mode:\n%s", out)
+	}
+	v := newMaintView(overviewScreen(info))
+	v.verbose = true
+	if out := stripANSI(renderMaintAutovacuum(v, maintBarW)); !strings.Contains(out, ovRow("xmin horizon", "none — nothing pins a snapshot")) {
 		t.Errorf("idle cluster horizon row missing from:\n%s", out)
 	}
 
 	info = overviewInfo()
 	info.Horizon = pg.HorizonStat{Age: 62_104_882, Kind: "idle transaction",
 		Holder: "pid 4711 in shop (app), idle in transaction for 00:42:00"}
-	out = stripANSI(renderMaintAutovacuum(newMaintView(overviewScreen(info)), maintBarW))
-	for _, want := range []string{"xmin horizon", "62.1M", "pid 4711 in shop", "VACUUM cannot freeze past it"} {
+	s := overviewScreen(info)
+	out = stripANSI(renderMaintAutovacuum(newMaintView(s), maintBarW))
+	for _, want := range []string{"xmin horizon", "62.1M", "pid 4711 in shop"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("horizon row missing %q in:\n%s", want, out)
 		}
+	}
+	// The sentence belongs to the recommendations panel, not the row.
+	if strings.Contains(out, "VACUUM cannot freeze past it") {
+		t.Errorf("the horizon reason must not repeat on the row:\n%s", out)
+	}
+	if a := s.maintenance.advice.Find("xmin_horizon"); a == nil || !strings.Contains(a.Reason, "VACUUM cannot freeze past it") {
+		t.Errorf("horizon advice = %+v, want the freeze reason", a)
 	}
 
 	// Unreadable is reported as unknown, never as "none".

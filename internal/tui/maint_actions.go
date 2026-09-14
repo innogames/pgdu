@@ -2,16 +2,16 @@ package tui
 
 import "pgdu/internal/pg"
 
-// maintAction is one cursor-addressable row of the system overview: a stats
-// reset in the extension-capacity block, or a recommendation that opens the
-// screen explaining it. Everything else on the page is read-only text.
+// maintAction is one cursor-addressable row of the system overview: a
+// recommendation that opens the screen explaining it, or a stats reset in the
+// statistics block at the foot of the page. Everything else is read-only text.
 type maintAction struct {
 	reset  string     // one of maintResetRows; "" on recommendation rows
 	advice *pg.Advice // nil on reset rows
 }
 
-// maintResetRows are the extension-capacity rows in render order; the names
-// are the pendingReset keys the y-confirm dispatches on.
+// maintResetRows are the statistics rows in render order; the names are the
+// pendingReset keys the y-confirm dispatches on.
 var maintResetRows = []string{"statements", "qualstats", "tablestats", "tablestats-all"}
 
 // key is the row's identity across reloads: the reset name or the advice key.
@@ -49,16 +49,17 @@ func adviceTargetLabel(a pg.Advice) (string, bool) {
 	return "", false
 }
 
-// actionRows lists the overview's action rows in render order: the reset rows,
-// then every recommendation the panel shows (advice.Actionable()).
+// actionRows lists the overview's action rows in render order: every
+// recommendation the panel shows (advice.Actionable()), then the reset rows
+// of the statistics block that closes the page.
 func (st *maintState) actionRows() []maintAction {
 	act := st.advice.Actionable()
 	rows := make([]maintAction, 0, len(maintResetRows)+len(act))
-	for _, r := range maintResetRows {
-		rows = append(rows, maintAction{reset: r})
-	}
 	for i := range act {
 		rows = append(rows, maintAction{advice: &act[i]})
+	}
+	for _, r := range maintResetRows {
+		rows = append(rows, maintAction{reset: r})
 	}
 	return rows
 }

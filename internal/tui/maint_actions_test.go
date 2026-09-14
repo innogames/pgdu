@@ -27,13 +27,13 @@ func TestMaintActionRows(t *testing.T) {
 	for i, r := range rows {
 		got[i] = r.key()
 	}
-	if want := "statements,qualstats,tablestats,tablestats-all,lock_waits,log_checkpoints"; strings.Join(got, ",") != want {
+	if want := "lock_waits,log_checkpoints,statements,qualstats,tablestats,tablestats-all"; strings.Join(got, ",") != want {
 		t.Errorf("action rows = %v, want %s", got, want)
 	}
 	for i, want := range []struct {
 		label string
 		ok    bool
-	}{{"reset stats", true}, {"reset stats", true}, {"reset stats", true}, {"reset stats", true}, {"lock tree", true}, {"settings", true}} {
+	}{{"lock tree", true}, {"settings", true}, {"reset stats", true}, {"reset stats", true}, {"reset stats", true}, {"reset stats", true}} {
 		if label, ok := rows[i].enterLabel(); label != want.label || ok != want.ok {
 			t.Errorf("row %d enterLabel = %q,%v, want %q,%v", i, label, ok, want.label, want.ok)
 		}
@@ -48,26 +48,33 @@ func TestRefreshAdviceKeepsCursorByKey(t *testing.T) {
 	s.maintenance.refreshAdvice()
 	rows := s.maintenance.actionRows()
 	if len(rows) != 6 {
-		t.Fatalf("expected 4 reset rows + 2 recommendations, got %d", len(rows))
+		t.Fatalf("expected 2 recommendations + 4 reset rows, got %d", len(rows))
 	}
-	// Cursor on log_checkpoints (last); a new, worse finding lands above it and
-	// the cursor stays on log_checkpoints.
-	s.maintenance.setCursor(5, rows)
+	// Cursor on log_checkpoints (the second recommendation); a new, worse
+	// finding lands above it and the cursor stays on log_checkpoints.
+	s.maintenance.setCursor(1, rows)
 	if !s.maintenance.follow || s.maintenance.cursorKey != "log_checkpoints" {
 		t.Fatalf("setCursor: follow=%v key=%q", s.maintenance.follow, s.maintenance.cursorKey)
 	}
 	info.Host.SwapFree = 6 << 30
 	s.maintenance.refreshAdvice()
 	rows = s.maintenance.actionRows()
-	if rows[s.maintenance.cursor].key() != "log_checkpoints" || s.maintenance.cursor != 6 {
-		t.Errorf("cursor after refresh = %d (%s), want 6 (log_checkpoints)", s.maintenance.cursor, rows[s.maintenance.cursor].key())
+	if rows[s.maintenance.cursor].key() != "log_checkpoints" || s.maintenance.cursor != 2 {
+		t.Errorf("cursor after refresh = %d (%s), want 2 (log_checkpoints)", s.maintenance.cursor, rows[s.maintenance.cursor].key())
 	}
-	// The row under the cursor vanishes: same index, clamped, re-keyed.
+	// The row under the cursor vanishes: same index, re-keyed to whatever
+	// moved up into it.
 	info.Settings["log_checkpoints"] = "on"
 	s.maintenance.refreshAdvice()
 	rows = s.maintenance.actionRows()
-	if s.maintenance.cursor != len(rows)-1 || s.maintenance.cursorKey != rows[len(rows)-1].key() {
-		t.Errorf("cursor after its row vanished = %d/%q, want the clamped last row", s.maintenance.cursor, s.maintenance.cursorKey)
+	if s.maintenance.cursor != 2 || s.maintenance.cursorKey != rows[2].key() || rows[2].key() != "statements" {
+		t.Errorf("cursor after its row vanished = %d/%q, want 2/statements", s.maintenance.cursor, s.maintenance.cursorKey)
+	}
+	// And a cursor past the end of a shrunken list is clamped.
+	s.maintenance.cursor, s.maintenance.cursorKey = 99, ""
+	s.maintenance.refreshAdvice()
+	if s.maintenance.cursor != len(rows)-1 {
+		t.Errorf("cursor past the end = %d, want %d", s.maintenance.cursor, len(rows)-1)
 	}
 }
 
@@ -80,35 +87,35 @@ func TestMaintEnterDispatch(t *testing.T) {
 	)
 	m := newTestModel(s)
 
-	s.maintenance.cursor = 1
+	s.maintenance.cursor = 5
 	m.handleMaintenanceEnter(s)
 	if s.maintenance.pendingReset != "qualstats" || len(m.stack) != 2 {
 		t.Errorf("reset row must arm the confirm, got pending=%q stack=%d", s.maintenance.pendingReset, len(m.stack))
 	}
 	s.maintenance.pendingReset = ""
 
-	s.maintenance.cursor = 4
+	s.maintenance.cursor = 0
 	m.handleMaintenanceEnter(s)
 	if top := m.top(); top.level != levelLockTree || top.tool != toolActivity || top.db != "postgres" {
 		t.Errorf("lock-tree row pushed %+v", top)
 	}
 	m.stack = m.stack[:2]
 
-	s.maintenance.cursor = 5
+	s.maintenance.cursor = 1
 	m.handleMaintenanceEnter(s)
 	if top := m.top(); top.level != levelDiagnosticResult || top.diag == nil || top.diag.Key != "bloat_index" || top.db != "shop" {
 		t.Errorf("diagnostic row pushed %+v", top)
 	}
 	m.stack = m.stack[:2]
 
-	s.maintenance.cursor = 6
+	s.maintenance.cursor = 2
 	m.handleMaintenanceEnter(s)
 	if top := m.top(); top.level != levelSettings || top.filter != "wal_buffers" {
 		t.Errorf("settings row pushed %+v (filter %q)", top, top.filter)
 	}
 	m.stack = m.stack[:2]
 
-	s.maintenance.cursor = 7
+	s.maintenance.cursor = 3
 	m.handleMaintenanceEnter(s)
 	if len(m.stack) != 2 || s.maintenance.pendingReset != "" {
 		t.Errorf("a recommendation without a target must do nothing, stack=%d", len(m.stack))
@@ -118,20 +125,24 @@ func TestMaintEnterDispatch(t *testing.T) {
 	}
 }
 
-// The recommendation rows carry the cursor and the drill mark, and the panel
-// sits above the sections so the first screen shows every action row.
+// The recommendation rows carry the cursor and the drill mark, the panel
+// opens the page, and the stats-reset rows close it.
 func TestRenderMaintenanceRecommendationCursor(t *testing.T) {
 	s := adviceScreen(
 		pg.Advice{Key: "lock_waits", Level: pg.AdviceCrit, Current: "3", Reason: "3 backend(s) waiting on locks", Target: pg.AdviceTargetLockTree},
 		pg.Advice{Key: "swap", Level: pg.AdviceWarn, Current: "2.00 GB", Reason: "swap in use"},
 	)
-	s.maintenance.cursor = 4
+	s.maintenance.cursor = 0
 	m := &Model{width: 200}
 	out := stripANSI(m.renderMaintenance(s, 200))
 	rec := strings.Index(out, " recommendations ")
 	srv := strings.Index(out, " server ")
+	stats := strings.Index(out, " statistics ")
 	if rec < 0 || srv < 0 || rec > srv {
 		t.Fatalf("recommendations must precede the sections\n%s", out)
+	}
+	if stats < 0 || stats < strings.Index(out, " schema health") {
+		t.Fatalf("the statistics block must close the page\n%s", out)
 	}
 	if !strings.Contains(out, "▶ ↵ ! lock_waits 3") {
 		t.Errorf("cursor row must carry the marker and the drill glyph\n%s", out)
@@ -141,6 +152,34 @@ func TestRenderMaintenanceRecommendationCursor(t *testing.T) {
 	}
 	if strings.Count(out, "▶") != 1 {
 		t.Errorf("exactly one cursor marker expected\n%s", out)
+	}
+	// The cursor moves on to the first reset row, below every section.
+	s.maintenance.cursor = 2
+	out = stripANSI(m.renderMaintenance(s, 300))
+	if i := strings.Index(out, "▶ pg_stat_statements"); i < 0 || i < stats {
+		t.Errorf("cursor on the first reset row must sit in the statistics block\n%s", out)
+	}
+}
+
+// A finding's fix line is shown under the cursor row only, so the panel stays
+// one line per finding until a row is picked.
+func TestRenderMaintenanceFixLineFollowsCursor(t *testing.T) {
+	s := adviceScreen(
+		pg.Advice{Key: "wal_buffers", Level: pg.AdviceWarn, Setting: "wal_buffers", Current: "64MB", Suggested: "128MB",
+			Reason: "stalls", Fix: "ALTER SYSTEM SET wal_buffers = '128MB';", Target: pg.AdviceTargetSettings},
+		pg.Advice{Key: "max_wal_size", Level: pg.AdviceWarn, Setting: "max_wal_size", Current: "1GB", Suggested: "4GB",
+			Reason: "wal-driven", Fix: "ALTER SYSTEM SET max_wal_size = '4GB';", Target: pg.AdviceTargetSettings},
+	)
+	m := &Model{width: 200}
+	s.maintenance.cursor = 0
+	out := stripANSI(m.renderMaintenance(s, 200))
+	if !strings.Contains(out, "ALTER SYSTEM SET wal_buffers") || strings.Contains(out, "ALTER SYSTEM SET max_wal_size") {
+		t.Errorf("only the cursor row shows its fix\n%s", out)
+	}
+	s.maintenance.cursor = 1
+	out = stripANSI(m.renderMaintenance(s, 200))
+	if strings.Contains(out, "ALTER SYSTEM SET wal_buffers") || !strings.Contains(out, "ALTER SYSTEM SET max_wal_size") {
+		t.Errorf("moving the cursor moves the fix line\n%s", out)
 	}
 }
 
@@ -154,7 +193,7 @@ func TestRenderMaintenanceFollowsCursor(t *testing.T) {
 	}
 	s := adviceScreen(advice...)
 	rows := s.maintenance.actionRows()
-	s.maintenance.setCursor(len(rows)-1, rows)
+	s.maintenance.setCursor(len(advice)-1, rows) // the last recommendation
 	m := &Model{width: 200}
 	out := stripANSI(m.renderMaintenance(s, 10))
 	if !strings.Contains(out, "▶") || s.offset == 0 || s.maintenance.follow {
@@ -186,8 +225,11 @@ func TestRenderMaintenanceSchemaHealth(t *testing.T) {
 	}
 	s.maintenance.refreshAdvice()
 	out := stripANSI(m.renderMaintenance(s, 300))
+	if !strings.Contains(squashSpaces(out), "schema health (postgres) ~ ✓ sequences · fk without index · index bloat · duplicate indexes") {
+		t.Errorf("the clean checks must fold into the title\n%s", out)
+	}
 	for _, want := range []string{
-		ovRow("sequences", "none past 30% of their range"),
+		// The findings and the error keep their rows.
 		"stale statistics", "2 tables", "public.a, public.b",
 		"table bloat", "1 table · ~3.00 GB wasted",
 		"invalid indexes", "could not evaluate", "permission denied",
@@ -197,9 +239,14 @@ func TestRenderMaintenanceSchemaHealth(t *testing.T) {
 			t.Errorf("schema section lacks %q\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "loading…") || strings.Contains(out, "refreshing") {
-		t.Errorf("landed sweep must not show a loading state\n%s", out)
+	if strings.Contains(out, "loading…") || strings.Contains(out, "refreshing") || strings.Contains(out, "none past 30%") {
+		t.Errorf("landed sweep must not show a loading state or a folded row\n%s", out)
 	}
+	m.maintVerbose = true
+	if out := stripANSI(m.renderMaintenance(s, 300)); !strings.Contains(out, ovRow("sequences", "none past 30% of their range")) {
+		t.Errorf("verbose shows the clean checks as rows\n%s", out)
+	}
+	m.maintVerbose = false
 	s.maintenance.schemaLoading = true
 	out = stripANSI(m.renderMaintenance(s, 300))
 	if !strings.Contains(out, "refreshing…") || !strings.Contains(out, "2 tables") {
