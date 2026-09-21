@@ -35,18 +35,21 @@ func paramColumns(query string) map[int]string {
 
 // sampleConnector is the set of keywords that can legitimately sit between a
 // column and the placeholder it is compared to (operators and parentheses are
-// already dropped by sqlWords). columnBefore steps over these to find the column.
+// already dropped by sqlWords). columnBefore steps over these to find the
+// column. "cast" is here for the ORM-generated `col = ANY(CAST($n AS text[]))`
+// shape; its "as" sits after the placeholder, so it never has to be stepped over.
 var sampleConnector = map[string]bool{
 	"in": true, "any": true, "all": true, "not": true, "like": true,
 	"ilike": true, "similar": true, "to": true, "between": true,
-	"and": true, "symmetric": true, "escape": true,
+	"and": true, "symmetric": true, "escape": true, "cast": true,
 }
 
 // columnBefore walks backwards from the $n token at index i to the column
 // reference it is compared against, stepping over the connector keywords,
 // parentheses, commas and earlier placeholders that can sit in between
-// (col IN ($1,$2), col = ANY($1), col BETWEEN $1 AND $2). It returns the first plain identifier
-// it reaches, or "" if there is none. Whatever it returns is later checked
+// (col IN ($1,$2), col = ANY($1), col = ANY(CAST($1 AS text[])), col BETWEEN
+// $1 AND $2). It returns the first plain identifier it reaches, or "" if there
+// is none. Whatever it returns is later checked
 // against captured predicate columns, so a wrong guess (e.g. landing on
 // VALUES) harmlessly resolves to "no captured value". The INTERVAL and EXTRACT
 // keywords precede a $n in `INTERVAL $n` / `EXTRACT($n FROM …)` — typed-literal

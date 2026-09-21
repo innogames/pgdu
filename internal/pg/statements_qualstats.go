@@ -47,6 +47,23 @@ func (c *Client) QualstatsSamples(ctx context.Context, db string, queryID int64)
 		})
 }
 
+// QualstatsQualTracked reports how many quals pg_qualstats has tracked for
+// queryID regardless of whether it captured a constant for any of them, so a
+// caller with no samples can tell "pg_qualstats never saw this query" from
+// "it saw it, but always with bound parameters" (see sqlQualstatsQualCount).
+// Callers should EnsureQualstats first.
+func (c *Client) QualstatsQualTracked(ctx context.Context, db string, queryID int64) (int, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	if err := pool.QueryRow(ctx, sqlQualstatsQualCount, queryID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("qualstats qual count in %q: %w", db, err)
+	}
+	return n, nil
+}
+
 // InferParams discovers the types of a normalized query's $n placeholders by
 // PREPAREing it and reading pg_prepared_statements.parameter_types. Best-effort:
 // utility statements and queries whose text was truncated by

@@ -343,6 +343,11 @@ func noSampleLines(s *screen) []string {
 	switch {
 	case s.stat.qualstats && len(covered) > 0:
 		lines = append(lines, "pg_qualstats covers "+strings.Join(covered, ", ")+" · missing "+strings.Join(missing, ", "))
+	case s.stat.qualstats && s.stat.qualTracked > 0:
+		// Tracked but never with a literal: the call binds its parameters and the
+		// plan went generic, so the qual holds a Param pg_qualstats can't deparse.
+		lines = append(lines, "pg_qualstats tracked "+countLabel(s.stat.qualTracked, "predicate")+
+			" for this query but captured no constants — bound parameters under a generic plan leave no literal to sample")
 	case s.stat.qualstats:
 		lines = append(lines, "pg_qualstats has no constants for this query yet")
 	case s.extPrompt != nil && s.extPrompt.name == extQualstats:
@@ -360,6 +365,14 @@ func noSampleLines(s *screen) []string {
 	case logLookupIdle, logLookupRunning, logLookupFound: // nothing to add
 	}
 	return lines
+}
+
+// countLabel renders "1 predicate" / "3 predicates" for a message.
+func countLabel(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return strconv.Itoa(n) + " " + noun + "s"
 }
 
 // qualCoverage splits the breakdown into the $n pg_qualstats covers and the rest.

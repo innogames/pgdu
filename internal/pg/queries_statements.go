@@ -194,6 +194,14 @@ ORDER BY q.occurences DESC, q.constvalue
 LIMIT  50
 `
 
+// sqlQualstatsQualCount counts every qual pg_qualstats tracked for a queryid,
+// including the ones it captured no constant for. A non-zero count with no
+// captured constants is the bind-parameter case: under a generic plan the
+// qual's right-hand side is a Param, so pg_qualstats records the predicate but
+// has nothing to deparse (constvalue and constant_position both NULL). That
+// tells "nothing tracked yet" from "tracked, but never with a literal".
+const sqlQualstatsQualCount = `SELECT count(*) FROM pg_qualstats WHERE queryid = $1`
+
 // sqlTableHotStats reads the cumulative update / HOT-update counters for one
 // relation (resolved by optionally schema-qualified name) from
 // pg_stat_user_tables. The statement-detail view uses it to show the HOT update

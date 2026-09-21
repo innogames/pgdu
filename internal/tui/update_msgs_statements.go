@@ -384,7 +384,7 @@ func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
 	s.stat.sampleSource = msg.source
 	s.stat.sampleParams = msg.params
 	s.stat.qualstats = msg.qualstats
-	s.stat.qualSamples = msg.qualSamples
+	s.stat.qualSamples, s.stat.qualTracked = msg.qualSamples, msg.qualTracked
 	s.stat.sampleErr = msg.err
 	s.stat.sampleResolved = true
 	// Offer a one-key install when pg_qualstats is absent but already preloaded —

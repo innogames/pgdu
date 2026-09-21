@@ -54,6 +54,11 @@ type statementSampleLoadedMsg struct {
 	// qualSamples is true when pg_qualstats holds constants for this query, so
 	// the p captured-values browser has something to show.
 	qualSamples bool
+	// qualTracked counts the quals pg_qualstats tracked for this query when it
+	// captured no constant for any of them — the bind-parameter case, which the
+	// detail view names instead of claiming nothing was seen. Only read when
+	// qualSamples is false.
+	qualTracked int
 	// installable is true when pg_qualstats is absent but already in
 	// shared_preload_libraries, so a one-key CREATE EXTENSION would enable real
 	// values. Drives the detail view's optional install hint.
@@ -245,12 +250,19 @@ func (m *Model) loadStatementSampleCmd(db string, queryID int64, queryText strin
 		// per-predicate constants for individual placeholders — the data the `p`
 		// browser shows, so it is offered only when there is some.
 		var samples []pg.QualSample
+		tracked := 0
 		if qualstats {
 			samples, _ = m.client.QualstatsSamples(ctx, db, queryID)
+			if len(samples) == 0 {
+				// Nothing captured: count the quals anyway, so the view can say
+				// whether pg_qualstats never saw the query or only ever saw it
+				// with bound parameters (no literal to deparse).
+				tracked, _ = m.client.QualstatsQualTracked(ctx, db, queryID)
+			}
 		}
 		params, err := m.client.InferParams(ctx, db, queryText)
 		if err != nil {
-			return statementSampleLoadedMsg{db: db, query: queryText, err: err, qualstats: qualstats, qualSamples: len(samples) > 0, installable: installable, needLog: true}
+			return statementSampleLoadedMsg{db: db, query: queryText, err: err, qualstats: qualstats, qualSamples: len(samples) > 0, qualTracked: tracked, installable: installable, needLog: true}
 		}
 		// Map the constants to their $n; a call results only when every placeholder
 		// got one.
@@ -259,7 +271,7 @@ func (m *Model) loadStatementSampleCmd(db string, queryID int64, queryText strin
 			qual = pg.MapQualConstants(queryText, params, samples)
 		}
 		real, breakdown := pg.ResolveSampleParams(queryText, params, qual)
-		msg := statementSampleLoadedMsg{db: db, query: queryText, qualstats: qualstats, qualSamples: len(samples) > 0, installable: installable, params: breakdown}
+		msg := statementSampleLoadedMsg{db: db, query: queryText, qualstats: qualstats, qualSamples: len(samples) > 0, qualTracked: tracked, installable: installable, params: breakdown}
 		msg.sample = pg.BuildSampleCall(queryText, params, real)
 		switch {
 		case msg.sample == "":

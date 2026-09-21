@@ -267,6 +267,15 @@ func TestRenderStatementDetailSourceHint(t *testing.T) {
 			absent: []string{"ANALYZE", "explain (real plan)", "select * from t where id = 42", "to browse the real values"},
 		},
 		{
+			// pg_qualstats saw the query but only ever with bound parameters, so it
+			// holds quals without constants — a different next step than "not seen".
+			name: "tracked without constants",
+			stat: stmtState{detail: &sel, sampleResolved: true, qualstats: true, qualTracked: 1, logLookup: logLookupNone,
+				sampleParams: []pg.SampleParam{{Ordinal: 1, Type: "integer", Column: "id"}}},
+			want:   []string{"pg_qualstats tracked 1 predicate for this query but captured no constants", "bound parameters under a generic plan"},
+			absent: []string{"has no constants for this query yet"},
+		},
+		{
 			name: "partial coverage",
 			stat: stmtState{detail: &two, sampleResolved: true, qualstats: true, logLookup: logLookupNone,
 				sampleParams: []pg.SampleParam{

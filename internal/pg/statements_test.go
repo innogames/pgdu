@@ -660,6 +660,13 @@ func TestParamColumns(t *testing.T) {
 			want:  map[int]string{1: "n", 2: "n"},
 		},
 		{
+			// Hibernate spells an IN over a typed array this way; the CAST used to
+			// swallow the column and resolve $2 to "cast".
+			name:  "any over a cast array",
+			query: "SELECT * FROM building b WHERE b.player_id = $1 AND b.definition = ANY (CAST ($2 AS VARCHAR[]))",
+			want:  map[int]string{1: "player_id", 2: "definition"},
+		},
+		{
 			name:  "no placeholders",
 			query: "SELECT now()",
 			want:  nil,

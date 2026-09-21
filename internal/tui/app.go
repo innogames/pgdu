@@ -394,6 +394,7 @@ type stmtState struct {
 	sampleResolved bool             // the sample lookup has reported — tells "no call" from "still resolving"
 	qualstats      bool             // pg_qualstats is installed in db (drives the source hint)
 	qualSamples    bool             // pg_qualstats holds constants for this query (drives the p captured-values browser)
+	qualTracked    int              // quals pg_qualstats tracked while capturing no constant (bind parameters) — only set when !qualSamples
 	sampleErr      error            // InferParams failure
 	logLookup      logLookupState   // the server-log search for a logged call
 	logInfo        *sampleLogInfo   // the logged call behind a sampleLog call
@@ -415,7 +416,7 @@ type stmtState struct {
 // neither run a stale call nor keep a finished log search on screen.
 func (st *stmtState) resetSample() {
 	st.sampleCall, st.sampleSource, st.sampleParams, st.sampleErr, st.sampleResolved = "", sampleNone, nil, nil, false
-	st.qualSamples = false
+	st.qualSamples, st.qualTracked = false, 0
 	st.logLookup, st.logInfo, st.logErr = logLookupIdle, nil, nil
 }
 
