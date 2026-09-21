@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"pgdu/internal/humanize"
 	"pgdu/internal/pg"
 )
 
@@ -20,7 +21,8 @@ func snapshotLabel(meta pg.SnapshotMeta) string {
 
 // renderStatementSnapshots lists the on-disk snapshots as a timeline range
 // picker. The query count is drawn as a bar so the relative size of each capture
-// reads at a glance; each row shows its age and database. The applied window's
+// reads at a glance; each row shows its age, database and — for the rows backed
+// by a file — its name and compressed on-disk size. The applied window's
 // endpoints carry ◀ start / ◀ end markers and the header sums the window up
 // (live with its refresh cadence, or frozen). Enter picks an endpoint: the first
 // pick spans pick → now (live); with a start already applied, picking another
@@ -124,7 +126,7 @@ func (m *Model) renderStatementSnapshots(s *screen, height int) string {
 		// Only real snapshots have a backing file to show; anchors are virtual.
 		row := cursor + bar + "  " + mu(count) + "  " + mu(age) + "  " + name
 		if !anchor {
-			row += "  " + mu(filepath.Base(it.snapPath))
+			row += "  " + mu(filepath.Base(it.snapPath)) + "  " + mu(humanize.Bytes(meta.FileSize))
 		}
 		if len(tags) > 0 {
 			row += "  " + strings.Join(tags, " ")
