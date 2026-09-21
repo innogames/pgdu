@@ -423,20 +423,50 @@ func normalizeMessage(msg string) string {
 // `/* … */` comments are kept because ORMs put the calling method there —
 // that is the most useful grouping key in the sample logs. `--` comments are
 // dropped (line noise).
-func NormalizeSQL(sql string) string { return normalizeSQL(sql, nil) }
+func NormalizeSQL(sql string) string { return normalizeSQL(sql, normOpts{}) }
+
+// NormalizeCall is the key a logged statement is matched to a pg_stat_statements
+// row by: NormalizeSQL with every $n and the NULL/TRUE/FALSE constants folded
+// into the same $? as the literals and `/* … */` comments dropped. A client that
+// binds some values and inlines others
+// has one call shape, while pg_stat_statements numbers the inlined constants as
+// further $n after the bound ones; the query id ignores comments and the pgss
+// text carries only the first-seen call's. PG18's squashed `IN ($1 /*, ... */)`
+// folds to IN ($?...) the same way a logged `IN (1, 2, 3)` does, since the
+// comment goes before the list fold runs.
+func NormalizeCall(sql string) string {
+	return normalizeSQL(sql, normOpts{dropComments: true, foldParams: true})
+}
 
 // SQLLiterals returns the constants NormalizeSQL replaces with $? — quoted
 // strings, dollar-quoted strings and numbers — in source order. This is what a
 // statement's "parameters" are when the driver inlined them instead of binding.
 func SQLLiterals(sql string) []string {
 	var out []string
-	normalizeSQL(sql, func(l string) { out = append(out, l) })
+	normalizeSQL(sql, normOpts{lit: func(l string) { out = append(out, l) }})
 	return out
 }
 
-// normalizeSQL is NormalizeSQL with an optional sink for every literal it
-// masks, so fingerprinting and literal extraction share one tokenizer.
-func normalizeSQL(sql string, lit func(string)) string {
+// normOpts tunes normalizeSQL for its callers, so fingerprinting, literal
+// extraction and call matching share one tokenizer.
+type normOpts struct {
+	lit          func(string) // receives every literal masked to $? (SQLLiterals)
+	dropComments bool         // /* */ comments go instead of staying the grouping hint
+	foldParams   bool         // $n placeholders and the NULL/TRUE/FALSE constants become $? like the literals (NormalizeCall)
+}
+
+// keywordConst reports whether an identifier-shaped word is a constant
+// pg_stat_statements replaces with $n: the NULL, TRUE and FALSE literals.
+func keywordConst(w string) bool {
+	switch strings.ToLower(w) {
+	case "null", "true", "false":
+		return true
+	}
+	return false
+}
+
+func normalizeSQL(sql string, o normOpts) string {
+	lit := o.lit
 	var b strings.Builder
 	b.Grow(len(sql))
 	space := func() {
@@ -455,7 +485,11 @@ func normalizeSQL(sql string, lit func(string)) string {
 			if end < 0 {
 				end = len(sql) - i - 2
 			}
-			b.WriteString(collapseSpaces(sql[i : i+2+end+2]))
+			if o.dropComments {
+				space()
+			} else {
+				b.WriteString(collapseSpaces(sql[i : i+2+end+2]))
+			}
 			i += 2 + end + 2
 		case ch == '-' && i+1 < len(sql) && sql[i+1] == '-':
 			end := strings.IndexByte(sql[i:], '\n')
@@ -497,7 +531,11 @@ func normalizeSQL(sql string, lit func(string)) string {
 			for j < len(sql) && isDigit(sql[j]) {
 				j++
 			}
-			b.WriteString(sql[i:j])
+			if o.foldParams {
+				b.WriteString("$?")
+			} else {
+				b.WriteString(sql[i:j])
+			}
 			i = j
 		case ch == '$' && i+1 < len(sql) && (isIdentByte(sql[i+1]) || sql[i+1] == '$'):
 			// dollar quoting: $tag$ … $tag$
@@ -528,6 +566,20 @@ func normalizeSQL(sql string, lit func(string)) string {
 			}
 			b.WriteString(sql[i : i+1+j+1])
 			i = i + 1 + j + 1
+		case o.foldParams && isIdentByte(ch) && !isDigit(ch) && (i == 0 || !isIdentByte(sql[i-1])):
+			// pg_stat_statements normalizes `= NULL` / `= true` to $n while the log
+			// keeps the keyword; fold both sides. `IS NOT NULL` folds the same way
+			// on both sides too, so the shapes still agree.
+			j := i
+			for j < len(sql) && isIdentByte(sql[j]) {
+				j++
+			}
+			if keywordConst(sql[i:j]) {
+				b.WriteString("$?")
+			} else {
+				b.WriteString(sql[i:j])
+			}
+			i = j
 		case isDigit(ch) && (i == 0 || !isIdentByte(sql[i-1])):
 			j := i
 			for j < len(sql) && (isDigit(sql[j]) || sql[j] == '.' || (sql[j] == 'e' || sql[j] == 'E') && j+1 < len(sql) && (isDigit(sql[j+1]) || sql[j+1] == '-' || sql[j+1] == '+') || (sql[j] == '-' || sql[j] == '+') && j > i && (sql[j-1] == 'e' || sql[j-1] == 'E')) {

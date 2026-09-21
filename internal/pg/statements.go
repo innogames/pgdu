@@ -22,8 +22,8 @@ func (c *Client) EnsureStatements(ctx context.Context, db string) error {
 
 // EnsureQualstats makes sure pg_qualstats is installed in db. Like
 // EnsureStatements it returns *MissingExtensionError when missing; callers in
-// the Top-queries view treat that as "no real parameters available" and fall
-// back to synthesized literals rather than surfacing it as a failure. Note
+// the Top-queries view treat that as "no real parameters available" and show
+// no sample call rather than surfacing it as a failure. Note
 // pg_qualstats only records data when its library is in
 // shared_preload_libraries (a server restart), which CREATE EXTENSION alone
 // can't arrange — so pgdu detects and uses it but does not offer to install it.
@@ -37,7 +37,7 @@ func (c *Client) EnsureQualstats(ctx context.Context, db string) error {
 // extension makes its views exist but they stay empty until a server restart
 // loads the library. pgdu therefore only offers a one-key install when this is
 // true (a plain CREATE EXTENSION is then enough); otherwise it stays in
-// detect-only mode and falls back to synthesized literals.
+// detect-only mode and shows no sample call.
 func (c *Client) QualstatsPreloaded(ctx context.Context, db string) (bool, error) {
 	pool, err := c.PoolFor(ctx, db)
 	if err != nil {

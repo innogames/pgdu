@@ -10,9 +10,9 @@ import (
 
 // handleStatementAnalyze runs EXPLAIN (ANALYZE, VERBOSE, BUFFERS) for the
 // detail view's query. ANALYZE executes the query for real, so it's gated to
-// read-only SELECT shapes (ReadOnlyQuery) and needs the sample call — the
-// query with synthesized literals filling its $n — to be ready. Returns nil
-// (a no-op) when any of those don't hold.
+// read-only SELECT shapes (ReadOnlyQuery) and needs the sample call — a
+// complete call built from captured values — to exist. Returns nil (a no-op)
+// when either doesn't hold.
 func (m *Model) handleStatementAnalyze(s *screen) tea.Cmd {
 	if s.stat.detail == nil || s.stat.explaining {
 		return nil
@@ -28,11 +28,11 @@ func (m *Model) handleStatementAnalyze(s *screen) tea.Cmd {
 }
 
 // statementPlanCmd issues the right (non-ANALYZE) EXPLAIN for the detail view:
-// a plain EXPLAIN on the real example call when one is available (real captured
-// values from pg_qualstats), otherwise the generic plan on the normalized query.
-// The caller is responsible for setting statExplaining / clearing prior output.
+// a plain EXPLAIN on the sample call when one exists (always a complete call
+// from captured values), otherwise the generic plan on the normalized query.
+// The caller is responsible for setting explaining / clearing prior output.
 func (m *Model) statementPlanCmd(s *screen) tea.Cmd {
-	if s.stat.sampleReal && s.stat.sampleCall != "" {
+	if s.stat.sampleCall != "" {
 		return m.loadStatementExplainLiteralCmd(s.db, s.stat.detail.Query, s.stat.sampleCall)
 	}
 	return m.loadStatementExplainCmd(s.db, s.stat.detail.Query)
@@ -43,8 +43,8 @@ func (m *Model) statementPlanCmd(s *screen) tea.Cmd {
 // normalized query has exactly one placeholder — then the captured constant is
 // unambiguously that $1, and we substitute it for a true per-value plan. For
 // multi-parameter queries we can't map one captured constant to one of several
-// placeholders, so we fall back to the representative real example query
-// (statSampleCall). Gated to read-only shapes since ANALYZE executes.
+// placeholders, so we fall back to the complete sample call when one exists
+// (else the key is a no-op). Gated to read-only shapes since ANALYZE executes.
 func (m *Model) handleSampleAnalyze(s *screen) tea.Cmd {
 	if s.stat.detail == nil || s.stat.explaining || !pg.ReadOnlyQuery(s.stat.detail.Query) {
 		return nil

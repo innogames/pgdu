@@ -29,6 +29,41 @@ func TestNormalizeSQL(t *testing.T) {
 	}
 }
 
+// NormalizeCall matches a logged call to a pg_stat_statements row: pgss numbers
+// inlined constants as further $n after the bound ones and keeps only the
+// first-seen comment, so both $n and literals fold to $? and comments go.
+func TestNormalizeCall(t *testing.T) {
+	pgss := "/* Repo.find */ SELECT a FROM t WHERE x = $1 AND y = $2 AND id IN ($3, $4) LIMIT $5"
+	logged := "/* Repo.findAll */ SELECT a\n\tFROM t WHERE x = $1 AND y = 'z' AND id IN (1, 2) LIMIT 10"
+	want := "SELECT a FROM t WHERE x = $? AND y = $? AND id IN ($?...) LIMIT $?"
+	if a, b := NormalizeCall(pgss), NormalizeCall(logged); a != b || a != want {
+		t.Errorf("NormalizeCall differs:\n%s\n%s\nwant %s", a, b, want)
+	}
+	// PG18 squashes long lists to `IN ($1 /*, ... */)`; the comment must go
+	// before the list fold so it folds like a logged `IN (1, 2, 3)`.
+	if got := NormalizeCall("SELECT a FROM t WHERE id IN ($1 /*, ... */)"); got != "SELECT a FROM t WHERE id IN ($?...)" {
+		t.Errorf("squashed list = %s", got)
+	}
+	// NULL / TRUE / FALSE are constants pg_stat_statements numbers as $n while
+	// the log keeps the keyword; IS NOT NULL folds the same on both sides.
+	pgss = "/* BattleRepository.cleanBattleLog */\nUPDATE battle\nSET\n  battle_log = $3\nWHERE id IN ( SELECT id FROM battle WHERE modified_at < NOW() - $1 AND battle_log IS NOT NULL AND state != $4 ORDER BY modified_at ASC LIMIT $2 )"
+	logged = "/* BattleRepository.cleanBattleLog */\n\tUPDATE battle\n\tSET\n\t  battle_log = NULL\n\tWHERE id IN ( SELECT id FROM battle WHERE modified_at < NOW() - $1 AND battle_log IS NOT NULL AND state != 'ACTIVE' ORDER BY modified_at ASC LIMIT $2 )"
+	if a, b := NormalizeCall(pgss), NormalizeCall(logged); a != b {
+		t.Errorf("NULL constant differs:\n%s\n%s", a, b)
+	}
+	if a, b := NormalizeCall("SELECT * FROM t WHERE active = $1"), NormalizeCall("SELECT * FROM t WHERE active = TRUE"); a != b {
+		t.Errorf("boolean constant differs:\n%s\n%s", a, b)
+	}
+	// Identifiers that merely contain the words are left alone.
+	if got := NormalizeCall("SELECT nullable, is_true FROM t"); got != "SELECT nullable, is_true FROM t" {
+		t.Errorf("identifiers folded: %s", got)
+	}
+	// The grouping normalizer is untouched: comment, $n and NULL kept.
+	if got := NormalizeSQL("/* A */ SELECT $1, NULL"); got != "/* A */ SELECT $1, NULL" {
+		t.Errorf("NormalizeSQL changed: %s", got)
+	}
+}
+
 func TestNormalizeMessage(t *testing.T) {
 	a := normalizeMessage(`column "buffers_backend" does not exist at character 18`)
 	b := normalizeMessage(`column "buffers_backend" does not exist at character 42`)

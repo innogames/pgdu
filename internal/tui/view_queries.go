@@ -302,16 +302,17 @@ func (m *Model) renderStatementsInfo(height int) string {
 		mu(" executes the query and shows the result rows — both execute the query.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" real parameters ") + "  " +
-		mu("via pg_qualstats — optional") + "\n")
-	b.WriteString("    " + mu("pg_stat_statements normalizes away constants, so by default the sample call uses ") + "\n")
-	b.WriteString("    " + mu("synthesized literals (1, 'sample', …) and EXPLAIN runs as GENERIC_PLAN — the plan for the") + "\n")
-	b.WriteString("    " + mu("parameterized query, without real values. Install ") + styleBadge.Render("pg_qualstats") +
-		mu(" (in shared_preload_libraries, with") + "\n")
-	b.WriteString("    " + mu("pg_qualstats.track_constants=on) and pgdu uses the real values it captured: the sample call") + "\n")
-	b.WriteString("    " + mu("becomes a real example and EXPLAIN sees real data. Press ") + styleBadge.Render("p") +
-		mu(" in the detail view to browse all") + "\n")
-	b.WriteString("    " + mu("captured values by frequency (the value pattern); ") + styleBadge.Render("↵") +
-		mu(" there EXPLAIN-ANALYZEs the highlighted one.") + "\n\n")
+		mu("pg_qualstats or the server log — values are never guessed") + "\n")
+	b.WriteString("    " + mu("pg_stat_statements normalizes constants away, and pgdu never invents them: the sample call is") + "\n")
+	b.WriteString("    " + mu("built only from values that really ran — the constants ") + styleBadge.Render("pg_qualstats") +
+		mu(" captured (install it in") + "\n")
+	b.WriteString("    " + mu("shared_preload_libraries with pg_qualstats.track_constants=on), or the bind values of a call the") + "\n")
+	b.WriteString("    " + mu("server logged with its parameters (log_min_duration_statement + log_parameter_max_length).") + "\n")
+	b.WriteString("    " + mu("Until one source covers every placeholder no sample call is shown, EXPLAIN runs as GENERIC_PLAN —") + "\n")
+	b.WriteString("    " + mu("the plan for the parameterized query, without values — and ") + styleBadge.Render("↵") + mu(" / ") +
+		styleBadge.Render("E") + mu(" are unavailable. Press ") + styleBadge.Render("p") + "\n")
+	b.WriteString("    " + mu("in the detail view to browse all captured values by frequency (the value pattern); ") + styleBadge.Render("↵") + "\n")
+	b.WriteString("    " + mu("there EXPLAIN-ANALYZEs the highlighted one.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" snapshots ") + "  " +
 		mu("capture the window to disk and diff it later") + "\n")

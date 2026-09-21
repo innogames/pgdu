@@ -183,6 +183,7 @@ func (p *Parser) feedStderr(buf []byte, base int64) {
 			SQLState: f.sqlstate,
 			Severity: severityOf(f.tag),
 			Message:  f.rest,
+			QueryID:  f.queryID,
 		}
 		p.entries = append(p.entries, e)
 		idx := len(p.entries) - 1
@@ -312,8 +313,12 @@ const (
 	csvQueryPos
 	csvLocation
 	csvAppName
-	csvMinFields = csvLocation + 1
+	csvBackendType
+	csvLeaderPID
+	csvQueryID
 )
+
+const csvMinFields = csvLocation + 1
 
 const csvTimeLayout = "2006-01-02 15:04:05.000 MST"
 
@@ -362,6 +367,9 @@ func (p *Parser) feedCSV(buf []byte, base int64) {
 		if len(rec) > csvAppName {
 			e.App = []byte(rec[csvAppName])
 		}
+		if len(rec) > csvQueryID {
+			e.QueryID, _ = strconv.ParseInt(rec[csvQueryID], 10, 64)
+		}
 		if v, err := strconv.Atoi(rec[csvPID]); err == nil {
 			e.PID = int32(v)
 		}
@@ -396,6 +404,7 @@ type jsonLogLine struct {
 	Statement string `json:"statement"`
 	AppName   string `json:"application_name"`
 	FuncName  string `json:"func_name"`
+	QueryID   int64  `json:"query_id"`
 }
 
 func (p *Parser) feedJSON(buf []byte, base int64) {
@@ -439,6 +448,7 @@ func (p *Parser) feedJSON(buf []byte, base int64) {
 			Statement: []byte(j.Statement),
 			Location:  []byte(j.FuncName),
 			App:       []byte(j.AppName),
+			QueryID:   j.QueryID,
 		})
 		off = next
 	}

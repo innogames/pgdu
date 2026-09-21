@@ -54,9 +54,6 @@ func TestStatementsSmoke(t *testing.T) {
 		t.Logf("InferParams (non-fatal): %v", err)
 	} else {
 		t.Logf("inferred %d params: %+v", len(params), params)
-		real := c.SampleParamValues(ctx, db, target.Query, params)
-		t.Logf("sampled %d real values: %+v", len(real), real)
-		t.Logf("sample call: %s", BuildSampleCall(target.Query, params, real))
 	}
 
 	plan, err := c.ExplainGeneric(ctx, db, target.Query)
@@ -91,6 +88,15 @@ func TestStatementsSmoke(t *testing.T) {
 		t.Logf("QualstatsSamples (non-fatal): %v", err)
 	} else {
 		t.Logf("captured %d real values for queryid %d", len(samples), target.QueryID)
+		if params != nil {
+			real, breakdown := ResolveSampleParams(target.Query, params, MapQualConstants(target.Query, params, samples))
+			t.Logf("per-$n breakdown: %+v", breakdown)
+			if call := BuildSampleCall(target.Query, params, real); call != "" {
+				t.Logf("sample call: %s", call)
+			} else {
+				t.Logf("pg_qualstats does not cover every $n — no sample call")
+			}
+		}
 		for _, s := range samples {
 			t.Logf("  %s.%s %s %s  (%d×)", s.Relation, s.Column, s.Operator, s.ConstValue, s.Occurrences)
 		}

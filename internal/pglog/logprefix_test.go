@@ -89,6 +89,17 @@ func TestCompilePrefixEscapes(t *testing.T) {
 	if !ok || f.pid != 42 || f.line != 7 || string(f.db) != "shop" || string(f.app) != "psql" || string(f.host) != "10.0.0.9" {
 		t.Errorf("pgbadger prefix: ok=%v %+v", ok, f)
 	}
+	// %Q carries the pg_stat_statements query id (signed 64-bit); 0 when the
+	// server had none to report.
+	m, _ = CompilePrefix("%m [%p] %q%u@%d %Q ", time.UTC)
+	f, ok = m.Match([]byte(`2026-09-02 00:15:25.123 UTC [42] app@shop -1234567890123456789 LOG:  x`))
+	if !ok || f.queryID != -1234567890123456789 || string(f.db) != "shop" || string(f.rest) != "x" {
+		t.Errorf("%%Q prefix: ok=%v queryID=%d %+v", ok, f.queryID, f)
+	}
+	f, ok = m.Match([]byte(`2026-09-02 00:15:25.123 UTC [42] app@shop 0 LOG:  x`))
+	if !ok || f.queryID != 0 {
+		t.Errorf("%%Q zero: ok=%v queryID=%d", ok, f.queryID)
+	}
 }
 
 func TestDetectPrefix(t *testing.T) {

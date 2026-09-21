@@ -268,9 +268,42 @@ func SubstituteParams(sql string, vals []string) (string, int) {
 	if len(vals) == 0 {
 		return sql, 0
 	}
-	var b strings.Builder
-	b.Grow(len(sql) + 8*len(vals))
 	filled := 0
+	out := walkParams(sql, func(ord int, tok string) string {
+		if ord < 1 || ord > len(vals) {
+			return tok
+		}
+		filled++
+		return vals[ord-1]
+	})
+	return out, filled
+}
+
+// UnfilledParams lists, ascending and without repeats, the $n ordinals of sql
+// that vals leaves unfilled — the placeholders SubstituteParams keeps verbatim.
+// nil when the list covers every placeholder (or the text has none), so the
+// substituted text is a complete call rather than a statement with holes.
+func UnfilledParams(sql string, vals []string) []int {
+	seen := map[int]bool{}
+	var out []int
+	walkParams(sql, func(ord int, tok string) string {
+		if ord >= 1 && ord > len(vals) && !seen[ord] {
+			seen[ord] = true
+			out = append(out, ord)
+		}
+		return tok
+	})
+	sort.Ints(out)
+	return out
+}
+
+// walkParams scans sql the way SubstituteParams does — string literals, quoted
+// identifiers, comments and dollar-quoted bodies copied through untouched — and
+// hands every $n placeholder to onParam, which returns the text to emit in its
+// place (tok itself to leave it alone). ord is 0 for a digit run Atoi rejects.
+func walkParams(sql string, onParam func(ord int, tok string) string) string {
+	var b strings.Builder
+	b.Grow(len(sql) + 64)
 	for i := 0; i < len(sql); {
 		switch ch := sql[i]; {
 		case ch == '\'' || ch == '"':
@@ -301,12 +334,10 @@ func SubstituteParams(sql string, vals []string) (string, int) {
 				j++
 			}
 			ord, err := strconv.Atoi(sql[i+1 : j])
-			if err != nil || ord < 1 || ord > len(vals) {
-				b.WriteString(sql[i:j])
-			} else {
-				b.WriteString(vals[ord-1])
-				filled++
+			if err != nil {
+				ord = 0
 			}
+			b.WriteString(onParam(ord, sql[i:j]))
 			i = j
 		case ch == '$':
 			j := dollarQuoteEnd(sql, i)
@@ -322,7 +353,7 @@ func SubstituteParams(sql string, vals []string) (string, int) {
 			i++
 		}
 	}
-	return b.String(), filled
+	return b.String()
 }
 
 // skipQuoted returns the index just past the string literal or quoted

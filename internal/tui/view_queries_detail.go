@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -141,44 +142,34 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	explainable := pg.ExplainableQuery(q.Query)
 
 	// --- sample call ---
+	// A non-empty call is complete and built from captured values by
+	// construction; only its origin varies. Without one, say what is missing
+	// and how to get real values — never a guessed literal.
 	b.WriteString("\n  " + styleHeader.Render(" sample call ") + "\n")
-	// Once the sample source is resolved, name it: real captured values vs
-	// synthesized literals, and how to get real ones when pg_qualstats is absent.
-	if explainable && (s.stat.sampleCall != "" || s.stat.sampleErr != nil) {
-		var hint string
-		switch {
-		case s.stat.sampleReal:
-			hint = "real values · pg_qualstats"
-		case s.stat.sampleFromQual && s.stat.sampleFromData:
-			hint = "values from pg_qualstats + live table data"
-		case s.stat.sampleFromQual:
-			hint = "values from pg_qualstats (per predicate)"
-		case s.stat.sampleFromData:
-			hint = "values sampled from live table data"
-		case s.stat.qualstats:
-			hint = "synthesized — pg_qualstats has no sample for this query yet"
-		case s.extPrompt != nil && s.extPrompt.name == extQualstats:
-			hint = "synthesized — press i to install pg_qualstats for real values"
-		default:
-			hint = "synthesized — install pg_qualstats (shared_preload_libraries + track_constants) for real values"
-		}
-		b.WriteString("    " + mu(hint) + "\n")
-	}
 	switch {
 	case !explainable:
 		b.WriteString("    " + mu("not a SELECT/DML statement — no parameters to fill") + "\n")
-	case s.stat.sampleErr != nil:
-		b.WriteString("    " + mu("could not infer parameters: "+s.stat.sampleErr.Error()) + "\n")
-		writeSchemaDriftHint(&b, s.stat.sampleErr)
 	case s.stat.sampleCall != "":
+		b.WriteString("    " + mu(sampleSourceHint(s)) + "\n")
 		// Same highlighter as the query section: the literals substituted for
 		// $n land in the accent the whole block used to wear, so the colour now
-		// marks exactly the filled-in values.
-		for _, line := range highlightSQL(s.stat.sampleCall, m.width-4) {
-			b.WriteString("    " + line + "\n")
+		// marks exactly the filled-in values. A statement without parameters is
+		// already printed in full just above.
+		if s.stat.sampleSource != sampleNoParams {
+			for _, line := range highlightSQL(s.stat.sampleCall, m.width-4) {
+				b.WriteString("    " + line + "\n")
+			}
 		}
-	default:
+	case !s.stat.sampleResolved:
 		b.WriteString("    " + mu("inferring parameters…") + "\n")
+	default:
+		if s.stat.sampleErr != nil {
+			b.WriteString("    " + mu("could not infer parameters: "+s.stat.sampleErr.Error()) + "\n")
+			writeSchemaDriftHint(&b, s.stat.sampleErr)
+		}
+		for _, line := range noSampleLines(s) {
+			b.WriteString("    " + mu(m.clipDetail(line)) + "\n")
+		}
 	}
 	if s.stat.verbose && explainable {
 		m.renderSampleParams(&b, s)
@@ -189,8 +180,8 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	switch {
 	case s.stat.explainAnalyze:
 		explainHdr = " explain (analyze · verbose · buffers) "
-	case s.stat.sampleReal:
-		// Real captured values → a plain EXPLAIN, so the planner sees real data.
+	case s.stat.sampleCall != "":
+		// Captured values → a plain EXPLAIN, so the planner sees real data.
 		explainHdr = " explain (real plan) "
 	}
 	b.WriteString("\n  " + styleHeader.Render(explainHdr) + "\n")
@@ -215,8 +206,8 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	}
 
 	// EXPLAIN ANALYZE affordance. ANALYZE executes the query for real, so it's
-	// offered only for read-only SELECT shapes and only once a sample call (with
-	// synthesized literals filling the $n) is available to actually run.
+	// offered only for read-only SELECT shapes and only once a complete sample
+	// call built from captured values is available to actually run.
 	if explainable && !s.stat.explaining && pg.ReadOnlyQuery(q.Query) && s.stat.sampleCall != "" {
 		b.WriteString("    " + mu("press ") + styleBadge.Render("↵") +
 			mu(" to run EXPLAIN (ANALYZE, VERBOSE, BUFFERS) — ") +
@@ -226,9 +217,9 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 			styleErr.Render("executes the query for real") + "\n")
 	}
 
-	// Captured-values affordance: only when pg_qualstats is present, since that's
-	// the only source of real per-value data to browse.
-	if explainable && s.stat.qualstats {
+	// Captured-values affordance: only when pg_qualstats holds constants for this
+	// query, so the browser never opens on an empty list.
+	if explainable && s.stat.qualSamples {
 		b.WriteString("    " + mu("press ") + styleBadge.Render("p") +
 			mu(" to browse the real values pg_qualstats captured for this query") + "\n")
 	}
@@ -253,15 +244,22 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 
 // renderSampleParams writes the verbose per-parameter breakdown under the sample
 // call: one aligned row per $n placeholder (ordinal · predicate column · type ·
-// where its value came from · the literal). For a real pg_qualstats example the
-// whole call is captured rather than built from $n (statSampleParams is nil), so
-// it points at the captured-values browser instead.
+// where its value came from · the literal, "—" when nothing captured it). It is
+// shown for an incomplete call too, so the missing $n are visible. For a
+// pg_qualstats example the whole call is captured rather than built from $n
+// (sampleParams is nil), so it points at the captured-values browser instead;
+// a logged call whose client inlined every value has no bind rows either.
 func (m *Model) renderSampleParams(b *strings.Builder, s *screen) {
 	mu := styleMuted.Render
-	if s.stat.sampleReal {
+	if s.stat.sampleSource == sampleQualExample {
 		b.WriteString("\n    " + mu("parameters") + "\n")
 		b.WriteString("    " + mu("all values captured by pg_qualstats — press ") +
 			styleBadge.Render("p") + mu(" to browse each predicate's real constants") + "\n")
+		return
+	}
+	if s.stat.sampleSource == sampleLog && len(s.stat.sampleParams) == 0 {
+		b.WriteString("\n    " + mu("parameters") + "\n")
+		b.WriteString("    " + mu("the logged call carries every value inline — nothing was bound") + "\n")
 		return
 	}
 	if len(s.stat.sampleParams) == 0 {
@@ -278,7 +276,11 @@ func (m *Model) renderSampleParams(b *strings.Builder, s *screen) {
 		if col == "" {
 			col = "—"
 		}
-		rows[i] = row{"$" + strconv.Itoa(p.Ordinal), col, p.Type, paramSourceLabel(p.Source), p.Value}
+		val := p.Value
+		if val == "" {
+			val = "—"
+		}
+		rows[i] = row{"$" + strconv.Itoa(p.Ordinal), col, p.Type, paramSourceLabel(p.Source), val}
 		ordW = max(ordW, displayWidth(rows[i].ord))
 		colW = max(colW, displayWidth(rows[i].col))
 		typW = max(typW, displayWidth(rows[i].typ))
@@ -298,17 +300,79 @@ func (m *Model) renderSampleParams(b *strings.Builder, s *screen) {
 // verbose parameter table's source column.
 func paramSourceLabel(src pg.ParamSource) string {
 	switch src {
-	case pg.ParamLiveData:
-		return "live table data"
 	case pg.ParamQualstats:
 		return "pg_qualstats"
-	case pg.ParamExtractField:
-		return "EXTRACT field"
-	case pg.ParamIntervalLiteral:
-		return "INTERVAL literal"
+	case pg.ParamLog:
+		return "server log"
 	default:
-		return "synthesized"
+		return "not captured"
 	}
+}
+
+// sampleSourceHint is the muted line over a sample call naming its origin.
+func sampleSourceHint(s *screen) string {
+	switch s.stat.sampleSource {
+	case sampleQualExample:
+		return "real values · pg_qualstats"
+	case sampleQualPredicates:
+		return "real values · pg_qualstats (per predicate)"
+	case sampleLog:
+		h := "real values · server log"
+		if li := s.stat.logInfo; li != nil {
+			h += " · " + filepath.Base(li.path) + " · " + li.at.Format("2006-01-02 15:04:05")
+			if li.durationMs > 0 {
+				h += " · " + fmtAge(li.durationMs)
+			}
+		}
+		return h
+	case sampleNoParams:
+		return "no parameters — the statement is its own call"
+	}
+	return ""
+}
+
+// noSampleLines explains a missing sample call: values are never guessed, so it
+// names the source still being tried, what pg_qualstats did cover, and what
+// would provide real values.
+func noSampleLines(s *screen) []string {
+	if s.stat.logLookup == logLookupRunning {
+		return []string{"no pg_qualstats values — searching the server log for a logged call…"}
+	}
+	lines := []string{"no captured parameter values — values are never guessed"}
+	covered, missing := qualCoverage(s.stat.sampleParams)
+	switch {
+	case s.stat.qualstats && len(covered) > 0:
+		lines = append(lines, "pg_qualstats covers "+strings.Join(covered, ", ")+" · missing "+strings.Join(missing, ", "))
+	case s.stat.qualstats:
+		lines = append(lines, "pg_qualstats has no constants for this query yet")
+	case s.extPrompt != nil && s.extPrompt.name == extQualstats:
+		lines = append(lines, "press i to install pg_qualstats")
+	default:
+		lines = append(lines, "install pg_qualstats, or log calls with their parameters (log_min_duration_statement + log_parameter_max_length)")
+	}
+	switch s.stat.logLookup {
+	case logLookupNone:
+		lines = append(lines, "no logged call with bound values in the server log — log_min_duration_statement (or log_statement) with log_parameter_max_length ≠ 0 records them")
+	case logLookupNoLog:
+		lines = append(lines, "no readable server log found — pass --log-file, or grant pg_read_server_files for the server's copy")
+	case logLookupErr:
+		lines = append(lines, "server log could not be read — "+s.stat.logErr.Error())
+	case logLookupIdle, logLookupRunning, logLookupFound: // nothing to add
+	}
+	return lines
+}
+
+// qualCoverage splits the breakdown into the $n pg_qualstats covers and the rest.
+func qualCoverage(params []pg.SampleParam) (covered, missing []string) {
+	for _, p := range params {
+		o := "$" + strconv.Itoa(p.Ordinal)
+		if p.Source == pg.ParamQualstats {
+			covered = append(covered, o)
+		} else {
+			missing = append(missing, o)
+		}
+	}
+	return covered, missing
 }
 
 // --- captured values (levelStatementSamples) ---
@@ -384,7 +448,8 @@ func (m *Model) renderStatementSamples(s *screen, height int) string {
 				b.WriteString("    " + line + "\n")
 			}
 		}
-	} else if s.stat.detail != nil && pg.ReadOnlyQuery(s.stat.detail.Query) {
+	} else if s.stat.detail != nil && pg.ReadOnlyQuery(s.stat.detail.Query) &&
+		(s.stat.sampleCall != "" || uniqueParams(s.stat.detail.Query) == 1) {
 		b.WriteString("    " + mu("press ") + styleBadge.Render("↵") +
 			mu(" to EXPLAIN (ANALYZE) the highlighted value — ") +
 			styleErr.Render("executes the query for real") + "\n")

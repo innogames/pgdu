@@ -85,8 +85,8 @@ func (c *Client) ExplainGeneric(ctx context.Context, db, query string) (string, 
 }
 
 // ExplainAnalyze runs EXPLAIN (ANALYZE, VERBOSE, BUFFERS) on a fully-literal
-// query — i.e. a sample call where the $n placeholders have already been
-// substituted (see BuildSampleCall) — and returns the plan text with real
+// query — i.e. a sample call where the $n placeholders carry captured values (a
+// pg_qualstats example, BuildSampleCall, or a logged call) — and returns the plan text with real
 // timing and buffer counters. Unlike ExplainGeneric this *executes* the query,
 // so callers must restrict it to read-only statements (ReadOnlyQuery). It runs
 // inside a transaction that always rolls back, so even a query with read-side

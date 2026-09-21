@@ -376,29 +376,42 @@ func TestBuildSampleCall(t *testing.T) {
 		want   string
 	}{
 		{
-			name:   "no params unchanged",
+			// Nothing to substitute: the statement is its own call.
+			name:   "no params → the query itself",
 			query:  "SELECT now()",
 			params: nil,
 			want:   "SELECT now()",
 		},
 		{
-			name:  "int and text",
+			name:  "all covered",
 			query: "SELECT * FROM t WHERE id = $1 AND name = $2",
 			params: []ParamType{
 				{Ordinal: 1, Type: "integer"},
 				{Ordinal: 2, Type: "text"},
 			},
-			want: "SELECT * FROM t WHERE id = 1::integer AND name = 'sample'::text",
+			real: map[int]string{1: "7::integer", 2: "'germany'::text"},
+			want: "SELECT * FROM t WHERE id = 7::integer AND name = 'germany'::text",
 		},
 		{
-			name:  "real values override synthesized, missing ones fall back",
+			// Values are never guessed: one uncovered $n means no call at all.
+			name:  "one missing → no call",
 			query: "SELECT * FROM t WHERE id = $1 AND name = $2",
 			params: []ParamType{
 				{Ordinal: 1, Type: "integer"},
 				{Ordinal: 2, Type: "text"},
 			},
 			real: map[int]string{2: "'germany'::text"},
-			want: "SELECT * FROM t WHERE id = 1::integer AND name = 'germany'::text",
+			want: "",
+		},
+		{
+			name:  "empty value counts as missing",
+			query: "SELECT * FROM t WHERE id = $1 AND name = $2",
+			params: []ParamType{
+				{Ordinal: 1, Type: "integer"},
+				{Ordinal: 2, Type: "text"},
+			},
+			real: map[int]string{1: "", 2: "'x'::text"},
+			want: "",
 		},
 		{
 			// $10 must not be mangled by the $1 substitution.
@@ -409,15 +422,10 @@ func TestBuildSampleCall(t *testing.T) {
 				{Ordinal: 3, Type: "integer"}, {Ordinal: 4, Type: "integer"},
 				{Ordinal: 5, Type: "integer"}, {Ordinal: 6, Type: "integer"},
 				{Ordinal: 7, Type: "integer"}, {Ordinal: 8, Type: "integer"},
-				{Ordinal: 9, Type: "integer"}, {Ordinal: 10, Type: "boolean"},
+				{Ordinal: 9, Type: "integer"}, {Ordinal: 10, Type: "integer"},
 			},
-			want: "VALUES (1::integer,1::integer,1::integer,1::integer,1::integer,1::integer,1::integer,1::integer,1::integer,true)",
-		},
-		{
-			name:   "unknown type falls back to typed null",
-			query:  "SELECT $1",
-			params: []ParamType{{Ordinal: 1, Type: "some_custom_type"}},
-			want:   "SELECT NULL::some_custom_type",
+			real: map[int]string{1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10"},
+			want: "VALUES (1,2,3,4,5,6,7,8,9,10)",
 		},
 	}
 	for _, c := range cases {
@@ -431,64 +439,58 @@ func TestBuildSampleCall(t *testing.T) {
 
 func TestResolveSampleParams(t *testing.T) {
 	cases := []struct {
-		name        string
-		query       string
-		params      []ParamType
-		qual        map[int]string
-		live        map[int]string
-		extractOrd  []int
-		intervalOrd []int
-		wantReal    map[int]string
-		want        []SampleParam
+		name     string
+		query    string
+		params   []ParamType
+		qual     map[int]string
+		wantReal map[int]string
+		want     []SampleParam
 	}{
 		{
-			// Precedence: qualstats beats live beats synthesized.
-			name:  "qualstats over live over synthesized",
-			query: "SELECT * FROM t WHERE a = $1 AND b = $2 AND c = $3",
+			// A pg_qualstats constant is the only per-predicate source; the rest is
+			// simply missing (never synthesized).
+			name:  "qualstats or missing",
+			query: "SELECT * FROM t WHERE a = $1 AND b = $2",
 			params: []ParamType{
 				{Ordinal: 1, Type: "bigint"},
 				{Ordinal: 2, Type: "text"},
-				{Ordinal: 3, Type: "integer"},
 			},
 			qual:     map[int]string{1: "849819134::bigint"},
-			live:     map[int]string{2: "'germany'::text"},
-			wantReal: map[int]string{1: "849819134::bigint", 2: "'germany'::text"},
+			wantReal: map[int]string{1: "849819134::bigint"},
 			want: []SampleParam{
 				{Ordinal: 1, Type: "bigint", Column: "a", Value: "849819134::bigint", Source: ParamQualstats},
-				{Ordinal: 2, Type: "text", Column: "b", Value: "'germany'::text", Source: ParamLiveData},
-				{Ordinal: 3, Type: "integer", Column: "c", Value: "1::integer", Source: ParamSynthesized},
+				{Ordinal: 2, Type: "text", Column: "b", Value: "", Source: ParamMissing},
 			},
 		},
 		{
-			// An EXTRACT field slot outranks every value source.
-			name:       "extract field slot wins",
-			query:      "SELECT EXTRACT($1 FROM created) FROM t WHERE n = $2",
-			params:     []ParamType{{Ordinal: 1, Type: "text"}, {Ordinal: 2, Type: "integer"}},
-			qual:       map[int]string{1: "'should-be-ignored'"},
-			extractOrd: []int{1},
-			wantReal:   map[int]string{1: "'epoch'"},
+			name:  "nothing captured",
+			query: "SELECT * FROM t WHERE a = $1 AND b = $2",
+			params: []ParamType{
+				{Ordinal: 1, Type: "bigint"},
+				{Ordinal: 2, Type: "text"},
+			},
+			wantReal: map[int]string{},
 			want: []SampleParam{
-				{Ordinal: 1, Type: "text", Column: "EXTRACT", Value: "'epoch'", Source: ParamExtractField},
-				{Ordinal: 2, Type: "integer", Column: "n", Value: "1::integer", Source: ParamSynthesized},
+				{Ordinal: 1, Type: "bigint", Column: "a", Source: ParamMissing},
+				{Ordinal: 2, Type: "text", Column: "b", Source: ParamMissing},
 			},
 		},
 		{
-			// An INTERVAL value slot gets a bare '1 day' (not a ::interval cast) so
-			// `INTERVAL $1` stays parseable, and it outranks the synthesized literal.
-			name:        "interval value slot wins",
-			query:       "SELECT * FROM t WHERE created >= NOW() - INTERVAL $1 AND n = $2",
-			params:      []ParamType{{Ordinal: 1, Type: "interval"}, {Ordinal: 2, Type: "integer"}},
-			intervalOrd: []int{1},
-			wantReal:    map[int]string{1: "'1 day'"},
+			// INTERVAL $n is a typed-literal slot, not a predicate on a column
+			// called "INTERVAL"; the row is listed without a column.
+			name:     "interval slot has no column",
+			query:    "SELECT * FROM t WHERE created >= NOW() - INTERVAL $1 AND n = $2",
+			params:   []ParamType{{Ordinal: 1, Type: "interval"}, {Ordinal: 2, Type: "integer"}},
+			wantReal: map[int]string{},
 			want: []SampleParam{
-				{Ordinal: 1, Type: "interval", Value: "'1 day'", Source: ParamIntervalLiteral},
-				{Ordinal: 2, Type: "integer", Column: "n", Value: "1::integer", Source: ParamSynthesized},
+				{Ordinal: 1, Type: "interval", Source: ParamMissing},
+				{Ordinal: 2, Type: "integer", Column: "n", Source: ParamMissing},
 			},
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			gotReal, got := ResolveSampleParams(c.query, c.params, c.qual, c.live, c.extractOrd, c.intervalOrd)
+			gotReal, got := ResolveSampleParams(c.query, c.params, c.qual)
 			if !reflect.DeepEqual(gotReal, c.wantReal) {
 				t.Errorf("ResolveSampleParams() real\n got: %+v\nwant: %+v", gotReal, c.wantReal)
 			}
@@ -564,23 +566,6 @@ func TestRewriteExtractFieldParams(t *testing.T) {
 	}
 }
 
-func TestExtractFieldOrdinals(t *testing.T) {
-	q := "SELECT x FROM t WHERE extract($2 FROM log_date) >= $3 AND extract($4 FROM log_date) < least($5, extract($6 FROM localtimestamp)) AND player_id = $1"
-	got := ExtractFieldOrdinals(q)
-	want := []int{2, 4, 6}
-	if len(got) != len(want) {
-		t.Fatalf("ExtractFieldOrdinals() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("ExtractFieldOrdinals() = %v, want %v", got, want)
-		}
-	}
-	if n := ExtractFieldOrdinals("SELECT * FROM t WHERE id = $1"); len(n) != 0 {
-		t.Errorf("ExtractFieldOrdinals(no extract) = %v, want empty", n)
-	}
-}
-
 func TestRewriteNormalizedParams(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -645,18 +630,6 @@ func TestRewriteNormalizedParams(t *testing.T) {
 				t.Errorf("rewriteNormalizedParams()\n got: %s\nwant: %s", got, c.want)
 			}
 		})
-	}
-}
-
-func TestIntervalParamOrdinals(t *testing.T) {
-	q := "SELECT * FROM t WHERE a >= NOW() - INTERVAL $2 AND b < NOW() + interval $4 AND n = $1"
-	got := IntervalParamOrdinals(q)
-	want := []int{2, 4}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("IntervalParamOrdinals() = %v, want %v", got, want)
-	}
-	if n := IntervalParamOrdinals("SELECT * FROM t WHERE id = $1"); len(n) != 0 {
-		t.Errorf("IntervalParamOrdinals(no interval) = %v, want empty", n)
 	}
 }
 
