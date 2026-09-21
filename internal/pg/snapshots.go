@@ -58,6 +58,10 @@ type SnapshotMeta struct {
 	StatsReset    time.Time
 	TrackPlanning bool
 	QueryCount    int
+	// FileSize is the on-disk (compressed) size of the snapshot file, filled by
+	// ListSnapshots from the directory entry rather than from the file's
+	// contents — readSnapshotMeta never sees it.
+	FileSize int64
 }
 
 // BaselineMap keys the snapshot's rows by queryid, matching the in-memory
@@ -210,6 +214,7 @@ func ListSnapshots(dir string) ([]SnapshotMeta, error) {
 		if err != nil {
 			continue
 		}
+		meta.FileSize = info.Size()
 		metaCache[path] = cachedMeta{modTime: info.ModTime(), size: info.Size(), meta: meta}
 		out = append(out, meta)
 	}

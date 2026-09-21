@@ -40,6 +40,9 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if m.Database != "app" || m.QueryCount != 2 || m.Target != "localhost:5432" {
 		t.Errorf("meta mismatch: %+v", m)
 	}
+	if m.FileSize <= 0 {
+		t.Errorf("FileSize not filled: %+v", m)
+	}
 	if !m.CapturedAt.Equal(snap.CapturedAt) {
 		t.Errorf("CapturedAt: want %v got %v", snap.CapturedAt, m.CapturedAt)
 	}
