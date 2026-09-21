@@ -169,6 +169,7 @@ type prefixFields struct {
 	sqlstate []byte
 	tag      []byte
 	rest     []byte
+	queryID  int64
 }
 
 // Match parses one line. ok is false for continuation lines.
@@ -226,6 +227,11 @@ func (m *prefixMatcher) Match(line []byte) (f prefixFields, ok bool) {
 	if l := get(m.idx['l']); l != nil {
 		if v, err := strconv.Atoi(string(l)); err == nil {
 			f.line = int32(v)
+		}
+	}
+	if q := get(m.idx['Q']); len(q) > 0 {
+		if v, err := strconv.ParseInt(string(q), 10, 64); err == nil {
+			f.queryID = v
 		}
 	}
 	f.session = get(m.idx['c'])

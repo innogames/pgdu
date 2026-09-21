@@ -381,12 +381,12 @@ func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
 		return nil
 	}
 	s.stat.sampleCall = msg.sample
+	s.stat.sampleSource = msg.source
 	s.stat.sampleParams = msg.params
-	s.stat.sampleReal = msg.real
-	s.stat.sampleFromData = msg.fromData
-	s.stat.sampleFromQual = msg.fromQual
 	s.stat.qualstats = msg.qualstats
+	s.stat.qualSamples = msg.qualSamples
 	s.stat.sampleErr = msg.err
+	s.stat.sampleResolved = true
 	// Offer a one-key install when pg_qualstats is absent but already preloaded —
 	// then CREATE EXTENSION alone unlocks real values. Otherwise drop any stale
 	// qualstats prompt (e.g. after the user just installed it out of band).
@@ -401,12 +401,63 @@ func (m *Model) onStatementSampleLoaded(msg statementSampleLoadedMsg) tea.Cmd {
 	} else if s.extPrompt != nil && s.extPrompt.name == extQualstats {
 		s.extPrompt = nil
 	}
+	var cmds []tea.Cmd
+	// No complete call from pg_qualstats → try the server log. The lookup Cmd is
+	// nil while another lookup runs; that one's handler re-issues for this
+	// screen, so the state is marked running either way.
+	if msg.needLog {
+		s.stat.logLookup = logLookupRunning
+		if c := m.lookupLogCallCmd(s); c != nil {
+			cmds = append(cmds, c)
+		}
+	}
 	// Auto-run the plan once the sample source is known (set up at drill-in,
-	// where statExplaining was flipped on). A real sample → plain EXPLAIN on it;
+	// where explaining was flipped on). A complete call → plain EXPLAIN on it;
 	// otherwise the generic plan, which doesn't need the sample at all, so it
-	// still runs when parameter inference failed.
+	// still runs when parameter inference failed — and a logged call arriving
+	// later re-runs it on real values.
 	if s.stat.explaining {
-		return m.statementPlanCmd(s)
+		cmds = append(cmds, m.statementPlanCmd(s))
+	}
+	return tea.Batch(cmds...)
+}
+
+// onStatementLogSampleLoaded lands the server-log lookup. The parsed log is
+// cached whatever screen is up; the result applies only to the detail that
+// asked (query guard, as onStatementSampleLoaded). A detail that asked while
+// this lookup ran gets its own now. A found call replaces the sample and its
+// real plan supersedes the generic one already on screen or in flight.
+func (m *Model) onStatementLogSampleLoaded(msg statementLogSampleLoadedMsg) tea.Cmd {
+	m.logCall.busy = false
+	if msg.report != nil {
+		m.logCall = logCallCache{path: msg.path, src: msg.src, report: msg.report}
+	}
+	s := m.findLevel(levelStatementDetail)
+	if s == nil || s.stat.detail == nil || s.stat.detail.Query != msg.query {
+		if s != nil && s.stat.detail != nil && s.stat.logLookup == logLookupRunning {
+			return m.lookupLogCallCmd(s)
+		}
+		return nil
+	}
+	switch {
+	case msg.err != nil:
+		s.stat.logLookup, s.stat.logErr = logLookupErr, msg.err
+	case msg.noLog:
+		s.stat.logLookup = logLookupNoLog
+	case msg.call == "":
+		s.stat.logLookup = logLookupNone
+	default:
+		s.stat.logLookup = logLookupFound
+		s.stat.sampleCall, s.stat.sampleSource = msg.call, sampleLog
+		s.stat.sampleParams = msg.params
+		info := msg.info
+		s.stat.logInfo = &info
+		// The generic plan (shown or in flight) is for $n; re-plan on the real
+		// call. An EXPLAIN ANALYZE the user asked for is left alone.
+		if !s.stat.explainAnalyze {
+			s.stat.explaining, s.stat.explain, s.stat.explainErr = true, "", nil
+			return m.statementPlanCmd(s)
+		}
 	}
 	return nil
 }
@@ -528,6 +579,14 @@ func (m *Model) onStatementExplainLoaded(msg statementExplainLoadedMsg) tea.Cmd 
 	// on the hidden detail screen below it.
 	s := m.findExplainTarget(msg.query)
 	if s == nil {
+		return nil
+	}
+	// A plan belongs to the sample call it ran on: when the server-log lookup
+	// swapped the call in while a plan was in flight, the earlier result (the
+	// generic plan) is stale and its successor is coming. ANALYZE is exempt — it
+	// is user-triggered one at a time, and the samples level runs it on
+	// per-value text.
+	if !msg.analyze && msg.call != s.stat.sampleCall {
 		return nil
 	}
 	s.stat.explaining = false

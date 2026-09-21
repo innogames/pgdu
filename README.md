@@ -58,7 +58,8 @@ does — no daemon, no collector, no web server.
   (*session start* by default, a saved snapshot, or *since the last stats reset*),
   snapshots go to disk (`S`) and any two points can be diffed (`L`), plus virtual
   anchors for *now*, *session start*, and *since the last stats reset*. `EXPLAIN
-  ANALYZE` uses the parameters `pg_qualstats` captured, or inferred ones.
+  ANALYZE` runs on a call rebuilt from the parameters `pg_qualstats` captured or
+  a call the server log recorded — never on guessed values.
 - **Log analyzer** — errors, slow queries, lock waits, checkpoints, temp files and
   autovacuum grouped by fingerprint, sectioned by category; `auto_explain` plans
   with their hot nodes heat-coloured; live tail, rotated `.gz` files, and
@@ -131,10 +132,10 @@ baseline and are hidden automatically.
 
 ![Top queries](docs/top_queries.png)
 
-`↵` opens the statement: full SQL, all counters, and a sample call. With
-`pg_qualstats` installed the sample uses constants actually seen in production;
-without it, parameters are inferred from the prepared statement and a generic
-plan is shown. `↵` again runs `EXPLAIN (ANALYZE, BUFFERS)` on read-only
+`↵` opens the statement: full SQL, all counters, and a sample call built only
+from real values — the constants `pg_qualstats` captured, or a call the server
+logged with its parameters; when neither covers every placeholder no call is
+shown and only the generic plan runs. `↵` again runs `EXPLAIN (ANALYZE, BUFFERS)` on read-only
 statements — plan nodes are heat-coloured by their share of the total time,
 with the single worst node bolded, so the bottleneck stands out without reading
 every line — `E` executes it and shows the rows, `p` browses the captured

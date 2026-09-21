@@ -219,3 +219,10 @@ fails (missing/corrupt → empty).
   The grouped views' bar rides the sort column (`syncStmtBar`; the width memo must be
   dirtied when it moves). Exactly one of `stat.cols`/`stat.groupCols` is non-nil, which is
   how `cycleSort` picks the sort memory to write.
+- **Sample calls are never guessed**: the query detail's sample call comes only from captured
+  values — a pg_qualstats example, its per-predicate constants covering every `$n`
+  (`BuildSampleCall` returns "" otherwise), or a call the server logged with its binds
+  (`pglog.LatestBoundCall`, matched by query id or `NormalizeCall`, read from the current
+  server log and cached in `Model.logCall`) — never table samples or synthesized literals.
+  `stat.sampleCall != ""` is the single gate for `↵`/`E` and the real (non-generic) EXPLAIN;
+  `sampleSource` only labels the origin.

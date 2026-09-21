@@ -233,28 +233,36 @@ func TestParserResumeAcrossFeeds(t *testing.T) {
 }
 
 func TestParseCSVAndJSON(t *testing.T) {
-	csvText := `2026-09-02 00:15:25.123 UTC,"app","shop",4242,"10.0.0.9:5000",68b6.1092,7,"INSERT",2026-09-02 00:15:20 UTC,3/12,0,ERROR,23505,"duplicate key value violates unique constraint ""channel_name_plugin_idx""","Key (name)=(x) already exists.",,,,,"INSERT INTO channel VALUES ($1)",,"_bt_check_unique, nbtinsert.c:664","psql","client backend",,0
+	// A PG14+ record (26 columns, query_id last) and a PG13 one (23 columns,
+	// no leader_pid/query_id) — the reader tolerates the shorter shape.
+	csvText := `2026-09-02 00:15:25.123 UTC,"app","shop",4242,"10.0.0.9:5000",68b6.1092,7,"INSERT",2026-09-02 00:15:20 UTC,3/12,0,ERROR,23505,"duplicate key value violates unique constraint ""channel_name_plugin_idx""","Key (name)=(x) already exists.",,,,,"INSERT INTO channel VALUES ($1)",,"_bt_check_unique, nbtinsert.c:664","psql","client backend",,-7351012345678901234
+2026-09-02 00:15:26.000 UTC,"app","shop",4243,"10.0.0.9:5001",68b6.1093,1,"SELECT",2026-09-02 00:15:20 UTC,3/13,0,LOG,00000,"duration: 3.0 ms  statement: SELECT 2",,,,,,,,"exec_simple_query, postgres.c:1","psql","client backend"
 `
 	p := NewParser(FormatCSV, nil, time.UTC)
 	p.Feed([]byte(csvText), 0)
 	es := p.Entries()
 	Classify(es)
-	if len(es) != 1 {
+	if len(es) != 2 {
 		t.Fatalf("csv: %d entries", len(es))
 	}
 	e := es[0]
 	if e.PID != 4242 || e.Line != 7 || string(e.User) != "app" || string(e.DB) != "shop" || e.Severity != SevError ||
-		!strings.HasPrefix(string(e.Message), "duplicate key") || !strings.HasPrefix(string(e.Statement), "INSERT") || string(e.App) != "psql" {
+		!strings.HasPrefix(string(e.Message), "duplicate key") || !strings.HasPrefix(string(e.Statement), "INSERT") || string(e.App) != "psql" ||
+		e.QueryID != -7351012345678901234 {
 		t.Errorf("csv entry = %+v", e)
 	}
+	if es[1].QueryID != 0 || es[1].Category != CatSlowQuery || string(es[1].SQL) != "SELECT 2" {
+		t.Errorf("23-column csv entry = %+v", es[1])
+	}
 
-	jsonText := `{"timestamp":"2026-09-02 00:15:25.123 UTC","user":"app","dbname":"shop","pid":4242,"remote_host":"10.0.0.9","session_id":"68b6.1092","line_num":7,"error_severity":"LOG","message":"duration: 12.5 ms  statement: SELECT 1","application_name":"psql","backend_type":"client backend"}
+	jsonText := `{"timestamp":"2026-09-02 00:15:25.123 UTC","user":"app","dbname":"shop","pid":4242,"remote_host":"10.0.0.9","session_id":"68b6.1092","line_num":7,"error_severity":"LOG","message":"duration: 12.5 ms  statement: SELECT 1","application_name":"psql","backend_type":"client backend","query_id":-7351012345678901234}
 `
 	p = NewParser(FormatJSON, nil, time.UTC)
 	p.Feed([]byte(jsonText), 0)
 	es = p.Entries()
 	Classify(es)
-	if len(es) != 1 || es[0].Category != CatSlowQuery || es[0].DurationMs != 12.5 || string(es[0].SQL) != "SELECT 1" || es[0].PID != 4242 {
+	if len(es) != 1 || es[0].Category != CatSlowQuery || es[0].DurationMs != 12.5 || string(es[0].SQL) != "SELECT 1" || es[0].PID != 4242 ||
+		es[0].QueryID != -7351012345678901234 {
 		t.Errorf("json entry = %+v", es)
 	}
 }

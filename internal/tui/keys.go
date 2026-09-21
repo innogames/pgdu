@@ -273,7 +273,7 @@ func (k *keyMap) applyContext(s *screen) {
 	}
 	k.SaveSnapshot.SetEnabled(stmtTable || stmtDetail)
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
-	k.Params.SetEnabled(stmtDetail)
+	k.Params.SetEnabled(stmtDetail && s.stat.qualSamples)
 	k.Execute.SetEnabled(stmtDetail)
 	// v is the parameter-source toggle on statement detail, the VACUUM trigger on parts,
 	// the auxiliary-backend visibility toggle on the activity table and the

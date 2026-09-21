@@ -598,12 +598,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case key.Matches(msg, m.keys.Params):
 		// Browse the real values pg_qualstats captured for this query — only
-		// meaningful when pg_qualstats is present (else there's nothing real to
-		// show). Pushes levelStatementSamples and loads the captured constants.
-		if s.level == levelStatementDetail && s.stat.detail != nil && s.stat.qualstats {
+		// when it holds some (else there's nothing real to show). Pushes
+		// levelStatementSamples and loads the captured constants.
+		if s.level == levelStatementDetail && s.stat.detail != nil && s.stat.qualSamples {
 			next := &screen{
 				level: levelStatementSamples, title: "values", tool: s.tool,
-				db: s.db, stat: stmtState{detail: s.stat.detail, sampleCall: s.stat.sampleCall, sampleReal: s.stat.sampleReal, qualstats: s.stat.qualstats}, loading: true}
+				db: s.db, stat: stmtState{detail: s.stat.detail, sampleCall: s.stat.sampleCall, qualstats: s.stat.qualstats}, loading: true}
 			m.stack = append(m.stack, next)
 			return m, m.loadStatementSamplesCmd(s.db, s.stat.detail.QueryID)
 		}

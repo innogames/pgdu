@@ -47,25 +47,30 @@ type statementsTickMsg struct{}
 
 type statementSampleLoadedMsg struct {
 	db        string
-	query     string // matches screen.statDetail.Query for stale-message rejection
-	sample    string
-	real      bool // sample is a real captured example (pg_qualstats), not synthesized
-	fromData  bool // synthesized, but ≥1 placeholder was filled with a real value sampled from the live table
-	fromQual  bool // synthesized, but ≥1 placeholder was filled with a per-predicate pg_qualstats constant
-	qualstats bool // pg_qualstats is installed in db (drives the source hint / captured-values affordance)
+	query     string       // matches screen.stat.detail.Query for stale-message rejection
+	sample    string       // complete, runnable call; "" when no pg_qualstats source covered every $n
+	source    sampleSource // where sample came from (sampleNone when sample == "")
+	qualstats bool         // pg_qualstats is installed in db (drives the source hint)
+	// qualSamples is true when pg_qualstats holds constants for this query, so
+	// the p captured-values browser has something to show.
+	qualSamples bool
 	// installable is true when pg_qualstats is absent but already in
 	// shared_preload_libraries, so a one-key CREATE EXTENSION would enable real
 	// values. Drives the detail view's optional install hint.
 	installable bool
-	// params is the per-placeholder breakdown behind sample (type, predicate
-	// column, value, source) for the verbose detail view. Nil on the real
-	// pg_qualstats path (the whole call is captured, not built from $n).
+	// params is the per-placeholder breakdown (type, predicate column, value,
+	// source) for the verbose detail view. Nil on the whole-example path; kept
+	// when sample == "" so the view can say which $n are missing.
 	params []pg.SampleParam
-	err    error
+	// needLog asks the handler to search the server log for a logged call:
+	// pg_qualstats produced no complete call.
+	needLog bool
+	err     error // InferParams failure
 }
 type statementExplainLoadedMsg struct {
 	db      string
 	query   string // matches screen.statDetail.Query for stale-message rejection
+	call    string // the literal call the plan ran on; "" for the generic plan
 	plan    string
 	err     error
 	analyze bool // plan came from EXPLAIN ANALYZE rather than the generic plan
@@ -197,28 +202,6 @@ func (m *Model) cycleStatRefresh() {
 	}
 }
 
-// loadStatementSampleCmd resolves the example call to show under a query. It
-// prefers a *real* example query from pg_qualstats (real captured constants, so
-// EXPLAIN reflects the plan a real call gets); when pg_qualstats is absent or
-// has sampled nothing for this queryid yet, it falls back to synthesizing typed
-// literals from the inferred $n types (BuildSampleCall). The qualstats flag is
-// reported either way so the detail view can label the source and offer the
-// captured-values list only when there's real data behind it.
-// paramsWithout returns params whose ordinal is not already resolved in cover,
-// so live-table sampling skips placeholders a higher-precedence source filled.
-func paramsWithout(params []pg.ParamType, cover map[int]string) []pg.ParamType {
-	if len(cover) == 0 {
-		return params
-	}
-	out := make([]pg.ParamType, 0, len(params))
-	for _, p := range params {
-		if cover[p.Ordinal] == "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 // loadStatementTableHotCmd fetches the HOT-update counters for the statement's
 // main table (parsed from the query, resolved server-side) so the detail view
 // can show its HOT update ratio. Returns nil when no table can be parsed.
@@ -233,48 +216,60 @@ func (m *Model) loadStatementTableHotCmd(db, queryText string) tea.Cmd {
 	})
 }
 
+// loadStatementSampleCmd resolves the example call to show under a query from
+// pg_qualstats: the whole-statement example it captured (real constants, so
+// EXPLAIN reflects the plan a real call gets), else its per-predicate constants
+// mapped onto every $n. Values are never sampled from tables or synthesized: a
+// call is reported only when complete, and otherwise needLog asks the handler to
+// try the server log. The qualstats flag is reported either way so the detail
+// view can label the source and offer the captured-values list only when there's
+// real data behind it.
 func (m *Model) loadStatementSampleCmd(db string, queryID int64, queryText string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		qualstats := m.client.EnsureQualstats(ctx, db) == nil
 		if qualstats {
 			// pg_qualstats caps example queries at track_activity_query_size, so a
 			// long statement comes back truncated mid-token — unusable for EXPLAIN.
-			// Reject those and fall through to the synthesized (full-length) call.
+			// Reject those and fall through to the per-predicate constants.
 			if ex, err := m.client.QualstatsExampleQuery(ctx, db, queryID); err == nil && ex != "" && pg.QualstatsExampleUsable(queryText, ex) {
-				return statementSampleLoadedMsg{db: db, query: queryText, sample: ex, real: true, qualstats: true}
+				return statementSampleLoadedMsg{db: db, query: queryText, sample: ex, source: sampleQualExample, qualstats: true, qualSamples: true}
 			}
 		}
 		// Absent but preloaded → a plain CREATE EXTENSION would enable real values;
-		// surface that as an install hint rather than only synthesizing literals.
+		// surface that as an install hint.
 		installable := false
 		if !qualstats {
 			installable, _ = m.client.QualstatsPreloaded(ctx, db)
 		}
+		// Even when the whole-statement example is unusable, pg_qualstats may hold
+		// per-predicate constants for individual placeholders — the data the `p`
+		// browser shows, so it is offered only when there is some.
+		var samples []pg.QualSample
+		if qualstats {
+			samples, _ = m.client.QualstatsSamples(ctx, db, queryID)
+		}
 		params, err := m.client.InferParams(ctx, db, queryText)
 		if err != nil {
-			return statementSampleLoadedMsg{db: db, query: queryText, err: err, qualstats: qualstats, installable: installable}
+			return statementSampleLoadedMsg{db: db, query: queryText, err: err, qualstats: qualstats, qualSamples: len(samples) > 0, installable: installable, needLog: true}
 		}
-		// Even when the whole-statement example is unusable, pg_qualstats may hold
-		// per-predicate constants for individual placeholders (the same data the `p`
-		// browser shows). Map those to their $n; they're real values that actually
-		// appeared in real calls, so they take precedence over live-table samples.
+		// Map the constants to their $n; a call results only when every placeholder
+		// got one.
 		var qual map[int]string
-		if qualstats {
-			if samples, err := m.client.QualstatsSamples(ctx, db, queryID); err == nil {
-				qual = pg.MapQualConstants(queryText, params, samples)
-			}
+		if len(samples) > 0 {
+			qual = pg.MapQualConstants(queryText, params, samples)
 		}
-		// Pull live-table values only for the placeholders qualstats didn't cover, so
-		// the synthesized call uses constants that actually exist in the data; any
-		// ordinal still unresolved falls back to a generic typed literal.
-		live := m.client.SampleParamValues(ctx, db, queryText, paramsWithout(params, qual))
-		// EXTRACT($n FROM …) field slots and INTERVAL $n value slots aren't real
-		// parameters; ResolveSampleParams fills them with bare literals ('epoch' /
-		// '1 day') so the sample call stays parseable and runnable.
-		real, breakdown := pg.ResolveSampleParams(queryText, params, qual, live, pg.ExtractFieldOrdinals(queryText), pg.IntervalParamOrdinals(queryText))
-		return statementSampleLoadedMsg{db: db, query: queryText, sample: pg.BuildSampleCall(queryText, params, real),
-			fromData: len(live) > 0, fromQual: len(qual) > 0, qualstats: qualstats, installable: installable,
-			params: breakdown}
+		real, breakdown := pg.ResolveSampleParams(queryText, params, qual)
+		msg := statementSampleLoadedMsg{db: db, query: queryText, qualstats: qualstats, qualSamples: len(samples) > 0, installable: installable, params: breakdown}
+		msg.sample = pg.BuildSampleCall(queryText, params, real)
+		switch {
+		case msg.sample == "":
+			msg.needLog = true
+		case len(params) == 0:
+			msg.source = sampleNoParams
+		default:
+			msg.source = sampleQualPredicates
+		}
+		return msg
 	})
 }
 
@@ -298,14 +293,14 @@ func (m *Model) loadStatementSamplesCmd(db string, queryID int64) tea.Cmd {
 }
 
 // loadStatementExplainLiteralCmd runs a plain EXPLAIN (no GENERIC_PLAN, no
-// ANALYZE) on sampleCall, a fully-literal real example query. matchQuery is the
+// ANALYZE) on sampleCall, a fully-literal real call. matchQuery is the
 // normalized text used only to reject stale messages. Used in place of the
-// generic plan when a real pg_qualstats example is available, so the planner
-// sees real values instead of $n.
+// generic plan whenever a sample call exists, so the planner sees the captured
+// values instead of $n.
 func (m *Model) loadStatementExplainLiteralCmd(db, matchQuery, sampleCall string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		plan, err := m.client.ExplainLiteral(ctx, db, sampleCall)
-		return statementExplainLoadedMsg{db: db, query: matchQuery, plan: plan, err: err}
+		return statementExplainLoadedMsg{db: db, query: matchQuery, call: sampleCall, plan: plan, err: err}
 	})
 }
 
@@ -315,7 +310,7 @@ func (m *Model) loadStatementExplainLiteralCmd(db, matchQuery, sampleCall string
 func (m *Model) loadStatementExplainAnalyzeCmd(db, matchQuery, sampleCall string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		plan, err := m.client.ExplainAnalyze(ctx, db, sampleCall)
-		return statementExplainLoadedMsg{db: db, query: matchQuery, plan: plan, err: err, analyze: true}
+		return statementExplainLoadedMsg{db: db, query: matchQuery, call: sampleCall, plan: plan, err: err, analyze: true}
 	})
 }
 

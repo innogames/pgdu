@@ -116,10 +116,17 @@ func enterLabel(s *screen) (label string, ok bool) {
 			return "narrow to " + v.noun(), true
 		}
 		return "query detail", true
-	case levelStatementDetail, levelStatementSamples:
-		// ANALYZE executes the query, so the detail and captured-values views
-		// offer it for read-only shapes only (handleStatementAnalyze's gate).
-		return "EXPLAIN ANALYZE", s.stat.detail != nil && pg.ReadOnlyQuery(s.stat.detail.Query)
+	case levelStatementDetail:
+		// ANALYZE executes the query, so the detail view offers it for read-only
+		// shapes only and only once a complete sample call exists to run
+		// (handleStatementAnalyze's gate).
+		return "EXPLAIN ANALYZE", s.stat.detail != nil && pg.ReadOnlyQuery(s.stat.detail.Query) && s.stat.sampleCall != ""
+	case levelStatementSamples:
+		// The captured-values view substitutes the highlighted constant itself
+		// for a single-parameter query and otherwise needs the sample call
+		// (sampleAnalyzeQuery).
+		return "EXPLAIN ANALYZE", s.stat.detail != nil && pg.ReadOnlyQuery(s.stat.detail.Query) &&
+			(s.stat.sampleCall != "" || uniqueParams(s.stat.detail.Query) == 1)
 	case levelSnapshots:
 		return "pick window", true
 	case levelMaintenance:

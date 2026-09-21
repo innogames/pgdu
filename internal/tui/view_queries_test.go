@@ -176,6 +176,21 @@ func TestRenderStatementDetailAnalyzeAffordance(t *testing.T) {
 	if out := renderModel(s); strings.Contains(out, "ANALYZE") {
 		t.Error("UPDATE detail must not offer EXPLAIN ANALYZE (it would execute)")
 	}
+
+	// No complete call (values are never guessed): nothing to run, so neither
+	// ↵ nor E is offered and the plan header stays generic.
+	s.stat.detail = &sel
+	s.stat.sampleCall = ""
+	s.stat.sampleResolved = true
+	out := renderModel(s)
+	for _, absent := range []string{"ANALYZE", "explain (real plan)", "to execute it"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("detail without a sample call must not show %q", absent)
+		}
+	}
+	if !strings.Contains(out, "explain (generic plan)") {
+		t.Error("detail without a sample call should use the generic-plan header")
+	}
 }
 
 func TestRenderStatementDetailAndInfo(t *testing.T) {
@@ -186,9 +201,9 @@ func TestRenderStatementDetailAndInfo(t *testing.T) {
 	}
 	s := &screen{
 		level: levelStatementDetail, title: "query", tool: toolQueries, db: "test",
-		loaded: true, stat: stmtState{detail: &q, windowExecMs: 1000, sampleCall: "select * from t where id = 1::integer", explain: "Seq Scan on t  (cost=0.00..1.00 rows=1 width=4)\n  Filter: (id = $1)"}}
+		loaded: true, stat: stmtState{detail: &q, windowExecMs: 1000, sampleCall: "select * from t where id = 1::integer", sampleSource: sampleQualPredicates, explain: "Seq Scan on t  (cost=0.00..1.00 rows=1 width=4)\n  Filter: (id = 1)"}}
 	out := renderModel(s)
-	for _, want := range []string{"query 7", "window metrics", "plan time", "blocks/row", "sample call", "explain (generic plan)", "Seq Scan"} {
+	for _, want := range []string{"query 7", "window metrics", "plan time", "blocks/row", "sample call", "explain (real plan)", "Seq Scan"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("detail view missing %q", want)
 		}
@@ -212,61 +227,136 @@ func TestRenderStatementDetailAndInfo(t *testing.T) {
 	}
 }
 
-// The detail view names the parameter source: real captured values when
-// pg_qualstats fed a real example, a "synthesized — install pg_qualstats" note
-// when it's absent, and the explain header flips real/generic to match.
+// The detail view names the sample call's source — a pg_qualstats example, its
+// per-predicate constants, or a call from the server log — and, without one,
+// says that values are never guessed and what would provide real ones; the
+// explain header flips real/generic with the call.
 func TestRenderStatementDetailSourceHint(t *testing.T) {
 	sel := pg.QueryStat{QueryID: 1, Query: "select * from t where id = $1", Calls: 1}
-	base := func() *screen {
-		return &screen{
-			level: levelStatementDetail, title: "query", tool: toolQueries, db: "test",
-			loaded: true, stat: stmtState{detail: &sel, windowExecMs: 100, sampleCall: "select * from t where id = 42"}}
+	two := pg.QueryStat{QueryID: 2, Query: "select * from t where a = $1 and b = $2", Calls: 1}
+	at := time.Date(2026, 9, 21, 14, 2, 11, 0, time.UTC)
+	cases := []struct {
+		name         string
+		stat         stmtState
+		ext          *extPrompt
+		want, absent []string
+	}{
+		{
+			name:   "pg_qualstats example",
+			stat:   stmtState{detail: &sel, sampleCall: "select * from t where id = 42", sampleSource: sampleQualExample, qualstats: true, qualSamples: true},
+			want:   []string{"real values · pg_qualstats", "explain (real plan)", "to browse the real values"},
+			absent: []string{"generic plan"},
+		},
+		{
+			name: "pg_qualstats per predicate",
+			stat: stmtState{detail: &sel, sampleCall: "select * from t where id = 42::integer", sampleSource: sampleQualPredicates, qualstats: true},
+			want: []string{"real values · pg_qualstats (per predicate)", "explain (real plan)"},
+		},
+		{
+			name: "server log",
+			stat: stmtState{detail: &sel, sampleCall: "select * from t where id = '42'", sampleSource: sampleLog, logLookup: logLookupFound,
+				logInfo: &sampleLogInfo{path: "/var/log/postgresql/postgresql-17-main.log", at: at, durationMs: 2300}},
+			want: []string{"real values · server log · postgresql-17-main.log · 2026-09-21 14:02:11 · 2.3s", "explain (real plan)", "'42'"},
+		},
+		{
+			name: "no constants yet",
+			stat: stmtState{detail: &sel, sampleResolved: true, qualstats: true, logLookup: logLookupNone,
+				sampleParams: []pg.SampleParam{{Ordinal: 1, Type: "integer", Column: "id"}}},
+			want: []string{"values are never guessed", "pg_qualstats has no constants for this query yet", "no logged call with bound values", "explain (generic plan)"},
+			// Installed but nothing captured for this query: no p browser either.
+			absent: []string{"ANALYZE", "explain (real plan)", "select * from t where id = 42", "to browse the real values"},
+		},
+		{
+			name: "partial coverage",
+			stat: stmtState{detail: &two, sampleResolved: true, qualstats: true, logLookup: logLookupNone,
+				sampleParams: []pg.SampleParam{
+					{Ordinal: 1, Type: "integer", Column: "a", Value: "42::integer", Source: pg.ParamQualstats},
+					{Ordinal: 2, Type: "text", Column: "b"}}},
+			want:   []string{"pg_qualstats covers $1 · missing $2"},
+			absent: []string{"42::integer"},
+		},
+		{
+			name: "installable",
+			stat: stmtState{detail: &sel, sampleResolved: true, logLookup: logLookupNone},
+			ext:  &extPrompt{name: extQualstats, db: "test", installable: true, reason: extPromptReasonQualstats},
+			want: []string{"press i to install pg_qualstats", "to install pg_qualstats"},
+		},
+		{
+			name:   "nothing installed",
+			stat:   stmtState{detail: &sel, sampleResolved: true, logLookup: logLookupNoLog},
+			want:   []string{"install pg_qualstats, or log calls with their parameters", "no readable server log found — pass --log-file"},
+			absent: []string{"to browse the real values"},
+		},
+		{
+			name:   "searching the log",
+			stat:   stmtState{detail: &sel, sampleResolved: true, logLookup: logLookupRunning},
+			want:   []string{"searching the server log"},
+			absent: []string{"values are never guessed"},
+		},
+		{
+			name: "log error",
+			stat: stmtState{detail: &sel, sampleResolved: true, logLookup: logLookupErr, logErr: errBoom},
+			want: []string{"server log could not be read — boom"},
+		},
+		{
+			name: "resolving",
+			stat: stmtState{detail: &sel},
+			want: []string{"inferring parameters…"},
+		},
+		{
+			name: "no parameters",
+			stat: stmtState{detail: &pg.QueryStat{QueryID: 3, Query: "select count(*) from t"}, sampleCall: "select count(*) from t", sampleSource: sampleNoParams, sampleResolved: true},
+			want: []string{"no parameters — the statement is its own call", "explain (real plan)", "ANALYZE"},
+		},
 	}
-
-	// Real values from pg_qualstats: "real values" hint, "(real plan)" header,
-	// and the captured-values affordance offered.
-	s := base()
-	s.stat.sampleReal = true
-	s.stat.qualstats = true
-	out := renderModel(s)
-	for _, want := range []string{"real values · pg_qualstats", "explain (real plan)", "to browse the real values"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("real-source detail missing %q", want)
-		}
-	}
-	if strings.Contains(out, "generic plan") {
-		t.Error("real-source detail must not show the generic-plan header")
-	}
-
-	// No pg_qualstats: synthesized, with the install hint and generic plan.
-	s = base()
-	s.stat.sampleReal = false
-	s.stat.qualstats = false
-	out = renderModel(s)
-	if !strings.Contains(out, "synthesized — install pg_qualstats") {
-		t.Error("missing-qualstats detail should suggest installing pg_qualstats")
-	}
-	if !strings.Contains(out, "explain (generic plan)") {
-		t.Error("missing-qualstats detail should use the generic-plan header")
-	}
-	if strings.Contains(out, "to browse the real values") {
-		t.Error("captured-values affordance must not show without pg_qualstats")
-	}
-
-	// pg_qualstats absent but preloaded: an install offer is surfaced, so both
-	// the sample-call hint and the non-blocking ext hint point at the i key.
-	s = base()
-	s.stat.sampleReal = false
-	s.stat.qualstats = false
-	s.extPrompt = &extPrompt{name: extQualstats, db: "test", installable: true, reason: extPromptReasonQualstats}
-	out = renderModel(s)
-	if !strings.Contains(out, "press i to install pg_qualstats for real values") {
-		t.Error("preloaded-but-absent detail should offer the i-key install in the sample hint")
-	}
-	if !strings.Contains(out, "to install pg_qualstats") {
-		t.Error("preloaded-but-absent detail should render the install ext hint")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.stat.windowExecMs = 100
+			s := &screen{level: levelStatementDetail, title: "query", tool: toolQueries, db: "test", loaded: true, stat: c.stat, extPrompt: c.ext}
+			out := renderModel(s)
+			for _, w := range c.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("missing %q in:\n%s", w, out)
+				}
+			}
+			for _, a := range c.absent {
+				if strings.Contains(out, a) {
+					t.Errorf("unexpected %q", a)
+				}
+			}
+		})
 	}
 }
+
+// The verbose v table lists every $n with its source, "—" standing in for a
+// value nothing captured.
+func TestRenderSampleParamsTable(t *testing.T) {
+	two := pg.QueryStat{QueryID: 2, Query: "select * from t where a = $1 and b = $2", Calls: 1}
+	s := &screen{
+		level: levelStatementDetail, title: "query", tool: toolQueries, db: "test", loaded: true,
+		stat: stmtState{detail: &two, windowExecMs: 100, sampleResolved: true, qualstats: true, verbose: true,
+			sampleParams: []pg.SampleParam{
+				{Ordinal: 1, Type: "integer", Column: "a", Value: "42::integer", Source: pg.ParamQualstats},
+				{Ordinal: 2, Type: "text", Column: "b"}}}}
+	out := renderModel(s)
+	for _, want := range []string{"not captured", "pg_qualstats", "—", "42::integer"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("verbose table missing %q", want)
+		}
+	}
+	s.stat.sampleCall, s.stat.sampleSource = "select * from t where a = '1' and b = 'x'", sampleLog
+	s.stat.sampleParams = []pg.SampleParam{{Ordinal: 1, Type: "integer", Column: "a", Value: "'1'", Source: pg.ParamLog}, {Ordinal: 2, Value: "'x'", Source: pg.ParamLog}}
+	if out := renderModel(s); !strings.Contains(out, "server log") {
+		t.Error("log-sourced rows should be labelled 'server log'")
+	}
+}
+
+// errBoom is a fixed error for rendering tests.
+var errBoom = errorString("boom")
+
+type errorString string
+
+func (e errorString) Error() string { return string(e) }
 
 // The captured-values level lists real constants with their frequency and
 // offers EXPLAIN ANALYZE on the highlighted one.
@@ -278,7 +368,7 @@ func TestRenderStatementSamples(t *testing.T) {
 	}
 	s := &screen{
 		level: levelStatementSamples, title: "values", tool: toolQueries, db: "test",
-		loaded: true, stat: stmtState{detail: &sel, qualstats: true, sampleReal: true, sampleCall: "select * from t where id = 42::integer"},
+		loaded: true, stat: stmtState{detail: &sel, qualstats: true, sampleSource: sampleQualExample, sampleCall: "select * from t where id = 42::integer"},
 		items: sampleItems(samples)}
 	out := renderModel(s)
 	for _, want := range []string{"captured values · query 9", "t.id = 42::integer", "t.id = 7::integer", "EXPLAIN (ANALYZE)"} {

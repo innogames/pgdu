@@ -378,20 +378,26 @@ type stmtState struct {
 	entry bool
 
 	// Query-detail state (levelStatementDetail). detail is the window-delta
-	// QueryStat for the drilled-into query; sampleCall is the synthesized
-	// example call (or "" with sampleErr set when params couldn't be
-	// inferred); explain holds the EXPLAIN output, run automatically on
-	// entry (generic plan) and re-runnable via x, or replaced by EXPLAIN
-	// ANALYZE on Enter. explainAnalyze flags which of the two the current
-	// explain text is.
+	// QueryStat for the drilled-into query. sampleCall is a complete example
+	// call built only from captured values (a pg_qualstats example, its
+	// per-predicate constants covering every $n, or a call the server logged
+	// with its binds) — never sampled from tables or synthesized — or "" when
+	// no source covers every placeholder; a non-empty call is by construction
+	// real and runnable, so sampleCall != "" is the single gate for ↵/E and
+	// the real (non-generic) EXPLAIN. explain holds the EXPLAIN output, run
+	// automatically on entry, or replaced by EXPLAIN ANALYZE on Enter;
+	// explainAnalyze flags which of the two the current text is.
 	detail         *pg.QueryStat
 	sampleCall     string
-	sampleParams   []pg.SampleParam // per-$n breakdown behind statSampleCall (verbose table)
-	sampleReal     bool             // statSampleCall is a real pg_qualstats example, not synthesized
-	sampleFromData bool             // statSampleCall is synthesized but uses real values sampled from the live table
-	sampleFromQual bool             // statSampleCall is synthesized but ≥1 placeholder uses a per-predicate pg_qualstats constant
-	qualstats      bool             // pg_qualstats is installed in db (drives source hint + captured-values key)
-	sampleErr      error
+	sampleSource   sampleSource     // where sampleCall came from (sampleNone while it is "")
+	sampleParams   []pg.SampleParam // per-$n breakdown (v table); kept when the call is incomplete so the missing $n show
+	sampleResolved bool             // the sample lookup has reported — tells "no call" from "still resolving"
+	qualstats      bool             // pg_qualstats is installed in db (drives the source hint)
+	qualSamples    bool             // pg_qualstats holds constants for this query (drives the p captured-values browser)
+	sampleErr      error            // InferParams failure
+	logLookup      logLookupState   // the server-log search for a logged call
+	logInfo        *sampleLogInfo   // the logged call behind a sampleLog call
+	logErr         error            // set with logLookupErr
 	explain        string
 	explainErr     error
 	explaining     bool
@@ -403,6 +409,46 @@ type stmtState struct {
 	// hotErr records a fetch failure (kept quiet — the row is just omitted).
 	hotStats *pg.TableHotStats
 	hotErr   error
+}
+
+// resetSample clears the sample-call state ahead of a (re)load so a refresh can
+// neither run a stale call nor keep a finished log search on screen.
+func (st *stmtState) resetSample() {
+	st.sampleCall, st.sampleSource, st.sampleParams, st.sampleErr, st.sampleResolved = "", sampleNone, nil, nil, false
+	st.qualSamples = false
+	st.logLookup, st.logInfo, st.logErr = logLookupIdle, nil, nil
+}
+
+// sampleSource names where a complete sample call came from. Values are never
+// guessed, so sampleNone always pairs with an empty sampleCall.
+type sampleSource int
+
+const (
+	sampleNone           sampleSource = iota // no source covered every $n
+	sampleQualExample                        // whole-statement pg_qualstats example query
+	sampleQualPredicates                     // built from per-predicate pg_qualstats constants, every $n covered
+	sampleLog                                // a call the server logged with its bind parameters
+	sampleNoParams                           // the statement has no $n; the normalized text is the call
+)
+
+// logLookupState tracks the server-log search for a logged call, started when
+// pg_qualstats yields no complete call (lookupLogCallCmd).
+type logLookupState int
+
+const (
+	logLookupIdle    logLookupState = iota // not started / not needed
+	logLookupRunning                       // searching
+	logLookupNone                          // searched, no call with complete bound values
+	logLookupNoLog                         // no readable server log
+	logLookupErr                           // search failed (logErr)
+	logLookupFound                         // a logged call is the sample call
+)
+
+// sampleLogInfo identifies the logged execution a sampleLog call was taken from.
+type sampleLogInfo struct {
+	path       string    // log file it was read from
+	at         time.Time // when the server logged it (log_timezone)
+	durationMs float64   // logged duration; 0 for a log_statement line, which has none
 }
 
 // actState: Activity tool state: the last pg_stat_activity sample plus its filters and the armed cancel/terminate.
@@ -1018,6 +1064,13 @@ type Model struct {
 	// logFile is the --log-file override: when set the analyzer skips the picker
 	// and opens it directly.
 	logFile string
+
+	// logCall is the parsed current server log the query detail's sample-call
+	// lookup reads bound values from (lookupLogCallCmd). Model-level so the
+	// second detail doesn't re-read the file; later lookups refresh it
+	// incrementally while the current log's path is unchanged. Only Update
+	// touches it: a Cmd gets a snapshot and hands the new report back in its msg.
+	logCall logCallCache
 
 	// Log table pickers: the timeline and slow panes share logTable's visibility
 	// set (the slow pane remembers its own sort column), the pooler-stats pane

@@ -39,7 +39,7 @@ type Client struct {
 
 	// True once pg_qualstats is known to be installed in a given database. Used
 	// to source real EXPLAIN parameters (real captured constants) for the
-	// Top-queries view, falling back to synthesized literals when absent.
+	// Top-queries view; without it (or a logged call) no sample call is built.
 	qualstatsReady map[string]bool
 
 	// Cached pg_stat_statements.track_planning per database (it only changes on

@@ -1,6 +1,7 @@
 package pglog
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -167,5 +168,26 @@ func TestBoundParamsAndTruncation(t *testing.T) {
 	}
 	if ParamsTruncated([]string{"'a'", "NULL", "''"}) {
 		t.Error("complete values reported as truncated")
+	}
+}
+
+func TestUnfilledParams(t *testing.T) {
+	cases := []struct {
+		sql  string
+		vals []string
+		want []int
+	}{
+		// $2 sits inside a string literal and is not a placeholder.
+		{"SELECT $1, $3 WHERE x = '$2'", []string{"'a'"}, []int{3}},
+		{"SELECT $2, $2", []string{"'a'"}, []int{2}},
+		{"SELECT $1", []string{"'a'"}, nil},
+		{"SELECT now()", nil, nil},
+		{"SELECT $$body $1$$, $2", []string{"'a'"}, []int{2}},
+		{"SELECT $3, $2", nil, []int{2, 3}},
+	}
+	for _, c := range cases {
+		if got := UnfilledParams(c.sql, c.vals); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("UnfilledParams(%q, %v) = %v, want %v", c.sql, c.vals, got, c.want)
+		}
 	}
 }

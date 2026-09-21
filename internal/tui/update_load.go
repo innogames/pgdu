@@ -53,6 +53,8 @@ func (m *Model) loadCurrent() tea.Cmd {
 		if s.stat.detail == nil {
 			return nil
 		}
+		// A stale call must not stay runnable while its sources are re-resolved.
+		s.stat.resetSample()
 		var cmds []tea.Cmd
 		// HOT update ratio for the statement's main table (cumulative, from
 		// pg_stat_user_tables). Reset first so a refresh re-fetches and a stale
@@ -65,10 +67,9 @@ func (m *Model) loadCurrent() tea.Cmd {
 		}
 		if pg.ExplainableQuery(s.stat.detail.Query) {
 			// Resolve the sample call first, then auto-run the plan once it's
-			// known: a real pg_qualstats example takes a plain EXPLAIN, a
-			// synthesized one the generic plan. onStatementSampleLoaded fires the
-			// EXPLAIN while statExplaining is set. ANALYZE stays opt-in (Enter)
-			// because it executes the query.
+			// known: a complete call takes a plain EXPLAIN, no call the generic
+			// plan. onStatementSampleLoaded fires the EXPLAIN while explaining is
+			// set. ANALYZE stays opt-in (Enter) because it executes the query.
 			s.stat.explaining = true
 			s.stat.explain = ""
 			s.stat.explainErr = nil

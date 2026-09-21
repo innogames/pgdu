@@ -179,10 +179,14 @@ type PgBouncerStats struct {
 // lines PostgreSQL emits right after it. Text fields are sub-slices of the
 // window buffer (zero-copy) — the TUI converts only what it renders.
 type Entry struct {
-	Off      int64 // byte offset of the primary line within the window buffer
-	Time     time.Time
-	PID      int32
-	Line     int32 // %l session line number, 0 when the prefix lacks it
+	Off  int64 // byte offset of the primary line within the window buffer
+	Time time.Time
+	PID  int32
+	Line int32 // %l session line number, 0 when the prefix lacks it
+	// QueryID is the pg_stat_statements query id the server logged with the
+	// line (%Q, csvlog/jsonlog on PG14+); 0 when the prefix lacks it or the
+	// server had none to report (compute_query_id off, utility statements).
+	QueryID  int64
 	Session  []byte
 	User     []byte
 	DB       []byte

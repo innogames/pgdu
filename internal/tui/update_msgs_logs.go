@@ -191,11 +191,22 @@ func logAutoOpenIndex(s *screen, cands []pg.LogCandidate) int {
 		return 0
 	}
 	if s.log.autoOpen {
-		for i, c := range cands {
-			if c.Info.Current {
-				return i
-			}
+		return currentLogIndex(cands)
+	}
+	return -1
+}
+
+// currentLogIndex is the position of the live server log among the candidates
+// (pg_current_logfile, or --log-file / the sole file found), or -1. Both the
+// picker's auto-open and the query detail's sample-call lookup read that file.
+func currentLogIndex(cands []pg.LogCandidate) int {
+	for i, c := range cands {
+		if c.Info.Current {
+			return i
 		}
+	}
+	if len(cands) == 1 {
+		return 0
 	}
 	return -1
 }

@@ -97,22 +97,21 @@ func (c *Client) InferParams(ctx context.Context, db, query string) ([]ParamType
 	return out, nil
 }
 
-// BuildSampleCall substitutes each $n in a normalized query with a literal,
-// producing a copy-pasteable example. real holds per-ordinal literals fetched
-// from the live table (see SampleParamValues); ordinals missing from it fall
-// back to a synthesized literal of the inferred type. Pure (no DB access) so it
-// is unit-testable. Replacement runs from the highest ordinal down so "$1"
-// doesn't clobber the prefix of "$10".
+// BuildSampleCall substitutes each $n in a normalized query with its captured
+// literal from real, highest ordinal first so "$1" doesn't clobber the prefix of
+// "$10". It returns "" unless every parameter has a value: a sample call is only
+// ever a complete, runnable statement — values are never guessed, so a partial
+// fill is not shown at all. A query without parameters is its own sample call.
+// Pure (no DB access).
 func BuildSampleCall(query string, params []ParamType, real map[int]string) string {
+	for _, p := range params {
+		if real[p.Ordinal] == "" {
+			return ""
+		}
+	}
 	out := query
 	for _, p := range slices.Backward(params) {
-
-		lit, ok := real[p.Ordinal]
-		if !ok {
-			lit = sampleLiteral(p.Type)
-		}
-		placeholder := "$" + strconv.Itoa(p.Ordinal)
-		out = strings.ReplaceAll(out, placeholder, lit)
+		out = strings.ReplaceAll(out, "$"+strconv.Itoa(p.Ordinal), real[p.Ordinal])
 	}
 	return out
 }
@@ -128,7 +127,7 @@ func BuildSampleCall(query string, params []ParamType, real map[int]string) stri
 // folds `col IN ($1,…,$n)` into a single `col = ANY('{…}')` qual, though, so
 // pg_qualstats then holds one array for a run of scalar placeholders; its
 // elements are dealt out across that column's ordinals in order, and any
-// ordinal beyond the last element stays absent for the caller's fallbacks.
+// ordinal beyond the last element stays absent, leaving the call incomplete.
 // Constants cut at PGQS_CONSTANT_SIZE (qualConstTruncated) are never spliced as
 // they are: a truncated scalar is skipped, a truncated array contributes only
 // its complete elements. Pure (no DB).
@@ -138,7 +137,7 @@ func MapQualConstants(query string, params []ParamType, samples []QualSample) ma
 		return nil
 	}
 	// First usable value wins per column (samples are occurrences-DESC), matched
-	// case-insensitively to the parsed column the same way SampleParamValues does.
+	// case-insensitively to the parsed column (catalog names fold unless quoted).
 	// A truncated scalar is useless, so a rarer but complete value beats it; a
 	// truncated array still has real elements and is kept when nothing better comes.
 	byCol := make(map[string]string, len(samples))
@@ -204,88 +203,23 @@ func isArrayType(regtype string) bool {
 	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(regtype)), "[]")
 }
 
-// ResolveSampleParams decides the literal and source for each $n placeholder,
-// applying precedence EXTRACT/INTERVAL slot > pg_qualstats > live-table > synthesized.
-// It returns the per-ordinal literals for the non-synthesized slots (to hand to
-// BuildSampleCall) and the full per-parameter breakdown for the verbose table.
-// EXTRACT slots get 'epoch' (a bare field literal every temporal type accepts)
-// and INTERVAL slots get a bare '1 day' string (so `INTERVAL $n` stays parseable
-// rather than becoming `INTERVAL '…'::interval`); synthesized slots get
-// sampleLiteral(type). Pure (no DB access).
-func ResolveSampleParams(query string, params []ParamType, qual, live map[int]string, extractOrds, intervalOrds []int) (map[int]string, []SampleParam) {
+// ResolveSampleParams pairs each $n with the pg_qualstats constant mapped to it
+// (qual, from MapQualConstants) or marks it ParamMissing with an empty Value. It
+// returns the ordinal → literal map for BuildSampleCall (non-nil, possibly empty)
+// and the full per-parameter breakdown for the verbose table, which is shown
+// even when the call is incomplete so the user sees which $n are missing. Pure
+// (no DB access).
+func ResolveSampleParams(query string, params []ParamType, qual map[int]string) (map[int]string, []SampleParam) {
 	cols := paramColumns(query)
-	extract := make(map[int]bool, len(extractOrds))
-	for _, o := range extractOrds {
-		extract[o] = true
-	}
-	interval := make(map[int]bool, len(intervalOrds))
-	for _, o := range intervalOrds {
-		interval[o] = true
-	}
 	real := map[int]string{}
 	breakdown := make([]SampleParam, 0, len(params))
 	for _, p := range params {
 		sp := SampleParam{Ordinal: p.Ordinal, Type: p.Type, Column: cols[p.Ordinal]}
-		switch {
-		case extract[p.Ordinal]:
-			sp.Source, sp.Value = ParamExtractField, "'epoch'"
-		case interval[p.Ordinal]:
-			// `INTERVAL $n` parses with "INTERVAL" as the preceding token, which
-			// paramColumns picks up as a bogus predicate column — it's the typed-
-			// literal keyword, not a column. Clear it.
-			sp.Source, sp.Value, sp.Column = ParamIntervalLiteral, "'1 day'", ""
-		case qual[p.Ordinal] != "":
-			sp.Source, sp.Value = ParamQualstats, qual[p.Ordinal]
-		case live[p.Ordinal] != "":
-			sp.Source, sp.Value = ParamLiveData, live[p.Ordinal]
-		default:
-			sp.Source, sp.Value = ParamSynthesized, sampleLiteral(p.Type)
-		}
-		if sp.Source != ParamSynthesized {
-			real[p.Ordinal] = sp.Value
+		if v := qual[p.Ordinal]; v != "" {
+			sp.Source, sp.Value = ParamQualstats, v
+			real[p.Ordinal] = v
 		}
 		breakdown = append(breakdown, sp)
 	}
 	return real, breakdown
-}
-
-// sampleLiteral returns a plausible, type-cast literal for a regtype name. The
-// cast (value::type) keeps the filled-in query type-correct so it can be
-// EXPLAINed or run as-is. Unknown types fall back to a typed NULL.
-func sampleLiteral(regtype string) string {
-	t := strings.ToLower(strings.TrimSpace(regtype))
-	// Array types: an empty array literal of the element type reads cleanly.
-	if strings.HasSuffix(t, "[]") {
-		return "'{}'::" + regtype
-	}
-	switch t {
-	case "smallint", "int2", "integer", "int", "int4", "bigint", "int8", "oid":
-		return "1::" + regtype
-	case "numeric", "decimal", "real", "float4", "double precision", "float8", "money":
-		return "1.0::" + regtype
-	case "boolean", "bool":
-		return "true"
-	case "text", "character varying", "varchar", "character", "char", "bpchar", "name", "citext":
-		return "'sample'::" + regtype
-	case "uuid":
-		return "'00000000-0000-0000-0000-000000000000'::uuid"
-	case "date":
-		return "CURRENT_DATE"
-	case "timestamp", "timestamp without time zone":
-		return "CURRENT_TIMESTAMP::timestamp"
-	case "timestamptz", "timestamp with time zone":
-		return "CURRENT_TIMESTAMP"
-	case "time", "time without time zone", "timetz", "time with time zone":
-		return "CURRENT_TIME"
-	case "interval":
-		return "'1 day'::interval"
-	case "json", "jsonb":
-		return "'{}'::" + regtype
-	case "inet", "cidr":
-		return "'127.0.0.1'::" + regtype
-	case "bytea":
-		return "'\\x00'::bytea"
-	default:
-		return "NULL::" + regtype
-	}
 }

@@ -2,7 +2,6 @@ package pg
 
 import (
 	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -159,8 +158,9 @@ func QualstatsExampleUsable(normalized, example string) bool {
 	// A complete denormalization has every constant spliced in. When pg_qualstats
 	// can't reconstruct a qual (e.g. WHERE alias.id=$1) it leaves the $n in place;
 	// a plain EXPLAIN on that fails with "there is no parameter $n" since, unlike
-	// GENERIC_PLAN, it supplies no value. Reject so the caller falls back to the
-	// synthesized sample call (which EXPLAINs via GENERIC_PLAN).
+	// GENERIC_PLAN, it supplies no value. Reject; the caller then tries the
+	// per-predicate constants and otherwise shows no call (the plan stays
+	// GENERIC_PLAN).
 	if hasParamPlaceholder(example) {
 		return false
 	}
@@ -186,7 +186,7 @@ func QualstatsExampleUsable(normalized, example string) bool {
 // track_activity_query_size before it reaches EXPLAIN. Handles the SQL `"`
 // in-string quote escape; dollar-quoting and E'…\" backslash escapes are rare
 // in normalized statements and not modelled (worst case a usable example is
-// rejected and the caller falls back to the synthesized sample).
+// rejected and no sample call is shown).
 func balancedDelimiters(s string) bool {
 	depth := 0
 	inStr := false
@@ -277,21 +277,6 @@ func rewriteExtractFieldParams(query string) string {
 	return extractFieldRe.ReplaceAllString(query, "extract($$${1},")
 }
 
-// ExtractFieldOrdinals returns the $n ordinals that sit in the field slot of an
-// EXTRACT(field FROM source) expression in a normalized query. Those placeholders
-// are not real bind parameters (see extractFieldRe), so BuildSampleCall must fill
-// them with a valid bare field literal rather than a synthesized typed value.
-func ExtractFieldOrdinals(query string) []int {
-	matches := extractFieldRe.FindAllStringSubmatch(query, -1)
-	var out []int
-	for _, m := range matches {
-		if n, err := strconv.Atoi(m[1]); err == nil {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
 // intervalParamRe matches an INTERVAL $n typed-literal whose value slot is a $n
 // placeholder. pg_stat_statements normalizes the string in `INTERVAL '1 day'` to
 // a $n, yielding `INTERVAL $1` — but the SQL grammar's INTERVAL-literal form
@@ -330,19 +315,4 @@ func rewriteNormalizedParams(query string) string {
 	// rewrite would re-match the `NOW() - $1` it produces and double-cast it.
 	q = dtArithParamRe.ReplaceAllString(q, "${1} ${2} $$${3}::interval")
 	return intervalParamRe.ReplaceAllString(q, "$$${1}::interval")
-}
-
-// IntervalParamOrdinals returns the $n ordinals that sit in the value slot of an
-// INTERVAL $n typed-literal in a normalized query. Substituting a synthesized
-// typed literal there would produce `INTERVAL '1 day'::interval` — still a syntax
-// error — so BuildSampleCall must fill these with a bare interval string instead.
-func IntervalParamOrdinals(query string) []int {
-	matches := intervalParamRe.FindAllStringSubmatch(query, -1)
-	var out []int
-	for _, m := range matches {
-		if n, err := strconv.Atoi(m[1]); err == nil {
-			out = append(out, n)
-		}
-	}
-	return out
 }
