@@ -47,7 +47,7 @@ SELECT
     coalesce(w.locktype, '') AS wait_locktype,
     coalesce(w.mode, '') AS wait_mode,
     coalesce(w.wait_relation, '') AS wait_relation,
-    coalesce(left(regexp_replace(a.query, '\s+', ' ', 'g'), 300), '') AS query
+    coalesce(left(btrim(regexp_replace(a.query, '\s+', ' ', 'g')), 300), '') AS query
 FROM involved i
 JOIN pg_stat_activity a ON a.pid = i.pid
 LEFT JOIN blocking b ON b.pid = i.pid

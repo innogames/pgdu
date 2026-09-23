@@ -33,7 +33,7 @@ SELECT
     -- No left() cap: the server already bounds this at track_activity_query_size,
     -- and MainTable needs the FROM clause, which a wide ORM select list pushes
     -- past any small prefix.
-    coalesce(regexp_replace(a.query, '\s+', ' ', 'g'), '') AS query
+    coalesce(btrim(regexp_replace(a.query, '\s+', ' ', 'g')), '') AS query
 FROM pg_stat_activity a
 WHERE a.pid <> pg_backend_pid()
 `
