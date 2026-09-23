@@ -180,6 +180,51 @@ func QualstatsExampleUsable(normalized, example string) bool {
 	return strings.HasSuffix(collapseSpaces(example), collapseSpaces(tail))
 }
 
+// TrimQualstatsExample cuts leading foreign statements off a pg_qualstats
+// example. pg_qualstats stores the executor's sourceText, which for a
+// multi-statement simple-protocol string ("BEGIN; SET …; COMMIT; SELECT …") is
+// the whole string, while pg_stat_statements hashes and stores only the
+// sub-statement — so the example comes back with the client's transaction
+// boilerplate glued in front and EXPLAIN fails on the leading BEGIN. The
+// normalized text up to its first $n carries no constants, so it must appear
+// verbatim (modulo whitespace) in the example; everything before that first
+// occurrence is the prefix to drop. Returns the example unchanged when the head
+// can't be located, leaving the decision to QualstatsExampleUsable.
+func TrimQualstatsExample(normalized, example string) string {
+	head := normalized
+	if i := firstParamPlaceholder(normalized); i >= 0 {
+		head = normalized[:i]
+	}
+	fields := strings.Fields(head)
+	if len(fields) == 0 {
+		return example
+	}
+	quoted := make([]string, len(fields))
+	for i, f := range fields {
+		quoted[i] = regexp.QuoteMeta(f)
+	}
+	re, err := regexp.Compile(strings.Join(quoted, `\s+`))
+	if err != nil {
+		return example
+	}
+	loc := re.FindStringIndex(example)
+	if loc == nil || loc[0] == 0 {
+		return example
+	}
+	return example[loc[0]:]
+}
+
+// firstParamPlaceholder returns the offset of the first $n placeholder in s, or
+// -1 when there is none.
+func firstParamPlaceholder(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '$' && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
+			return i
+		}
+	}
+	return -1
+}
+
 // balancedDelimiters reports whether s has balanced parentheses and terminated
 // single-quoted string literals — a necessary condition for a complete SQL
 // statement, used to spot a pg_qualstats example truncated at

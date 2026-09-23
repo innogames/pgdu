@@ -237,6 +237,36 @@ func TestQueryKind(t *testing.T) {
 	}
 }
 
+func TestTrimQualstatsExample(t *testing.T) {
+	normalized := "SELECT pg_relation_size(c.oid) AS rsize, relkind\nFROM pg_class c\nWHERE relkind IN ($1)"
+	// pg_qualstats stores the whole multi-statement client string; the hashed
+	// SELECT starts after the transaction boilerplate.
+	ex := "BEGIN; SET statement_timeout=30000;COMMIT;SELECT pg_relation_size(c.oid) AS rsize, relkind\nFROM pg_class c\nWHERE relkind IN ('i')"
+	want := "SELECT pg_relation_size(c.oid) AS rsize, relkind\nFROM pg_class c\nWHERE relkind IN ('i')"
+	if got := TrimQualstatsExample(normalized, ex); got != want {
+		t.Errorf("prefix not trimmed:\n%s", got)
+	}
+	if !QualstatsExampleUsable(normalized, want) {
+		t.Error("trimmed example should be usable")
+	}
+	// Whitespace between the head's tokens may differ from the catalog text.
+	spaced := "COMMIT; SELECT   pg_relation_size(c.oid)  AS rsize, relkind FROM pg_class c WHERE relkind IN ('i')"
+	if got := TrimQualstatsExample(normalized, spaced); !strings.HasPrefix(got, "SELECT   pg_relation_size") {
+		t.Errorf("whitespace variant not trimmed:\n%s", got)
+	}
+	// Already clean → unchanged; head not found → unchanged.
+	if got := TrimQualstatsExample(normalized, want); got != want {
+		t.Errorf("clean example altered:\n%s", got)
+	}
+	if got := TrimQualstatsExample(normalized, "SELECT 1"); got != "SELECT 1" {
+		t.Errorf("unrelated example altered:\n%s", got)
+	}
+	// No placeholders: the whole statement is the head.
+	if got := TrimQualstatsExample("SELECT 1", "BEGIN; SELECT 1"); got != "SELECT 1" {
+		t.Errorf("placeholder-free example not trimmed:\n%s", got)
+	}
+}
+
 func TestQualstatsExampleUsable(t *testing.T) {
 	normalized := "SELECT a, b FROM t WHERE x = $1 AND y <= $2 FOR UPDATE OF t"
 	// A complete denormalization ends with the same constant-free suffix.

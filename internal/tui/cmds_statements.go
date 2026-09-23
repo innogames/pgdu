@@ -235,9 +235,14 @@ func (m *Model) loadStatementSampleCmd(db string, queryID int64, queryText strin
 		if qualstats {
 			// pg_qualstats caps example queries at track_activity_query_size, so a
 			// long statement comes back truncated mid-token — unusable for EXPLAIN.
-			// Reject those and fall through to the per-predicate constants.
-			if ex, err := m.client.QualstatsExampleQuery(ctx, db, queryID); err == nil && ex != "" && pg.QualstatsExampleUsable(queryText, ex) {
-				return statementSampleLoadedMsg{db: db, query: queryText, sample: ex, source: sampleQualExample, qualstats: true, qualSamples: true}
+			// Reject those and fall through to the per-predicate constants. A
+			// multi-statement client string arrives with its BEGIN/SET boilerplate
+			// in front of the hashed statement; trim that before judging.
+			if ex, err := m.client.QualstatsExampleQuery(ctx, db, queryID); err == nil && ex != "" {
+				ex = pg.TrimQualstatsExample(queryText, ex)
+				if pg.QualstatsExampleUsable(queryText, ex) {
+					return statementSampleLoadedMsg{db: db, query: queryText, sample: ex, source: sampleQualExample, qualstats: true, qualSamples: true}
+				}
 			}
 		}
 		// Absent but preloaded → a plain CREATE EXTENSION would enable real values;
