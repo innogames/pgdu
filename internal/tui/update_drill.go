@@ -214,13 +214,19 @@ func (m *Model) toolEntryScreen(t tool) *screen {
 		return &screen{level: levelPgBouncers, title: "pgbouncer", tool: toolPgBouncer, db: m.client.DefaultDB(), loading: true}
 	case toolActivity:
 		// Activity tool is cluster-wide: skip the database picker and go
-		// directly to the live pg_stat_activity list.
+		// directly to the live pg_stat_activity list. The sort column lives on
+		// the shared actTable but the direction on the screen, so a reopen
+		// would otherwise keep the remembered column with a fresh (ascending)
+		// direction; start every visit in the default order instead, as the
+		// top-queries table does.
+		m.actTable.sortColID = actSpec.defaultSort
 		return &screen{
-			level: levelActivity,
-			title: "activity",
-			tool:  toolActivity,
-			db:    m.client.DefaultDB(),
-			act:   actState{filter: pg.ActivityActiveWaiting, hosts: make(map[string]string)}}
+			level:    levelActivity,
+			title:    "activity",
+			tool:     toolActivity,
+			db:       m.client.DefaultDB(),
+			sortDesc: true,
+			act:      actState{filter: pg.ActivityActiveWaiting, hosts: make(map[string]string)}}
 	default:
 		return &screen{level: levelDatabases, title: "databases", tool: t, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}
 	}
