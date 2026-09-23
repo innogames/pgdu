@@ -626,7 +626,7 @@ func displayWidth(s string) int {
 // (0x1b) on the slow path, where their zero/variable display width is handled
 // correctly.
 func asciiWidth(s string) (int, bool) {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] < 0x20 || s[i] > 0x7e {
 			return 0, false
 		}

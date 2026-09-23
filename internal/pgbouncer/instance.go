@@ -132,7 +132,7 @@ type Overview struct {
 }
 
 func cutComma(s string) (before, after string, found bool) {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] == ',' {
 			return s[:i], s[i+1:], true
 		}

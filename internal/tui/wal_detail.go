@@ -295,7 +295,7 @@ func bitsFromText(bits *string, infomask int32) []byte {
 	}
 	s := *bits
 	out := make([]byte, (len(s)+7)/8)
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] == '1' {
 			out[i/8] |= 1 << (i % 8)
 		}

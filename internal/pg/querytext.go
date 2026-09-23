@@ -217,7 +217,7 @@ func TrimQualstatsExample(normalized, example string) string {
 // firstParamPlaceholder returns the offset of the first $n placeholder in s, or
 // -1 when there is none.
 func firstParamPlaceholder(s string) int {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] == '$' && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
 			return i
 		}
@@ -264,7 +264,7 @@ func balancedDelimiters(s string) bool {
 // hasParamPlaceholder reports whether s contains a $n placeholder (a '$'
 // immediately followed by one or more digits).
 func hasParamPlaceholder(s string) bool {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] == '$' && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
 			return true
 		}
@@ -277,7 +277,7 @@ func hasParamPlaceholder(s string) bool {
 // suffix). Returns "" when the query has no placeholders.
 func normalizedTailAfterLastParam(query string) string {
 	last := -1
-	for i := 0; i < len(query); i++ {
+	for i := range len(query) {
 		if query[i] != '$' {
 			continue
 		}

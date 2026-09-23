@@ -19,18 +19,22 @@ import (
 // (see .goreleaser.yaml). It stays "dev" for plain `go build` / `make build`.
 var version = "dev"
 
-func main() {
+func main() { os.Exit(run()) }
+
+// run holds every defer so an early exit still closes the pool and cancels the
+// connect timeout; main only turns its result into the process exit code.
+func run() int {
 	cfg, err := cli.Parse(os.Args[1:])
 	if err != nil {
 		if errors.Is(err, cli.ErrHelp) {
-			os.Exit(0)
+			return 0
 		}
 		if errors.Is(err, cli.ErrVersion) {
 			fmt.Println("pgdu", version)
-			os.Exit(0)
+			return 0
 		}
 		fmt.Fprintln(os.Stderr, "pgdu:", err)
-		os.Exit(2)
+		return 2
 	}
 
 	client := pg.New(cfg)
@@ -43,7 +47,7 @@ func main() {
 		// a pooler-only host (or a down server) must not keep it from opening.
 		if cfg.Tool != "pgbouncer" {
 			fmt.Fprintln(os.Stderr, "pgdu: connect:", err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Fprintln(os.Stderr, "pgdu: warning: postgres unreachable, continuing with the pgbouncer tool only:", err)
 	}
@@ -52,6 +56,7 @@ func main() {
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "pgdu:", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

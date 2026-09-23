@@ -188,7 +188,7 @@ func renderColumns(left, right string, leftW, rightW int) string {
 	r := strings.Split(strings.TrimRight(right, "\n"), "\n")
 	rule := styleMuted.Render("│ ")
 	var b strings.Builder
-	for i := 0; i < max(len(l), len(r)); i++ {
+	for i := range max(len(l), len(r)) {
 		var ll, rr string
 		if i < len(l) {
 			ll = truncateToWidth(l[i], leftW)

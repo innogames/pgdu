@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"io"
 	"regexp"
 	"strconv"
@@ -381,8 +382,8 @@ func (p *Parser) feedCSV(buf []byte, base int64) {
 }
 
 func isCSVParseErr(err error) bool {
-	_, ok := err.(*csv.ParseError)
-	return ok
+	var perr *csv.ParseError
+	return errors.As(err, &perr)
 }
 
 // jsonLogLine mirrors the jsonlog record (PG15+). Only the fields the

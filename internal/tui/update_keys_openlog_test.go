@@ -26,6 +26,7 @@ func logCand(path string, current bool) pg.LogCandidate {
 // candidate a screen opened.
 type pathSource struct {
 	pglog.Source
+
 	path string
 }
 

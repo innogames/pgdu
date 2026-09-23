@@ -600,7 +600,6 @@ func (m *Model) onStatementExplainLoaded(msg statementExplainLoadedMsg) tea.Cmd 
 // flight for the given normalized query — the one that issued the request.
 func (m *Model) findExplainTarget(query string) *screen {
 	for _, s := range slices.Backward(m.stack) {
-
 		if s.level != levelStatementDetail && s.level != levelStatementSamples {
 			continue
 		}

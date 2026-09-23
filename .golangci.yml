@@ -1,27 +1,67 @@
 # Pin the config format so `make lint` and CI behave identically regardless of
 # the golangci-lint version on the runner. Builds on the default linter set
 # (errcheck, govet, ineffassign, staticcheck, unused).
+#
+# No `run.go` pin: released golangci-lint (≥ 2.13) is built with Go 1.27, so it
+# analyses the module at the go.mod language version. If a runner's binary is
+# older than go.mod's Go, upgrade the binary rather than pinning here — a pinned
+# analysis Go makes staticcheck misread newer syntax (e.g. `new(expr)`).
 version: "2"
-run:
-  # go.mod targets 1.26, but released golangci-lint binaries are built with an
-  # older Go and refuse to analyse a module that targets a newer one. Pin the
-  # analysis target to the binary's build Go so lint runs; bump when prebuilt
-  # golangci-lint ships a Go 1.26 build.
-  #
-  # The same skew makes staticcheck misread the Go 1.26 `new(expr)` form (it
-  # treats the argument as a type), so prefer the classic `x := …; return &x`
-  # idiom over `new(value)` until the analysis Go is bumped.
-  go: "1.24"
 linters:
   enable:
     # --- performance ---
-    - prealloc      # slices grown with append() in a loop that should be presized
-    - perfsprint    # fmt.Sprintf where strconv is cheaper (autofixed by --fix)
-    - unconvert     # redundant type conversions (autofixed by --fix)
+    - prealloc       # slices grown with append() in a loop that should be presized
+    - perfsprint     # fmt.Sprintf where strconv is cheaper (autofixed by --fix)
+    - unconvert      # redundant type conversions (autofixed by --fix)
+    - intrange       # `for i := 0; i < n; i++` → `for i := range n` (autofixed)
+    - copyloopvar    # pre-1.22 `v := v` loop-variable copies that are now dead
+    - fatcontext     # context.With* accumulated inside a loop
+    - makezero       # make([]T, n) followed by append (double-sized slice)
+    - mirror         # string↔[]byte round-trips where a byte/string twin exists
+    - exptostd       # golang.org/x/exp calls that moved into the stdlib
+    - usestdlibvars  # literals that duplicate stdlib constants (http.MethodGet, …)
+    - modernize      # gopls modernizers: min/max, slices.Contains, strings.Cut… (autofixed)
     # --- unused / dead code (extends the default `unused`) ---
-    - wastedassign  # values assigned but never read before the next write
+    - wastedassign   # values assigned but never read before the next write
+    # --- correctness ---
+    - errorlint      # err == ErrX / err.(*T) that break on wrapped errors → errors.Is/As
+    - nilnesserr     # `if err != nil { return nil, otherErr }` returning the wrong error
+    - nilerr         # returning nil when err is non-nil (and vice versa)
+    - durationcheck  # time.Duration * time.Duration
+    - reassign       # reassigning package-level vars of other packages (io.EOF = …)
+    - rowserrcheck   # sql.Rows without a rows.Err() check
+    - sqlclosecheck  # sql.Rows / Stmt never closed
+    - errchkjson     # json.Marshal on types that make it fail at runtime
+    - gochecksumtype # exhaustive switches over sum types marked //sumtype:decl
+    - gocheckcompilerdirectives # malformed //go: directives that silently become comments
+    - nosprintfhostport         # fmt.Sprintf("%s:%d") host:port that breaks on IPv6
+    # gocritic's default diagnostic set (badCond, dupBranchBody, offBy1,
+    # sloppyLen, exitAfterDefer, …). The performance tag is not enabled:
+    # hugeParam/rangeValCopy flag the by-value Bubble Tea Model (~400 hits)
+    # and appendCombine wants one-field-per-line append sequences folded.
+    - gocritic
+    # --- style ---
+    - misspell       # common English misspellings in comments/strings (autofixed)
+    - whitespace     # leading/trailing blank lines in blocks (autofixed)
+    - godot          # top-level comments end in a period (autofixed)
+    - embeddedstructfieldcheck # embedded fields first, separated by a blank line
+    - nolintlint     # //nolint must name a linter and be needed; stale ones are flagged
+    - usetesting     # t.Context()/t.TempDir()/t.Setenv over the manual forms
+    - thelper        # test helpers call t.Helper() first
     # signatures — every Update() message handler returns tea.Cmd (most via the
     # `return m, m.onX(msg)` dispatch table, even when a given handler never
     # issues a follow-up), and the render*(s *screen, …) / render*Row(it item, …)
     # families share a fixed shape. unparam reads those uniform-but-unused
-    # params/returns as dead and floods ~30 false positives.
+    # params/returns as dead and floods ~30 false positives. exhaustive is out
+    # for the same reason: level/tool/sortMode switches rely on `default:`.
+  settings:
+    gocritic:
+      disabled-checks:
+        - ifElseChain      # 2–3 branch if/else reads fine; switch{} is not always clearer
+        - singleCaseSwitch # a `switch { case key.Matches… }` mirrors its sibling handlers
+    misspell:
+      ignore-rules:
+        - occurences # pg_qualstats really spells its column `occurences`
+    nolintlint:
+      require-explanation: true
+      require-specific: true

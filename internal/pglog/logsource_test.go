@@ -3,6 +3,7 @@ package pglog
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -85,7 +86,7 @@ func TestGzipTailWindow(t *testing.T) {
 	if err != nil || win.Truncated || !bytes.Equal(whole, data) {
 		t.Errorf("whole gz read: err=%v win=%+v", err, win)
 	}
-	if _, err := src.ReadFrom(t.Context(), 0); err != ErrNotIncremental {
+	if _, err := src.ReadFrom(t.Context(), 0); !errors.Is(err, ErrNotIncremental) {
 		t.Errorf("gz ReadFrom err = %v", err)
 	}
 }

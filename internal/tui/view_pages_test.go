@@ -40,7 +40,7 @@ func hexText(s string) *string {
 	parts := make([]string, 0, len(s)+1)
 	hdr := byte((len(s)+1)<<1 | 1) // short varlena header includes its own byte
 	parts = append(parts, byteHex(hdr))
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		parts = append(parts, byteHex(s[i]))
 	}
 	joined := strings.Join(parts, " ")

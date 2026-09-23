@@ -47,7 +47,9 @@ func TestIntegration_LockWaiters(t *testing.T) {
 		t.Fatalf("waiter connect: %v", err)
 	}
 	defer func() { _ = wait.Close(ctx) }()
-	go func() { _, _ = wait.Query(context.Background(), `SELECT * FROM pgdu_locktest`) }()
+	// The rows are never read: the query has to stay blocked behind the lock
+	// for the scenario, and closing the conn below tears it down.
+	go func() { _, _ = wait.Query(context.Background(), `SELECT * FROM pgdu_locktest`) }() //nolint:sqlclosecheck // deliberately left waiting
 
 	// Poll for the wait relationship to establish.
 	var nodes []LockNode

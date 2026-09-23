@@ -2,6 +2,7 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -31,7 +32,7 @@ func (c *Client) TableMaintStats(ctx context.Context, t Table) (*TableMaintStats
 		&s.AvacAnalyzeThreshold, &s.AvacAnalyzeScale,
 		&s.FreezeMaxAge,
 	)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -73,7 +74,7 @@ func (c *Client) TableHotStats(ctx context.Context, db, name string) (*TableHotS
 	}
 	var s TableHotStats
 	err = pool.QueryRow(ctx, sqlTableHotStats, name).Scan(&s.Updates, &s.HotUpdates)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
