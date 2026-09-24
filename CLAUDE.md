@@ -221,8 +221,12 @@ fails (missing/corrupt → empty).
   how `cycleSort` picks the sort memory to write.
 - **Sample calls are never guessed**: the query detail's sample call comes only from captured
   values — a pg_qualstats example, its per-predicate constants covering every `$n`
-  (`BuildSampleCall` returns "" otherwise), or a call the server logged with its binds
+  (`BuildSampleCall` returns "" otherwise; `MapQualConstants` matches each `$n` by column,
+  scope-resolved table and operator via `paramSlots`, and keeps one AND group's values from
+  a single `uniquequalid` combination), or a call the server logged with its binds
   (`pglog.LatestBoundCall`, matched by query id or `NormalizeCall`, read from the current
   server log and cached in `Model.logCall`) — never table samples or synthesized literals.
+  The one filled-in value is an EXISTS subquery's lone select-list `$n` (`inertParams`,
+  `ParamInert`): it becomes `1`, which cannot change the result or the plan.
   `stat.sampleCall != ""` is the single gate for `↵`/`E` and the real (non-generic) EXPLAIN;
   `sampleSource` only labels the origin.

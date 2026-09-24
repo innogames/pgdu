@@ -885,3 +885,112 @@ func TestQualConstTruncated(t *testing.T) {
 		}
 	}
 }
+
+// The serveradmin case from the field: `sub` aliases a different table in each
+// EXISTS, `hostname` carries both a regex and an equality qual, the regex
+// column is cast, and the EXISTS select lists are placeholders pg_qualstats
+// can never capture. Each slot must get its own table's and operator's value,
+// the servertype/hostname pair must come from one captured combination, and
+// the EXISTS-list $n are filled with the inert 1.
+func TestMapQualConstantsScopedAliases(t *testing.T) {
+	query := `SELECT server.server_id, server.hostname, server.intern_ip, server.servertype_id
+FROM server
+WHERE (server.servertype_id = $1)
+  AND server.hostname::text ~ $2
+  AND NOT EXISTS (SELECT $3 FROM server_boolean_attribute AS sub WHERE server.server_id = sub.server_id AND sub.attribute_id = $4)
+  AND (EXISTS (SELECT $5 FROM server_relation_attribute AS sub WHERE server.server_id = sub.server_id AND sub.attribute_id = $6 AND sub.value IN ( SELECT server_id FROM server WHERE hostname = $7)))
+ORDER BY server.hostname`
+	params := make([]ParamType, 7)
+	for i := range params {
+		params[i] = ParamType{Ordinal: i + 1, Type: "text"}
+	}
+	params[2].Type, params[4].Type = "integer", "integer"
+
+	wantSlots := map[int]paramSlot{
+		1: {"servertype_id", "server", "="},
+		2: {"hostname", "server", "~"},
+		4: {"attribute_id", "server_boolean_attribute", "="},
+		6: {"attribute_id", "server_relation_attribute", "="},
+		7: {"hostname", "server", "="},
+	}
+	if got := paramSlots(query); !reflect.DeepEqual(got, wantSlots) {
+		t.Errorf("paramSlots()\n got: %+v\nwant: %+v", got, wantSlots)
+	}
+	if got, want := inertParams(query), map[int]bool{3: true, 5: true}; !reflect.DeepEqual(got, want) {
+		t.Errorf("inertParams() = %v, want %v", got, want)
+	}
+
+	samples := []QualSample{
+		// occurrences-DESC. The most frequent hostname value is the equality's;
+		// the most frequent regex is from a rarer combination than the top one.
+		{Relation: "server", Column: "hostname", Operator: "=", ConstValue: "'lb-1'::text", Occurrences: 900},
+		{Relation: "server", Column: "hostname", Operator: "~", ConstValue: "'^db'::text", Occurrences: 700, QualID: 42, UniqueQualID: 2},
+		{Relation: "server", Column: "servertype_id", Operator: "=", ConstValue: "'vm'::text", Occurrences: 600, QualID: 42, UniqueQualID: 1},
+		{Relation: "server", Column: "hostname", Operator: "~", ConstValue: "'^web'::text", Occurrences: 600, QualID: 42, UniqueQualID: 1},
+		{Relation: "server", Column: "servertype_id", Operator: "=", ConstValue: "'hw'::text", Occurrences: 500, QualID: 42, UniqueQualID: 2},
+		{Relation: "server_relation_attribute", Column: "attribute_id", Operator: "=", ConstValue: "'loadbalancer'::text", Occurrences: 800},
+		{Relation: "server_boolean_attribute", Column: "attribute_id", Operator: "=", ConstValue: "'no_monitoring'::text", Occurrences: 400},
+	}
+	// The top sample of qualid 42 is ('^db', hw) → the pair stays together.
+	qual := MapQualConstants(query, params, samples)
+	want := map[int]string{
+		1: "'hw'::text",
+		2: "'^db'::text",
+		4: "'no_monitoring'::text",
+		6: "'loadbalancer'::text",
+		7: "'lb-1'::text",
+	}
+	if !reflect.DeepEqual(qual, want) {
+		t.Errorf("MapQualConstants()\n got: %+v\nwant: %+v", qual, want)
+	}
+	real, _ := ResolveSampleParams(query, params, qual)
+	call := BuildSampleCall(query, params, real)
+	for _, frag := range []string{"SELECT 1 FROM server_boolean_attribute", "SELECT 1 FROM server_relation_attribute", "hostname::text ~ '^db'::text", "hostname = 'lb-1'::text"} {
+		if !strings.Contains(call, frag) {
+			t.Errorf("BuildSampleCall() missing %q in:\n%s", frag, call)
+		}
+	}
+}
+
+func TestParamSlotsOperatorsAndScopes(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  map[int]paramSlot
+	}{
+		{
+			name:  "between bounds and negations",
+			query: "SELECT * FROM t WHERE n BETWEEN $1 AND $2 AND c NOT IN ($3) AND s NOT LIKE $4 AND u != $5",
+			want: map[int]paramSlot{
+				1: {"n", "t", ">="}, 2: {"n", "t", "<="}, 3: {"c", "t", "<>"}, 4: {"s", "t", "!~~"}, 5: {"u", "t", "<>"},
+			},
+		},
+		{
+			name:  "join aliases, unqualified column ambiguous",
+			query: "SELECT * FROM a x JOIN b y ON x.id = y.a_id WHERE y.k = $1 AND z = $2",
+			want:  map[int]paramSlot{1: {"k", "b", "="}, 2: {"z", "", "="}},
+		},
+		{
+			name:  "similar to never matches a capture",
+			query: "SELECT * FROM t WHERE s SIMILAR TO $1",
+			want:  map[int]paramSlot{1: {"s", "t", opUnmatchable}},
+		},
+		{
+			name:  "for update skip locked is not a table",
+			query: "SELECT * FROM jobs WHERE state = $1 FOR UPDATE SKIP LOCKED",
+			want:  map[int]paramSlot{1: {"state", "jobs", "="}},
+		},
+		{
+			name:  "character varying cast",
+			query: `SELECT * FROM public."T" WHERE "T".name::character varying = ANY($1)`,
+			want:  map[int]paramSlot{1: {"name", "T", "="}},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := paramSlots(c.query); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("paramSlots()\n got: %+v\nwant: %+v", got, c.want)
+			}
+		})
+	}
+}

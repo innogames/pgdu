@@ -177,13 +177,17 @@ const sqlQualstatsExample = `SELECT pg_qualstats_example_query($1)`
 // (e.g. 'line 1'::text). The LEFT JOINs resolve the left-hand column/operator
 // for display and are NULL-safe for quals whose left side isn't a plain column.
 // We read the pg_qualstats view (one row per captured qual occurrence).
+// qualid/uniquequalid tie the quals of one AND expression together, the latter
+// per constant combination, so a sample call can reuse values that co-occurred.
 const sqlQualstatsSamples = `
 SELECT COALESCE(c.relname, '')  AS relation,
        COALESCE(a.attname, '')  AS column,
        COALESCE(o.oprname, '')  AS operator,
        q.constvalue,
        COALESCE(q.constant_position, 0),
-       q.occurences
+       q.occurences,
+       COALESCE(q.qualid::bigint, 0),
+       COALESCE(q.uniquequalid::bigint, 0)
 FROM   pg_qualstats q
 LEFT JOIN pg_class     c ON c.oid = q.lrelid
 LEFT JOIN pg_attribute a ON a.attrelid = q.lrelid AND a.attnum = q.lattnum

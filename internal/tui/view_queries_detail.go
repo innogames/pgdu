@@ -304,6 +304,8 @@ func paramSourceLabel(src pg.ParamSource) string {
 		return "pg_qualstats"
 	case pg.ParamLog:
 		return "server log"
+	case pg.ParamInert:
+		return "EXISTS list · any value"
 	default:
 		return "not captured"
 	}
@@ -375,14 +377,17 @@ func countLabel(n int, noun string) string {
 	return strconv.Itoa(n) + " " + noun + "s"
 }
 
-// qualCoverage splits the breakdown into the $n pg_qualstats covers and the rest.
+// qualCoverage splits the breakdown into the $n pg_qualstats covers and the
+// ones nothing captured; an inert EXISTS-list $n is neither.
 func qualCoverage(params []pg.SampleParam) (covered, missing []string) {
 	for _, p := range params {
 		o := "$" + strconv.Itoa(p.Ordinal)
-		if p.Source == pg.ParamQualstats {
+		switch p.Source {
+		case pg.ParamQualstats:
 			covered = append(covered, o)
-		} else {
+		case pg.ParamMissing:
 			missing = append(missing, o)
+		case pg.ParamLog, pg.ParamInert:
 		}
 	}
 	return covered, missing

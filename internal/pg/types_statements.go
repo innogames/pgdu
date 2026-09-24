@@ -217,6 +217,7 @@ const (
 	ParamMissing   ParamSource = iota // no captured value for this $n
 	ParamQualstats                    // constant captured per-predicate by pg_qualstats
 	ParamLog                          // bind value of a call the server logged (slow query log)
+	ParamInert                        // EXISTS select-list constant: any value gives the same result and plan
 )
 
 // SampleParam describes one $n placeholder of a sample call: its inferred type,
@@ -244,6 +245,11 @@ type QualSample struct {
 	ConstValue  string
 	Position    int   // constant_position: char offset in the original query text
 	Occurrences int64 // occurences: how often this predicate fired
+	// QualID groups the quals of one AND expression (0 when the qual stands
+	// alone); UniqueQualID is that group hashed with its constants, so samples
+	// sharing it are values that were passed together in one call.
+	QualID       int64
+	UniqueQualID int64
 	// Truncated marks a ConstValue cut at pg_qualstats' 80-byte constant buffer:
 	// it is a prefix of the real value, not a usable literal.
 	Truncated bool

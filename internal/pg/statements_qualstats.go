@@ -1,6 +1,7 @@
 package pg
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -41,7 +42,7 @@ func (c *Client) QualstatsSamples(ctx context.Context, db string, queryID int64)
 	return collect(ctx, pool, fmt.Sprintf("qualstats samples in %q", db), sqlQualstatsSamples, []any{queryID},
 		func(row pgx.CollectableRow) (QualSample, error) {
 			var s QualSample
-			err := row.Scan(&s.Relation, &s.Column, &s.Operator, &s.ConstValue, &s.Position, &s.Occurrences)
+			err := row.Scan(&s.Relation, &s.Column, &s.Operator, &s.ConstValue, &s.Position, &s.Occurrences, &s.QualID, &s.UniqueQualID)
 			s.Truncated = qualConstTruncated(s.ConstValue)
 			return s, err
 		})
@@ -133,64 +134,82 @@ func BuildSampleCall(query string, params []ParamType, real map[int]string) stri
 	return out
 }
 
-// MapQualConstants picks, for each $n placeholder it can tie to a column, the
+// MapQualConstants picks, for each $n placeholder it can tie to a column, a
 // pg_qualstats constant captured for that column — the most-frequent one, since
-// samples arrive occurrences-DESC (sqlQualstatsSamples). Best-effort: ordinals
-// with no resolvable column or no matching captured qual are simply absent.
+// samples arrive occurrences-DESC (sqlQualstatsSamples). A sample must also
+// agree with the slot's table and operator when the text reveals them
+// (paramSlots), so `sub.attribute_id` in two subqueries over different tables,
+// or `hostname ~ $2` next to `hostname = $7`, each get their own value. Within
+// one AND expression the values come from a single captured combination (the
+// most frequent uniquequalid), so the call reuses constants that really ran
+// together; a slot that combination doesn't cover falls back to any capture.
+// Best-effort: ordinals with no resolvable column or no matching captured qual
+// are simply absent.
 //
 // ConstValue is a cast-carrying literal (e.g. `'{…}'::text[]`, `true::boolean`)
 // that splices straight into the sample call when its shape matches the slot:
 // an array constant lands inside a `col = ANY($n)` form unchanged. The planner
 // folds `col IN ($1,…,$n)` into a single `col = ANY('{…}')` qual, though, so
 // pg_qualstats then holds one array for a run of scalar placeholders; its
-// elements are dealt out across that column's ordinals in order, and any
+// elements are dealt out across that slot's ordinals in order, and any
 // ordinal beyond the last element stays absent, leaving the call incomplete.
 // Constants cut at PGQS_CONSTANT_SIZE (qualConstTruncated) are never spliced as
 // they are: a truncated scalar is skipped, a truncated array contributes only
 // its complete elements. Pure (no DB).
 func MapQualConstants(query string, params []ParamType, samples []QualSample) map[int]string {
-	cols := paramColumns(query)
-	if len(cols) == 0 || len(samples) == 0 {
+	slots := paramSlots(query)
+	if len(slots) == 0 || len(samples) == 0 {
 		return nil
 	}
-	// First usable value wins per column (samples are occurrences-DESC), matched
-	// case-insensitively to the parsed column (catalog names fold unless quoted).
-	// A truncated scalar is useless, so a rarer but complete value beats it; a
-	// truncated array still has real elements and is kept when nothing better comes.
-	byCol := make(map[string]string, len(samples))
+	combo := map[int64]int64{} // qualid → its most frequent uniquequalid
 	for _, s := range samples {
-		if s.Column == "" || s.ConstValue == "" {
-			continue
-		}
-		k := strings.ToLower(s.Column)
-		prev, seen := byCol[k]
-		switch {
-		case !seen:
-			if _, _, _, isArr := qualArrayConst(s.ConstValue); isArr || !s.Truncated {
-				byCol[k] = s.ConstValue
-			}
-		case s.Truncated:
-		case qualConstTruncated(prev):
-			byCol[k] = s.ConstValue
+		if _, seen := combo[s.QualID]; !seen && s.QualID != 0 && s.ConstValue != "" {
+			combo[s.QualID] = s.UniqueQualID
 		}
 	}
-	// Ordinals per column in $n order, so array elements are dealt out the way
+	// First usable value wins (samples are occurrences-DESC). A truncated scalar
+	// is useless, so a rarer but complete value beats it; a truncated array still
+	// has real elements and is kept when nothing better comes.
+	pick := func(sl paramSlot, coherent bool) string {
+		var fallback string
+		for _, s := range samples {
+			if !sl.accepts(s) || coherent && s.QualID != 0 && s.UniqueQualID != combo[s.QualID] {
+				continue
+			}
+			if !s.Truncated {
+				return s.ConstValue
+			}
+			if _, _, _, isArr := qualArrayConst(s.ConstValue); isArr && fallback == "" {
+				fallback = s.ConstValue
+			}
+		}
+		return fallback
+	}
+	// Ordinals per slot in $n order, so array elements are dealt out the way
 	// the IN list spelled them.
 	typ := make(map[int]string, len(params))
-	byColOrds := map[string][]int{}
+	lits := map[paramSlot]string{}
+	ordsBySlot := map[paramSlot][]int{}
 	for _, p := range params {
-		if col, ok := cols[p.Ordinal]; ok {
-			k := strings.ToLower(col)
-			if _, ok := byCol[k]; ok {
-				byColOrds[k] = append(byColOrds[k], p.Ordinal)
-				typ[p.Ordinal] = p.Type
-			}
+		sl, ok := slots[p.Ordinal]
+		if !ok {
+			continue
+		}
+		sl = sl.key()
+		lit, seen := lits[sl]
+		if !seen {
+			lit = cmp.Or(pick(sl, true), pick(sl, false))
+			lits[sl] = lit
+		}
+		if lit != "" {
+			ordsBySlot[sl] = append(ordsBySlot[sl], p.Ordinal)
+			typ[p.Ordinal] = p.Type
 		}
 	}
 	out := map[int]string{}
-	for k, ords := range byColOrds {
+	for sl, ords := range ordsBySlot {
 		slices.Sort(ords)
-		lit := byCol[k]
+		lit := lits[sl]
 		elems, _, complete, isArr := qualArrayConst(lit)
 		for i, ord := range ords {
 			switch {
@@ -215,26 +234,50 @@ func MapQualConstants(query string, params []ParamType, samples []QualSample) ma
 	return out
 }
 
+// key folds the slot's names so slots that differ only in case share a value.
+func (sl paramSlot) key() paramSlot {
+	return paramSlot{Column: strings.ToLower(sl.Column), Relation: strings.ToLower(sl.Relation), Op: sl.Op}
+}
+
+// accepts reports whether a captured qual can be this slot's value: same
+// column, and same table and operator wherever both sides know them.
+func (sl paramSlot) accepts(s QualSample) bool {
+	if s.Column == "" || s.ConstValue == "" || !strings.EqualFold(s.Column, sl.Column) {
+		return false
+	}
+	if sl.Relation != "" && s.Relation != "" && !strings.EqualFold(s.Relation, sl.Relation) {
+		return false
+	}
+	return sl.Op == "" || s.Operator == "" || s.Operator == sl.Op
+}
+
 // isArrayType reports whether a regtype name from InferParams denotes an array.
 func isArrayType(regtype string) bool {
 	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(regtype)), "[]")
 }
 
 // ResolveSampleParams pairs each $n with the pg_qualstats constant mapped to it
-// (qual, from MapQualConstants) or marks it ParamMissing with an empty Value. It
+// (qual, from MapQualConstants), fills an EXISTS select-list placeholder with
+// the inert 1 (inertParams), or marks it ParamMissing with an empty Value. It
 // returns the ordinal → literal map for BuildSampleCall (non-nil, possibly empty)
 // and the full per-parameter breakdown for the verbose table, which is shown
 // even when the call is incomplete so the user sees which $n are missing. Pure
 // (no DB access).
 func ResolveSampleParams(query string, params []ParamType, qual map[int]string) (map[int]string, []SampleParam) {
 	cols := paramColumns(query)
+	inert := inertParams(query)
 	real := map[int]string{}
 	breakdown := make([]SampleParam, 0, len(params))
 	for _, p := range params {
 		sp := SampleParam{Ordinal: p.Ordinal, Type: p.Type, Column: cols[p.Ordinal]}
-		if v := qual[p.Ordinal]; v != "" {
+		switch v := qual[p.Ordinal]; {
+		case v != "":
 			sp.Source, sp.Value = ParamQualstats, v
-			real[p.Ordinal] = v
+		case inert[p.Ordinal]:
+			sp.Source, sp.Value = ParamInert, "1"
+		}
+		if sp.Value != "" {
+			real[p.Ordinal] = sp.Value
 		}
 		breakdown = append(breakdown, sp)
 	}
