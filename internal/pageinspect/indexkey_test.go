@@ -174,6 +174,15 @@ func TestFormatPGTemporal(t *testing.T) {
 		{"date +infinity", formatPGDate(math.MaxInt32), "infinity"},
 		{"time midnight", formatPGTime(0), "00:00:00"},
 		{"time 01:01:01", formatPGTime(3_661_000_000), "01:01:01"},
+		{"interval zero", formatPGInterval(0, 0, 0), "00:00:00"},
+		{"interval one day", formatPGInterval(0, 1, 0), "1 day"},
+		{"interval full", formatPGInterval(4*3_600_000_000+5*60_000_000+6_500_000, 3, 14), "1 year 2 mons 3 days 04:05:06.5"},
+		{"interval plural", formatPGInterval(0, 2, 26), "2 years 2 mons 2 days"},
+		{"interval negative", formatPGInterval(-3_600_000_000, -1, -1), "-1 mons -1 days -01:00:00"},
+		{"interval mixed signs", formatPGInterval(7_200_000_000, -1, 0), "-1 days +02:00:00"},
+		{"interval long hours", formatPGInterval(100*3_600_000_000, 0, 0), "100:00:00"},
+		{"interval +infinity", formatPGInterval(math.MaxInt64, math.MaxInt32, math.MaxInt32), "infinity"},
+		{"interval -infinity", formatPGInterval(math.MinInt64, math.MinInt32, math.MinInt32), "-infinity"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.got != tc.want {
@@ -191,6 +200,16 @@ func TestDecodeIndexKeyTimestamp(t *testing.T) {
 	if !ok || got != "2000-01-01 00:00:00" {
 		t.Errorf("DecodeIndexKey(timestamp 0) = (%q, %v), want (%q, true)",
 			got, ok, "2000-01-01 00:00:00")
+	}
+}
+
+// TestDecodeIndexKeyInterval wires the interval path: bytes as the page stores
+// them (time µs, then day, then month — little-endian).
+func TestDecodeIndexKeyInterval(t *testing.T) {
+	ivCol := col("interval", "d", 16, "T")
+	got, ok := DecodeIndexKey("00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00", []pg.IndexKeyColumn{ivCol})
+	if !ok || got != "1 day" {
+		t.Errorf("DecodeIndexKey(interval 1 day) = (%q, %v), want (%q, true)", got, ok, "1 day")
 	}
 }
 

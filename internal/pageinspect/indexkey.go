@@ -175,7 +175,7 @@ func alignOffset(off int, typalign string) int {
 // formatFixed renders a fixed-width attribute's bytes (little-endian). Integers
 // are signed unless the type is an unsigned oid-family type; float4/float8 are
 // reinterpreted from their bit pattern; bool and "char" get their natural form.
-// Other fixed-width types (uuid, name, timestamps, …) fall back to text/hex of
+// Other fixed-width types (name, macaddr, …) fall back to text/hex of
 // the raw bytes — a stable, length-correct rendering even when not pretty.
 func formatFixed(v []byte, typName string) string {
 	switch len(v) {
@@ -227,10 +227,14 @@ func formatFixed(v []byte, typName string) string {
 			return strconv.FormatInt(int64(u), 10)
 		}
 	case 16:
-		if typName == "uuid" {
+		switch typName {
+		case "uuid":
 			// Stored byte-for-byte in text order, so hex + dashes is the
 			// canonical 8-4-4-4-12 form.
 			return fmt.Sprintf("%x-%x-%x-%x-%x", v[0:4], v[4:6], v[6:8], v[8:10], v[10:16])
+		case "interval":
+			return formatPGInterval(int64(binary.LittleEndian.Uint64(v[0:8])),
+				int32(binary.LittleEndian.Uint32(v[8:12])), int32(binary.LittleEndian.Uint32(v[12:16])))
 		}
 		return formatBytesText(v)
 	default:
@@ -274,6 +278,67 @@ func formatPGDate(days int32) string {
 func formatPGTime(micros int64) string {
 	secs, usec := micros/1_000_000, micros%1_000_000
 	return time.Unix(secs, usec*1000).UTC().Format("15:04:05.999999")
+}
+
+// formatPGInterval renders an Interval struct (time µs, day, month — each field
+// signed on its own, never normalised into the others) the way PG's default
+// IntervalStyle "postgres" prints it: "1 year 2 mons -3 days +04:05:06.5". The
+// "+" after a negative field mirrors EncodeInterval so mixed signs stay
+// unambiguous. PG 17's ±infinity sentinels (every field at its extreme) map to
+// their textual form.
+func formatPGInterval(micros int64, days, months int32) string {
+	switch {
+	case micros == math.MaxInt64 && days == math.MaxInt32 && months == math.MaxInt32:
+		return "infinity"
+	case micros == math.MinInt64 && days == math.MinInt32 && months == math.MinInt32:
+		return "-infinity"
+	}
+	var sb strings.Builder
+	isBefore := false
+	part := func(n int64, unit string) {
+		if n == 0 {
+			return
+		}
+		if sb.Len() > 0 {
+			sb.WriteByte(' ')
+		}
+		if isBefore && n > 0 {
+			sb.WriteByte('+')
+		}
+		sb.WriteString(strconv.FormatInt(n, 10))
+		sb.WriteByte(' ')
+		sb.WriteString(unit)
+		if n != 1 {
+			sb.WriteByte('s')
+		}
+		isBefore = n < 0
+	}
+	part(int64(months)/12, "year")
+	part(int64(months)%12, "mon")
+	part(int64(days), "day")
+	if sb.Len() == 0 || micros != 0 {
+		if sb.Len() > 0 {
+			sb.WriteByte(' ')
+		}
+		switch {
+		case micros < 0:
+			sb.WriteByte('-')
+		case isBefore:
+			sb.WriteByte('+')
+		}
+		// Magnitude as uint64 so MinInt64 (not an infinity sentinel on its own)
+		// can't overflow on negation.
+		u := uint64(micros)
+		if micros < 0 {
+			u = -u
+		}
+		secs, usec := u/1_000_000, u%1_000_000
+		fmt.Fprintf(&sb, "%02d:%02d:%02d", secs/3600, secs/60%60, secs%60)
+		if usec != 0 {
+			sb.WriteString(strings.TrimRight(fmt.Sprintf(".%06d", usec), "0"))
+		}
+	}
+	return sb.String()
 }
 
 // decodeVarlena reads a varlena (typlen -1) attribute at offset off. It honours
