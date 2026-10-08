@@ -244,10 +244,24 @@ func TestWALBlockToItem(t *testing.T) {
 	}
 }
 
+// Buffer rows name their table the way the breadcrumb does: bare in public,
+// schema-qualified elsewhere; a split-view row appends its own relname.
 func TestBufferStatToItem(t *testing.T) {
-	it := bufferStatToItem(pg.TableBufferStat{Schema: "public", Name: "orders", BufferedBytes: 4096})
-	if it.name != "public.orders" || it.size != 4096 {
-		t.Errorf("bufferStatToItem = name %q size %d, want public.orders / 4096", it.name, it.size)
+	cases := []struct {
+		st   pg.TableBufferStat
+		want string
+	}{
+		{pg.TableBufferStat{Schema: "public", Name: "orders", BufferedBytes: 4096}, "orders"},
+		{pg.TableBufferStat{Schema: "app", Name: "orders", BufferedBytes: 4096}, "app.orders"},
+		{pg.TableBufferStat{Schema: "public", Name: "orders", BufferedBytes: 4096,
+			Rel: &pg.BufferRel{Kind: pg.PartIndex, Name: "orders_pkey"}}, "orders › orders_pkey"},
+	}
+	for _, c := range cases {
+		it := bufferStatToItem(c.st)
+		if it.name != c.want || it.size != 4096 || !it.hasChildren {
+			t.Errorf("bufferStatToItem(%s.%s) = name %q size %d drill %v, want %q / 4096 / true",
+				c.st.Schema, c.st.Name, it.name, it.size, it.hasChildren, c.want)
+		}
 	}
 }
 

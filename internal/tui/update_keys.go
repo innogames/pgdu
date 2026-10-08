@@ -455,6 +455,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case key.Matches(msg, m.keys.Install):
 		return m, m.triggerInstall(s)
+	case key.Matches(msg, m.keys.BufSplit):
+		// Split the buffers list into heap/toast/index rows, or fold it back
+		// per table: a re-projection of the loaded rows, no reload.
+		if s.level == levelBufferTables {
+			m.toggleBufSplit(s)
+		}
 	case key.Matches(msg, m.keys.StmtView):
 		// Cycle the top-queries table through its roll-ups: the same window,
 		// re-projected in place (no reload), so the live tick keeps landing.

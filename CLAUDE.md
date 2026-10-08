@@ -158,6 +158,16 @@ fails (missing/corrupt → empty).
   because the block scan needs the resolved window). `applySort` rebuilds `s.items`
   via `buildWALItems`; its `walSectionRow` lines (Σ, title, column header, notes) are
   inert (the only rows `skipInertRow` steps over) and kept visible under a filter.
+- **Buffers list is one load, two views**: `RelationBufferStats` returns a row per storage
+  relation (heap; toast = TOAST heap + its index; each index) with `TableBufferStat.Rel`
+  set, kept on `buf.rels`. `buildBufferItems` folds it per table via `pg.RollUpBufferStats`
+  (the default, also the describe panel's figure) or lists it as-is when `buf.byRel`
+  (`tab`), so the split never re-scans pg_buffercache and both Σ rows agree.
+  OID/Schema/Name stay the owning table's; rows key by `TableBufferStat.Key()`, and the
+  detail histogram takes `whole` = `Rel == nil`. A split row's `item.name` is
+  `table › relname` (the `/` and name-sort key; the table bare in `public`, else
+  `schema.table`, per `bufTableName`), drawn as separate table and relation columns
+  sized by `bufSplitWidths`.
 - **Log analyzer** (`internal/pglog`): `pglog.Entry` text fields are `[]byte` sub-slices of the window buffer;
   convert to string only what you render. The `levelLogs` screen owns `log.report`;
   child screens find it via `findLevel(levelLogs)` and are re-pointed on each refresh.

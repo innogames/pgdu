@@ -12,10 +12,8 @@ func (m *Model) onBufferStatsLoaded(msg bufferStatsLoadedMsg) tea.Cmd {
 	if cmd, stop := settleLoad(s, msg.err, extPromptReasonBufferCache); stop {
 		return cmd
 	}
-	s.items = s.items[:0]
-	for _, st := range msg.stats {
-		s.items = append(s.items, bufferStatToItem(st))
-	}
+	s.buf.rels = msg.stats
+	s.items = buildBufferItems(s)
 	m.applySort(s)
 	return nil
 }
@@ -43,7 +41,7 @@ func (m *Model) onBufferSummaryLoaded(msg bufferSummaryLoadedMsg) tea.Cmd {
 
 func (m *Model) onBufferDetailLoaded(msg bufferDetailLoadedMsg) tea.Cmd {
 	s := m.findLevel(levelBufferDetail)
-	if s == nil || s.db != msg.db || s.buf.detail == nil || s.buf.detail.OID != msg.oid {
+	if s == nil || s.db != msg.db || s.buf.detail == nil || s.buf.detail.Key() != msg.oid {
 		return nil
 	}
 	s.loading = false

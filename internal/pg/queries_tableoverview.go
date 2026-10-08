@@ -57,12 +57,13 @@ ORDER  BY total_bytes DESC
 
 // sqlTableStatsBuffers sums the current shared-buffer footprint (total and
 // dirty bytes) per table for one schema from pg_buffercache, covering the heap,
-// TOAST and every index — the same filenode aggregation as sqlBufferStats but
-// without the sizing/statio columns the overview already has. It is a separate
-// best-effort query rather than a join in sqlTableStats because pg_buffercache
-// is an extension needing pg_monitor: its absence must not take down the whole
-// overview, only blank the two buffer columns. As in sqlBufferStats, the
-// filenode set filters pg_buffercache before the GROUP BY.
+// TOAST (heap and index) and every index — the same filenodes as
+// sqlBufferRelStats but summed per table and without the sizing/statio columns
+// the overview already has. It is a separate best-effort query rather than a
+// join in sqlTableStats because pg_buffercache is an extension needing
+// pg_monitor: its absence must not take down the whole overview, only blank the
+// two buffer columns. As in sqlBufferRelStats, the filenode set filters
+// pg_buffercache before the GROUP BY.
 const sqlTableStatsBuffers = `
 WITH filenodes AS (
   SELECT c.oid AS tab_oid, pg_relation_filenode(c.oid) AS fn
@@ -78,7 +79,7 @@ WITH filenodes AS (
   SELECT c.oid, pg_relation_filenode(i.indexrelid)
   FROM   pg_class c
   JOIN   pg_namespace n ON n.oid = c.relnamespace
-  JOIN   pg_index i ON i.indrelid = c.oid
+  JOIN   pg_index i ON i.indrelid IN (c.oid, c.reltoastrelid)
   WHERE  n.nspname = $1 AND c.relkind IN ('r','m','p')
 ),
 bc AS (

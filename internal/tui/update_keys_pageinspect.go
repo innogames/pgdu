@@ -11,66 +11,85 @@ import (
 // jumpToPageInspector opens the page-inspector view for the part under the
 // cursor on levelParts: heap → heap pages of the table, toast → heap pages of
 // the TOAST relation, index → index pages (btree/gist/brin/gin). On the
-// shared-buffers screens it opens the heap pages of the highlighted (or
-// inspected) table, so a hot/dirty table can be read page by page; on a table
-// describe panel it opens the described table's heap pages. The pushed
-// screen is stamped toolPageInspect so it renders and lays out exactly as if
-// reached through the page-inspector tool; q pops back to where it came from.
+// shared-buffers screens it opens the highlighted (or inspected) row the same
+// way: a table's heap pages, or a split-view relation's own pages, so a
+// hot/dirty table or index can be read page by page; on a table describe panel
+// it opens the described table's heap pages. The pushed screen is stamped
+// toolPageInspect so it renders and lays out exactly as if reached through the
+// page-inspector tool; q pops back to where it came from.
 func (m *Model) jumpToPageInspector(s *screen) tea.Cmd {
+	var t pg.Table
+	part := pg.Part{Kind: pg.PartHeap}
 	switch s.level {
 	case levelBufferTables, levelBufferDetail:
-		target, ok := bufDescribeTarget(s)
+		st, ok := bufStatAt(s)
 		if !ok {
 			return nil
 		}
-		// TotalBytes covers indexes and toast too; HeapBytes is cosmetic for the
-		// heap-pages view (relpages is loaded), so the same reconstruction serves.
-		t := target.table
+		// TotalBytes is the whole table (or the split-view relation); HeapBytes
+		// is cosmetic for the heap-pages view (relpages is loaded), so it serves.
+		t = bufStatTable(st)
 		t.HeapBytes = t.TotalBytes
-		m.stack = append(m.stack, heapPagesScreen(t, "heap pages"))
-		return m.loadCurrent()
+		if st.Rel != nil {
+			part = bufRelPart(st.Rel)
+			part.SizeBytes = st.TotalBytes
+			if part.Kind == pg.PartToast {
+				t.ToastOID, part.ToastName = st.Rel.OID, st.Rel.Name
+			}
+		}
 	case levelDescribe:
 		if !describeHasHeap(s) {
 			return nil
 		}
-		m.stack = append(m.stack, heapPagesScreen(s.table, "heap pages"))
-		return m.loadCurrent()
+		t = s.table
 	case levelParts:
+		vis := s.visibleIndexes()
+		if s.cursor < 0 || s.cursor >= len(vis) {
+			return nil
+		}
+		p, ok := s.items[vis[s.cursor]].data.(pg.Part)
+		if !ok {
+			return nil
+		}
+		t, part = s.table, p
 	default:
 		return nil
 	}
-	vis := s.visibleIndexes()
-	if s.cursor < 0 || s.cursor >= len(vis) {
+	next := m.partPagesScreen(t, part)
+	if next == nil {
 		return nil
 	}
-	p, ok := s.items[vis[s.cursor]].data.(pg.Part)
-	if !ok {
-		return nil
-	}
-	var next *screen
+	m.stack = append(m.stack, next)
+	return m.loadCurrent()
+}
+
+// partPagesScreen is the page-inspector screen over one storage part of table
+// t: its heap, its TOAST heap (t.ToastOID, named by p.ToastName, qualified or
+// bare in pg_toast) or the index p. nil when there is nothing to open; an index
+// AM pageinspect can't decode also leaves a notice.
+func (m *Model) partPagesScreen(t pg.Table, p pg.Part) *screen {
 	switch p.Kind {
 	case pg.PartHeap:
-		next = heapPagesScreen(s.table, "heap pages")
+		return heapPagesScreen(t, "heap pages")
 	case pg.PartToast:
-		if s.table.ToastOID == 0 {
+		if t.ToastOID == 0 {
 			return nil
 		}
-		// ToastName is qualified ("pg_toast.pg_toast_16438"); the loaders build
-		// the regclass from Schema + Name, so split it back apart.
+		// The loaders build the regclass from Schema + Name, so split a
+		// qualified ToastName ("pg_toast.pg_toast_16438") back apart.
 		schema, name := "pg_toast", p.ToastName
 		if i := strings.LastIndexByte(name, '.'); i >= 0 {
 			schema, name = name[:i], name[i+1:]
 		}
-		t := pg.Table{
-			DB: s.db, Schema: schema, OID: s.table.ToastOID, Name: name,
+		return heapPagesScreen(pg.Table{
+			DB: t.DB, Schema: schema, OID: t.ToastOID, Name: name,
 			HeapBytes: p.SizeBytes,
-		}
-		next = heapPagesScreen(t, "toast pages")
+		}, "toast pages")
 	case pg.PartIndex:
 		r := pg.Relation{
-			DB: s.db, Schema: s.schema, OID: p.OID, Name: p.Name,
+			DB: t.DB, Schema: t.Schema, OID: p.OID, Name: p.Name,
 			SizeBytes: p.SizeBytes, AccessMethod: p.AccessMethod,
-			ParentOID: s.table.OID, ParentName: s.table.Name,
+			ParentOID: t.OID, ParentName: t.Name,
 		}
 		pageSort := sortByBlkno
 		switch p.AccessMethod {
@@ -87,15 +106,12 @@ func (m *Model) jumpToPageInspector(s *screen) tea.Cmd {
 			m.notice = p.AccessMethod + " indexes can't be inspected — pageinspect only decodes btree/gist/brin/gin pages"
 			return nil
 		}
-		next = &screen{
+		return &screen{
 			level: levelIndexPages, title: "index pages", tool: toolPageInspect,
 			db: r.DB, schema: r.Schema, pages: pageState{index: r, heapWindowStart: 0, heapWindowCount: heapWindowDefault},
 			sort: pageSort, sortDesc: pageSort.defaultDesc()}
-	default:
-		return nil
 	}
-	m.stack = append(m.stack, next)
-	return m.loadCurrent()
+	return nil
 }
 
 // describeHasHeap reports whether a describe screen shows a table whose heap

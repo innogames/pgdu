@@ -644,17 +644,20 @@ const (
 	bufColDirty    = 10 // dirty bytes — usually small or "0 B"
 	bufColDirtyPct = 7  // dirty ÷ buffered, "100.0%" (header "dirty%↓" sets the width)
 	bufColTemp     = 5  // mean usagecount, "3.2" (header "temp↓" sets the width)
+	bufColTableMax = 40 // split view: table column cap (longer names clip with …)
+	bufColRelMax   = 48 // split view: relation budget cap in barReserve
 )
 
 // renderBufferList draws the shared-buffer occupancy view as a column table:
 // bar | buffered bytes | total table size | cached % | hit % | dirty | temp |
-// table name.
+// table name; the split view (one row per heap/toast/index) has type | table |
+// relation in its place.
 // The bar visualises BufferedBytes scaled to the largest sibling so the eye
 // still gets a quick "which table dominates the cache" read. rankByOID
-// maps each row to its rank among all buffered tables (0 = biggest); the
-// row picks its bar colour from bufferSlicePalette by that rank, cycling
-// on overflow, so the brightest hues match the top slices on the summary
-// bar above.
+// maps each row (by TableBufferStat.Key) to its rank among all buffered rows
+// (0 = biggest); the row picks its bar colour from bufferSlicePalette by that
+// rank, cycling on overflow, so the brightest hues match the top slices on
+// the summary bar above.
 func (m *Model) renderBufferList(s *screen, height int, rankByOID map[uint32]int) string {
 	vis := s.visibleIndexes()
 	maxSz := maxItemSize(s.items, vis)
@@ -671,19 +674,20 @@ func (m *Model) renderBufferList(s *screen, height int, rankByOID map[uint32]int
 
 	// The Σ footer is pinned beneath the list (like the diagnostic tables'
 	// total row), so it takes one line off the scrolling area when present.
-	footer := renderBufferTotals(s.items, barW)
+	tableW, _ := bufSplitWidths(s)
+	footer := renderBufferTotals(s.items, barW, tableW)
 	listH := height
 	if footer != "" {
 		listH = max(height-1, 0)
 	}
-	out := m.renderRowList(s, listH, renderBufferHeader(s.sort, s.sortDesc, barW),
+	out := m.renderRowList(s, listH, renderBufferHeader(s.sort, s.sortDesc, barW, tableW),
 		func(it item, selected bool) string {
 			st, _ := it.data.(pg.TableBufferStat)
 			barStyle := styleBar
-			if idx, ok := rankByOID[st.OID]; ok && idx < len(bufferSlicePalette) {
+			if idx, ok := rankByOID[st.Key()]; ok && idx < len(bufferSlicePalette) {
 				barStyle = bufferSliceStyle(idx)
 			}
-			return renderBufferRow(it, st, maxSz, maxDirty, barW, selected, barStyle)
+			return renderBufferRow(it, st, maxSz, maxDirty, barW, selected, barStyle, tableW)
 		})
 	if footer != "" {
 		out += footer + "\n"
@@ -697,8 +701,9 @@ func (m *Model) renderBufferList(s *screen, height int, rankByOID map[uint32]int
 // the buffered-bytes-weighted mean usagecount, so all three are true
 // aggregates rather than averages of the per-row percentages. Sums cover
 // every loaded row, not just the filtered subset, matching the other Σ
-// footers. Returns "" when no row carries buffer stats (nothing to sum).
-func renderBufferTotals(items []item, barW int) string {
+// footers; the split view's rows (tableW > 0, see bufSplitWidths) sum to the
+// same figures. Returns "" when no row carries buffer stats (nothing to sum).
+func renderBufferTotals(items []item, barW, tableW int) string {
 	var buffered, total, hits, reads, dirty int64
 	var usageWeighted float64
 	n := 0
@@ -742,12 +747,17 @@ func renderBufferTotals(items []item, barW int) string {
 		padRight(hitStr, bufColHit) + "  " +
 		padRight(humanize.Bytes(dirty), bufColDirty) + "  " +
 		padRight(dirtyPctStr, bufColDirtyPct) + "  " +
-		padRight(tempStr, bufColTemp) + "  " +
-		"  " + fmt.Sprintf("Σ %d tables", n)
+		padRight(tempStr, bufColTemp) + "  "
+	unit := "tables"
+	if tableW > 0 {
+		line += strings.Repeat(" ", partTypeColW+2+tableW+2)
+		unit = "relations"
+	}
+	line += "  " + fmt.Sprintf("Σ %d %s", n, unit)
 	return styleTotal.Render(line)
 }
 
-func renderBufferHeader(sort sortMode, sortDesc bool, barW int) string {
+func renderBufferHeader(sort sortMode, sortDesc bool, barW, tableW int) string {
 	// Pad: cursor (2) + bar slot (barW+2) + "  " then columns.
 	line := headerIndent(barW) +
 		padRight(sortMark("buffered", sort == sortBySize, sortDesc), bufColBuffered) + "  " +
@@ -756,8 +766,15 @@ func renderBufferHeader(sort sortMode, sortDesc bool, barW int) string {
 		padRight(sortMark("hit", sort == sortByHitRatio, sortDesc), bufColHit) + "  " +
 		padRight(sortMark("dirty", sort == sortByDirty, sortDesc), bufColDirty) + "  " +
 		padRight(sortMark("dirty%", sort == sortByDirtyPct, sortDesc), bufColDirtyPct) + "  " +
-		padRight(sortMark("temp", sort == sortByTemp, sortDesc), bufColTemp) + "  " +
-		"  " + sortMark("table", sort == sortByName, sortDesc)
+		padRight(sortMark("temp", sort == sortByTemp, sortDesc), bufColTemp) + "  "
+	if tableW > 0 {
+		// The name sort orders by table, then relation (bufStatName).
+		line += padRight("type", partTypeColW) + "  " +
+			padRight(sortMark("table", sort == sortByName, sortDesc), tableW) + "  " +
+			"  " + "relation"
+		return styleMuted.Render(line)
+	}
+	line += "  " + sortMark("table", sort == sortByName, sortDesc)
 	return styleMuted.Render(line)
 }
 
@@ -1021,7 +1038,7 @@ func (m *Model) renderSchemasTotals(s *screen) string {
 	return styleTotal.Render(line) + "\n"
 }
 
-func renderBufferRow(it item, st pg.TableBufferStat, maxSize, maxDirty int64, barW int, selected bool, barStyle lipgloss.Style) string {
+func renderBufferRow(it item, st pg.TableBufferStat, maxSize, maxDirty int64, barW int, selected bool, barStyle lipgloss.Style, tableW int) string {
 	bar := renderSolidBar(it.size, maxSize, barW, barStyle)
 	cursor := selectedCursor(selected)
 	name := highlightName(it.name, selected)
@@ -1041,6 +1058,21 @@ func renderBufferRow(it item, st pg.TableBufferStat, maxSize, maxDirty int64, ba
 	if st.DirtyBytes > 0 {
 		dirtyStr = costStyleRelative(float64(st.DirtyBytes), float64(maxDirty)).Render(humanize.Bytes(st.DirtyBytes))
 	}
+	if tableW > 0 {
+		// Split view: type | table | relation in place of the one name.
+		typeStr := strings.Repeat(" ", partTypeColW)
+		rel := st.Name
+		if st.Rel != nil {
+			// Padded on the raw label so the tint's escape codes don't skew the width.
+			p := bufRelPart(st.Rel)
+			typeStr = partTypeStyle(p).Render(padRight(partTypeLabel(p), partTypeColW))
+			rel = st.Rel.Name
+		}
+		table := padRight(highlightName(clipCells(bufTableName(st), tableW), selected), tableW)
+		name = typeStr + "  " + table + "  " + drillMark(it.hasChildren) + highlightName(rel, selected)
+	} else {
+		name = drillMark(it.hasChildren) + name
+	}
 	return cursor + bar + "  " +
 		padRight(bufStr, bufColBuffered) + "  " +
 		padRight(totStr, bufColTotal) + "  " +
@@ -1049,7 +1081,29 @@ func renderBufferRow(it item, st pg.TableBufferStat, maxSize, maxDirty int64, ba
 		padRight(dirtyStr, bufColDirty) + "  " +
 		padRight(dirtyPctCell(st), bufColDirtyPct) + "  " +
 		padRight(tempCell(st), bufColTemp) + "  " +
-		drillMark(it.hasChildren) + name
+		name
+}
+
+// bufSplitWidths sizes the split view's table column to the longest table name
+// loaded and its relation column (the barReserve budget; the last column isn't
+// padded) to the longest relname, each capped so one very long name can't
+// starve the bar. Measured over every row, not the filtered ones, so the
+// columns hold still while typing a filter. Both are 0 in the per-table view,
+// which has neither column.
+func bufSplitWidths(s *screen) (tableW, relW int) {
+	if !s.buf.byRel {
+		return 0, 0
+	}
+	tableW, relW = len("table"), len("relation")
+	for _, it := range s.items {
+		st, ok := it.data.(pg.TableBufferStat)
+		if !ok || st.Rel == nil {
+			continue
+		}
+		tableW = max(tableW, displayWidth(bufTableName(st)))
+		relW = max(relW, displayWidth(st.Rel.Name))
+	}
+	return min(tableW, bufColTableMax), min(relW, bufColRelMax)
 }
 
 // scrollWindow renders a height-line slice of body starting at *offset, clamping

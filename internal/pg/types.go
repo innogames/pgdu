@@ -181,18 +181,41 @@ type Column struct {
 
 // TableBufferStat is one row of the shared-buffers view: how much of
 // shared_buffers a table currently occupies (heap + toast + indexes summed)
-// and its cumulative cache hit ratio.
+// and its cumulative cache hit ratio — or, with Rel set, the same figures for
+// one storage relation of the table.
 type TableBufferStat struct {
 	DB            string
 	Schema        string
 	Name          string
 	OID           uint32
 	BufferedBytes int64   // pages in shared_buffers * block_size
-	TotalBytes    int64   // pg_total_relation_size(oid), for "% cached" context
-	Hits          int64   // heap_blks_hit + idx_blks_hit
-	Reads         int64   // heap_blks_read + idx_blks_read
+	TotalBytes    int64   // on-disk size over all forks, for "% cached" context
+	Hits          int64   // pg_statio *_blks_hit of the relations counted
+	Reads         int64   // pg_statio *_blks_read of the relations counted
 	DirtyBytes    int64   // buffered pages flagged isdirty * block_size
-	UsageAvg      float64 // mean clock-sweep usagecount across this table's buffers (0..5)
+	UsageAvg      float64 // mean clock-sweep usagecount across these buffers (0..5)
+
+	// Rel is the one storage relation a per-relation row counts (the buffers
+	// list's split view); nil on the per-table roll-up. OID/Schema/Name always
+	// stay the owning table's, so describe and the breadcrumb resolve the table.
+	Rel *BufferRel
+}
+
+// BufferRel names the storage relation behind a per-relation TableBufferStat.
+type BufferRel struct {
+	Kind         PartKind // PartHeap, PartToast (TOAST heap + its index, as in the parts view) or PartIndex
+	OID          uint32   // the relation itself: the table, its TOAST heap or the index
+	Name         string   // the table's name for the heap, "pg_toast_N" for toast, else the index's
+	AccessMethod string   // index access method ("btree", "gin", …); "" for heap and toast
+}
+
+// Key identifies the row among its siblings: the relation on a per-relation
+// row, else the table.
+func (s TableBufferStat) Key() uint32 {
+	if s.Rel != nil {
+		return s.Rel.OID
+	}
+	return s.OID
 }
 
 // CachedFrac returns BufferedBytes / TotalBytes in [0,1], or -1 when the

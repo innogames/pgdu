@@ -46,8 +46,9 @@ func barReserve(s *screen) int {
 	switch l {
 	case levelBufferTables:
 		// cursor + bar(brackets) + buffered + total + cached + hit + dirty +
-		// dirty% + temp + mark + name
-		return colCursor + colBrackets +
+		// dirty% + temp + mark + name, the split view's name being
+		// type + table + relation (bufSplitWidths)
+		w := colCursor + colBrackets +
 			bufColBuffered + colGutter +
 			bufColTotal + colGutter +
 			bufColCached + colGutter +
@@ -55,7 +56,11 @@ func barReserve(s *screen) int {
 			bufColDirty + colGutter +
 			bufColDirtyPct + colGutter +
 			bufColTemp + colGutter +
-			colMark + colName
+			colMark
+		if tableW, relW := bufSplitWidths(s); tableW > 0 {
+			return w + partTypeColW + colGutter + tableW + colGutter + relW
+		}
+		return w + colName
 	case levelShmem:
 		// cursor + bar(brackets) + size + share% + group + name
 		return colCursor + colBrackets +

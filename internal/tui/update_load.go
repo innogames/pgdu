@@ -108,7 +108,7 @@ func (m *Model) loadCurrent() tea.Cmd {
 		}
 		s.buf.usage = nil
 		s.buf.usageErr = nil
-		return m.loadBufferDetailCmd(s.db, s.buf.detail.OID)
+		return m.loadBufferDetailCmd(s.db, *s.buf.detail)
 	case levelShmem:
 		return m.loadShmemCmd(s.db)
 	case levelParts:
