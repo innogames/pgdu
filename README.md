@@ -28,8 +28,9 @@ does — no daemon, no collector, no web server.
   byte-level layout of the tuple header, null bitmap, and each attribute.
 - **Shared buffers: who owns the cache, and why** — per-relation buffered bytes,
   cached %, hit %, dirty bytes and dirty %, and a usage-count "temperature"
-  histogram with dirty and pinned buffers per band; `p` reads a hot table page
-  by page, `m` maps the whole shared-memory segment.
+  histogram with dirty and pinned buffers per band, per table or split into heap,
+  TOAST, and each index (`tab`); `p` reads a hot table page by page, `m` maps the
+  whole shared-memory segment.
 - **System overview as a one-screen health check** — memory sizing against the
   host (huge pages, page cache, swap), buffer-cache temperature and miss latency,
   checkpoint interval and cost with a recommended `max_wal_size`, freeze ages and
@@ -366,16 +367,20 @@ of the table that is cached, hit ratio, **dirty bytes** and the **dirty share**
 of what is buffered (graded on fixed thresholds, since a mostly-dirty cache means
 write pressure whatever the table's size), and a mean usage count coloured
 cold → hot — so a table that sits in the pool without being reused, or one whose
-pages are all dirty and hot, is obvious at a glance.
+pages are all dirty and hot, is obvious at a glance. Rows are per table (heap,
+TOAST and indexes summed) by default; `tab` splits each table into its heap,
+TOAST, and index rows with the same columns apiece, so a fat index stands out
+from its table, and `tab` again folds them back.
 
 ![Shared buffers](docs/shared_buffers.png)
 
 Drill into a relation for its **buffer detail**: cache footprint, hit ratio,
 dirty bytes as a share of what is buffered, and the relation's own histogram from
 cold (evictable) to hot (frequently reused), with the dirty and pinned portion of
-each band marked. Heap, TOAST, and indexes are counted together. From either
-screen `p` opens the table's heap pages in the page inspector, so a hot or dirty
-table can be read page by page.
+each band marked. Heap, TOAST, and indexes are counted together, or just the one
+relation when opened from the split view. From either screen `p` opens the pages
+in the page inspector — the table's heap, or the split-view relation's own heap,
+TOAST, or index pages — so a hot or dirty relation can be read page by page.
 
 ![Shared buffer detail](docs/shared_buffer_details.png)
 

@@ -639,11 +639,64 @@ func bufferStatToItem(s pg.TableBufferStat) item {
 	// detail is left empty: the per-row figures (table size, cached %, hit %)
 	// are rendered as their own columns in renderBufferList.
 	return item{
-		name:        s.Schema + "." + s.Name,
+		name:        bufStatName(s),
 		size:        s.BufferedBytes,
-		hasChildren: true, // Enter → per-table buffer detail
+		hasChildren: true, // Enter → per-table (or per-relation) buffer detail
 		data:        s,
 	}
+}
+
+// bufStatName is a buffers-list row's name: the / filter's text and the name
+// sort's key. A split-view row carries its table and its own relname ("orders
+// › orders_pkey", the heap just the table, whose relname it is), so the filter
+// finds a row by either and the name sort keeps a table's family together;
+// the renderer shows the two as separate columns.
+func bufStatName(s pg.TableBufferStat) string {
+	name := bufTableName(s)
+	if s.Rel != nil && s.Rel.Kind != pg.PartHeap {
+		name += " › " + s.Rel.Name
+	}
+	return name
+}
+
+// bufTableName is a buffers row's table as the breadcrumb would spell it: bare
+// in public, schema-qualified elsewhere (the single-schema fast path leaves
+// the schema out of the trail, so the row keeps it).
+func bufTableName(s pg.TableBufferStat) string {
+	if s.Schema == "public" {
+		return s.Name
+	}
+	return s.Schema + "." + s.Name
+}
+
+// bufRelLabel names a relation within its table: "heap", "toast" or the
+// index's own name.
+func bufRelLabel(r *pg.BufferRel) string {
+	if r.Kind == pg.PartIndex {
+		return r.Name
+	}
+	return r.Kind.String()
+}
+
+// bufRelPart is a split-view relation as the parts view's pg.Part, for the
+// shared type-column label and tint.
+func bufRelPart(r *pg.BufferRel) pg.Part {
+	return pg.Part{Kind: r.Kind, OID: r.OID, Name: r.Name, AccessMethod: r.AccessMethod}
+}
+
+// buildBufferItems projects the loaded per-relation footprint onto the
+// buffers list: one row per relation in the split view, else folded per
+// table. Callers run applySort afterwards.
+func buildBufferItems(s *screen) []item {
+	stats := s.buf.rels
+	if !s.buf.byRel {
+		stats = pg.RollUpBufferStats(stats)
+	}
+	items := make([]item, 0, len(stats))
+	for _, st := range stats {
+		items = append(items, bufferStatToItem(st))
+	}
+	return items
 }
 
 func shmemAllocToItem(a pg.ShmemAllocation) item {

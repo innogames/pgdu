@@ -2,7 +2,6 @@ package pg
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -98,10 +97,11 @@ func (c *Client) EnsureBufferCache(ctx context.Context, db string) error {
 	return c.ensureExtension(ctx, db, "pg_buffercache", c.bufCacheReady)
 }
 
-// TableBufferStats lists per-table shared-buffer footprint and cumulative
-// hit/read counters for one schema. Buffer footprint sums heap + toast +
-// indexes — the natural answer to "which table is using the cache".
-func (c *Client) TableBufferStats(ctx context.Context, db, schema string) ([]TableBufferStat, error) {
+// RelationBufferStats lists the shared-buffer footprint and cumulative
+// hit/read counters of every storage relation of the tables in one schema:
+// heap, TOAST (heap + its index) and each index, one row apiece with Rel set.
+// RollUpBufferStats folds them into the per-table view.
+func (c *Client) RelationBufferStats(ctx context.Context, db, schema string) ([]TableBufferStat, error) {
 	if err := c.EnsureBufferCache(ctx, db); err != nil {
 		return nil, err
 	}
@@ -109,21 +109,67 @@ func (c *Client) TableBufferStats(ctx context.Context, db, schema string) ([]Tab
 	if err != nil {
 		return nil, err
 	}
-	return collect(ctx, pool, fmt.Sprintf("table buffer stats in %q.%q", db, schema), sqlBufferStats, []any{schema},
-		func(row pgx.CollectableRow) (TableBufferStat, error) {
-			s := TableBufferStat{DB: db, Schema: schema}
-			err := row.Scan(&s.OID, &s.Schema, &s.Name, &s.BufferedBytes, &s.TotalBytes,
-				&s.Hits, &s.Reads, &s.DirtyBytes, &s.UsageAvg)
-			return s, err
-		})
+	return collect(ctx, pool, fmt.Sprintf("relation buffer stats in %q.%q", db, schema),
+		sqlBufferRelStats, []any{schema}, scanBufferRelStat(db))
+}
+
+// scanBufferRelStat scans one sqlBufferRelStats row.
+func scanBufferRelStat(db string) func(pgx.CollectableRow) (TableBufferStat, error) {
+	return func(row pgx.CollectableRow) (TableBufferStat, error) {
+		s := TableBufferStat{DB: db, Rel: &BufferRel{}}
+		var kind string
+		err := row.Scan(&s.OID, &s.Schema, &s.Name, &kind, &s.Rel.OID, &s.Rel.Name, &s.Rel.AccessMethod,
+			&s.BufferedBytes, &s.TotalBytes, &s.Hits, &s.Reads, &s.DirtyBytes, &s.UsageAvg)
+		switch kind {
+		case "toast":
+			s.Rel.Kind = PartToast
+		case "index":
+			s.Rel.Kind = PartIndex
+		default:
+			s.Rel.Kind = PartHeap
+		}
+		return s, err
+	}
+}
+
+// RollUpBufferStats folds per-relation rows into one row per table, in the
+// order tables first appear. Bytes and I/O counters sum; the mean usagecount is
+// re-weighted by buffered bytes, which reconstructs the pooled per-buffer mean
+// exactly since every buffer is one block.
+func RollUpBufferStats(rels []TableBufferStat) []TableBufferStat {
+	at := make(map[uint32]int, len(rels))
+	out := make([]TableBufferStat, 0, len(rels))
+	var usage []float64
+	for _, r := range rels {
+		i, ok := at[r.OID]
+		if !ok {
+			i = len(out)
+			at[r.OID] = i
+			out = append(out, TableBufferStat{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
+			usage = append(usage, 0)
+		}
+		t := &out[i]
+		t.BufferedBytes += r.BufferedBytes
+		t.TotalBytes += r.TotalBytes
+		t.Hits += r.Hits
+		t.Reads += r.Reads
+		t.DirtyBytes += r.DirtyBytes
+		usage[i] += r.UsageAvg * float64(r.BufferedBytes)
+	}
+	for i := range out {
+		if out[i].BufferedBytes > 0 {
+			out[i].UsageAvg = usage[i] / float64(out[i].BufferedBytes)
+		}
+	}
+	return out
 }
 
 // TableBufferStatByOID returns the shared-buffer footprint (buffered/total/
-// dirty bytes, cumulative hits/reads, mean usagecount) for one relation by OID,
+// dirty bytes, cumulative hits/reads, mean usagecount) for one table by OID,
 // summing its heap, toast and indexes — the cache-footprint figures for the
 // describe-table view. A relation with no buffered pages (or one that no longer
 // exists) yields a zero-value stat and no error, so callers can render "not
-// cached" without special-casing pgx.ErrNoRows.
+// cached" without special-casing an empty result.
 func (c *Client) TableBufferStatByOID(ctx context.Context, db string, oid uint32) (TableBufferStat, error) {
 	if err := c.EnsureBufferCache(ctx, db); err != nil {
 		return TableBufferStat{}, err
@@ -132,28 +178,27 @@ func (c *Client) TableBufferStatByOID(ctx context.Context, db string, oid uint32
 	if err != nil {
 		return TableBufferStat{}, err
 	}
-	s := TableBufferStat{DB: db, OID: oid}
-	err = pool.QueryRow(ctx, sqlBufferStatByOID, oid).Scan(
-		&s.OID, &s.Schema, &s.Name, &s.BufferedBytes, &s.TotalBytes,
-		&s.Hits, &s.Reads, &s.DirtyBytes, &s.UsageAvg)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return TableBufferStat{DB: db, OID: oid}, nil
-	}
+	rels, err := collect(ctx, pool, fmt.Sprintf("table buffer stat for oid %d in %q", oid, db),
+		sqlBufferRelStatsByOID, []any{oid}, scanBufferRelStat(db))
 	if err != nil {
-		return TableBufferStat{}, fmt.Errorf("table buffer stat for oid %d in %q: %w", oid, db, err)
+		return TableBufferStat{}, err
 	}
-	return s, nil
+	if tabs := RollUpBufferStats(rels); len(tabs) > 0 {
+		return tabs[0], nil
+	}
+	return TableBufferStat{DB: db, OID: oid}, nil
 }
 
-// TableBufferUsageCounts returns the per-table clock-sweep temperature
-// histogram (usagecount 0..5 → buffers/dirty/pinned) for one relation, summing
-// its heap, toast and index filenodes. Always six rows (empty buckets included)
+// TableBufferUsageCounts returns the clock-sweep temperature histogram
+// (usagecount 0..5 → buffers/dirty/pinned) for one relation: with whole set,
+// the table's heap, toast and index filenodes together; otherwise oid's alone
+// (a TOAST heap with its index). Always six rows (empty buckets included)
 // so the caller can render a stable bar. Also returns the cluster block_size so
 // the caller can express the (page-counted) histogram in bytes — and recompute
 // the buffered/dirty footprint from this same fresh snapshot, keeping it
 // consistent with the histogram rather than the older list-load snapshot.
 // Powers the buffer-detail drill-down.
-func (c *Client) TableBufferUsageCounts(ctx context.Context, db string, oid uint32) ([]BufferUsageCount, int64, error) {
+func (c *Client) TableBufferUsageCounts(ctx context.Context, db string, oid uint32, whole bool) ([]BufferUsageCount, int64, error) {
 	if err := c.EnsureBufferCache(ctx, db); err != nil {
 		return nil, 0, err
 	}
@@ -165,8 +210,8 @@ func (c *Client) TableBufferUsageCounts(ctx context.Context, db string, oid uint
 	if err := pool.QueryRow(ctx, "SELECT current_setting('block_size')::bigint").Scan(&blockSize); err != nil {
 		return nil, 0, fmt.Errorf("block size in %q: %w", db, err)
 	}
-	counts, err := collect(ctx, pool, fmt.Sprintf("table buffer usage counts for oid %d in %q", oid, db),
-		sqlBufferTableUsageCounts, []any{oid}, scanBufferUsageCount)
+	counts, err := collect(ctx, pool, fmt.Sprintf("buffer usage counts for oid %d in %q", oid, db),
+		sqlBufferTableUsageCounts, []any{oid, whole}, scanBufferUsageCount)
 	return counts, blockSize, err
 }
 

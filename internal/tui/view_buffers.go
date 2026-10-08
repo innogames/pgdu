@@ -52,6 +52,9 @@ func (m *Model) renderBufferInfo(height int) string {
 	b.WriteString("  " + mu("Tables ranked 11+ use the default bar colour.  ") +
 		styleBadge.Render("↵") + mu(" opens a per-table breakdown, ") +
 		styleBadge.Render("p") + mu(" → its heap pages in the page inspector.") + "\n")
+	b.WriteString("  " + styleBadge.Render("tab") + mu(" splits each table into its heap, toast (heap + its index) and index rows,") + "\n")
+	b.WriteString("  " + mu("each with its own figures; ") + styleBadge.Render("↵") + mu("/") + styleBadge.Render("p") +
+		mu(" then open that relation, ") + styleBadge.Render("tab") + mu(" folds back per table.") + "\n")
 
 	return padInfo(&b, height)
 }
@@ -115,9 +118,10 @@ func bufferDetailBarWidth(termW int) int {
 	return w
 }
 
-// renderBufferDetail draws the single-table drill-down: the cache-footprint
-// figures carried from the parent row (rendered synchronously), then the
-// clock-sweep temperature histogram for this table's buffers (loaded async).
+// renderBufferDetail draws the single-table (or split-view relation)
+// drill-down: the cache-footprint figures carried from the parent row
+// (rendered synchronously), then the clock-sweep temperature histogram for its
+// buffers (loaded async).
 func (m *Model) renderBufferDetail(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
@@ -130,7 +134,7 @@ func (m *Model) renderBufferDetail(s *screen, height int) string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString("  " + styleSelected.Render(st.Schema+"."+st.Name) +
+	b.WriteString("  " + styleSelected.Render(bufDetailTitle(st)) +
 		mu("  ·  shared-buffers detail") + "\n\n")
 
 	barW := bufferDetailBarWidth(m.width)
@@ -182,9 +186,13 @@ func (m *Model) renderBufferDetail(s *screen, height int) string {
 		pct := float64(dirtyBytes) / float64(bufferedBytes) * 100
 		dirtyVal = bloatPercentStyle(int(pct)).Render(fmt.Sprintf("%s (%.1f%% of buffered)", humanize.Bytes(dirtyBytes), pct))
 	}
+	sizeLabel := "table size"
+	if st.Rel != nil {
+		sizeLabel = "size"
+	}
 	rows := [][2]string{
 		{"buffered", humanize.Bytes(bufferedBytes)},
-		{"table size", humanize.Bytes(st.TotalBytes)},
+		{sizeLabel, humanize.Bytes(st.TotalBytes)},
 		{"cached", cachedVal},
 		{"hit ratio", hitVal},
 		{"dirty", dirtyVal},
@@ -239,6 +247,20 @@ func (m *Model) renderBufferDetail(s *screen, height int) string {
 	return padInfo(&b, height)
 }
 
+// bufDetailTitle names what a buffer-detail screen covers: the table, or a
+// split-view relation with its owner ("orders_pkey · btree index of orders").
+func bufDetailTitle(st *pg.TableBufferStat) string {
+	table := bufTableName(*st)
+	switch {
+	case st.Rel == nil:
+		return table
+	case st.Rel.Kind == pg.PartIndex:
+		return st.Rel.Name + " · " + partTypeLabel(bufRelPart(st.Rel)) + " index of " + table
+	default:
+		return st.Rel.Kind.String() + " of " + table
+	}
+}
+
 // renderBufferDetailInfo is the ? overlay for the per-table buffer-detail
 // screen: it explains the cache-footprint figures and the clock-sweep
 // temperature histogram, sized to fill `height` lines.
@@ -250,8 +272,9 @@ func (m *Model) renderBufferDetailInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" cache footprint ") + "  " +
 		mu("how much of this table lives in shared_buffers") + "\n")
-	b.WriteString("    " + mu("buffered     bytes of this table (heap + toast + all indexes) cached") + "\n")
-	b.WriteString("    " + mu("table size   on-disk pg_total_relation_size, for context") + "\n")
+	b.WriteString("    " + mu("buffered     bytes cached: the table's heap + toast + all indexes, or the") + "\n")
+	b.WriteString("    " + mu("             one relation when opened from the split (tab) view") + "\n")
+	b.WriteString("    " + mu("table size   on-disk size over all forks (pg_total_relation_size), for context") + "\n")
 	b.WriteString("    " + mu("cached       buffered ÷ table size — how much of the table fits in cache") + "\n")
 	b.WriteString("    " + mu("hit ratio    cumulative shared-buffer hits ÷ (hits + disk reads)") + "\n")
 	b.WriteString("    " + mu("dirty        bytes modified in memory, not yet flushed to disk") + "\n")
@@ -266,7 +289,7 @@ func (m *Model) renderBufferDetailInfo(height int) string {
 	b.WriteString("    " + sw(styleDirty) + "  " + mu("dirty        the modified-but-unflushed slice of each band — pages the") + "\n")
 	b.WriteString("    " + mu("                 checkpointer still owes a write; lots of hot+dirty = write pressure") + "\n")
 	b.WriteString("    " + mu("each row's bar is scaled to the table's busiest band, so band sizes compare.") + "\n\n")
-	b.WriteString("  " + styleBadge.Render("p") + mu(" opens this table's heap pages in the page inspector.") + "\n")
+	b.WriteString("  " + styleBadge.Render("p") + mu(" opens the pages in the page inspector: the table's heap, or the relation's own.") + "\n")
 
 	return padInfo(&b, height)
 }
@@ -424,7 +447,7 @@ func topBufferSlices(items []item, total int64, width int) []bufferSlice {
 		if !ok || st.BufferedBytes <= 0 {
 			continue
 		}
-		pairs = append(pairs, pair{oid: st.OID, name: st.Schema + "." + st.Name, bytes: st.BufferedBytes})
+		pairs = append(pairs, pair{oid: st.Key(), name: it.name, bytes: st.BufferedBytes})
 	}
 	sort.Slice(pairs, func(i, j int) bool { return pairs[i].bytes > pairs[j].bytes })
 	if cap := len(bufferSlicePalette); len(pairs) > cap {
@@ -444,9 +467,10 @@ func topBufferSlices(items []item, total int64, width int) []bufferSlice {
 }
 
 // rankBuffersByOID assigns every buffer-stat item a rank (0 = biggest
-// BufferedBytes) so row bars in the list can pick a palette colour by
+// BufferedBytes), keyed by TableBufferStat.Key so split-view relations rank
+// on their own, so row bars in the list can pick a palette colour by
 // rank. The same rank is used for the top-N slices on the summary bar,
-// so a row's colour matches its slice exactly for tables in the top-N.
+// so a row's colour matches its slice exactly for rows in the top-N.
 func rankBuffersByOID(items []item) map[uint32]int {
 	type entry struct {
 		oid   uint32
@@ -458,7 +482,7 @@ func rankBuffersByOID(items []item) map[uint32]int {
 		if !ok || st.BufferedBytes <= 0 {
 			continue
 		}
-		es = append(es, entry{oid: st.OID, bytes: st.BufferedBytes})
+		es = append(es, entry{oid: st.Key(), bytes: st.BufferedBytes})
 	}
 	sort.Slice(es, func(i, j int) bool { return es[i].bytes > es[j].bytes })
 	out := make(map[uint32]int, len(es))

@@ -398,6 +398,13 @@ func TestBreadcrumbSchemaQualifier(t *testing.T) {
 			{level: levelBufferDetail, tool: toolBuffers, db: "shop", schema: "app",
 				buf: bufState{detail: &pg.TableBufferStat{DB: "shop", Schema: "app", Name: "orders"}}},
 		}, "db:5432 ▸ buffers ▸ shop ▸ app.orders"},
+		{"buffers split view → index detail", []*screen{
+			{level: levelDatabases, tool: toolBuffers},
+			{level: levelBufferTables, tool: toolBuffers, db: "shop", schema: "app"},
+			{level: levelBufferDetail, tool: toolBuffers, db: "shop", schema: "app",
+				buf: bufState{detail: &pg.TableBufferStat{DB: "shop", Schema: "app", Name: "orders",
+					Rel: &pg.BufferRel{Kind: pg.PartIndex, OID: 11, Name: "orders_pkey"}}}},
+		}, "db:5432 ▸ buffers ▸ shop ▸ app.orders › orders_pkey"},
 		{"page inspector fast path, index → heap hop", []*screen{
 			{level: levelDatabases, tool: toolPageInspect},
 			{level: levelRelations, tool: toolPageInspect, db: "shop", schema: "app"},

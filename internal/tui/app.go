@@ -608,10 +608,16 @@ type bufState struct {
 	// Populated on the levelBufferTables screen alongside the row data.
 	summary    *pg.BufferCacheSummary
 	summaryErr error
+	// rels is the loaded per-relation footprint (heap, toast, each index);
+	// buildBufferItems projects it as one row per table, or as-is when byRel
+	// (the tab split view), so tab never re-scans pg_buffercache.
+	rels  []pg.TableBufferStat
+	byRel bool
 
-	// levelBufferDetail state: detail is the table being inspected (carried
-	// from the parent row, so the overview figures render immediately); usage
-	// is its clock-sweep temperature histogram, loaded asynchronously.
+	// levelBufferDetail state: detail is the table (or, from the split view,
+	// the relation) being inspected, carried from the parent row so the
+	// overview figures render immediately; usage is its clock-sweep
+	// temperature histogram, loaded asynchronously.
 	detail    *pg.TableBufferStat
 	usage     []pg.BufferUsageCount
 	blockSize int64 // cluster block_size, for expressing the histogram in bytes

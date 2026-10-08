@@ -212,13 +212,20 @@ func csvSchema(s *screen) (header []string, row func(it item) []string, ok bool)
 			}, true
 
 	case levelBufferTables:
-		return []string{"schema", "name", "oid", "buffered_bytes", "total_bytes", "hits", "reads", "hit_ratio"},
+		// kind/relation/relation_oid name the split view's relation; a per-table
+		// row is kind "table" with the table itself as the relation.
+		return []string{"schema", "name", "oid", "buffered_bytes", "total_bytes", "hits", "reads", "hit_ratio", "kind", "relation", "relation_oid"},
 			func(it item) []string {
 				st, ok := it.data.(pg.TableBufferStat)
 				if !ok {
 					return nil
 				}
-				return []string{st.Schema, st.Name, csvUint(st.OID), csvInt(st.BufferedBytes), csvInt(st.TotalBytes), csvInt(st.Hits), csvInt(st.Reads), numStr(st.HitRatio())}
+				kind, rel := "table", st.Name
+				if st.Rel != nil {
+					kind, rel = st.Rel.Kind.String(), st.Rel.Name
+				}
+				return []string{st.Schema, st.Name, csvUint(st.OID), csvInt(st.BufferedBytes), csvInt(st.TotalBytes), csvInt(st.Hits), csvInt(st.Reads), numStr(st.HitRatio()),
+					kind, rel, csvUint(st.Key())}
 			}, true
 
 	case levelShmem:

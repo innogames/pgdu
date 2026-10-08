@@ -520,7 +520,13 @@ func crumbText(sc, prev *screen, named crumbScope) (text string, names crumbScop
 		return "heap", names
 	case levelBufferDetail:
 		if d := sc.buf.detail; d != nil {
-			return named.qualify(sc.db, d.Schema, d.Name), crumbScope{schema: d.Schema}
+			text = named.qualify(sc.db, d.Schema, d.Name)
+			if d.Rel != nil {
+				// A split-view row: name the relation within its table, the heap
+				// too, so the trail tells it apart from the whole table's detail.
+				text += " › " + bufRelLabel(d.Rel)
+			}
+			return text, crumbScope{schema: d.Schema}
 		}
 	case levelShmem:
 		return "shmem", names

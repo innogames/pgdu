@@ -22,7 +22,7 @@ type bufferSummaryLoadedMsg struct {
 
 type bufferDetailLoadedMsg struct {
 	db        string
-	oid       uint32
+	oid       uint32 // the detail's TableBufferStat.Key
 	counts    []pg.BufferUsageCount
 	blockSize int64
 	err       error
@@ -36,7 +36,7 @@ type shmemLoadedMsg struct {
 
 func (m *Model) loadBufferStatsCmd(db, schema string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
-		stats, err := m.client.TableBufferStats(ctx, db, schema)
+		stats, err := m.client.RelationBufferStats(ctx, db, schema)
 		return bufferStatsLoadedMsg{db: db, schema: schema, stats: stats, err: err}
 	})
 }
@@ -54,9 +54,13 @@ func (m *Model) loadBufferSummaryCmd(db string) tea.Cmd {
 	})
 }
 
-func (m *Model) loadBufferDetailCmd(db string, oid uint32) tea.Cmd {
+// loadBufferDetailCmd fetches the temperature histogram of a buffers-list
+// row: the whole table for a per-table row, the one relation for a split-view
+// row.
+func (m *Model) loadBufferDetailCmd(db string, st pg.TableBufferStat) tea.Cmd {
+	oid, whole := st.Key(), st.Rel == nil
 	return query(func(ctx context.Context) tea.Msg {
-		counts, blockSize, err := m.client.TableBufferUsageCounts(ctx, db, oid)
+		counts, blockSize, err := m.client.TableBufferUsageCounts(ctx, db, oid, whole)
 		return bufferDetailLoadedMsg{db: db, oid: oid, counts: counts, blockSize: blockSize, err: err}
 	})
 }

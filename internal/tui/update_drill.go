@@ -67,7 +67,7 @@ func (m *Model) drillIn() tea.Cmd {
 		// figures render synchronously; only the temperature histogram is fetched.
 		stat := st
 		next := &screen{
-			level: levelBufferDetail, title: st.Schema + "." + st.Name, tool: s.tool,
+			level: levelBufferDetail, title: bufStatName(st), tool: s.tool,
 			db: s.db, schema: st.Schema, buf: bufState{detail: &stat}}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()

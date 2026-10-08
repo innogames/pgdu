@@ -27,6 +27,7 @@ type keyMap struct {
 	Columns          key.Binding
 	ResetCols        key.Binding // r: reset column visibility to defaults (inside the C picker)
 	StmtView         key.Binding // tab (top queries): queries → by table → by type
+	BufSplit         key.Binding // tab (buffers list): per table ↔ per relation (heap/toast/index)
 	Filter           key.Binding
 	Seek             key.Binding
 	// GinNextLeaf jumps the GIN page list to the next posting-tree leaf page,
@@ -170,6 +171,7 @@ func defaultKeys() keyMap {
 		DeleteSnapshot: key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete snapshot")),
 		Columns:        key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "configure columns")),
 		StmtView:       key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "queries/by table/by type")),
+		BufSplit:       key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "by relation")),
 		ResetCols:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reset to defaults")),
 		Filter:         key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		Seek:           key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "seek to key")),
@@ -241,6 +243,17 @@ func (k *keyMap) applyContext(s *screen) {
 	k.StmtView.SetEnabled(stmtTable)
 	if stmtTable {
 		k.StmtView.SetHelp("tab", s.stat.view.next().label())
+	}
+	// tab splits the buffers list into heap/toast/index rows and back, named
+	// for the view it leads to like StmtView.
+	bufSplit := s.level == levelBufferTables && (s.extPrompt == nil || !s.extPrompt.blocking)
+	k.BufSplit.SetEnabled(bufSplit)
+	if bufSplit {
+		help := "by relation"
+		if s.buf.byRel {
+			help = "by table"
+		}
+		k.BufSplit.SetHelp("tab", help)
 	}
 	// C (Columns) is the column-config picker on the top-queries table, the
 	// activity table, the table overview, diagnostic results and the heap
@@ -395,6 +408,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	if k.StmtView.Enabled() {
 		b = append(b, k.StmtView)
 	}
+	if k.BufSplit.Enabled() {
+		b = append(b, k.BufSplit)
+	}
 	if k.logJumpInFooter {
 		b = append(b, k.LogJump)
 	}
@@ -448,7 +464,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Refresh, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
-		{k.StmtView, k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
+		{k.StmtView, k.BufSplit, k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
 		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.JumpIO, k.Progress, k.Settings},
 		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump, k.LogParams, k.OpenLog},
 		{k.Help, k.Quit},
