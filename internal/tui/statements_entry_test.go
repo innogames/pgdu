@@ -237,3 +237,46 @@ func TestStatementsEntryWindowsDefaultSortDesc(t *testing.T) {
 	m.onSnapshotFrozenLoaded(snapshotFrozenLoadedMsg{end: end, cumulative: true})
 	check(t, m, frozen)
 }
+
+// A frozen window's header names both ends with their dates, what the start is
+// (stats reset or snapshot) and how long the window is; a same-day end drops its
+// date, and an unknown reset time still renders as a loaded window.
+func TestFrozenWindowHeader(t *testing.T) {
+	at := func(s string) time.Time {
+		ts, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.Local)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ts
+	}
+	header := func(msg snapshotFrozenLoadedMsg) string {
+		st := &screen{level: levelStatements, tool: toolQueries, db: "app"}
+		m := newTestModel(st)
+		m.onSnapshotFrozenLoaded(msg)
+		return ansi.Strip(m.renderStatementsHeader(st))
+	}
+	cases := []struct {
+		name string
+		msg  snapshotFrozenLoadedMsg
+		want []string
+	}{
+		{"cumulative", snapshotFrozenLoadedMsg{cumulative: true,
+			end: &pg.Snapshot{CapturedAt: at("2026-09-28 07:24:18"), StatsReset: at("2026-09-22 12:34:56")}},
+			[]string{"over 5d 18h", "2026-09-22 12:34:56 stats reset → 2026-09-28 07:24:18 snapshot", "frozen"}},
+		{"same-day snapshots", snapshotFrozenLoadedMsg{
+			base: &pg.Snapshot{CapturedAt: at("2026-09-28 06:19:17")},
+			end:  &pg.Snapshot{CapturedAt: at("2026-09-28 07:24:18")}},
+			[]string{"over 1h 05m", "2026-09-28 06:19:17 snapshot → 07:24:18 snapshot"}},
+		{"unknown reset", snapshotFrozenLoadedMsg{cumulative: true,
+			end: &pg.Snapshot{CapturedAt: at("2026-09-28 07:24:18")}},
+			[]string{"since last reset → 2026-09-28 07:24:18 snapshot", "frozen"}},
+	}
+	for _, c := range cases {
+		got := header(c.msg)
+		for _, w := range c.want {
+			if !strings.Contains(got, w) {
+				t.Errorf("%s: header %q lacks %q", c.name, got, w)
+			}
+		}
+	}
+}

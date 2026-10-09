@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"pgdu/internal/pg"
@@ -130,28 +131,27 @@ func planTimeMetric(q pg.QueryStat, trackPlanning bool, mu func(...string) strin
 func (m *Model) renderStatementsHeader(s *screen) string {
 	mu := styleMuted.Render
 	badge := styleHeader.Render(" " + s.stat.view.label() + " ")
-	if s.stat.baselineAt.IsZero() {
-		return "  " + badge + "  " + mu("opening window — run some queries…")
-	}
 	// The window span and the refresh state are the same whichever view is up;
 	// the count names what the view's rows are, and the key hints name the
 	// actions that apply to it.
 	var line string
 	switch {
 	case s.stat.endSnap != nil:
-		// Frozen A→B diff between two snapshots: no live "now", so the window is the
-		// fixed span between the two capture times and there's nothing to refresh.
-		line = "  " + badge + "  " +
-			styleSelected.Render(s.stat.baselineAt.Format("15:04:05")) + mu(" → ") +
-			styleSelected.Render(s.stat.sampledAt.Format("15:04:05")) +
-			mu("  ·  snapshot diff (frozen)  ·  "+m.statementsCount(s)+"  ·  "+m.statementsHints(s, "R for live"))
+		// Frozen window ending at a snapshot: no live "now", so it's the fixed span
+		// between the two anchors and there's nothing to refresh. Checked before the
+		// opening-window guard: a cumulative window whose stats_reset is unknown has
+		// a zero baselineAt yet is fully loaded.
+		line = "  " + badge + "  " + m.frozenWindowSpan(s) +
+			mu("  ·  frozen  ·  "+m.statementsCount(s)+"  ·  "+m.statementsHints(s, "R for live"))
+	case s.stat.baselineAt.IsZero():
+		return "  " + badge + "  " + mu("opening window — run some queries…")
 	case s.stat.baseSnap != nil:
 		// Disk baseline, live end: the window runs from the snapshot's capture time
 		// up to the latest live sample.
 		elapsed := max(s.stat.sampledAt.Sub(s.stat.baselineAt), 0)
 		line = "  " + badge + "  " +
 			mu("over the last ") + styleSelected.Render(fmtDuration(elapsed)) +
-			mu(" (since "+s.stat.baselineAt.Format("2006-01-02 15:04:05")+" snapshot) · live") +
+			mu(" (since "+s.stat.baselineAt.Local().Format("2006-01-02 15:04:05")+" snapshot) · live") +
 			mu(fmt.Sprintf("  ·  %s  ·  refresh %s  ·  %s", m.statementsCount(s), m.refreshLabel(),
 				m.statementsHints(s, "t cadence · C columns · R for live")))
 	default:
@@ -169,6 +169,37 @@ func (m *Model) renderStatementsHeader(s *screen) string {
 			mu(": ALTER SYSTEM SET pg_stat_statements.track_planning = on; SELECT pg_reload_conf();")
 	}
 	return line
+}
+
+// frozenWindowSpan is a frozen window's "over 5d 18h  2026-09-22 12:34:56 stats
+// reset → 2026-09-28 07:24:18 snapshot": a multi-day window is unreadable from
+// clock times alone, and the start may be the stats reset rather than a snapshot.
+// An unknown reset time leaves neither a start date nor a duration to show.
+func (m *Model) frozenWindowSpan(s *screen) string {
+	mu, hi := styleMuted.Render, styleSelected.Render
+	startKind := " snapshot"
+	if s.stat.cumulative {
+		startKind = " stats reset"
+	}
+	if s.stat.baselineAt.IsZero() {
+		return hi("since last reset") + mu(" → ") +
+			hi(s.stat.sampledAt.Local().Format("2006-01-02 15:04:05")) + mu(" snapshot")
+	}
+	start, end := fmtWindowSpan(s.stat.baselineAt, s.stat.sampledAt)
+	elapsed := max(s.stat.sampledAt.Sub(s.stat.baselineAt), 0)
+	return mu("over ") + hi(fmtDuration(elapsed)) + "  " +
+		hi(start) + mu(startKind+" → ") + hi(end) + mu(" snapshot")
+}
+
+// fmtWindowSpan formats a window's two ends in local time, the start always
+// dated and the end only when it falls on another day than the start.
+func fmtWindowSpan(a, b time.Time) (start, end string) {
+	a, b = a.Local(), b.Local()
+	const day, clock = "2006-01-02 ", "15:04:05"
+	if a.Format(day) == b.Format(day) {
+		return a.Format(day + clock), b.Format(clock)
+	}
+	return a.Format(day + clock), b.Format(day + clock)
 }
 
 // statementsCount names the view's rows for the header: the window's
