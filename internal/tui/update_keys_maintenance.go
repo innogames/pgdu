@@ -29,8 +29,8 @@ func (m *Model) openSettings(s *screen, filter string) tea.Cmd {
 }
 
 // handleMaintenanceEnter acts on the highlighted action row of the system
-// overview: a capacity row arms its reset confirmation (y executes), a
-// recommendation opens the screen that explains it.
+// overview: a capacity row arms its reset confirmation (y executes) unless its
+// extension is missing, a recommendation opens the screen that explains it.
 func (m *Model) handleMaintenanceEnter(s *screen) tea.Cmd {
 	st := &s.maintenance
 	rows := st.actionRows()
@@ -39,7 +39,9 @@ func (m *Model) handleMaintenanceEnter(s *screen) tea.Cmd {
 	}
 	row := rows[st.cursor]
 	if row.advice == nil {
-		st.pendingReset = row.reset
+		if !row.missing {
+			st.pendingReset = row.reset
+		}
 		return nil
 	}
 	return m.openAdviceTarget(s, *row.advice)

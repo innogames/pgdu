@@ -33,9 +33,36 @@ func TestMaintActionRows(t *testing.T) {
 	for i, want := range []struct {
 		label string
 		ok    bool
-	}{{"lock tree", true}, {"settings", true}, {"reset stats", true}, {"reset stats", true}, {"reset stats", true}, {"reset stats", true}} {
+	}{{"lock tree", true}, {"settings", true}, {"reset stats", true}, {"reset stats", false}, {"reset stats", true}, {"reset stats", true}} {
 		if label, ok := rows[i].enterLabel(); label != want.label || ok != want.ok {
 			t.Errorf("row %d enterLabel = %q,%v, want %q,%v", i, label, ok, want.label, want.ok)
+		}
+	}
+}
+
+// An extension reset row whose extension is not installed in the overview's
+// database keeps its slot but Enter must not arm a reset: the function would
+// not exist (pg_qualstats_reset() → 42883).
+func TestMaintResetRowNeedsExtension(t *testing.T) {
+	s := adviceScreen() // overviewInfo: pg_stat_statements installed, pg_qualstats not
+	m := &Model{}
+	for i, r := range s.maintenance.actionRows() {
+		s.maintenance.cursor, s.maintenance.pendingReset = i, ""
+		m.handleMaintenanceEnter(s)
+		want := r.reset
+		if r.reset == "qualstats" {
+			want = ""
+		}
+		if s.maintenance.pendingReset != want {
+			t.Errorf("Enter on %s armed %q, want %q", r.reset, s.maintenance.pendingReset, want)
+		}
+	}
+	// Before the first snapshot lands nothing is known to be installed.
+	s.maintenance.info = nil
+	for _, r := range s.maintenance.actionRows() {
+		ext := r.reset == "statements" || r.reset == "qualstats"
+		if r.missing != ext {
+			t.Errorf("no snapshot: %s missing = %v, want %v", r.reset, r.missing, ext)
 		}
 	}
 }
@@ -87,9 +114,9 @@ func TestMaintEnterDispatch(t *testing.T) {
 	)
 	m := newTestModel(s)
 
-	s.maintenance.cursor = 5
+	s.maintenance.cursor = 4
 	m.handleMaintenanceEnter(s)
-	if s.maintenance.pendingReset != "qualstats" || len(m.stack) != 2 {
+	if s.maintenance.pendingReset != "statements" || len(m.stack) != 2 {
 		t.Errorf("reset row must arm the confirm, got pending=%q stack=%d", s.maintenance.pendingReset, len(m.stack))
 	}
 	s.maintenance.pendingReset = ""

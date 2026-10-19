@@ -56,6 +56,7 @@ func TestEnterLabel(t *testing.T) {
 		{"statement samples multi param no call", with(&screen{level: levelStatementSamples, stat: stmtState{detail: &pg.QueryStat{Query: "select * from t where a = $1 and b = $2"}}}), "", false},
 		{"activity", with(&screen{level: levelActivity}), "query detail", true},
 		{"overview reset row", overviewActionScreen(3), "reset stats", true},
+		{"overview reset row, extension missing", overviewActionScreen(4), "", false},
 		{"overview lock-tree recommendation", overviewActionScreen(0), "lock tree", true},
 		{"overview diagnostic recommendation", overviewActionScreen(1), "Database stats", true},
 		{"overview recommendation without target", overviewActionScreen(2), "", false},
@@ -108,6 +109,7 @@ func TestApplyContextEnterFooter(t *testing.T) {
 // its four reset rows, the cursor on action row cursor.
 func overviewActionScreen(cursor int) *screen {
 	s := &screen{level: levelMaintenance, tool: toolMaintenance, db: "postgres"}
+	s.maintenance.info = overviewInfo() // pg_stat_statements installed, pg_qualstats not
 	s.maintenance.advice = pg.AdviceSet{
 		{Key: "lock_waits", Level: pg.AdviceCrit, Target: pg.AdviceTargetLockTree},
 		{Key: "deadlocks", Level: pg.AdviceWarn, Target: pg.AdviceTargetDiagnostic, DiagKey: "database_stats"},

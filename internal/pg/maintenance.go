@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Maintenance gathers a best-effort server-health snapshot for the Maintenance
@@ -425,9 +426,25 @@ func (c *Client) resetExtStats(ctx context.Context, db, label, resetSQL string) 
 		return err
 	}
 	if _, err := pool.Exec(ctx, resetSQL); err != nil {
-		return fmt.Errorf("reset %s in %q: %w", label, db, err)
+		return fmt.Errorf("reset %s in %q: %w", label, c.resolvedDB(ctx, pool, db), err)
 	}
 	return nil
+}
+
+// resolvedDB names the database pool is connected to, for error messages: db
+// itself, else the configured default, else — when pgdu was started without
+// -d and libpq picked the database — what the server reports, so a failure on
+// the default database never reads `in ""`.
+func (c *Client) resolvedDB(ctx context.Context, pool *pgxpool.Pool, db string) string {
+	if db != "" {
+		return db
+	}
+	if c.cfg.Database != "" {
+		return c.cfg.Database
+	}
+	var name string
+	_ = pool.QueryRow(ctx, sqlCurrentDatabase).Scan(&name)
+	return name
 }
 
 // ResetStatements runs pg_stat_statements_reset() in db.

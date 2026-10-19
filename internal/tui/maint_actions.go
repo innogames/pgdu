@@ -8,6 +8,11 @@ import "pgdu/internal/pg"
 type maintAction struct {
 	reset  string     // one of maintResetRows; "" on recommendation rows
 	advice *pg.Advice // nil on reset rows
+	// missing marks an extension reset row whose extension is not installed
+	// in the overview's database: the row keeps its cursor slot (so the
+	// positions stay fixed) but Enter does nothing, since the reset function
+	// would not exist.
+	missing bool
 }
 
 // maintResetRows are the statistics rows in render order; the names are the
@@ -26,7 +31,7 @@ func (a maintAction) key() string {
 // recommendation has nowhere to go.
 func (a maintAction) enterLabel() (string, bool) {
 	if a.advice == nil {
-		return "reset stats", true
+		return "reset stats", !a.missing
 	}
 	return adviceTargetLabel(*a.advice)
 }
@@ -59,9 +64,22 @@ func (st *maintState) actionRows() []maintAction {
 		rows = append(rows, maintAction{advice: &act[i]})
 	}
 	for _, r := range maintResetRows {
-		rows = append(rows, maintAction{reset: r})
+		rows = append(rows, maintAction{reset: r, missing: !st.resetAvailable(r)})
 	}
 	return rows
+}
+
+// resetAvailable reports whether the reset row named r has something to
+// reset: the extension rows need their extension installed (which only a
+// loaded snapshot can tell); the table-stats rows reset built-in counters.
+func (st *maintState) resetAvailable(r string) bool {
+	switch r {
+	case "statements":
+		return st.info != nil && st.info.Statements.Installed
+	case "qualstats":
+		return st.info != nil && st.info.Qualstats.Installed
+	}
+	return true
 }
 
 // setCursor moves the cursor to row i of rows, remembers the row's key and

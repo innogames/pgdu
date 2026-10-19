@@ -471,6 +471,10 @@ ORDER  BY category, name`
 	// Requires superuser or pg_monitor on most versions.
 	sqlQualstatsResetAll = `SELECT pg_qualstats_reset()`
 
+	// sqlCurrentDatabase names the database a pool landed in when pgdu was
+	// started without -d, for error messages.
+	sqlCurrentDatabase = `SELECT current_database()`
+
 	// sqlTableStatsResetAll resets the cumulative table/index/IO counters that
 	// back the Table overview (pg_stat_all_tables / pg_statio_all_tables). It
 	// zeroes every counter for the *current database* and bumps that database's
