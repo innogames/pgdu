@@ -406,8 +406,31 @@ func (c *Client) extCapacity(ctx context.Context, db, name, sqlCount, sqlReset, 
 // statementsCapacity reads the pg_stat_statements fill level.
 // Returns an ExtCapacity with Installed=false when the extension is absent.
 func (c *Client) statementsCapacity(ctx context.Context, db string) ExtCapacity {
-	return c.extCapacity(ctx, db, "pg_stat_statements", sqlStatementsCount,
+	cap := c.extCapacity(ctx, db, "pg_stat_statements", sqlStatementsCount,
 		sqlStatementsReset, sqlStatementsShmem, sqlStatementsTextBytes)
+	if cap.Installed {
+		if pool, err := c.PoolFor(ctx, db); err == nil {
+			_ = pool.QueryRow(ctx, sqlStatementsDealloc).Scan(&cap.Dealloc)
+		}
+	}
+	return cap
+}
+
+// StatementsFill is the cheap part of statementsCapacity for the top-queries
+// tick: entry count, .max and the eviction counter, without the extension
+// probe, shmem or query-text sums. Callers have already read
+// pg_stat_statements, so the extension is known to be installed.
+func (c *Client) StatementsFill(ctx context.Context, db string) (ExtCapacity, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return ExtCapacity{}, err
+	}
+	cap := ExtCapacity{Name: "pg_stat_statements", Installed: true}
+	if err := pool.QueryRow(ctx, sqlStatementsCount).Scan(&cap.Used, &cap.Max); err != nil {
+		return ExtCapacity{}, fmt.Errorf("pg_stat_statements fill in %q: %w", c.resolvedDB(ctx, pool, db), err)
+	}
+	_ = pool.QueryRow(ctx, sqlStatementsDealloc).Scan(&cap.Dealloc)
+	return cap, nil
 }
 
 // qualstatsCapacity reads the pg_qualstats fill level.

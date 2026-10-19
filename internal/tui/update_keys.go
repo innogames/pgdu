@@ -131,6 +131,14 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// Server-side pg_stat_statements reset from the top-queries table (X).
+	if s.stat.pendingReset {
+		s.stat.pendingReset = false
+		if confirmGate(msg) {
+			return m, m.resetStatementsCmd(s.db)
+		}
+		return m, nil
+	}
 	// Snapshot delete confirmation, same y/n arming as reindex.
 	if m.pendingDeleteSnap != "" {
 		path := m.pendingDeleteSnap
@@ -474,11 +482,14 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// snapshot becomes the new "since" point. Also drops any loaded disk
 		// snapshot (base→now or frozen A→B) and the cumulative flag.
 		if s.level == levelStatements {
-			s.stat.baseline = nil
-			s.stat.baseSnap = nil
-			s.stat.endSnap = nil
-			s.stat.cumulative = false
+			s.stat.restartWindow()
 			return m, m.loadCurrent()
+		}
+	case key.Matches(msg, m.keys.ResetStatements):
+		// Arm the y-confirm for pg_stat_statements_reset(): unlike R it zeroes
+		// the server's counters, cluster-wide.
+		if s.level == levelStatements {
+			s.stat.pendingReset = true
 		}
 	case key.Matches(msg, m.keys.SaveSnapshot):
 		// Dump the current pg_stat_statements counters to disk. Available from the

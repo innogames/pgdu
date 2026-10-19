@@ -170,3 +170,13 @@ func (m *Model) handleStatementEnter(s *screen, msg tea.KeyPressMsg) (tea.Cmd, b
 	}
 	return nil, false
 }
+
+// restartWindow drops the window's baseline so the next live sample opens a
+// new one, leaving any disk snapshot or cumulative window behind (R, and the
+// X reset whose zeroed counters no old baseline can be diffed against).
+func (st *stmtState) restartWindow() {
+	st.baseline = nil
+	st.baseSnap = nil
+	st.endSnap = nil
+	st.cumulative = false
+}

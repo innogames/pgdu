@@ -479,20 +479,27 @@ func (m *Model) onSettingsLoaded(msg settingsLoadedMsg) tea.Cmd {
 	return nil
 }
 
+// onMaintResetDone lands a stats reset armed on the system overview or, for
+// pg_stat_statements, on the top-queries table (X).
 func (m *Model) onMaintResetDone(msg maintResetDoneMsg) tea.Cmd {
-	s := m.findLevel(levelMaintenance)
-	if s == nil {
-		return nil
-	}
-	s.maintenance.pendingReset = ""
 	if msg.err != nil {
-		// Surface the error as a transient notice so the dashboard stays visible.
+		// Surface the error as a transient notice so the screen stays visible.
 		m.notice = fmt.Sprintf("reset %s failed: %s", maintResetTarget(msg.which), msg.err)
 		return nil
 	}
 	m.notice = maintResetTarget(msg.which) + " reset"
-	// Reload the maintenance view so the updated capacity numbers are visible.
-	return m.loadCurrent()
+	switch s := m.top(); s.level {
+	case levelMaintenance:
+		// Reload so the updated capacity numbers are visible.
+		return m.loadCurrent()
+	case levelStatements:
+		// The counters restarted from zero, so every baseline the window or
+		// the @session anchor holds would diff negative.
+		s.stat.restartWindow()
+		s.stat.sessionBaseline = nil
+		return m.loadCurrent()
+	}
+	return nil
 }
 
 func (m *Model) onTableStatsLoaded(msg tableStatsLoadedMsg) tea.Cmd {

@@ -30,11 +30,17 @@ FROM   pg_settings
 WHERE  name = ANY($1)`
 
 	// sqlStatementsCount reads the current entry count and the .max GUC together.
-	// Any user who can see pg_stat_statements can run this query.
+	// Any user who can see pg_stat_statements can run this query. showtext =>
+	// false skips reading the query-text file, so the count stays cheap enough
+	// for the top-queries tick.
 	sqlStatementsCount = `
 SELECT count(*),
        COALESCE(current_setting('pg_stat_statements.max', true)::bigint, 0)
-FROM   pg_stat_statements`
+FROM   pg_stat_statements(false)`
+
+	// sqlStatementsDealloc reads how often the entry table overflowed since
+	// the last reset. pg_stat_statements_info is granted to PUBLIC.
+	sqlStatementsDealloc = `SELECT dealloc FROM pg_stat_statements_info`
 
 	// sqlStatementsReset reads the last stats_reset from pg_stat_statements_info.
 	// Requires pg_read_all_stats or superuser; callers should handle errors

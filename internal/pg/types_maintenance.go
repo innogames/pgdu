@@ -19,6 +19,10 @@ type ExtCapacity struct {
 	StatsReset time.Time // last reset timestamp; zero = unknown
 	ShmemBytes int64     // reserved shared memory (pg_shmem_allocations); 0 = unknown
 	TextBytes  int64     // query-text bytes (pg_stat_statements only); 0 = n/a
+	// Dealloc counts the times pg_stat_statements hit .max and evicted its
+	// least-used ~5 % since the last reset (pg_stat_statements_info.dealloc);
+	// 0 for pg_qualstats, which drops new entries instead.
+	Dealloc int64
 }
 
 // FillRatio is Used/Max as a fraction in [0,1]. Returns 0 when Max ≤ 0 (GUC

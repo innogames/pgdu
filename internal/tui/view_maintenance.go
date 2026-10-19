@@ -253,6 +253,9 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 		}
 		extra += "  " + mu(mem)
 	}
+	if cap.Dealloc > 0 {
+		extra += "  " + mu(fmt.Sprintf("evicted %d×", cap.Dealloc))
+	}
 	if !cap.StatsReset.IsZero() {
 		age := time.Since(cap.StatsReset)
 		extra += "  " + mu("reset "+relativeAge(age))

@@ -32,6 +32,8 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 	}
 	s.stat.sampledAt = time.Now()
 	s.stat.trackPlanning = msg.trackPlanning
+	s.stat.fill = msg.fill
+	s.stat.fill.StatsReset = msg.statsReset
 	// Best-effort "now" magnitude for the L browser's live anchor; updated every tick.
 	s.stat.liveCount = len(msg.stats)
 

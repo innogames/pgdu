@@ -14,6 +14,7 @@ type statementsLoadedMsg struct {
 	stats         []pg.QueryStat // raw cumulative snapshot; diffed against the baseline
 	trackPlanning bool           // whether plan time is being collected
 	statsReset    time.Time      // pg_stat_statements_info.stats_reset — guards a disk baseline
+	fill          pg.ExtCapacity // entry count vs .max; zero Max when unreadable
 	err           error
 }
 
@@ -106,7 +107,8 @@ func (m *Model) loadStatementsCmd(db string) tea.Cmd {
 		}
 		tp, _ := m.client.TrackPlanning(ctx, db)     // best-effort column decoration
 		reset, _ := m.client.StatementsInfo(ctx, db) // best-effort reset guard for disk baselines
-		return statementsLoadedMsg{db: db, stats: stats, trackPlanning: tp, statsReset: reset}
+		fill, _ := m.client.StatementsFill(ctx, db)  // best-effort "full" note in the header
+		return statementsLoadedMsg{db: db, stats: stats, trackPlanning: tp, statsReset: reset, fill: fill}
 	})
 }
 

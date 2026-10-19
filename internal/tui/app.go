@@ -348,6 +348,11 @@ type stmtState struct {
 	sampledAt     time.Time
 	trackPlanning bool // pg_stat_statements.track_planning — gates the plan_ms column
 	liveCount     int  // distinct queries in the last live sample — sizes the "now" anchor bar
+	// fill is the cluster-wide entry count against pg_stat_statements.max from
+	// the last live sample: near .max the header warns that rarely-run
+	// statements are being evicted. pendingReset is the armed X confirm.
+	fill         pg.ExtCapacity
+	pendingReset bool
 
 	// Session anchor: the very first in-memory baseline taken when the tool was
 	// entered, preserved unchanged even after a disk/cumulative baseline replaces

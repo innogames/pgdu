@@ -144,7 +144,7 @@ func (m *Model) renderStatementsHeader(s *screen) string {
 		line = "  " + badge + "  " + m.frozenWindowSpan(s) +
 			mu("  ·  frozen  ·  "+m.statementsCount(s)+"  ·  "+m.statementsHints(s, "R for live"))
 	case s.stat.baselineAt.IsZero():
-		return "  " + badge + "  " + mu("opening window — run some queries…")
+		return "  " + badge + "  " + mu("opening window — run some queries…") + m.statementsNotes(s)
 	case s.stat.baseSnap != nil:
 		// Disk baseline, live end: the window runs from the snapshot's capture time
 		// up to the latest live sample.
@@ -168,7 +168,43 @@ func (m *Model) renderStatementsHeader(s *screen) string {
 		line += "\n  " + mu("planning time column hidden — ") + styleBadge.Render("track_planning off") +
 			mu(": ALTER SYSTEM SET pg_stat_statements.track_planning = on; SELECT pg_reload_conf();")
 	}
-	return line
+	return line + m.statementsNotes(s)
+}
+
+// statementsNotes is the header's tail whatever the window state: the warning
+// that pg_stat_statements is at .max, and the X confirm once armed.
+func (m *Model) statementsNotes(s *screen) string {
+	var b strings.Builder
+	if note := statementsFullNote(s.stat.fill); note != "" {
+		b.WriteString("\n  " + note)
+	}
+	if s.stat.pendingReset {
+		b.WriteString("\n" + confirmBanner("reset pg_stat_statements in every database (snapshots taken before it can no longer start a window)"))
+	}
+	return b.String()
+}
+
+// statementsFullNote warns, from the same threshold as the overview's bar and
+// advice, that pg_stat_statements is at .max. A full table still tracks new
+// statements, but each overflow evicts the least-used ~5 %: rarely-run queries
+// keep dropping out and coming back with counters restarted from zero, so they
+// undercount in any window.
+func statementsFullNote(fill pg.ExtCapacity) string {
+	ratio := fill.FillRatio()
+	if ratio < pg.ExtCapacityWarnFrac {
+		return ""
+	}
+	mu := styleMuted.Render
+	detail := formatRows(fill.Used) + "/" + formatRows(fill.Max)
+	if fill.Dealloc > 0 {
+		detail += fmt.Sprintf(" · evicted %d×", fill.Dealloc)
+		if !fill.StatsReset.IsZero() {
+			detail += " since reset " + relativeAge(time.Since(fill.StatsReset))
+		}
+	}
+	return styleErr.Render(fmt.Sprintf("pg_stat_statements %s%% full", fmt1(ratio*100))) +
+		mu(" ("+detail+") — the least-used entries are evicted, so rarely-run queries undercount · ") +
+		styleBadge.Render("X") + mu(" resets, or raise pg_stat_statements.max (restart)")
 }
 
 // frozenWindowSpan is a frozen window's "over 5d 18h  2026-09-22 12:34:56 stats
@@ -268,7 +304,9 @@ func (m *Model) renderStatementsInfo(height int) string {
 		mu(" (the default —") + "\n")
 	b.WriteString("    " + mu("a fresh sample, so the table is everything that ran ‘since you opened it’), a saved snapshot, or") + "\n")
 	b.WriteString("    " + mu("‘since last reset’ (the raw cumulative counters). "+m.refreshSentence()) + "\n")
-	b.WriteString("    " + mu("press ") + styleBadge.Render("R") + mu(" to drop the baseline and restart the window. Stats are scoped to the current database.") + "\n\n")
+	b.WriteString("    " + mu("press ") + styleBadge.Render("R") + mu(" to drop the baseline and restart the window. Stats are scoped to the current database.") + "\n")
+	b.WriteString("    " + styleBadge.Render("X") + mu(" resets pg_stat_statements itself (y to confirm, every database). At pg_stat_statements.max each new") + "\n")
+	b.WriteString("    " + mu("statement evicts the least-used ~5 %, so rarely-run queries keep restarting from zero — the header warns.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" columns ") + "  " +
 		mu("all sortable — ") + styleBadge.Render("←") + mu("/") + styleBadge.Render("→") +
