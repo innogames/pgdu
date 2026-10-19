@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
@@ -89,7 +89,7 @@ func TestTupleLayoutToastValuePane(t *testing.T) {
 		t.Error("title must advertise Enter on chunk_data as the toast value")
 	}
 
-	cmd := m.handleTupleLayoutKey(s, tea.KeyMsg{Type: tea.KeyEnter})
+	cmd := m.handleTupleLayoutKey(s, tea.KeyPressMsg{Code: tea.KeyEnter})
 	tv := s.pages.toastVal
 	if cmd == nil || !m.showTupleValue || tv == nil || tv.chunkID != 42 || !tv.loading {
 		t.Fatalf("enter on chunk_data: cmd=%v pane=%v state=%+v; want the value loading", cmd != nil, m.showTupleValue, tv)
@@ -120,17 +120,17 @@ func TestTupleLayoutToastValuePane(t *testing.T) {
 	}
 
 	// esc back to the legend, enter again: the value is already here.
-	m.handleTupleLayoutKey(s, tea.KeyMsg{Type: tea.KeyEsc})
+	m.handleTupleLayoutKey(s, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.showTupleValue || s.pages.toastVal == nil {
 		t.Fatalf("esc: pane=%v state kept=%v", m.showTupleValue, s.pages.toastVal != nil)
 	}
-	if cmd := m.handleTupleLayoutKey(s, tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil || !m.showTupleValue {
+	if cmd := m.handleTupleLayoutKey(s, tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil || !m.showTupleValue {
 		t.Error("re-entering the pane refetched a value already loaded")
 	}
 
 	// Closing the overlay forgets the value: a reopened overlay starts clean.
-	m.handleTupleLayoutKey(s, tea.KeyMsg{Type: tea.KeyEsc})
-	m.handleTupleLayoutKey(s, tea.KeyMsg{Type: tea.KeyEsc})
+	m.handleTupleLayoutKey(s, tea.KeyPressMsg{Code: tea.KeyEsc})
+	m.handleTupleLayoutKey(s, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.showTupleLayout || s.pages.toastVal != nil {
 		t.Errorf("closing the overlay: open=%v toastVal kept=%v", m.showTupleLayout, s.pages.toastVal != nil)
 	}
@@ -142,7 +142,7 @@ func TestTupleLayoutToastValueError(t *testing.T) {
 	m := &Model{width: 120, height: 40, keys: defaultKeys(), stack: []*screen{s}}
 	m.showTupleLayout = true
 	parkOn(t, m, s, "chunk_data")
-	m.handleTupleLayoutKey(s, tea.KeyMsg{Type: tea.KeyEnter})
+	m.handleTupleLayoutKey(s, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m.onToastValueLoaded(toastValueLoadedMsg{tableOID: 7, chunkID: 42, err: errors.New("permission denied")})
 	body := stripANSI(m.renderTupleValue(s))
 	if !strings.Contains(body, "permission denied") || !strings.Contains(body, "slice|") {
@@ -160,7 +160,7 @@ func TestTupleLayoutToastValueOnlyForChunkData(t *testing.T) {
 	if _, ok := m.tupleLayoutToastValueUnderCursor(s); ok {
 		t.Error("chunk_id is not a slice of a value")
 	}
-	if cmd := m.handleTupleLayoutKey(s, tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil || s.pages.toastVal != nil || !m.showTupleValue {
+	if cmd := m.handleTupleLayoutKey(s, tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil || s.pages.toastVal != nil || !m.showTupleValue {
 		t.Error("enter on chunk_id must open the plain pane without a load")
 	}
 

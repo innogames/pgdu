@@ -5,9 +5,17 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	tea "charm.land/bubbletea/v2"
 )
 
-func (m *Model) View() string {
+func (m *Model) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	return v
+}
+
+func (m *Model) render() string {
 	if m.width == 0 {
 		return ""
 	}
@@ -18,8 +26,8 @@ func (m *Model) View() string {
 	b.WriteString("\n")
 
 	// Three header lines, the blank above the footer, and the help row. The
-	// budget must be exact: Bubble Tea drops overflowing lines from the *top*,
-	// so one line too many hides the title/breadcrumb line, not the footer.
+	// budget must be exact: the alt screen clips an overflowing frame at the
+	// bottom, so one line too many hides the help row and footer.
 	contentHeight := max(m.height-5, 3)
 
 	var rankByOID map[uint32]int

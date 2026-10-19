@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/charmbracelet/bubbles/key"
+import "charm.land/bubbles/v2/key"
 
 type keyMap struct {
 	Up, Down         key.Binding
@@ -156,7 +156,7 @@ func defaultKeys() keyMap {
 		SortPrev:       key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "prev column")),
 		ShowQuery:      key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "show SQL")),
 		ReverseSort:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reverse sort")),
-		Refresh:        key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "refresh")),
+		Refresh:        key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "refresh")),
 		Install:        key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "install extension")),
 		Describe:       key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "→ describe")),
 		DiskUsage:      key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "→ disk usage")),

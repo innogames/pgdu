@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"pgdu/internal/pg"
@@ -218,7 +218,7 @@ func TestWALOverviewNavigation(t *testing.T) {
 	m := newTestModel(s)
 	m.width, m.height = 200, 50
 	m.applySort(s)
-	press := func(k tea.KeyType) { m.Update(tea.KeyMsg{Type: k}) }
+	press := func(k rune) { m.Update(tea.KeyPressMsg{Code: k}) }
 	at := func() string { return walKinds([]item{s.items[s.visibleIndexes()[s.cursor]]})[0] }
 
 	press(tea.KeyDown) // Btree
@@ -264,7 +264,7 @@ func TestWALOverviewNavigation(t *testing.T) {
 	}
 	s.filter = ""
 	s.itemsRev++
-	if out := ansi.Strip(m.View()); !strings.Contains(out, "Σ 2 resource managers") || !strings.Contains(out, "Σ 2 relations") ||
+	if out := ansi.Strip(m.View().Content); !strings.Contains(out, "Σ 2 resource managers") || !strings.Contains(out, "Σ 2 relations") ||
 		!strings.Contains(out, "by relation") || strings.Contains(out, "w by relation") {
 		t.Errorf("rendered overview lacks the two tables or still advertises w:\n%s", out)
 	}

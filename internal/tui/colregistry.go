@@ -3,8 +3,8 @@ package tui
 import (
 	"slices"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pg"
 )
@@ -123,7 +123,7 @@ func (sp colSpec[ID, R, C]) open(m *Model, t *colTable[ID]) {
 // registry defaults, C/esc close. Mandatory columns and columns whose
 // availability gate is off for ctx can't be toggled. rebuild re-projects the
 // screen after a change; the selection persists to prefs under sp.prefsKey.
-func (sp colSpec[ID, R, C]) handleKey(m *Model, t *colTable[ID], msg tea.KeyMsg, ctx C, rebuild func()) tea.Cmd {
+func (sp colSpec[ID, R, C]) handleKey(m *Model, t *colTable[ID], msg tea.KeyPressMsg, ctx C, rebuild func()) tea.Cmd {
 	reg := sp.registry()
 	save := func() { m.saveColPrefs(sp.prefsKey, colVisToStrings(t.visible)) }
 	return m.handleColCfgKey(msg, colCfgSpec{
@@ -209,11 +209,11 @@ type colCfgSpec struct {
 // handleColCfgKey drives a modal column-config overlay: Up/Down/Top/Bottom move
 // the cursor over the column set, space/Enter toggle the highlighted column's
 // visibility, r resets to defaults, and C/esc close it. Quit still quits.
-func (m *Model) handleColCfgKey(msg tea.KeyMsg, sp colCfgSpec) tea.Cmd {
+func (m *Model) handleColCfgKey(msg tea.KeyPressMsg, sp colCfgSpec) tea.Cmd {
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return tea.Quit
-	case key.Matches(msg, m.keys.Columns), msg.Type == tea.KeyEsc:
+	case key.Matches(msg, m.keys.Columns), msg.Code == tea.KeyEsc:
 		sp.close()
 	case key.Matches(msg, m.keys.Up):
 		if *sp.cursor > 0 {

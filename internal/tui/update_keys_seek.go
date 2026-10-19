@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
@@ -17,8 +17,8 @@ import (
 // cursor where it landed), Backspace edits (and blurs when it empties the query),
 // Up/Down nudge the cursor, and printable input extends the query. Every edit
 // re-runs the seek so the cursor jumps live to the covering entry.
-func (m *Model) handleSeekKey(s *screen, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
+func (m *Model) handleSeekKey(s *screen, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.Code {
 	case tea.KeyEsc:
 		s.pages.seekFocused = false
 		s.pages.seekQuery = ""
@@ -41,11 +41,11 @@ func (m *Model) handleSeekKey(s *screen, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.cursor < s.visibleLen()-1 {
 			s.cursor++
 		}
-	case tea.KeyRunes, tea.KeySpace:
-		if msg.Alt {
+	default:
+		if msg.Text == "" || msg.Mod.Contains(tea.ModAlt) {
 			return m, nil
 		}
-		s.pages.seekQuery += string(msg.Runes)
+		s.pages.seekQuery += msg.Text
 		seekApply(s)
 	}
 	return m, nil

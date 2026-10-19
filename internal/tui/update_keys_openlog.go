@@ -1,8 +1,8 @@
 package tui
 
 import (
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pglog"
 )
@@ -47,7 +47,7 @@ func (l logLink) help() string {
 
 // handleOpenLogKey dispatches l on the levels that link into the log analyzer.
 // Returns handled=false when the key is not ours.
-func (m *Model) handleOpenLogKey(s *screen, msg tea.KeyMsg) (tea.Cmd, bool) {
+func (m *Model) handleOpenLogKey(s *screen, msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	link, ok := logLinkFor(s)
 	if !ok || !key.Matches(msg, m.keys.OpenLog) {
 		return nil, false

@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // barVisibleWidth strips styling and counts the visible cells, including the

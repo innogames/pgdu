@@ -3,13 +3,13 @@ package tui
 import (
 	"slices"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // handleColumnConfigKey drives the C picker on the top-queries table — the
 // list's or the roll-ups', whichever view is up; planning columns can't be
 // shown while track_planning is off.
-func (m *Model) handleColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleColumnConfigKey(s *screen, msg tea.KeyPressMsg) tea.Cmd {
 	ctx := stmtCtx{trackPlanning: s.stat.trackPlanning}
 	rebuild := func() { m.rebuildStatementItems(s) }
 	if v := s.stat.view; v.grouped() {
@@ -20,7 +20,7 @@ func (m *Model) handleColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 
 // handleActColumnConfigKey drives the C picker on the Activity table; the
 // rebuild waits for the first snapshot.
-func (m *Model) handleActColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleActColumnConfigKey(s *screen, msg tea.KeyPressMsg) tea.Cmd {
 	return actSpec.handleKey(m, &m.actTable, msg, actCtx{}, func() {
 		if s.act.rows != nil {
 			m.rebuildActivityItems(s)
@@ -29,7 +29,7 @@ func (m *Model) handleActColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 }
 
 // handleTblColumnConfigKey drives the C picker on the Table overview.
-func (m *Model) handleTblColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleTblColumnConfigKey(s *screen, msg tea.KeyPressMsg) tea.Cmd {
 	return tblSpec.handleKey(m, &m.tblTable, msg, tblCtx{}, func() { m.rebuildTableStatItems(s) })
 }
 
@@ -38,7 +38,7 @@ func (m *Model) handleTblColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 // operates on the result's dynamic column set; visibility is kept per
 // diagnostic key and by column name (see diagVis). The last visible column
 // can't be hidden.
-func (m *Model) handleDiagColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleDiagColumnConfigKey(s *screen, msg tea.KeyPressMsg) tea.Cmd {
 	res := s.diagResult
 	key := s.diagVisKey()
 	if res == nil || key == "" {
@@ -92,7 +92,7 @@ func (m *Model) handleDiagColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 // re-projecting loaded rows. The picker stays open across the reload. An empty
 // pick is fine (the list falls back to its physical columns), and nothing is
 // persisted — see pageState.tuplePick.
-func (m *Model) handleTupleColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleTupleColumnConfigKey(s *screen, msg tea.KeyPressMsg) tea.Cmd {
 	cols := s.pages.tupleCols
 	if len(cols) == 0 {
 		m.showTupleColumnConfig = false

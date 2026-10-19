@@ -3,8 +3,8 @@ package tui
 import (
 	"slices"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pg"
 	"pgdu/internal/pglog"
@@ -14,7 +14,7 @@ import (
 // pane, w window, j jump) plus the shared t/C keys when they land on a log
 // level. Esc/q walk back through the stack to the file picker. Returns handled=false when the key is not ours so handleKey
 // continues with its generic cases.
-func (m *Model) handleLogKey(s *screen, msg tea.KeyMsg) (cmd tea.Cmd, handled bool) {
+func (m *Model) handleLogKey(s *screen, msg tea.KeyPressMsg) (cmd tea.Cmd, handled bool) {
 	switch s.level {
 	case levelLogs, levelLogGroup, levelLogEntry, levelLogFiles:
 	default:
@@ -141,7 +141,7 @@ func nextLogCategory(r *pglog.Report, cat pglog.Category, on bool) (pglog.Catego
 
 // handleLogColumnConfigKey drives the C picker over the timeline columns.
 // Enabling the hostname column kicks off the reverse-DNS lookups.
-func (m *Model) handleLogColumnConfigKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleLogColumnConfigKey(s *screen, msg tea.KeyPressMsg) tea.Cmd {
 	v := s.log.view
 	cmd := logSpec(v).handleKey(m, m.logTableFor(v), msg, logCtx{}, func() { m.rebuildLogItems(s) })
 	return tea.Batch(cmd, m.logHostsCmd(s))

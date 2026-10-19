@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
@@ -60,7 +60,7 @@ func TestTupleLayoutEnterOpensValuePane(t *testing.T) {
 		t.Error("the layout title must advertise Enter on a column row")
 	}
 
-	m.handleTupleLayoutKey(s, tea.KeyMsg{Type: tea.KeyEnter})
+	m.handleTupleLayoutKey(s, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !m.showTupleValue || m.tupleValueOffset != 0 {
 		t.Fatalf("enter on the column: pane=%v offset=%d, want it open at the top", m.showTupleValue, m.tupleValueOffset)
 	}
@@ -81,7 +81,7 @@ func TestTupleLayoutEnterOpensValuePane(t *testing.T) {
 	}
 
 	// Esc returns to the legend, leaving the layout itself open.
-	m.handleTupleLayoutKey(s, tea.KeyMsg{Type: tea.KeyEsc})
+	m.handleTupleLayoutKey(s, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.showTupleValue || !m.showTupleLayout {
 		t.Fatalf("esc: pane=%v layout=%v, want back on the legend", m.showTupleValue, m.showTupleLayout)
 	}
@@ -90,7 +90,7 @@ func TestTupleLayoutEnterOpensValuePane(t *testing.T) {
 	if m.tupleLayoutValueUnderCursor(s) {
 		t.Error("a header field has no value pane")
 	}
-	m.handleTupleLayoutKey(s, tea.KeyMsg{Type: tea.KeyEnter})
+	m.handleTupleLayoutKey(s, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.showTupleLayout || m.showTupleValue {
 		t.Errorf("enter on a header field: layout=%v pane=%v, want the overlay dismissed", m.showTupleLayout, m.showTupleValue)
 	}

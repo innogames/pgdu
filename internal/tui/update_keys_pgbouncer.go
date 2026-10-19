@@ -1,8 +1,8 @@
 package tui
 
 import (
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pgbouncer"
 	"pgdu/internal/pglog"
@@ -11,7 +11,7 @@ import (
 // handlePgbKey dispatches the pgbouncer tool's own keys. Returns false when
 // the key is not one of them (or the screen is not a pgbouncer level), so the
 // shared handler runs as usual.
-func (m *Model) handlePgbKey(s *screen, msg tea.KeyMsg) (tea.Cmd, bool) {
+func (m *Model) handlePgbKey(s *screen, msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	if s.tool != toolPgBouncer {
 		return nil, false
 	}

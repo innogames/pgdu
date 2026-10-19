@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pg"
 	"pgdu/internal/prefs"
@@ -191,14 +191,14 @@ func TestMaintVerboseTogglePersists(t *testing.T) {
 	if m.maintVerbose {
 		t.Fatal("quiet is the default")
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m.Update(tea.KeyPressMsg{Code: 'v', Text: "v"})
 	if !m.maintVerbose || !s.maintenance.follow {
 		t.Errorf("v must switch to verbose and re-follow the cursor (verbose %v, follow %v)", m.maintVerbose, s.maintenance.follow)
 	}
 	if !prefs.Load().OverviewVerbose {
 		t.Error("the toggle must be saved to prefs")
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m.Update(tea.KeyPressMsg{Code: 'v', Text: "v"})
 	if m.maintVerbose || prefs.Load().OverviewVerbose {
 		t.Error("v again must switch back and save that too")
 	}

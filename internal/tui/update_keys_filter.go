@@ -1,7 +1,7 @@
 package tui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // handleFilterKey is the input handler while s.filterFocused is true. Esc
@@ -9,8 +9,8 @@ import (
 // rune (and blurs if it empties the query), Up/Down navigate the filtered
 // list live, and any printable input is appended to the query. Editing the
 // query resets cursor/offset so the user always lands on the first match.
-func (m *Model) handleFilterKey(s *screen, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
+func (m *Model) handleFilterKey(s *screen, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.Code {
 	case tea.KeyEsc:
 		s.filter = ""
 		s.filterFocused = false
@@ -33,12 +33,26 @@ func (m *Model) handleFilterKey(s *screen, msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		if s.cursor < s.visibleLen()-1 {
 			s.cursor++
 		}
-	case tea.KeyRunes, tea.KeySpace:
-		if msg.Alt {
+	default:
+		if msg.Text == "" || msg.Mod.Contains(tea.ModAlt) {
 			return m, nil
 		}
-		s.filter += string(msg.Runes)
+		s.filter += msg.Text
 		s.resetCursor()
+	}
+	return m, nil
+}
+
+// handlePaste feeds a bracketed paste into whichever input has focus, the way
+// v1 delivered a paste as one rune keypress; outside an input it is dropped.
+func (m *Model) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	s := m.top()
+	in := tea.KeyPressMsg{Text: msg.Content}
+	switch {
+	case s.filterFocused:
+		return m.handleFilterKey(s, in)
+	case s.pages.seekFocused:
+		return m.handleSeekKey(s, in)
 	}
 	return m, nil
 }

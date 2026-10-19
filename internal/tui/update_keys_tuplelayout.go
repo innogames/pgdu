@@ -3,8 +3,8 @@ package tui
 import (
 	"math"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
@@ -65,7 +65,7 @@ func (m *Model) closeTupleLayout(s *screen) {
 // esc/q close. Everything else is swallowed so the list beneath
 // never moves. Quit still quits. Cursor moves may overshoot — the renderer
 // clamps to the segment count (same contract as handleInfoKey/scrollWindow).
-func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleTupleLayoutKey(s *screen, msg tea.KeyPressMsg) tea.Cmd {
 	// The ? reference sits on top of the overlay: scroll keys move it and
 	// ?/esc dismiss it (back to the layout), exactly like the level infos.
 	if m.showInfo {
@@ -212,7 +212,7 @@ func (m *Model) loadToastValue(s *screen, chunkID uint32) tea.Cmd {
 // handleInfoKey), ? opens the layout reference on top, enter/esc return to the
 // legend. Everything else is swallowed so neither the legend nor the list
 // beneath it moves. Quit still quits.
-func (m *Model) handleTupleValueKey(msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleTupleValueKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return tea.Quit

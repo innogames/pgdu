@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"pgdu/internal/cli"
@@ -96,7 +96,7 @@ func TestSnapshotsListedEntryPicker(t *testing.T) {
 // Esc on the entry picker leaves the tool: the table beneath has never loaded.
 // Esc on the L browser over a loaded table just returns to the table.
 func TestEntryPickerBackLeavesTool(t *testing.T) {
-	esc := tea.KeyMsg{Type: tea.KeyEsc}
+	esc := tea.KeyPressMsg{Code: tea.KeyEsc}
 
 	st := &screen{level: levelStatements, tool: toolQueries, db: "app"}
 	browser := &screen{level: levelSnapshots, tool: toolQueries, db: "app", loaded: true, stat: stmtState{entry: true}}
@@ -187,7 +187,7 @@ func TestRenderEntryPicker(t *testing.T) {
 		metas:     []pg.SnapshotMeta{{Path: "/snaps/a.json.gz", Target: "db:5432", Database: "app", CapturedAt: t1, QueryCount: 20}},
 		liveCount: 42,
 	})
-	out := ansi.Strip(m.View())
+	out := ansi.Strip(m.View().Content)
 	for _, want := range []string{"pick the window's base", "window: session start → now", "session start", "default", "since last reset", "a.json.gz", "new snapshots: press S"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("entry picker missing %q in output:\n%s", want, out)
@@ -198,7 +198,7 @@ func TestRenderEntryPicker(t *testing.T) {
 	}
 	// Moving onto the snapshot row previews that window instead.
 	browser.cursor = 1
-	if out := ansi.Strip(m.View()); !strings.Contains(out, "window: "+t1.Local().Format("2006-01-02 15:04:05")+" → now") {
+	if out := ansi.Strip(m.View().Content); !strings.Contains(out, "window: "+t1.Local().Format("2006-01-02 15:04:05")+" → now") {
 		t.Errorf("preview should follow the cursor:\n%s", out)
 	}
 }

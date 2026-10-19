@@ -3,7 +3,7 @@ package tui
 import (
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pg"
 )
@@ -151,11 +151,11 @@ func stmtDescribeTarget(s *screen) (descTarget, bool) {
 // handleStatementEnter handles Enter on the statement detail and captured-values
 // screens, which don't drill: Enter confirms an EXPLAIN ANALYZE run instead.
 // ok is false on every other level.
-func (m *Model) handleStatementEnter(s *screen, msg tea.KeyMsg) (tea.Cmd, bool) {
+func (m *Model) handleStatementEnter(s *screen, msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	if s.level == levelStatementDetail {
 		// The detail view doesn't drill further; Enter (not l/→) confirms an
 		// EXPLAIN ANALYZE run on read-only queries.
-		if msg.Type == tea.KeyEnter {
+		if msg.Code == tea.KeyEnter {
 			return m.handleStatementAnalyze(s), true
 		}
 		return nil, true
@@ -163,7 +163,7 @@ func (m *Model) handleStatementEnter(s *screen, msg tea.KeyMsg) (tea.Cmd, bool) 
 	if s.level == levelStatementSamples {
 		// The captured-values list doesn't drill further; Enter runs EXPLAIN
 		// ANALYZE for the highlighted real value (read-only queries only).
-		if msg.Type == tea.KeyEnter {
+		if msg.Code == tea.KeyEnter {
 			return m.handleSampleAnalyze(s), true
 		}
 		return nil, true

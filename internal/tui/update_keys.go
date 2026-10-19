@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pg"
 )
@@ -27,7 +27,7 @@ func max32(a, b int32) int32 {
 // confirmGate resolves an armed two-step confirmation: `y` (case-insensitive)
 // confirms, any other key cancels. Callers capture the pending target and
 // clear the arming field before checking, so the next key is always consumed.
-func confirmGate(msg tea.KeyMsg) bool {
+func confirmGate(msg tea.KeyPressMsg) bool {
 	return msg.String() == "y" || msg.String() == "Y"
 }
 
@@ -46,7 +46,7 @@ func (m *Model) pageStep() int {
 // handleInfoKey drives the modal ? reference overlay: scroll keys move
 // infoOffset (clamped on render by scrollWindow), Help/Back/Quit close it (Quit
 // still quits), and everything else is swallowed so the hidden list stays put.
-func (m *Model) handleInfoKey(msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleInfoKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return tea.Quit
@@ -68,7 +68,7 @@ func (m *Model) handleInfoKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	s := m.top()
 	// Scope tool/level-specific bindings to the current screen so a disabled
 	// binding never matches here (key.Matches honours Enabled), letting other
@@ -758,17 +758,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Esc is shared with Back; when an overlay/filter is up, Esc closes
 		// that instead of unwinding the stack. `q` always navigates back so
 		// muscle memory for "go up a level" is preserved.
-		if msg.Type == tea.KeyEsc && m.showInfo {
+		if msg.Code == tea.KeyEsc && m.showInfo {
 			m.showInfo = false
 			break
 		}
 		// The expanded help footer eats most of the screen; Esc collapses it
 		// too (not just a second ?) since the list underneath is unusable.
-		if msg.Type == tea.KeyEsc && m.help.ShowAll {
+		if msg.Code == tea.KeyEsc && m.help.ShowAll {
 			m.help.ShowAll = false
 			break
 		}
-		if msg.Type == tea.KeyEsc && s.filter != "" {
+		if msg.Code == tea.KeyEsc && s.filter != "" {
 			s.filter = ""
 			s.resetCursor()
 			break
@@ -777,7 +777,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// time before it leaves: a roll-up returns to the list, then a group
 		// narrowing widens back to the whole window — the same one-undo-per-Esc
 		// the text filter gets.
-		if msg.Type == tea.KeyEsc && s.level == levelStatements {
+		if msg.Code == tea.KeyEsc && s.level == levelStatements {
 			if s.stat.view.grouped() {
 				s.stat.view = stmtViewQueries
 				m.rebuildStatementItems(s)
@@ -1053,7 +1053,7 @@ func (m *Model) diagFixForCursor(s *screen) (sql, db string, ok bool) {
 // overlay stays until it completes. Finished: scroll keys page the output,
 // anything else dismisses, and a successful run reloads the result table
 // (its rows describe the state the fix just changed). Quit always quits.
-func (m *Model) handleDiagFixKey(s *screen, msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleDiagFixKey(s *screen, msg tea.KeyPressMsg) tea.Cmd {
 	if key.Matches(msg, m.keys.Quit) {
 		return tea.Quit
 	}
@@ -1092,7 +1092,7 @@ func (m *Model) handleDiagFixKey(s *screen, msg tea.KeyMsg) tea.Cmd {
 // scrollDiagFix applies the list navigation keys to the fix output pane and
 // reports whether msg was one of them. Any manual scroll turns tail-follow
 // off; the renderer turns it back on when the window reaches the bottom.
-func (m *Model) scrollDiagFix(f *diagFixRun, msg tea.KeyMsg) bool {
+func (m *Model) scrollDiagFix(f *diagFixRun, msg tea.KeyPressMsg) bool {
 	step := m.pageStep()
 	switch {
 	case key.Matches(msg, m.keys.Up):

@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pg"
 )
@@ -22,7 +22,7 @@ func TestDescribeTopQueriesJump(t *testing.T) {
 	if !m.keys.TopQueries.Enabled() {
 		t.Fatal("t must be enabled on a table's describe panel")
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 
 	n := len(m.stack)
 	if n < 3 || m.stack[n-2].level != levelStatements || m.stack[n-1].level != levelSnapshots {

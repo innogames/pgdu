@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"pgdu/internal/pg"
@@ -58,7 +58,7 @@ func TestWALOpenCheckpointLog(t *testing.T) {
 	if hdr := ansi.Strip(m.renderWALSummary(wal)); !strings.Contains(hdr, "l checkpoint log") {
 		t.Errorf("header checkpoints line must carry the l hint: %q", hdr)
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
 
 	picker := m.top()
 	if picker.level != levelLogFiles || !picker.log.autoOpen || !picker.log.catOn || picker.log.cat != pglog.CatCheckpoint {
@@ -144,7 +144,7 @@ func TestTopQueriesOpenSlowLog(t *testing.T) {
 	if !m.keys.OpenLog.Enabled() || m.keys.OpenLog.Help().Desc != "→ slow query log" {
 		t.Fatalf("l on top queries: enabled=%v help=%q", m.keys.OpenLog.Enabled(), m.keys.OpenLog.Help().Desc)
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
 	picker := m.top()
 	if picker.level != levelLogFiles || !picker.log.autoOpen || !picker.log.catOn || picker.log.cat != pglog.CatSlowQuery {
 		t.Fatalf("after l: level=%v autoOpen=%v cat=%v/%v", picker.level, picker.log.autoOpen, picker.log.catOn, picker.log.cat)
@@ -185,7 +185,7 @@ func TestOverviewOpenLog(t *testing.T) {
 	if slices.ContainsFunc(m.keys.ShortHelp(), func(b key.Binding) bool { return b.Help().Key == "l" }) {
 		t.Error("the overview footer must not repeat l; its header line lists the jump keys")
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
 	picker := m.top()
 	if picker.level != levelLogFiles || !picker.log.autoOpen || picker.log.catOn {
 		t.Fatalf("after l: level=%v autoOpen=%v catOn=%v", picker.level, picker.log.autoOpen, picker.log.catOn)

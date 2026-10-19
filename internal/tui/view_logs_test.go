@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"pgdu/internal/pg"
@@ -726,7 +726,7 @@ func TestLogCategoryFilterCycle(t *testing.T) {
 	}
 	press := func() {
 		m.keys.applyContext(s)
-		if _, ok := m.handleLogKey(s, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")}); !ok {
+		if _, ok := m.handleLogKey(s, tea.KeyPressMsg{Code: 'f', Text: "f"}); !ok {
 			t.Fatal("f must be handled on the log overview")
 		}
 	}

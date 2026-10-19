@@ -5,19 +5,16 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/cli"
 	"pgdu/internal/pg"
 )
 
-// keyMsg builds a tea.KeyMsg for a literal key string: " " becomes the space
-// key (which the Refresh binding matches), anything else a rune key press.
-func keyMsg(s string) tea.KeyMsg {
-	if s == " " {
-		return tea.KeyMsg{Type: tea.KeySpace}
-	}
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+// keyMsg builds a tea.KeyPressMsg for a single typed character; " " is the
+// space key, which the Refresh binding matches.
+func keyMsg(s string) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: []rune(s)[0], Text: s}
 }
 
 // renderModel builds a Model with a given screen on top and renders it. The
@@ -29,7 +26,7 @@ func renderModel(top *screen) string {
 	m.width, m.height = 200, 80
 	m.hostLabel = "db:5432"
 	m.stack = append(m.stack, top)
-	return m.View()
+	return m.View().Content
 }
 
 // cellByID resolves a footer/row cell by its stable column id, independent of
@@ -148,7 +145,7 @@ func TestStatementsMissingExtension(t *testing.T) {
 	if len(s.items) != 0 || s.diagCols != nil {
 		t.Error("table should be cleared when the extension is missing")
 	}
-	out := m.View()
+	out := m.View().Content
 	for _, want := range []string{"Extension required", "pg_stat_statements", "CREATE EXTENSION"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing-extension view missing %q", want)
@@ -214,7 +211,7 @@ func TestRenderStatementDetailAndInfo(t *testing.T) {
 	m.width, m.height = 200, 50
 	m.stack = append(m.stack, s)
 	m.showInfo = true
-	if m.View() == "" {
+	if m.View().Content == "" {
 		t.Fatal("info overlay rendered empty")
 	}
 	// View clips the (scrollable) overlay to the viewport at the current scroll
@@ -509,7 +506,7 @@ func TestColumnConfigToggleRebuilds(t *testing.T) {
 	m.stack = append(m.stack, s)
 
 	// temp_read is opt-in (off by default), so it isn't in the table yet.
-	if strings.Contains(m.View(), "temp_read") {
+	if strings.Contains(m.View().Content, "temp_read") {
 		t.Fatal("temp_read should be hidden by default")
 	}
 	// Open the picker, move to temp_read, toggle it on.
@@ -523,7 +520,7 @@ func TestColumnConfigToggleRebuilds(t *testing.T) {
 		t.Fatal("space should toggle the column, not close the overlay")
 	}
 	m.stmtTable.showCfg = false // close the overlay to render the table
-	if !strings.Contains(m.View(), "temp_read") {
+	if !strings.Contains(m.View().Content, "temp_read") {
 		t.Error("temp_read should appear in the table after enabling it")
 	}
 }

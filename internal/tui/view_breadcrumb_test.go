@@ -326,7 +326,7 @@ func TestViewFitsTerminal(t *testing.T) {
 		for _, h := range []int{12, 30, 61} {
 			m := newTestModel(st...)
 			m.width, m.height = 120, h
-			v := m.View()
+			v := m.View().Content
 			if lines := strings.Count(v, "\n") + 1; lines != h {
 				t.Errorf("%s at height %d renders %d lines", name, h, lines)
 			}

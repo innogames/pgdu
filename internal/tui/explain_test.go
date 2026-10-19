@@ -1,25 +1,13 @@
 package tui
 
 import (
-	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
-
 	"pgdu/internal/cli"
 	"pgdu/internal/pg"
 )
-
-// go test has no TTY, so lipgloss auto-detects the Ascii profile and strips all
-// colour — which would make the heat-colour assertions below trivially pass.
-// Force a colour profile so Render actually emits ANSI.
-func TestMain(m *testing.M) {
-	lipgloss.SetColorProfile(termenv.TrueColor)
-	os.Exit(m.Run())
-}
 
 // newExplainModel builds a Model wide enough that clipDetail never truncates
 // the sample plans. The client is never exercised by colorizeExplain.

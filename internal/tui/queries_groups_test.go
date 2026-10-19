@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pg"
 )
@@ -180,7 +180,7 @@ func TestStatementsTabCyclesViews(t *testing.T) {
 	if s.diagBarCol != -1 {
 		t.Errorf("list bar = %d, want none", s.diagBarCol)
 	}
-	tab := tea.KeyMsg{Type: tea.KeyTab}
+	tab := tea.KeyPressMsg{Code: tea.KeyTab}
 
 	m.Update(tab)
 	if s.stat.view != stmtViewByTable || len(s.items) != 3 {
@@ -199,20 +199,20 @@ func TestStatementsTabCyclesViews(t *testing.T) {
 	if !s.sortDesc {
 		t.Error("roll-up opens sorted descending")
 	}
-	if !strings.Contains(m.View(), "3 tables of 5 queries") {
+	if !strings.Contains(m.View().Content, "3 tables of 5 queries") {
 		t.Error("header should count the tables of the window")
 	}
 
 	// → moves the sort (and the bar) to the next column; a text column has no bar.
-	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	if s.diagBarCol != s.diagSortCol {
 		t.Errorf("bar must follow the sort: bar=%d sort=%d", s.diagBarCol, s.diagSortCol)
 	}
 	if m.stmtGroupTable.sortColID != s.stat.groupCols[s.diagSortCol].id {
 		t.Error("cycleSort must record the roll-up's sort column on its own picker state")
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyLeft})
-	m.Update(tea.KeyMsg{Type: tea.KeyLeft}) // wraps onto the key column (text)
+	m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyLeft}) // wraps onto the key column (text)
 	if s.stat.groupCols[s.diagSortCol].id != colGroup || s.diagBarCol != -1 {
 		t.Errorf("text sort column has no bar: id=%v bar=%d", s.stat.groupCols[s.diagSortCol].id, s.diagBarCol)
 	}
@@ -235,7 +235,7 @@ func TestStatementsTabCyclesViews(t *testing.T) {
 // once, then leaves the screen.
 func TestStatementsGroupNarrowAndEsc(t *testing.T) {
 	m, s := groupedStatementsScreen()
-	m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	// Move the cursor onto the t row (sorted total_ms↓ it is first, but resolve by name).
 	vis := s.visibleIndexes()
 	for i, idx := range vis {
@@ -247,7 +247,7 @@ func TestStatementsGroupNarrowAndEsc(t *testing.T) {
 	if !ok || label != "narrow to table" {
 		t.Errorf("enter label = %q %v", label, ok)
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if s.stat.view != stmtViewQueries || s.stat.group == nil || s.stat.group.key != "t" {
 		t.Fatalf("enter should narrow the list: view=%v group=%+v", s.stat.view, s.stat.group)
 	}
@@ -263,7 +263,7 @@ func TestStatementsGroupNarrowAndEsc(t *testing.T) {
 	if got := cellByID(s.stat.cols, s.diagTotalRow, colPctTime).Num; got != 80 {
 		t.Errorf("narrowed footer time%% = %v, want 80 of the window", got)
 	}
-	if out := m.View(); !strings.Contains(out, "table t · 3 of 5 queries · esc widens") {
+	if out := m.View().Content; !strings.Contains(out, "table t · 3 of 5 queries · esc widens") {
 		t.Error("header should name the narrowing")
 	}
 	if label, _ := enterLabel(s); label != "query detail" {
@@ -278,11 +278,11 @@ func TestStatementsGroupNarrowAndEsc(t *testing.T) {
 	}
 
 	depth := len(m.stack)
-	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if s.stat.group != nil || len(s.items) != 5 || len(m.stack) != depth {
 		t.Fatalf("first esc widens in place: group=%v items=%d stack=%d", s.stat.group, len(s.items), len(m.stack))
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if len(m.stack) != depth-1 {
 		t.Error("second esc leaves the screen")
 	}
@@ -291,9 +291,9 @@ func TestStatementsGroupNarrowAndEsc(t *testing.T) {
 // Esc on a roll-up returns to the list rather than leaving the screen.
 func TestStatementsEscLeavesRollup(t *testing.T) {
 	m, s := groupedStatementsScreen()
-	m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	depth := len(m.stack)
-	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if s.stat.view != stmtViewQueries || len(m.stack) != depth {
 		t.Errorf("esc on a roll-up: view=%v stack=%d", s.stat.view, len(m.stack))
 	}
@@ -303,7 +303,7 @@ func TestStatementsEscLeavesRollup(t *testing.T) {
 // the no-table bucket have nothing to describe.
 func TestStatementsGroupDescribeTarget(t *testing.T) {
 	m, s := groupedStatementsScreen()
-	m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	place := func(key string) {
 		for i, idx := range s.visibleIndexes() {
 			if s.items[idx].stmtGroupKey == key {
@@ -320,7 +320,7 @@ func TestStatementsGroupDescribeTarget(t *testing.T) {
 	if _, ok := stmtDescribeTarget(s); ok {
 		t.Error("the no-table bucket has nothing to describe")
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	if _, ok := stmtDescribeTarget(s); ok {
 		t.Error("type rows have nothing to describe")
 	}
@@ -329,12 +329,12 @@ func TestStatementsGroupDescribeTarget(t *testing.T) {
 // The roll-ups' C picker opens its own state and toggles rebuild the grouped table.
 func TestStatementsGroupColumnPicker(t *testing.T) {
 	m, s := groupedStatementsScreen()
-	m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m.Update(keyMsg("C"))
 	if !m.stmtGroupTable.showCfg || m.stmtTable.showCfg {
 		t.Fatal("C on a roll-up opens the roll-ups' picker")
 	}
-	if !strings.Contains(m.View(), "by table roll-up") {
+	if !strings.Contains(m.View().Content, "by table roll-up") {
 		t.Error("picker title should name the roll-up")
 	}
 	before := len(s.diagCols)
@@ -343,7 +343,7 @@ func TestStatementsGroupColumnPicker(t *testing.T) {
 	if len(s.diagCols) != before+1 {
 		t.Errorf("toggling miss on should add a column: %d → %d", before, len(s.diagCols))
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.stmtGroupTable.showCfg {
 		t.Error("esc closes the picker")
 	}
