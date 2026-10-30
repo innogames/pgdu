@@ -466,6 +466,24 @@ func padInfo(b *strings.Builder, height int) string {
 	return b.String()
 }
 
+// fitInfo is padInfo's clamping sibling: it truncates to height lines before
+// padding, so a pane whose header grows with its state can never push the
+// footer off the screen on a short terminal. padInfo only pads, which is right
+// for panes whose content is already bounded by a viewport.
+func fitInfo(b *strings.Builder, height int) string {
+	if height < 1 {
+		height = 1
+	}
+	out := b.String()
+	if strings.Count(out, "\n") > height {
+		lines := strings.SplitN(out, "\n", height+1)
+		out = strings.Join(lines[:height], "\n") + "\n"
+	}
+	var trimmed strings.Builder
+	trimmed.WriteString(out)
+	return padInfo(&trimmed, height)
+}
+
 // hexDumpWidth is the bytes-per-line of the hex dumps (the classic 16).
 const hexDumpWidth = 16
 

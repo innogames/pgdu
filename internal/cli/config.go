@@ -8,9 +8,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/pflag"
 )
+
+// defaultRetention keeps roughly two years of size samples. It is the horizon
+// only; the tiers below it (everything inside a week, then one per day, then
+// one per ISO week) live in pg.RetentionFor.
+const defaultRetention = 2 * 365 * 24 * time.Hour
 
 // ErrHelp is returned by Parse when the user asked for --help so callers can
 // exit cleanly without printing a redundant error.
@@ -30,16 +36,35 @@ type Config struct {
 	SSLMode  string
 	DSN      string
 
-	// SnapshotDir is where top-queries snapshots are written (S) and read (L).
+	// SnapshotDir is where top-queries snapshots are written (S) and read (L),
+	// and where size samples (--sample, *.sizes.gz) live alongside them.
 	// Defaults to a shared directory under the system temp dir
 	// ($TMPDIR/pgdu-snapshots, i.e. /tmp/pgdu-snapshots) so snapshots taken by
 	// one user can be read and deleted by any other user on the same host.
+	//
+	// On most distributions that path is tmpfs or cleaned at boot, so point it
+	// somewhere persistent if you want size history to outlive a reboot.
 	SnapshotDir string
 
 	// Tool, when non-empty, names the top-level tool to open directly, skipping
 	// the tool-picker screen. One of the canonical tool names ("disk",
-	// "buffers", "queries", "activity", "logs", "pgbouncer"); empty means start on the picker.
+	// "buffers", "queries", "activity", "logs", "pgbouncer", "growth"); empty
+	// means start on the picker.
 	Tool string
+
+	// Sample turns pgdu into a one-shot size sampler: capture, write, prune,
+	// print the path, exit — no TUI. The "no daemon" rule means size history
+	// only accrues if something runs on a schedule, so this is the cron entry
+	// point.
+	Sample bool
+
+	// SampleMinBytes folds relations below this size into the sample's "other"
+	// counters. 0 (the default) keeps every relation.
+	SampleMinBytes int64
+
+	// SampleRetention is the horizon --sample prunes size samples back to.
+	// 0 disables pruning entirely.
+	SampleRetention time.Duration
 
 	// LogFile is an explicit server log to analyze (--log-file / PGDU_LOG_FILE).
 	// Empty means auto-detect: pg_current_logfile(), then /var/log/postgresql.
@@ -62,6 +87,9 @@ func Parse(args []string) (Config, error) {
 
 		SnapshotDir: envOr("PGDU_SNAPSHOT_DIR", defaultSnapshotDir()),
 		LogFile:     os.Getenv("PGDU_LOG_FILE"),
+
+		SampleMinBytes:  envBytesOr("PGDU_SAMPLE_MIN_BYTES", 0),
+		SampleRetention: envAgeOr("PGDU_SAMPLE_RETENTION", defaultRetention),
 	}
 
 	fs.StringVarP(&cfg.Host, "host", "h", cfg.Host, "database server host or socket path (empty = libpq default)")
@@ -76,15 +104,21 @@ func Parse(args []string) (Config, error) {
 	var showVersion bool
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
+	// Size sampling: the non-interactive half of the growth tool.
+	fs.BoolVar(&cfg.Sample, "sample", false, "capture a size sample into --snapshot-dir, prune old ones, print the path and exit (no TUI)")
+	minBytes := fs.String("sample-min-bytes", formatBytes(cfg.SampleMinBytes), "fold relations below this size into the sample's \"other\" total (e.g. 1MB; 0 = keep all)")
+	retention := fs.String("sample-retention", formatAge(cfg.SampleRetention), "how far back --sample keeps size samples (e.g. 90d, 2y; 0 = never prune)")
+
 	// Tool shortcuts: each opens a top-level tool directly, skipping the picker.
 	// They are mutually exclusive — pick at most one.
-	var diskUsage, sharedBuffers, activity, topQueries, logs, pgbouncer bool
+	var diskUsage, sharedBuffers, activity, topQueries, logs, pgbouncer, growth bool
 	fs.BoolVar(&diskUsage, "disk-usage", false, "start directly in the disk-usage browser")
 	fs.BoolVar(&sharedBuffers, "shared-buffers", false, "start directly in the shared-buffers browser")
 	fs.BoolVar(&activity, "activity", false, "start directly in the activity tool (pg_stat_activity)")
 	fs.BoolVar(&topQueries, "top-queries", false, "start directly in the top-queries tool (pg_stat_statements)")
 	fs.BoolVar(&logs, "logs", false, "start directly in the log analyzer")
 	fs.BoolVar(&pgbouncer, "pgbouncer", false, "start directly in the pgbouncer tool")
+	fs.BoolVar(&growth, "growth", false, "start directly in the size-history/growth tool")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "pgdu - PostgreSQL disk usage explorer (ncdu-style TUI)\n\n")
@@ -102,23 +136,46 @@ func Parse(args []string) (Config, error) {
 		return Config{}, ErrVersion
 	}
 
-	// Map the tool shortcut flags onto cfg.Tool, rejecting more than one.
-	tools := map[string]bool{
-		"disk":      diskUsage,
-		"buffers":   sharedBuffers,
-		"activity":  activity,
-		"queries":   topQueries,
-		"logs":      logs,
-		"pgbouncer": pgbouncer,
+	var err error
+	if cfg.SampleMinBytes, err = parseBytes(*minBytes); err != nil {
+		return Config{}, fmt.Errorf("--sample-min-bytes: %w", err)
 	}
-	for name, set := range tools {
-		if !set {
+	if cfg.SampleRetention, err = parseAge(*retention); err != nil {
+		return Config{}, fmt.Errorf("--sample-retention: %w", err)
+	}
+
+	// Map the tool shortcut flags onto cfg.Tool, rejecting more than one. The
+	// flag spellings are listed once, so the error can never drift from the set
+	// of flags as tools are added.
+	tools := []struct {
+		name, flag string
+		set        bool
+	}{
+		{"disk", "--disk-usage", diskUsage},
+		{"buffers", "--shared-buffers", sharedBuffers},
+		{"activity", "--activity", activity},
+		{"queries", "--top-queries", topQueries},
+		{"logs", "--logs", logs},
+		{"pgbouncer", "--pgbouncer", pgbouncer},
+		{"growth", "--growth", growth},
+	}
+	for _, t := range tools {
+		if !t.set {
 			continue
 		}
 		if cfg.Tool != "" {
-			return Config{}, errors.New("only one of --disk-usage/--shared-buffers/--activity/--top-queries/--logs/--pgbouncer may be given")
+			flags := make([]string, 0, len(tools))
+			for _, t := range tools {
+				flags = append(flags, t.flag)
+			}
+			return Config{}, fmt.Errorf("only one of %s may be given", strings.Join(flags, "/"))
 		}
-		cfg.Tool = name
+		cfg.Tool = t.name
+	}
+
+	// --sample is non-interactive, so a tool to open is meaningless with it.
+	if cfg.Sample && cfg.Tool != "" {
+		return Config{}, errors.New("--sample is non-interactive and cannot be combined with a tool flag")
 	}
 
 	if cfg.DSN == "" && cfg.User == "" {
@@ -285,6 +342,129 @@ func envIntOr(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+// parseBytes accepts a plain byte count or one with a K/M/G/T suffix (KB, MiB
+// and so on too), so a cron line reads --sample-min-bytes 1MB rather than
+// 1048576. Suffixes are binary: 1K is 1024.
+func parseBytes(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	// Strip the optional "B" and the "i" of the KiB/MiB spellings before
+	// reading the unit letter, so 1K, 1KB and 1KiB all mean the same thing.
+	mult := int64(1)
+	num := strings.ToUpper(s)
+	num = strings.TrimSuffix(num, "B")
+	num = strings.TrimSuffix(num, "I")
+	if num != "" {
+		switch num[len(num)-1] {
+		case 'K':
+			mult, num = 1<<10, num[:len(num)-1]
+		case 'M':
+			mult, num = 1<<20, num[:len(num)-1]
+		case 'G':
+			mult, num = 1<<30, num[:len(num)-1]
+		case 'T':
+			mult, num = 1<<40, num[:len(num)-1]
+		}
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(num), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size %q", s)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("size %q must not be negative", s)
+	}
+	return n * mult, nil
+}
+
+// formatBytes renders a byte count the way parseBytes reads it, so the flag's
+// printed default round-trips.
+func formatBytes(n int64) string {
+	switch {
+	case n == 0:
+		return "0"
+	case n%(1<<40) == 0:
+		return strconv.FormatInt(n/(1<<40), 10) + "T"
+	case n%(1<<30) == 0:
+		return strconv.FormatInt(n/(1<<30), 10) + "G"
+	case n%(1<<20) == 0:
+		return strconv.FormatInt(n/(1<<20), 10) + "M"
+	case n%(1<<10) == 0:
+		return strconv.FormatInt(n/(1<<10), 10) + "K"
+	}
+	return strconv.FormatInt(n, 10)
+}
+
+// parseAge extends time.ParseDuration with the d/w/y suffixes an operator
+// actually types for a retention horizon; Go's own parser tops out at hours.
+func parseAge(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "0" {
+		return 0, nil
+	}
+	unit := time.Duration(0)
+	switch s[len(s)-1] {
+	case 'd', 'D':
+		unit = 24 * time.Hour
+	case 'w', 'W':
+		unit = 7 * 24 * time.Hour
+	case 'y', 'Y':
+		unit = 365 * 24 * time.Hour
+	}
+	if unit != 0 {
+		n, err := strconv.Atoi(strings.TrimSpace(s[:len(s)-1]))
+		if err != nil {
+			return 0, fmt.Errorf("invalid duration %q", s)
+		}
+		if n < 0 {
+			return 0, fmt.Errorf("duration %q must not be negative", s)
+		}
+		return time.Duration(n) * unit, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q (try 90d, 2y or 36h)", s)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("duration %q must not be negative", s)
+	}
+	return d, nil
+}
+
+// formatAge renders a duration the way parseAge reads it.
+func formatAge(d time.Duration) string {
+	switch {
+	case d == 0:
+		return "0"
+	case d%(365*24*time.Hour) == 0:
+		return strconv.FormatInt(int64(d/(365*24*time.Hour)), 10) + "y"
+	case d%(7*24*time.Hour) == 0:
+		return strconv.FormatInt(int64(d/(7*24*time.Hour)), 10) + "w"
+	case d%(24*time.Hour) == 0:
+		return strconv.FormatInt(int64(d/(24*time.Hour)), 10) + "d"
+	}
+	return d.String()
+}
+
+func envBytesOr(key string, def int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := parseBytes(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func envAgeOr(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := parseAge(v); err == nil {
+			return d
 		}
 	}
 	return def

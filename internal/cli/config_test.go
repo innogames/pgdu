@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func parseKV(s string) map[string]string {
@@ -178,5 +179,150 @@ func TestParsePgBouncerTool(t *testing.T) {
 	}
 	if _, err := Parse([]string{"-U", "x", "--pgbouncer", "--logs"}); err == nil || !strings.Contains(err.Error(), "--pgbouncer") {
 		t.Errorf("two tool flags must be rejected naming --pgbouncer: %v", err)
+	}
+}
+
+func TestParseBytes(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    int64
+		wantErr bool
+	}{
+		{"", 0, false},
+		{"0", 0, false},
+		{"1024", 1024, false},
+		{"1K", 1 << 10, false},
+		{"1KB", 1 << 10, false},
+		{"1KiB", 1 << 10, false},
+		{"4M", 4 << 20, false},
+		{"2g", 2 << 30, false},
+		{"1T", 1 << 40, false},
+		{"1MBs", 0, true},
+		{"-5M", 0, true},
+		{"abc", 0, true},
+	}
+	for _, c := range cases {
+		got, err := parseBytes(c.in)
+		if (err != nil) != c.wantErr {
+			t.Errorf("parseBytes(%q) err = %v, wantErr %v", c.in, err, c.wantErr)
+			continue
+		}
+		if err == nil && got != c.want {
+			t.Errorf("parseBytes(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestParseAge(t *testing.T) {
+	day := 24 * time.Hour
+	cases := []struct {
+		in      string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"", 0, false},
+		{"0", 0, false},
+		{"90d", 90 * day, false},
+		{"2y", 2 * 365 * day, false},
+		{"6w", 6 * 7 * day, false},
+		{"36h", 36 * time.Hour, false},
+		{"-5d", 0, true},
+		{"", 0, false},
+		{"soon", 0, true},
+	}
+	for _, c := range cases {
+		got, err := parseAge(c.in)
+		if (err != nil) != c.wantErr {
+			t.Errorf("parseAge(%q) err = %v, wantErr %v", c.in, err, c.wantErr)
+			continue
+		}
+		if err == nil && got != c.want {
+			t.Errorf("parseAge(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// The printed flag defaults must round-trip through their own parser, or
+// --help advertises a value the flag would reject.
+func TestSampleFlagDefaultsRoundTrip(t *testing.T) {
+	for _, n := range []int64{0, 1 << 20, 1536} {
+		got, err := parseBytes(formatBytes(n))
+		if err != nil || got != n {
+			t.Errorf("bytes %d -> %q -> %d (%v)", n, formatBytes(n), got, err)
+		}
+	}
+	for _, d := range []time.Duration{0, defaultRetention, 90 * 24 * time.Hour, 36 * time.Hour} {
+		got, err := parseAge(formatAge(d))
+		if err != nil || got != d {
+			t.Errorf("age %v -> %q -> %v (%v)", d, formatAge(d), got, err)
+		}
+	}
+}
+
+func TestParseGrowthTool(t *testing.T) {
+	cfg, err := Parse([]string{"-U", "u", "--growth"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Tool != "growth" {
+		t.Errorf("Tool = %q, want growth", cfg.Tool)
+	}
+}
+
+func TestParseRejectsTwoTools(t *testing.T) {
+	_, err := Parse([]string{"-U", "u", "--growth", "--disk-usage"})
+	if err == nil {
+		t.Fatal("want an error for two tool flags")
+	}
+	// The message is built from the flag list, so it must name the new one too.
+	if !strings.Contains(err.Error(), "--growth") || !strings.Contains(err.Error(), "--disk-usage") {
+		t.Errorf("error does not name both flags: %v", err)
+	}
+}
+
+func TestParseSampleFlags(t *testing.T) {
+	cfg, err := Parse([]string{"-U", "u", "--sample", "--sample-min-bytes", "1MB", "--sample-retention", "90d"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Sample {
+		t.Error("Sample not set")
+	}
+	if cfg.SampleMinBytes != 1<<20 {
+		t.Errorf("SampleMinBytes = %d, want 1MiB", cfg.SampleMinBytes)
+	}
+	if cfg.SampleRetention != 90*24*time.Hour {
+		t.Errorf("SampleRetention = %v, want 90d", cfg.SampleRetention)
+	}
+}
+
+func TestParseSampleRejectsToolFlag(t *testing.T) {
+	if _, err := Parse([]string{"-U", "u", "--sample", "--growth"}); err == nil {
+		t.Error("want an error: --sample is non-interactive")
+	}
+}
+
+func TestParseSampleBadValues(t *testing.T) {
+	if _, err := Parse([]string{"-U", "u", "--sample-min-bytes", "lots"}); err == nil {
+		t.Error("want an error for an unparseable size")
+	}
+	if _, err := Parse([]string{"-U", "u", "--sample-retention", "forever"}); err == nil {
+		t.Error("want an error for an unparseable duration")
+	}
+}
+
+func TestParseSampleDefaults(t *testing.T) {
+	cfg, err := Parse([]string{"-U", "u"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Sample {
+		t.Error("Sample must default off")
+	}
+	if cfg.SampleMinBytes != 0 {
+		t.Errorf("SampleMinBytes = %d, want 0 (keep every relation)", cfg.SampleMinBytes)
+	}
+	if cfg.SampleRetention != defaultRetention {
+		t.Errorf("SampleRetention = %v, want %v", cfg.SampleRetention, defaultRetention)
 	}
 }

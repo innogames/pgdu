@@ -10,6 +10,7 @@ const (
 	colPrefsTableStats  = "tablestats"
 	colPrefsLogs        = "logs"
 	colPrefsLogStats    = "logstats"
+	colPrefsGrowth      = "growth" // the size-history table, at every scope
 )
 
 // colVisToStrings converts a typed column-visibility map (e.g. map[actColID]bool)

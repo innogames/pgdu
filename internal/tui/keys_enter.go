@@ -172,6 +172,21 @@ func enterLabel(s *screen) (label string, ok bool) {
 			}
 		}
 		return "SHOW table", true
+	case levelGrowth:
+		// A roll-up row narrows in place; a relation row opens its disk parts,
+		// unless it was dropped, in which case there is nothing to open. The
+		// gate is item.hasChildren rather than a payload type switch, because
+		// a generic table's item.data is []pg.DiagCell with no row type to
+		// switch on — the builder sets the flag to exactly what drillIn does.
+		if v := s.growth.view; v.grouped() {
+			return "narrow to " + v.noun(), true
+		}
+		if !hasCur {
+			return "disk parts", true
+		}
+		return "disk parts", cur.hasChildren
+	case levelGrowthWindow:
+		return "pick window", true
 	}
 	// Leaves: columns, buffer detail, shmem, tuple row, WAL block detail,
 	// statement result, settings, lock tree, wait profile, progress, pgbouncer

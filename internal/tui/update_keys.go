@@ -170,11 +170,16 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	// Snapshot delete confirmation, same y/n arming as reindex.
+	// Snapshot/size-sample delete confirmation, same y/n arming as reindex.
+	// The armed field is path-keyed and kind-agnostic; only the dispatch knows
+	// which browser is open, so each re-lists its own kind afterwards.
 	if m.pendingDeleteSnap != "" {
 		path := m.pendingDeleteSnap
 		m.pendingDeleteSnap = ""
 		if confirmGate(msg) {
+			if s.level == levelGrowthWindow {
+				return m, m.deleteSizeSampleCmd(path, m.snapshotDir, s.db)
+			}
 			return m, m.deleteSnapshotCmd(path, m.snapshotDir, s.db)
 		}
 		return m, nil
@@ -206,6 +211,9 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// and toggle keys instead of the normal list bindings (Quit still quits).
 	if (m.stmtTable.showCfg || m.stmtGroupTable.showCfg) && s.level == levelStatements {
 		return m, m.handleColumnConfigKey(s, msg)
+	}
+	if m.growthTable.showCfg && s.level == levelGrowth {
+		return m, m.handleGrowthColumnConfigKey(s, msg)
 	}
 	if m.tblTable.showCfg && s.level == levelTableStats {
 		return m, m.handleTblColumnConfigKey(s, msg)
@@ -508,6 +516,14 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelBufferTables {
 			m.toggleBufSplit(s)
 		}
+	case key.Matches(msg, m.keys.GrowthScope):
+		// Cycle the growth table's scope: the same diffed rows, re-projected
+		// in place, so no file is re-read and the narrowing survives.
+		if s.level == levelGrowth {
+			s.growth.view = s.growth.view.next()
+			m.rebuildGrowthItems(s)
+			s.resetCursor()
+		}
 	case key.Matches(msg, m.keys.StmtView):
 		// Cycle the top-queries table through its roll-ups: the same window,
 		// re-projected in place (no reload), so the live tick keeps landing.
@@ -571,10 +587,28 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelStatements || s.level == levelStatementDetail {
 			return m, m.saveSnapshotCmd(s.db)
 		}
+		// In the growth tool S captures a size sample. It scans every relation
+		// and can run for minutes, so it must not stack.
+		if s.level == levelGrowth || s.level == levelGrowthWindow {
+			if s.growth.capturing {
+				m.notice = "a size capture is already running"
+				return m, nil
+			}
+			s.growth.capturing = true
+			return m, m.captureSizesCmd(s.db, true)
+		}
 	case key.Matches(msg, m.keys.Snapshots):
 		// Open the on-disk snapshots browser over the top-queries table.
 		if s.level == levelStatements {
 			next := &screen{level: levelSnapshots, title: "snapshots", tool: s.tool, db: s.db, loading: true}
+			m.stack = append(m.stack, next)
+			return m, m.loadCurrent()
+		}
+		// Reopen the size-sample browser over the growth table. Not in entry
+		// mode: a window is already applied, so the live "now" row is offered
+		// and Back pops just this screen.
+		if s.level == levelGrowth {
+			next := &screen{level: levelGrowthWindow, title: "samples", tool: s.tool, db: s.db, loading: true}
 			m.stack = append(m.stack, next)
 			return m, m.loadCurrent()
 		}
@@ -583,6 +617,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelSnapshots {
 			if meta, ok := s.selectedSnapshot(); ok {
 				m.pendingDeleteSnap = meta.Path
+			}
+		}
+		if s.level == levelGrowthWindow {
+			if cur, ok := s.currentItem(); ok && cur.snapPath != "" && cur.snapPath != growthNow {
+				m.pendingDeleteSnap = cur.snapPath
 			}
 		}
 	case key.Matches(msg, m.keys.ActivityFilter):
@@ -637,6 +676,8 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			actSpec.open(m, &m.actTable)
 		case levelTableStats:
 			tblSpec.open(m, &m.tblTable)
+		case levelGrowth:
+			growthSpec.open(m, &m.growthTable)
 		case levelDiagnosticResult, levelPgBouncerShow:
 			if s.diagResult != nil {
 				m.showInfo = false
@@ -718,6 +759,14 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelStatementDetail {
 			s.stat.verbose = !s.stat.verbose
 		}
+		// On the growth table, `v` reveals the dropped relations. They are
+		// hidden by default because a negative delta reads as noise next to the
+		// growth the tool is about.
+		if s.level == levelGrowth {
+			s.growth.showGone = !s.growth.showGone
+			m.rebuildGrowthItems(s)
+			s.resetCursor()
+		}
 		// On the parts level, `v` arms the VACUUM VERBOSE confirmation.
 		if s.level == levelParts && s.table.OID != 0 {
 			if m.vacuum.running {
@@ -795,6 +844,16 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		next.table = t.table
 		return m, m.loadDescribeTableCmd(t.table)
+	case key.Matches(msg, m.keys.Growth):
+		// From the disk browser, open the size-history tool for the same
+		// database: the same two screens the root menu's database pick pushes,
+		// so the window picker opens over an unloaded table and Back from it
+		// leaves the tool. Gated by applyContext to the disk levels that carry
+		// a database.
+		if s.tool == toolDisk && s.db != "" {
+			m.stack = append(m.stack, databaseChildScreens(toolGrowth, s.db)...)
+			return m, m.loadCurrent()
+		}
 	case key.Matches(msg, m.keys.DiskUsage):
 		// From the top-queries views, jump to the main table's disk-usage (parts)
 		// breakdown. Only meaningful for name-resolved targets (the statement
@@ -876,7 +935,29 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
+		// Same one-undo-per-Esc on the growth table: a roll-up scope returns to
+		// the relation list, then a narrowing widens back to the whole window.
+		if msg.Code == tea.KeyEsc && s.level == levelGrowth {
+			if s.growth.view.grouped() {
+				s.growth.view = growthByTable
+				m.rebuildGrowthItems(s)
+				s.resetCursor()
+				break
+			}
+			if s.growth.group != nil {
+				s.growth.group = nil
+				m.rebuildGrowthItems(s)
+				s.resetCursor()
+				break
+			}
+		}
 		if len(m.stack) > 1 {
+			m.stack = m.stack[:len(m.stack)-1]
+		}
+		// Backing out of the entry picker leaves the tool: the growth table
+		// beneath it has never loaded (no window picked yet), so landing there
+		// would only show an empty screen.
+		if s.level == levelGrowthWindow && s.growth.entry && len(m.stack) > 1 && m.top().level == levelGrowth && !m.top().loaded {
 			m.stack = m.stack[:len(m.stack)-1]
 		}
 		// Backing out of the entry picker leaves the tool: the top-queries table

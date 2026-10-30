@@ -60,6 +60,7 @@ func (m *Model) diskSchemasInfo(b *strings.Builder) {
 	b.WriteString("    " + mu("reconciling against pg_database_size, which counts them.") + "\n\n")
 	b.WriteString("  " + styleHeader.Render(" keys ") + "\n")
 	b.WriteString("    " + styleBadge.Render("↵") + mu("  open the schema's tables. A database with one non-system schema skips this screen.") + "\n")
+	b.WriteString("    " + styleBadge.Render("h") + mu("  size history for this database — what is growing, rather than what is big") + "\n")
 }
 
 func (m *Model) diskTablesInfo(b *strings.Builder) {
@@ -98,6 +99,8 @@ func (m *Model) diskTablesInfo(b *strings.Builder) {
 	b.WriteString("    " + styleBadge.Render("↵") + mu("  the table's parts: its heap, its TOAST and each index separately, with bloat measured") + "\n")
 	b.WriteString("    " + styleBadge.Render("d") + mu("  describe the table (\\d with statistics attached)") + "\n")
 	b.WriteString("    " + styleBadge.Render("e") + mu("  export this table, filtered and sorted as shown, to CSV") + "\n")
+	b.WriteString("    " + styleBadge.Render("h") + mu("  size history for this database: the same relations, but Δ bytes and bytes/day between") + "\n")
+	b.WriteString("    " + mu("two captured samples. This screen answers what is big; that one answers what is growing.") + "\n")
 }
 
 func (m *Model) diskPartsInfo(b *strings.Builder) {

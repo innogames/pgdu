@@ -139,6 +139,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onSnapshotBaseLoaded(msg)
 	case snapshotFrozenLoadedMsg:
 		return m, m.onSnapshotFrozenLoaded(msg)
+	case sizeSamplesListedMsg:
+		return m, m.onSizeSamplesListed(msg)
+	case sizeSampleCapturedMsg:
+		return m, m.onSizeSampleCaptured(msg)
+	case growthWindowLoadedMsg:
+		return m, m.onGrowthWindowLoaded(msg)
+
 	case exportDoneMsg:
 		return m, m.onExportDone(msg)
 

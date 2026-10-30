@@ -2,9 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
+
+	"pgdu/internal/humanize"
 )
 
 // relativeAge formats a duration as a short human-readable age suffix such as
@@ -156,6 +159,10 @@ func levelLabel(l level) string {
 		return "pgbouncer"
 	case levelPgBouncerShow:
 		return "pgbouncer-show"
+	case levelGrowth:
+		return "growth"
+	case levelGrowthWindow:
+		return "samples"
 	case levelWAL:
 		return "wal"
 	case levelWALRecords:
@@ -305,4 +312,42 @@ func fmtDuration(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%dd %dh", int(d/(24*time.Hour)), int(d%(24*time.Hour)/time.Hour))
 	}
+}
+
+// signedBytes renders a byte change with an explicit sign, so a column of
+// changes reads as changes rather than as sizes: "+1.20 MB", "-3.00 MB", "0 B".
+// humanize.Bytes already carries the minus; only the plus has to be added, and
+// a genuine zero gets neither.
+func signedBytes(n int64) string {
+	if n > 0 {
+		return "+" + humanize.Bytes(n)
+	}
+	return humanize.Bytes(n)
+}
+
+// signedCount is signedBytes for a humanized counter. It formats the
+// magnitude and adds the sign itself rather than handing a negative to
+// formatRows, which renders one as "?" — correct for an absolute counter,
+// where a negative means "unknown", but wrong for a change, where it just
+// means rows went away.
+func signedCount(n int64) string {
+	switch {
+	case n > 0:
+		return "+" + formatRows(n)
+	case n < 0 && n != math.MinInt64:
+		return "-" + formatRows(-n)
+	case n < 0:
+		return "?" // only reachable from an overflowed conversion
+	}
+	return formatRows(0)
+}
+
+// signedPct renders a percentage change with an explicit sign. Like the plain
+// percent columns it omits the "%" itself — the column header carries the unit.
+func signedPct(v float64) string {
+	s := fmt.Sprintf("%.*f", diagPercentDecimals, v)
+	if v > 0 {
+		return "+" + s
+	}
+	return s
 }

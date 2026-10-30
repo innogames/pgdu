@@ -345,14 +345,12 @@ func (m *Model) cycleSort(s *screen, dir int) {
 			return
 		}
 		s.diagSortCol = ((s.diagSortCol+dir)%n + n) % n
-		// Numeric columns default to descending (biggest first);
-		// text columns default to ascending (alphabetical).
-		switch s.diagCols[s.diagSortCol].Kind {
-		case pg.DiagInt, pg.DiagFloat, pg.DiagPercent, pg.DiagBytes, pg.DiagPercentGraded, pg.DiagCostGraded, pg.DiagDuration, pg.DiagPercentBad, pg.DiagCount:
-			s.sortDesc = true
-		default:
-			s.sortDesc = false
-		}
+		// Numeric columns default to descending (biggest first); text columns
+		// default to ascending (alphabetical). Signed change columns count as
+		// numeric, so landing on one puts the largest growth on top rather
+		// than the largest shrink — "what is growing" is the question the
+		// column exists to answer. r still flips it to find the shrinkers.
+		s.sortDesc = numericDiagKind(s.diagCols[s.diagSortCol].Kind)
 		// On the top-queries table, remember the chosen column by stable id so a
 		// later column hide/show re-pins the sort to the same column (see
 		// syncStmtSort). Same logic for the Activity table's actCols.
@@ -371,6 +369,14 @@ func (m *Model) cycleSort(s *screen, dir int) {
 		}
 		if s.tbl.cols != nil && s.diagSortCol < len(s.tbl.cols) {
 			m.tblTable.sortColID = s.tbl.cols[s.diagSortCol].id
+		}
+		if s.growth.cols != nil && s.diagSortCol < len(s.growth.cols) {
+			m.growthTable.sortColID = s.growth.cols[s.diagSortCol].id
+		}
+		if s.level == levelGrowth {
+			// The growth table's bar rides the sort column: the question the
+			// table answers changes with it.
+			m.syncGrowthBar(s)
 		}
 		if s.level == levelLogs && s.log.cols != nil && s.diagSortCol < len(s.log.cols) {
 			*m.logSortCol(s.log.view) = s.log.cols[s.diagSortCol].id

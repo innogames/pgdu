@@ -18,6 +18,9 @@ internal/pg/         # pgx wrapper: one *pgxpool.Pool per database, lazy
   diag_defs_{cat}.go #   Diagnostics registry entries per category; diagnostic_defs.go concatenates them
   types.go, types_{domain}.go   # row structs
   {entity}.go        #   one file per entity's List*/Fill*/Probe* operations
+  sizehistory.go     #   size samples: capture, save/list/load, retention (growth tool)
+  growth.go          #   DiffSizes + the scope roll-ups over two samples
+  snapfile.go        #   the gzip-JSON file layer both sample kinds share
   pgbouncer.go       #   DiscoverPgBouncers: pgbouncer.Client.Discover + the behind-a-pooler check
   logdiscover.go     #   log file discovery (pg_current_logfile / pg_ls_logdir) + server-side LogSource
 internal/diagres/    # generic column/row result table (kinds, cells, pgx row scan) shared by pg and pgbouncer
@@ -83,6 +86,9 @@ Defaults match `psql`: no `-h` → Unix socket + peer auth. `PGPASSWORD` is read
 
 Snapshots (`--snapshot-dir`, default `/tmp/pgdu-snapshots`, `PGDU_SNAPSHOT_DIR`) are
 deliberately world-writable (dir 0o777, files 0o666) so any host user can manage anyone's.
+The directory holds two kinds: query snapshots (`*.json.gz`) and size samples
+(`*.sizes.gz`, written by `pgdu --sample`). On most distros that path is tmpfs or
+cleaned at boot, so point it somewhere persistent for real size history.
 Prefs (`~/.config/pgdu/prefs.json`, `PGDU_CONFIG_DIR`) are per-user; `prefs.Load` never
 fails (missing/corrupt → empty).
 
@@ -229,6 +235,43 @@ fails (missing/corrupt → empty).
   Adding a row means deciding which of the three it is. Action rows are the recommendations
   first, then the four stats-reset rows of the closing statistics block (`actionRows`); the fix
   line renders under the cursor row only.
+- **Growth / size history** (`toolGrowth`, `--growth`): pgdu accrues its own history,
+  since the server keeps none. A *sample* (`internal/pg/sizehistory.go`) is one
+  per-relation size capture of one database; a *window* is two samples, diffed by
+  `DiffSizes`. Samples share the snapshot directory with query snapshots but are a
+  separate kind: `snapfile.go` holds the one `snapKind` registry both listers claim
+  their files through, and the meta cache is **per kind** (`metaStore[T]`) because a
+  single path-keyed map would have each lister's disappeared-files sweep evict the
+  other's entries. Rows key on the logical identity `(database, schema, relname)` —
+  OID survives `pg_upgrade` but not a dump/restore — and every consequence is a tag,
+  never a silent correction: `new` carries its whole size as the delta, `gone` a
+  negative one, `rewritten` (relfilenode changed) leaves the delta alone because the
+  shrink is real disk, and a rename reads as one `gone` plus one `new`. A window
+  under 60 s is refused; a reversed pair is ordered by time and flagged; a straddled
+  stats reset clears `RowsKnown` but never touches the byte deltas, because sizes are
+  measured and rows are counted. The partition roll-up walks `ParentOID` client-side
+  (`RollUpGrowth`), *not* `sqlDiagTableShowSize`'s recursive CTE, because the tree
+  differs between the two samples and only the client holds both files.
+  `pgdu --sample` is the cron one-shot (`runSample` in `main.go`, its own 10-minute
+  budget, path to stdout) and the only thing that prunes; the TUI's `S` captures with
+  no size floor and never prunes. The four scopes are Tab-cycled in-place views over
+  one row set, and because a roll-up row is a `pg.GrowthRow` too they share **one**
+  column registry — unlike the top-queries roll-ups, whose group rows are a different
+  type and need a second. The picker duplicates the snapshot browser's idiom rather
+  than its code (that one is welded to `stmtState`); what differs is a bytes bar,
+  `@now` as the only anchor, and a compatibility check that adds `DatabaseOID`/
+  `SystemID` — where **zero means unknown and must read as compatible**, since
+  `pg_control_system()` is revoked from PUBLIC.
+  Every *change* column uses one of the `Diag*Delta*` kinds, which is what makes
+  the explicit `+`/`-` safe: `diagCellText` (`view_diag.go`) is the single place a
+  numeric cell becomes text, so the width pass, the data row, the headline-bar
+  number and the Σ footer cannot disagree about the spelling — before the kinds
+  existed the bar re-derived its number from `Num` and would have dropped a sign
+  the cell had added. `deltaStyle` colours by **direction, not judgement**: a
+  shrink green, growth graded against the column's largest absolute change,
+  zero muted. An absolute figure (`size`, `base`, `rows`) must never take a delta
+  kind, and `signedCount` formats the magnitude itself rather than handing a
+  negative to `formatRows`, whose `?` means "unknown" on a counter, not "fewer".
 - **Top-queries snapshots**: the `L` browser carries virtual anchors (`@now`,
   `@session`, `@reset` in `cmds.go`) that are never backed by a file — every path that
   loads or diffs a snapshot must special-case them. Snapshots older than the live

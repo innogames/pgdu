@@ -99,6 +99,10 @@ func (m *Model) drillIn() tea.Cmd {
 		return m.drillStatement(s, cur)
 	case levelSnapshots:
 		return m.loadSelectedSnapshot(s, cur)
+	case levelGrowth:
+		return m.drillGrowth(s, cur)
+	case levelGrowthWindow:
+		return m.pickGrowthWindow(s, cur)
 	case levelActivity:
 		return m.drillActivityStatement(s, cur)
 	case levelPgBouncers:
@@ -259,6 +263,15 @@ func databaseChildScreens(t tool, db string) []*screen {
 		return []*screen{
 			{level: levelStatements, title: "queries", tool: toolQueries, db: db},
 			{level: levelSnapshots, title: "snapshots", tool: toolQueries, db: db, loading: true, stat: stmtState{entry: true}},
+		}
+	}
+	if t == toolGrowth {
+		// Same shape as toolQueries, for the same reason: the growth table has
+		// no time axis of its own, so the sample/window picker opens on top of
+		// it and the table loads only once a window is picked.
+		return []*screen{
+			{level: levelGrowth, title: "growth", tool: toolGrowth, db: db},
+			{level: levelGrowthWindow, title: "samples", tool: toolGrowth, db: db, loading: true, growth: growthState{entry: true}},
 		}
 	}
 	return []*screen{{level: levelSchemas, title: "schemas", tool: t, db: db, sort: sortBySize, sortDesc: sortBySize.defaultDesc()}}

@@ -36,7 +36,18 @@ const (
 	KindPercentBad                // 0–100 % where higher is worse: cell text graded green→red on an absolute scale (e.g. dead-tuple %, seq-scan %)
 	KindCount                     // large cumulative counter: rendered humanized (1.2k/3.4M/5.1G) from Num; sorts and sums on the raw value
 	KindLogSeverity               // server-log severity tag: coloured per value (ERROR/FATAL red, WARNING yellow, LOG muted); Num carries the ordinal for sorting
+	KindDeltaBytes                // signed byte change: rendered "+1.20 MB" / "-3.00 MB" from Num, coloured by direction (growth graded, shrink green)
+	KindDeltaCount                // signed counter change: humanized with an explicit sign, coloured like KindDeltaBytes
+	KindDeltaPct                  // signed percentage change: rendered with an explicit sign, coloured like KindDeltaBytes
+	KindGrowthTag                 // size-history row tag: new cyan, rewritten yellow, gone muted
 )
+
+// IsDelta reports whether a kind is one of the signed change columns, which
+// share a formatter (explicit +/-) and a colour rule (direction, not value).
+// A change of zero is neither growth nor shrink and renders muted.
+func (k Kind) IsDelta() bool {
+	return k == KindDeltaBytes || k == KindDeltaCount || k == KindDeltaPct
+}
 
 // Column describes one column of a result set.
 type Column struct {

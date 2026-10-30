@@ -33,6 +33,13 @@ func (m *Model) handleTblColumnConfigKey(s *screen, msg tea.KeyPressMsg) tea.Cmd
 	return tblSpec.handleKey(m, &m.tblTable, msg, tblCtx{}, func() { m.rebuildTableStatItems(s) })
 }
 
+// handleGrowthColumnConfigKey drives the C picker on the growth table. One
+// picker serves every scope, so the checkbox list stays stable across Tab.
+func (m *Model) handleGrowthColumnConfigKey(s *screen, msg tea.KeyPressMsg) tea.Cmd {
+	ctx := growthCtx{view: s.growth.view, window: s.growth.duration()}
+	return growthSpec.handleKey(m, &m.growthTable, msg, ctx, func() { m.rebuildGrowthItems(s) })
+}
+
 // handleDiagColumnConfigKey drives the column-config overlay for a diagnostic
 // result (C on levelDiagnosticResult). Unlike the registry-backed pickers it
 // operates on the result's dynamic column set; visibility is kept per
