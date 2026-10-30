@@ -78,6 +78,8 @@ func (m *Model) renderIndexPagesInfo(height int) string {
 		mu(" means posting-list dedup is possible") + "\n\n")
 
 	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+strconv.Itoa(int(heapWindowDefault))+" pages per step).") + "\n")
+	b.WriteString("  " + styleBadge.Render("s") + "  " +
+		mu("go to block: type a block number and press ↵ — the window follows it when it has to.") + "\n")
 	b.WriteString("  " + mu("Within a window, j/k or arrows move the cursor; ↵ drills into one page's items.") + "\n")
 	b.WriteString("  " + mu("Block 0 is the metapage — skipped here; it carries the root pointer, not a tree page.") + "\n")
 
@@ -1046,7 +1048,7 @@ func indexKeyText(t pg.IndexTuple, cols []pg.IndexKeyColumn) (string, bool) {
 	if t.Data == nil {
 		return "", false
 	}
-	if s, ok := pageinspect.DecodeIndexKey(*t.Data, cols); ok {
+	if s, ok := pageinspect.DecodeIndexKey(*t.Data, cols, t.Nulls); ok {
 		return s, true
 	}
 	if s, ok := decodeHexKey(*t.Data); ok {
@@ -1157,7 +1159,7 @@ func pivotNAtts(ctid *string) (int, bool) {
 func pivotKeyText(t pg.IndexTuple, cols []pg.IndexKeyColumn) (string, bool) {
 	if t.Data != nil {
 		if natts, ok := pivotNAtts(t.Ctid); ok {
-			if s, ok := pageinspect.DecodeIndexKeyPivot(*t.Data, cols, natts); ok {
+			if s, ok := pageinspect.DecodeIndexKeyPivot(*t.Data, cols, natts, t.Nulls); ok {
 				return s, true
 			}
 		}

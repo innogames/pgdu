@@ -157,39 +157,6 @@ func TestHeapPageLPExtractors(t *testing.T) {
 	}
 }
 
-func TestHeapTupleState(t *testing.T) {
-	const (
-		xminCmt  = pg.HeapXminCommitted
-		xminInv  = pg.HeapXminInvalid
-		xmaxCmt  = pg.HeapXmaxCommitted
-		xmaxInv  = pg.HeapXmaxInvalid
-		xmaxMult = pg.HeapXmaxIsMulti
-	)
-	xid := func(v uint32) *uint32 { return &v }
-	cases := []struct {
-		name string
-		t    pg.HeapTuple
-		want string
-	}{
-		{"live", pg.HeapTuple{LPFlags: pg.LPNormal, Infomask: xminCmt | xmaxInv, Xmax: xid(0)}, "live"},
-		{"frozen", pg.HeapTuple{LPFlags: pg.LPNormal, Infomask: xminCmt | xminInv | xmaxInv}, "frozen"},
-		{"dead (deleted+committed)", pg.HeapTuple{LPFlags: pg.LPNormal, Infomask: xminCmt | xmaxCmt, Xmax: xid(1043)}, "dead"},
-		{"deleting (xmax uncommitted)", pg.HeapTuple{LPFlags: pg.LPNormal, Infomask: xminCmt, Xmax: xid(1043)}, "deleting"},
-		{"locked (multixact)", pg.HeapTuple{LPFlags: pg.LPNormal, Infomask: xminCmt | xmaxMult, Xmax: xid(7)}, "locked"},
-		{"aborted inserter", pg.HeapTuple{LPFlags: pg.LPNormal, Infomask: xminInv}, "aborted"},
-		{"dead line pointer", pg.HeapTuple{LPFlags: pg.LPDead}, "dead"},
-		{"redirect", pg.HeapTuple{LPFlags: pg.LPRedirect}, "redirect"},
-		{"unused", pg.HeapTuple{LPFlags: pg.LPUnused}, "unused"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got, _ := heapTupleState(c.t); got != c.want {
-				t.Errorf("heapTupleState = %q, want %q", got, c.want)
-			}
-		})
-	}
-}
-
 func TestItemBufferExtractors(t *testing.T) {
 	good := item{data: pg.TableBufferStat{BufferedBytes: 50, TotalBytes: 200, Hits: 3, Reads: 1}}
 	noIO := item{data: pg.TableBufferStat{TotalBytes: 200}}

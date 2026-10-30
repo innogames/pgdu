@@ -20,10 +20,13 @@ func (c *Client) EnsurePageInspect(ctx context.Context, db string) error {
 	return c.ensureExtension(ctx, db, "pageinspect", c.pageInspectReady)
 }
 
-// RelPages returns pg_class.relpages for a table — used to clamp the
-// page-window the user is scrolling through so we never call get_raw_page
-// past EOF. ANALYZE-accurate; close enough for clamping without taking the
-// exclusive lock pg_relation_size_blocks would need.
+// RelPages returns a relation's current main-fork block count — used to clamp
+// the page window the user is scrolling through so we never call get_raw_page
+// past EOF. It divides pg_relation_size by block_size rather than reading
+// pg_class.relpages (see sqlRelPages): relpages is an ANALYZE-time estimate
+// that is zero on a never-analyzed table and stale after a bulk load, which
+// would hide real pages or send the clamp past the end of the file.
+// pg_relation_size only stat()s the fork — no lock, no scan.
 func (c *Client) RelPages(ctx context.Context, t Table) (int32, error) {
 	pool, err := c.PoolFor(ctx, t.DB)
 	if err != nil {
@@ -38,50 +41,55 @@ func (c *Client) RelPages(ctx context.Context, t Table) (int32, error) {
 
 // clampPageWindow caps the half-open window [start, start+count) to the
 // relation's real page count, since get_raw_page / bt_page_stats error hard
-// past EOF. relpages comes from sqlRelPages (pg_class — ANALYZE-accurate, no
-// exclusive lock). ok is false when the window is entirely past EOF or the
-// relation has fewer than minPages browsable pages (1 for a heap; 2 for an
-// index, whose block 0 is the un-listable meta page). On ok the adjusted count
-// is returned.
-func (c *Client) clampPageWindow(ctx context.Context, pool *pgxpool.Pool, oid uint32, qualified string, start, count, minPages int32) (int32, bool, error) {
-	var relpages int32
+// past EOF. The count comes from sqlRelPages — the file size, not
+// pg_class.relpages (see RelPages). ok is false when the window is entirely
+// past EOF or the relation has fewer than minPages browsable pages (1 for a
+// heap; 2 for an index, whose block 0 is the un-listable meta page). On ok the
+// adjusted count and the relation's total page count are returned, the latter
+// so callers need not re-read it for the status line.
+func (c *Client) clampPageWindow(ctx context.Context, pool *pgxpool.Pool, oid uint32, qualified string, start, count, minPages int32) (adjusted, relpages int32, ok bool, err error) {
 	if err := queryRelRow(ctx, pool, fmt.Sprintf("relpages for %q", qualified), sqlRelPages, []any{oid}, &relpages); err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
 	if relpages < minPages || start >= relpages {
-		return 0, false, nil
+		return 0, relpages, false, nil
 	}
 	if start+count > relpages {
 		count = relpages - start
 	}
-	return count, true, nil
+	return count, relpages, true, nil
 }
 
 // listPageWindow is the shared preamble of every List*Pages reader: ensure
 // pageinspect, clamp the requested window to the relation's real page count
-// (nil result when nothing is browsable), then run the summary query over
-// (regclass, start, count) and collect the rows.
-func listPageWindow[T any](ctx context.Context, c *Client, db, schema, name string, oid uint32, qualified, op, sql string, start, count, minPages int32, scan func(pgx.CollectableRow) (T, error)) ([]T, error) {
+// (nil rows when nothing is browsable), then run the summary query over
+// (regclass, start, count) and collect the rows. relpages — the relation's
+// whole block count — rides along because the clamp has already paid for it;
+// the TUI needs it for the "pages N–M / total" status line and would otherwise
+// read it a second time per load.
+func listPageWindow[T any](ctx context.Context, c *Client, db, schema, name string, oid uint32, qualified, op, sql string, start, count, minPages int32, scan func(pgx.CollectableRow) (T, error)) (rows []T, relpages int32, err error) {
 	if err := c.EnsurePageInspect(ctx, db); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	pool, err := c.PoolFor(ctx, db)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	regclass := qualifiedIdent(schema, name)
-	count, ok, err := c.clampPageWindow(ctx, pool, oid, qualified, start, count, minPages)
+	count, relpages, ok, err := c.clampPageWindow(ctx, pool, oid, qualified, start, count, minPages)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if !ok {
-		return nil, nil
+		return nil, relpages, nil
 	}
-	return collect(ctx, pool, op, sql, []any{regclass, start, count}, scan)
+	rows, err = collect(ctx, pool, op, sql, []any{regclass, start, count}, scan)
+	return rows, relpages, err
 }
 
-// ListHeapPages returns up to `count` per-page summaries starting at `start`.
-func (c *Client) ListHeapPages(ctx context.Context, t Table, start, count int32) ([]HeapPageStat, error) {
+// ListHeapPages returns up to `count` per-page summaries starting at `start`,
+// plus the heap's whole block count (see listPageWindow).
+func (c *Client) ListHeapPages(ctx context.Context, t Table, start, count int32) ([]HeapPageStat, int32, error) {
 	return listPageWindow(ctx, c, t.DB, t.Schema, t.Name, t.OID, t.Qualified(),
 		fmt.Sprintf("list heap pages in %q", t.Qualified()), sqlHeapPagesSummary, start, count, 1,
 		func(row pgx.CollectableRow) (HeapPageStat, error) {
@@ -193,7 +201,7 @@ func (c *Client) ToastChunkLocation(ctx context.Context, db string, toastOID, ch
 // starting at `start`. Block 0 is the index meta page; bt_page_stats errors
 // on it, so the SQL clamps the window to start at 1 internally — callers
 // can pass start=0 without surprising failure.
-func (c *Client) ListIndexPages(ctx context.Context, r Relation, start, count int32) ([]IndexPageStat, error) {
+func (c *Client) ListIndexPages(ctx context.Context, r Relation, start, count int32) ([]IndexPageStat, int32, error) {
 	// minPages=2: an index's block 0 is the meta page, which bt_page_stats
 	// can't summarise, so a one-page index has nothing browsable.
 	return listPageWindow(ctx, c, r.DB, r.Schema, r.Name, r.OID, r.Qualified(),
@@ -709,7 +717,7 @@ func (c *Client) ListTupleAttrs(ctx context.Context, t Table, blkno, lp int32) (
 // ListGistPages returns up to `count` per-page summaries of a GiST index from
 // `start`. GiST has no metapage (block 0 is the root), so minPages=1 and the
 // window starts wherever the caller asks.
-func (c *Client) ListGistPages(ctx context.Context, r Relation, start, count int32) ([]GistPageStat, error) {
+func (c *Client) ListGistPages(ctx context.Context, r Relation, start, count int32) ([]GistPageStat, int32, error) {
 	return listPageWindow(ctx, c, r.DB, r.Schema, r.Name, r.OID, r.Qualified(),
 		fmt.Sprintf("list gist pages in %q", r.Qualified()), sqlGistPagesSummary, start, count, 1,
 		func(row pgx.CollectableRow) (GistPageStat, error) {
@@ -816,7 +824,7 @@ func (c *Client) BrinMeta(ctx context.Context, r Relation) (BrinMeta, error) {
 
 // ListBrinPages returns up to `count` BRIN page summaries from `start`. Block 0
 // (meta) is browsable — brin_page_type handles every page type — so minPages=1.
-func (c *Client) ListBrinPages(ctx context.Context, r Relation, start, count int32) ([]BrinPageStat, error) {
+func (c *Client) ListBrinPages(ctx context.Context, r Relation, start, count int32) ([]BrinPageStat, int32, error) {
 	return listPageWindow(ctx, c, r.DB, r.Schema, r.Name, r.OID, r.Qualified(),
 		fmt.Sprintf("list brin pages in %q", r.Qualified()), sqlBrinPagesSummary, start, count, 1,
 		func(row pgx.CollectableRow) (BrinPageStat, error) {
@@ -868,7 +876,7 @@ func (c *Client) GinMeta(ctx context.Context, r Relation) (GinMeta, error) {
 // ListGinPages returns up to `count` GIN page summaries from `start`. The
 // metapage (block 0) is skipped (minPages=2; the SQL clamps the lower bound to
 // block 1) since its opaque area differs and it's covered by the banner.
-func (c *Client) ListGinPages(ctx context.Context, r Relation, start, count int32) ([]GinPageStat, error) {
+func (c *Client) ListGinPages(ctx context.Context, r Relation, start, count int32) ([]GinPageStat, int32, error) {
 	return listPageWindow(ctx, c, r.DB, r.Schema, r.Name, r.OID, r.Qualified(),
 		fmt.Sprintf("list gin pages in %q", r.Qualified()), sqlGinPagesSummary, start, count, 2,
 		func(row pgx.CollectableRow) (GinPageStat, error) {

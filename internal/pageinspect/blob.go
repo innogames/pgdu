@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"encoding/binary"
+	"errors"
 	"io"
 	"math"
 	"unicode/utf8"
@@ -24,6 +25,11 @@ import (
 // prefix read, never a full inflate. 1 KiB is several times the widest terminal.
 const maxBlobDecode = 1024
 
+// maxBlobHex bounds the stored bytes echoed back when a container is
+// recognised but nothing could be inflated from it. Short, since this is a
+// per-row legend cell and the bytes are a last resort, not the value.
+const maxBlobHex = 64
+
 // compressedBlobValue renders a varlena payload that is itself a compressed
 // stream as "<format>: <content>", falling back to "<format> · N raw" when the
 // stream announces its size but cannot be decoded (an unvendored or failing
@@ -34,17 +40,17 @@ func compressedBlobValue(payload []byte) (string, bool) {
 	case isZstdFrame(payload):
 		size, sized := zstdFrameSize(payload)
 		data, truncated, ok := decompressZstd(payload)
-		return blobText("zstd", size, sized, data, truncated, ok), true
+		return blobText("zstd", size, sized, payload, data, truncated, ok), true
 	case isGzip(payload):
 		size, sized := gzipRawSize(payload)
 		data, truncated, ok := decompressGzip(payload)
-		return blobText("gzip", size, sized, data, truncated, ok), true
+		return blobText("gzip", size, sized, payload, data, truncated, ok), true
 	case isZlib(payload):
 		// zlib has no magic number, only a two-byte sanity check that random
 		// bytes pass now and then, so it is claimed only once it decodes —
 		// otherwise the value falls back to its normal text/hex rendering.
 		if data, truncated, ok := decompressZlib(payload); ok {
-			return blobText("zlib", 0, false, data, truncated, ok), true
+			return blobText("zlib", 0, false, payload, data, truncated, ok), true
 		}
 	}
 	return "", false
@@ -53,12 +59,19 @@ func compressedBlobValue(payload []byte) (string, bool) {
 // blobText assembles the rendered value from a decode attempt. A decode that
 // produced nothing still leaves the format name — knowing a column holds zstd
 // is most of the answer — plus the raw size when the container declares one.
-func blobText(kind string, size int64, sized bool, data []byte, truncated, ok bool) string {
+// With neither, the stored bytes themselves are all there is to report, so
+// they are hexed rather than hidden behind the bare word "undecoded".
+func blobText(kind string, size int64, sized bool, stored, data []byte, truncated, ok bool) string {
 	if !ok {
 		if sized {
 			return kind + " · " + humanize.Bytes(size) + " raw"
 		}
-		return kind + " · undecoded"
+		n := min(len(stored), maxBlobHex)
+		s := kind + " · undecoded · " + hexString(stored[:n])
+		if n < len(stored) {
+			s += "…"
+		}
+		return s
 	}
 	s := kind + ": " + blobPayloadText(data)
 	if truncated {
@@ -83,10 +96,13 @@ func blobPayloadText(data []byte) string {
 }
 
 // trimPartialRune drops a trailing incomplete UTF-8 sequence (at most the 3
-// bytes a 4-byte rune can leave behind).
+// bytes a 4-byte rune can leave behind). DecodeLastRune reports RuneError both
+// for a byte that cannot start one and for a correctly encoded U+FFFD, and
+// only the width tells them apart — without the size check a payload that
+// legitimately ends in a replacement character loses its last three bytes.
 func trimPartialRune(b []byte) []byte {
 	for i := 0; i < utf8.UTFMax-1 && len(b) > 0; i++ {
-		if r, _ := utf8.DecodeLastRune(b); r != utf8.RuneError {
+		if r, size := utf8.DecodeLastRune(b); r != utf8.RuneError || size > 1 {
 			break
 		}
 		b = b[:len(b)-1]
@@ -98,15 +114,19 @@ func trimPartialRune(b []byte) []byte {
 // the cap is a success, not an error: the extra byte read distinguishes "the
 // payload ends here" from "there is more we chose not to inflate". An error
 // after some output still yields that output — a blob whose tail is corrupt or
-// clipped is worth showing as far as it decoded.
+// clipped is worth showing as far as it decoded — but it counts as truncated,
+// so the caller's ellipsis says the rendering is partial. Running out of input
+// is how a complete stream shorter than the cap ends, so ReadFull's own EOFs
+// are not errors here.
 func readBounded(r io.Reader) (data []byte, truncated, ok bool) {
 	buf := make([]byte, maxBlobDecode+1)
 	n, err := io.ReadFull(r, buf)
+	cut := err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF)
 	switch {
 	case n > maxBlobDecode:
 		return buf[:maxBlobDecode], true, true
 	case n > 0:
-		return buf[:n], false, true
+		return buf[:n], cut, true
 	case err == nil:
 		return nil, false, true
 	}

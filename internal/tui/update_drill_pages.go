@@ -37,11 +37,16 @@ func (m *Model) drillHeapTuple(s *screen, cur item) tea.Cmd {
 			target, ok := s.items[idx].data.(pg.HeapTuple)
 			if ok && target.LP == ht.LPOff {
 				s.cursor = vi
-				break
+				return nil
 			}
 		}
+		// The target is on the page but filtered out of view, so the cursor
+		// would silently stay put — say why rather than look like a dead key.
+		m.notice = fmt.Sprintf("HOT target #%04d is not in view — clear the filter to follow it", ht.LPOff)
 		return nil
 	}
+	// DEAD/UNUSED slots and a NULL t_ctid carry no tuple to show; enterLabel
+	// already disables Enter on them, so this only guards a stale row.
 	if ht.LPFlags != pg.LPNormal || ht.Ctid == nil {
 		return nil
 	}

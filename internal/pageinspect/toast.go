@@ -32,6 +32,36 @@ type ToastDecoded struct {
 // size: 1 GiB is the varlena limit, anything above is a misread header.
 const toastMaxRawSize = 1 << 30
 
+// Maximum expansion each codec can achieve, used to reject a header whose
+// declared raw size the stream could not possibly produce. pglz emits at most
+// a 273-byte match per 3 input bytes plus one control bit (~88×); an LZ4 block
+// approaches 255× as its match-length extension bytes each add 255 output
+// bytes. Both are rounded up, so no real stream is refused — the point is only
+// to keep four unvalidated header bytes from sizing an allocation.
+const (
+	pglzMaxExpansion = 128
+	lz4MaxExpansion  = 256
+)
+
+// decodeInitialCap bounds what the decompressors preallocate. rawSize comes
+// from a header that has not been validated against its own stream yet, so
+// sizing the buffer by it up front turns four bad bytes into a 1 GiB
+// allocation; append grows past this for a value that really is that big.
+const decodeInitialCap = 1 << 20
+
+// expansionLimit is the largest inflated size `stored` compressed bytes of
+// `method` could yield.
+func expansionLimit(method string, stored int) int {
+	ratio := pglzMaxExpansion
+	if method == "lz4" {
+		ratio = lz4MaxExpansion
+	}
+	if stored > toastMaxRawSize/ratio {
+		return toastMaxRawSize
+	}
+	return stored * ratio
+}
+
 // toastDecodeMaxText caps the rendered value. The pane re-wraps and re-indents
 // Text on every render, so it has to stay far below what a 1 GiB value could
 // expand to — yet well above the per-row budget of maxBlobDecode, since this
@@ -55,7 +85,7 @@ const toastDecodeMaxText = 256 << 10
 func DecodeToastValue(v pg.ToastValue) ToastDecoded {
 	var d ToastDecoded
 	var notes []string
-	method, rawSize, plausible := toastCompressionHeader(v.Data)
+	method, rawSize, plausible := toastCompressionHeader(v.Data, v.Truncated)
 	switch {
 	case plausible && v.Truncated:
 		// Can't inflate a prefix, can't rule the header out either.
@@ -100,7 +130,7 @@ func DecodeToastValue(v pg.ToastValue) ToastDecoded {
 // the inflated payload size. Plausibility only — the caller confirms by
 // inflating: a declared size no larger than what is stored, or beyond the
 // varlena limit, cannot be a real header.
-func toastCompressionHeader(data []byte) (method string, rawSize int, ok bool) {
+func toastCompressionHeader(data []byte, truncated bool) (method string, rawSize int, ok bool) {
 	if len(data) < 4 {
 		return "", 0, false
 	}
@@ -114,7 +144,15 @@ func toastCompressionHeader(data []byte) (method string, rawSize int, ok bool) {
 	default:
 		return "", 0, false
 	}
-	if rawSize <= len(data)-4 || rawSize > toastMaxRawSize {
+	stored := len(data) - 4
+	if rawSize <= stored || rawSize > toastMaxRawSize {
+		return "", 0, false
+	}
+	// A size the stored bytes could not expand to is a misread header, not a
+	// compressed value — and believing it would size an allocation from four
+	// bytes we have not validated. Skipped for a truncated value, whose
+	// stored prefix says nothing about what the whole stream expands to.
+	if !truncated && rawSize > expansionLimit(method, stored) {
 		return "", 0, false
 	}
 	return method, rawSize, true

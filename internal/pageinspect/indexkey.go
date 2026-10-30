@@ -32,11 +32,18 @@ const pgEpochUnix = 946684800
 // better to show fewer columns than wrong ones. The caller falls back to raw
 // hex when ok == false (nothing decoded).
 //
+// nulls is bt_page_items' per-tuple null flag (pg.IndexTuple.Nulls; nil when
+// the server did not report one). A set flag refuses the decode outright: the
+// stripped bitmap is the only record of *which* attributes are null, so the
+// remaining bytes belong to an unknown subset of cols and a positional walk
+// would hand column 1 the bytes of whichever column is actually first — wrong,
+// and indistinguishable from right. Hex is the honest answer there.
+//
 // Assumes a little-endian server: pageinspect returns the bytes in the server's
 // native byte order and there is no way to probe it over the wire. Every
 // production PostgreSQL platform is little-endian, matching the on-wire data.
-func DecodeIndexKey(hexData string, cols []pg.IndexKeyColumn) (string, bool) {
-	parts, complete, ok := decodeIndexKeyParts(hexData, cols)
+func DecodeIndexKey(hexData string, cols []pg.IndexKeyColumn, nulls *bool) (string, bool) {
+	parts, complete, ok := decodeIndexKeyParts(hexData, cols, nulls)
 	if !ok {
 		return "", false
 	}
@@ -60,8 +67,8 @@ func DecodeIndexKey(hexData string, cols []pg.IndexKeyColumn) (string, bool) {
 // e.g. the minus-infinity downlink — or unknown column types). The leading
 // element (parts[0]) is the index's first key column, which the seek feature
 // compares against.
-func decodeIndexKeyParts(hexData string, cols []pg.IndexKeyColumn) (parts []string, complete, ok bool) {
-	if len(cols) == 0 {
+func decodeIndexKeyParts(hexData string, cols []pg.IndexKeyColumn, nulls *bool) (parts []string, complete, ok bool) {
+	if len(cols) == 0 || hasNullAttrs(nulls) {
 		return nil, false, false
 	}
 	b, truncated := parseHexBytes(hexData)
@@ -101,8 +108,8 @@ func decodeIndexKeyParts(hexData string, cols []pg.IndexKeyColumn) (parts []stri
 // includes leftover bytes past the stored attributes that aren't pure MAXALIGN
 // zero padding — then natts wasn't a real attribute count (the ctid was a
 // genuine heap pointer whose offset merely looked small).
-func DecodeIndexKeyPivot(hexData string, cols []pg.IndexKeyColumn, natts int) (string, bool) {
-	if natts <= 0 || natts >= len(cols) {
+func DecodeIndexKeyPivot(hexData string, cols []pg.IndexKeyColumn, natts int, nulls *bool) (string, bool) {
+	if natts <= 0 || natts >= len(cols) || hasNullAttrs(nulls) {
 		return "", false
 	}
 	b, truncated := parseHexBytes(hexData)
@@ -131,6 +138,13 @@ func DecodeIndexKeyPivot(hexData string, cols []pg.IndexKeyColumn, natts int) (s
 		parts = append(parts, "−∞")
 	}
 	return "(" + strings.Join(parts, ",") + ")", true
+}
+
+// hasNullAttrs reads bt_page_items' per-tuple null flag. nil means the server
+// reported none (an older pageinspect, or a caller that built the tuple
+// itself), which is also how an index with no nullable column reads.
+func hasNullAttrs(nulls *bool) bool {
+	return nulls != nil && *nulls
 }
 
 // DecodeIndexColumn decodes one attribute starting at absolute offset off within
@@ -500,12 +514,14 @@ func hexString(b []byte) string {
 // bytes — the value the seek feature compares against. It uses the raw bytes (not
 // the heap-projected Decoded) so leaf and internal pages yield the same leading
 // column consistently. Reports false for an absent/empty key (the minus-infinity
-// downlink) or when no column type is known.
+// downlink), when no column type is known, or when the tuple has null attributes —
+// the seek compares leading values, and a mis-attributed one would send a descent
+// down the wrong subtree (see DecodeIndexKey).
 func LeadingKeyValue(t pg.IndexTuple, cols []pg.IndexKeyColumn) (string, bool) {
 	if t.Data == nil {
 		return "", false
 	}
-	parts, _, ok := decodeIndexKeyParts(*t.Data, cols)
+	parts, _, ok := decodeIndexKeyParts(*t.Data, cols, t.Nulls)
 	if !ok || len(parts) == 0 {
 		return "", false
 	}

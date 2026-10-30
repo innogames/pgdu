@@ -257,11 +257,19 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.help.ShowAll = !m.help.ShowAll
 	case key.Matches(msg, m.keys.Filter):
 		s.filterFocused = true
-	case key.Matches(msg, m.keys.GinNextLeaf):
+	case key.Matches(msg, m.keys.GinNextLeaf, m.keys.CtidNext):
+		// n is GinNextLeaf on the GIN page list and CtidNext on a superseded
+		// heap tuple; applyContext enables at most one, and key.Matches only
+		// fires on an enabled binding, so the physical key is unambiguous
+		// (the Seek/ShowQuery pattern).
+		if m.keys.CtidNext.Enabled() {
+			return m, m.followCtid(s)
+		}
 		return m, m.jumpGinDataLeaf(s)
 	case key.Matches(msg, m.keys.Seek):
-		// Seek is enabled only on levelIndexTuples (see applyContext). Open the
-		// input fresh; mutually exclusive with the fuzzy filter.
+		// Seek is enabled on levelIndexTuples and the two page lists (see
+		// applyContext). Open the input fresh; mutually exclusive with the
+		// fuzzy filter.
 		s.pages.seekFocused = true
 		s.pages.seekQuery = ""
 		s.pages.seekStatus = ""
