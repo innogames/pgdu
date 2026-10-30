@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -122,18 +123,60 @@ func fillPartBloat(ctx context.Context, pool *pgxpool.Pool, t Table, qualified s
 			p.HasBloat = true
 		}
 	case PartIndex:
-		// btree is the only access method with a density pgdu can read without
-		// a full scan (pgstatindex). GIN, GiST, BRIN, SP-GiST and hash would
-		// need pgstattuple over the whole index, so they stay unmeasured — a
-		// blank cell is honest, where the flat 10 % guess this used to emit
-		// sorted, summed into the Σ row and armed REINDEX exactly like a
-		// measured value.
-		if mode != BloatExact || p.AccessMethod != "btree" || p.SizeBytes > bloatExactMaxBytes {
+		// Without pgstattuple there is nothing to read, and above the size cap
+		// the read would cost more than the answer is worth. Either way the
+		// row stays blank, which is honest — where the flat 10 % guess this
+		// used to emit sorted, summed into the Σ row and armed REINDEX exactly
+		// like a measured value.
+		if mode != BloatExact || p.SizeBytes > bloatExactMaxBytes {
 			return
 		}
 		indexRef := qualifiedIdent(t.Schema, p.Name)
-		if err := pool.QueryRow(ctx, sqlBloatIndex, indexRef).Scan(&p.WastedBytes); err == nil {
+		// btree has a density in its metapage-level statistics; everything else
+		// has to be walked. Both are real measurements, so neither is marked as
+		// an estimate — but the walk is why the size cap and the per-part
+		// timeout matter more here than anywhere else.
+		stmt := sqlBloatIndexFull
+		if p.AccessMethod == "btree" {
+			stmt = sqlBloatIndex
+		}
+		if err := pool.QueryRow(ctx, stmt, indexRef).Scan(&p.WastedBytes); err == nil {
 			p.HasBloat = true
 		}
+		if p.AccessMethod == "gin" {
+			// Cheap (metapage only) and only meaningful for GIN, so it is read
+			// here rather than given a probe of its own.
+			_ = pool.QueryRow(ctx, sqlGinPendingPages, indexRef).Scan(&p.GinPendingPages)
+		}
 	}
+}
+
+// TableBloat is one table's estimated wasted bytes for the tables list.
+// CanEstimate false means the inputs were missing (never analyzed, or a
+// partitioned parent with no storage of its own), so WastedBytes says nothing
+// and the row renders blank rather than clean.
+type TableBloat struct {
+	OID         uint32
+	Name        string
+	WastedBytes int64
+	CanEstimate bool
+}
+
+// TableBloatEstimates returns a statistics-only bloat estimate for every table
+// in one schema. It reads pg_class and pg_stats only — no page sampling — so it
+// is cheap enough to chain off the tables list, unlike the pgstattuple scan
+// FillBloat runs once a single table is open. The figures are estimates and the
+// caller must mark them as such.
+func (c *Client) TableBloatEstimates(ctx context.Context, db, schema string) ([]TableBloat, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	return collect(ctx, pool, fmt.Sprintf("estimate table bloat in %q.%q", db, schema),
+		sqlBloatTablesEstimate, []any{schema},
+		func(row pgx.CollectableRow) (TableBloat, error) {
+			var t TableBloat
+			err := row.Scan(&t.OID, &t.Name, &t.CanEstimate, &t.WastedBytes)
+			return t, err
+		})
 }

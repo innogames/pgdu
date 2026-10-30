@@ -724,6 +724,11 @@ type reindexState struct {
 	pending string
 	// running is the index currently being rebuilt (empty when idle).
 	running string
+	// whole marks the pending/running rebuild as REINDEX TABLE CONCURRENTLY —
+	// every index on the table in one pass — rather than the single index the
+	// cursor is on. Both report into pg_stat_progress_create_index keyed by the
+	// table, so the same banner and poller follow either.
+	whole bool
 	// prog is the last-polled live progress of the running REINDEX from
 	// pg_stat_progress_create_index; nil until the first sample lands (or
 	// between phases where the view reports no counters).
@@ -790,9 +795,46 @@ type partsState struct {
 	tableStats    *pg.TableMaintStats
 	tableStatsErr error
 
-	// pendingVacuum is true when the user has armed the vacuum confirm flow
-	// (pressed `v` on levelParts); y executes, any other key cancels.
-	pendingVacuum bool
+	// pendingMaint names the armed maintenance confirm on levelParts — one of
+	// the maintOp constants, "" when nothing is armed. y executes, any other
+	// key cancels. All three stream into the same pane, so they share one
+	// confirm slot: arming a second cancels the first, as it does everywhere.
+	pendingMaint maintOp
+}
+
+// maintOp is a streaming maintenance statement offered on the parts screen.
+// VACUUM is the everyday one; FREEZE is the one that actually advances
+// relfrozenxid, at the cost of a full heap scan; ANALYZE alone refreshes the
+// statistics every estimate on these screens is derived from, without the
+// vacuum's cost.
+type maintOp string
+
+const (
+	maintVacuum  maintOp = "vacuum"
+	maintFreeze  maintOp = "vacuum freeze"
+	maintAnalyze maintOp = "analyze"
+)
+
+// statement is the SQL the op runs, for the confirm banner and the pane header.
+func (o maintOp) statement(qualified string) string {
+	switch o {
+	case maintFreeze:
+		return "VACUUM (VERBOSE, FREEZE, ANALYZE, SKIP_LOCKED) " + qualified
+	case maintAnalyze:
+		return "ANALYZE VERBOSE " + qualified
+	}
+	return "VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) " + qualified
+}
+
+// label is the short name shown in the output pane's header.
+func (o maintOp) label() string {
+	switch o {
+	case maintFreeze:
+		return "VACUUM FREEZE"
+	case maintAnalyze:
+		return "ANALYZE"
+	}
+	return "VACUUM"
 }
 
 // pageState: Page inspector state: heap window, tuple/index detail, AM metadata and the seek input. Field names are unchanged.
@@ -1169,6 +1211,7 @@ type diagFixRun struct {
 
 // vacuumState holds the live and completed output of a streaming VACUUM run.
 type vacuumState struct {
+	op       maintOp
 	table    pg.Table
 	started  time.Time
 	finished time.Time

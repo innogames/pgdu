@@ -12,7 +12,8 @@ import (
 // Kept in sync with the level set the ? key toggles in handleKey.
 func (m *Model) hasInfoOverlay(s *screen) bool {
 	switch s.level {
-	case levelBufferTables, levelBufferDetail, levelShmem,
+	case levelDatabases, levelSchemas, levelTables, levelParts, levelColumns,
+		levelBufferTables, levelBufferDetail, levelShmem,
 		levelHeapPages, levelHeapTuples,
 		levelIndexPages, levelIndexTuples,
 		levelWAL, levelWALRecords, levelWALBlocks, levelWALRelBlocks, levelWALBlockDetail,
@@ -33,6 +34,8 @@ func (m *Model) hasInfoOverlay(s *screen) bool {
 // hasInfoOverlay(s) is true.
 func (m *Model) renderInfoOverlay(s *screen, height int) string {
 	switch s.level {
+	case levelDatabases, levelSchemas, levelTables, levelParts, levelColumns:
+		return m.renderDiskInfo(s.level, height)
 	case levelBufferTables:
 		return m.renderBufferInfo(height)
 	case levelBufferDetail:
@@ -319,6 +322,10 @@ func (m *Model) renderReindexBanner(s *screen) string {
 		}
 		return line
 	case s.reindex.pending != "":
+		if s.reindex.whole {
+			return confirmBanner("REINDEX TABLE CONCURRENTLY " + s.reindex.pending +
+				" — every index on the table, one at a time")
+		}
 		return confirmBanner("REINDEX INDEX CONCURRENTLY " + s.reindex.pending)
 	case s.reindex.err != nil:
 		return "  " + styleErr.Render("reindex failed: "+s.reindex.err.Error())

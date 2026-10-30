@@ -113,6 +113,35 @@ func (m *Model) onTablesLoaded(msg tablesLoadedMsg) tea.Cmd {
 		s.items = append(s.items, tableToItem(t, s.tool))
 	}
 	m.applySort(s)
+	if msg.err != nil || len(msg.tables) == 0 || s.tool != toolDisk {
+		return nil
+	}
+	return m.fillTableBloatCmd(msg.db, msg.schema)
+}
+
+// onTableBloatFilled patches the estimate into the already-sorted tables list.
+// Like onBloatFilled it matches by name, never by index: applySort has run
+// since the rows were built. A failed or unestimable row is left unmeasured, so
+// the column simply doesn't claim anything for it.
+func (m *Model) onTableBloatFilled(msg tableBloatFilledMsg) tea.Cmd {
+	s := m.findLevel(levelTables)
+	if s == nil || s.db != msg.db || s.schema != msg.schema || msg.err != nil {
+		return nil
+	}
+	byName := make(map[string]pg.TableBloat, len(msg.rows))
+	for _, r := range msg.rows {
+		byName[r.Name] = r
+	}
+	for i := range s.items {
+		r, ok := byName[s.items[i].name]
+		if !ok || !r.CanEstimate {
+			continue
+		}
+		s.items[i].bloat = r.WastedBytes
+		s.items[i].hasBloat = true
+		s.items[i].bloatEstimated = true
+	}
+	m.applySort(s)
 	return nil
 }
 
@@ -520,8 +549,9 @@ func (m *Model) onVacuumStarted(msg vacuumStartedMsg) tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	s.parts.pendingVacuum = false
+	s.parts.pendingMaint = ""
 	m.vacuum = vacuumState{
+		op:      msg.op,
 		table:   msg.table,
 		started: time.Now(),
 		running: true,

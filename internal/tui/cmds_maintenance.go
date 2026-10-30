@@ -42,6 +42,7 @@ type tableStatsLoadedMsg struct {
 }
 
 type vacuumStartedMsg struct {
+	op     maintOp
 	table  pg.Table
 	lineCh <-chan string
 	doneCh <-chan error
@@ -205,12 +206,23 @@ func (m *Model) loadTableStatsCmd(t pg.Table) tea.Cmd {
 // that delivers vacuumLineMsg for each notice line and vacuumDoneMsg when done.
 // It uses tea.ExecProcess-style sequencing via a channelled approach: the outer
 // goroutine launches the vacuum and a ticker delivers lines via waitVacuumLineCmd.
-func (m *Model) vacuumTableCmd(t pg.Table) tea.Cmd {
+// maintTableCmd runs one streaming maintenance statement on t. All three share
+// the pane, the line plumbing and the esc-to-dismiss, so they share a command;
+// op decides the statement and what the header calls it. No client-side
+// timeout: like REINDEX, these legitimately run for minutes.
+func (m *Model) maintTableCmd(t pg.Table, op maintOp) tea.Cmd {
+	run := m.client.VacuumTable
+	switch op {
+	case maintFreeze:
+		run = m.client.VacuumFreezeTable
+	case maintAnalyze:
+		run = m.client.AnalyzeTable
+	}
 	lineCh, doneCh := startStream(func(onLine func(string)) error {
-		return m.client.VacuumTable(context.Background(), t, onLine)
+		return run(context.Background(), t, onLine)
 	})
 	return func() tea.Msg {
-		return vacuumStartedMsg{table: t, lineCh: lineCh, doneCh: doneCh}
+		return vacuumStartedMsg{op: op, table: t, lineCh: lineCh, doneCh: doneCh}
 	}
 }
 

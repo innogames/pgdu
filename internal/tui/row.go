@@ -867,7 +867,7 @@ func renderTablesHeader(s *screen, barW int) string {
 			padRight(sortMark("toast", s.sort == sortByToast, s.sortDesc), breakdownColW) + "  " +
 			padRight(sortMark("rows", s.sort == sortByRows, s.sortDesc), rowsColW) + "  "
 		if anyBloat {
-			line += padRight("bloat", 12) + "  "
+			line += padRight(sortMark("bloat", s.sort == sortByBloat, s.sortDesc), 12) + "  "
 		}
 	}
 	// 2-cell placeholder for the drillMark ("↵ " / "  ") before the name.

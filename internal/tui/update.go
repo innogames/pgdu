@@ -49,6 +49,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onColumnsLoaded(msg)
 	case bloatFilledMsg:
 		return m, m.onBloatFilled(msg)
+	case tableBloatFilledMsg:
+		return m, m.onTableBloatFilled(msg)
 	case extStatusMsg:
 		return m, m.onExtStatus(msg)
 	case extInstalledMsg:

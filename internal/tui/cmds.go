@@ -54,6 +54,14 @@ type bloatFilledMsg struct {
 	parts []pg.Part
 	err   error
 }
+
+// tableBloatFilledMsg carries the statistics-only estimate for a whole schema,
+// chained off the tables list the way bloatFilledMsg chains off the parts list.
+type tableBloatFilledMsg struct {
+	db, schema string
+	rows       []pg.TableBloat
+	err        error
+}
 type columnsLoadedMsg struct {
 	tableOID uint32
 	columns  []pg.Column
@@ -298,6 +306,17 @@ func (m *Model) fillBloatCmd(t pg.Table, parts []pg.Part) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		err := m.client.FillBloat(ctx, t, parts)
 		return bloatFilledMsg{table: t, parts: parts, err: err}
+	})
+}
+
+// fillTableBloatCmd estimates bloat for every table in the schema. It is a
+// separate, chained load because the tables list must not wait on it: the
+// sizes are the point of that screen and the bloat column appears a moment
+// later, exactly like the parts screen's scan.
+func (m *Model) fillTableBloatCmd(db, schema string) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		rows, err := m.client.TableBloatEstimates(ctx, db, schema)
+		return tableBloatFilledMsg{db: db, schema: schema, rows: rows, err: err}
 	})
 }
 
@@ -625,6 +644,15 @@ func (m *Model) loadDescribeIndexCmd(db string, oid uint32, name string) tea.Cmd
 		d, err := m.client.DescribeIndex(ctx, db, oid, name)
 		return describeLoadedMsg{oid: oid, desc: d, err: err}
 	})
+}
+
+// reindexTableCmd rebuilds every index on t in one pass. Same no-timeout and
+// same progress view as the single-index form.
+func (m *Model) reindexTableCmd(t pg.Table) tea.Cmd {
+	return func() tea.Msg {
+		err := m.client.ReindexTable(context.Background(), t)
+		return reindexDoneMsg{tableOID: t.OID, indexName: t.Name, err: err}
+	}
 }
 
 func (m *Model) reindexIndexCmd(t pg.Table, indexName string) tea.Cmd {

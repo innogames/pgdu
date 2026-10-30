@@ -287,7 +287,7 @@ func validSorts(l level) []sortMode {
 	case levelTools, levelDiagnostics, levelPgBouncer:
 		return []sortMode{sortByName}
 	case levelTables:
-		return []sortMode{sortBySize, sortByHeap, sortByIndex, sortByToast, sortByRows, sortByName}
+		return []sortMode{sortBySize, sortByHeap, sortByIndex, sortByToast, sortByRows, sortByBloat, sortByName}
 	case levelParts:
 		return []sortMode{sortBySize, sortByBloat, sortByType, sortByName}
 	case levelColumns:

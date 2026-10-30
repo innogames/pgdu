@@ -754,6 +754,13 @@ func partToItem(p pg.Part) item {
 		if p.IsUnique && !p.IsPrimary {
 			tags = append(tags, "unique")
 		}
+		if p.GinPendingPages > 0 {
+			// Live entries waiting to be merged into the index proper, not
+			// waste — so it sits in the detail string rather than the bloat
+			// column. A list that keeps growing means inserts are outrunning
+			// the merge and lookups are paying for it.
+			tags = append(tags, fmt.Sprintf("pending %s pages", formatRows(p.GinPendingPages)))
+		}
 		detail = strings.Join(tags, " · ")
 	}
 	return item{

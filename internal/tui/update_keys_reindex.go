@@ -50,6 +50,20 @@ func (m *Model) handleReindexEnter(s *screen) tea.Cmd {
 		return nil
 	}
 	s.reindex.pending = cand
+	s.reindex.whole = false
 	s.reindex.err = nil
 	return nil
+}
+
+// armReindexTable arms REINDEX TABLE CONCURRENTLY on the open table. Unlike
+// the single-index form it is not gated on a measured bloat figure: the point
+// of rebuilding every index at once is usually that you don't want to judge
+// them one by one, and the non-btree ones may have no figure to judge.
+func armReindexTable(s *screen) {
+	if s.level != levelParts || s.table.OID == 0 || s.reindex.running != "" {
+		return
+	}
+	s.reindex.pending = s.table.Qualified()
+	s.reindex.whole = true
+	s.reindex.err = nil
 }

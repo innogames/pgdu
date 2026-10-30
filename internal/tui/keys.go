@@ -18,6 +18,9 @@ type keyMap struct {
 	Rebaseline       key.Binding
 	ResetStatements  key.Binding // X (top queries): pg_stat_statements_reset(), y-confirmed
 	ResetMinMax      key.Binding // M (top queries): pg_stat_statements_reset(…, minmax_only), y-confirmed
+	Analyze          key.Binding // a (parts): ANALYZE VERBOSE, y-confirmed
+	VacuumFreeze     key.Binding // F (parts): VACUUM FREEZE, y-confirmed
+	ReindexTable     key.Binding // R (parts): REINDEX TABLE CONCURRENTLY, y-confirmed
 	EvictBuffers     key.Binding // X (buffers): pg_buffercache_evict_*, y-confirmed — shares X with ResetStatements, only one is enabled per level
 	ToggleRefresh    key.Binding
 	Params           key.Binding
@@ -170,6 +173,9 @@ func defaultKeys() keyMap {
 		Rebaseline:      key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "reset window")),
 		ResetStatements: key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "reset pg_stat_statements")),
 		ResetMinMax:     key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "reset min/max/stddev")),
+		Analyze:         key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "ANALYZE")),
+		VacuumFreeze:    key.NewBinding(key.WithKeys("F"), key.WithHelp("F", "VACUUM FREEZE")),
+		ReindexTable:    key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "REINDEX TABLE")),
 		EvictBuffers:    key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "evict from cache")),
 		ToggleRefresh:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "refresh cadence")),
 		Params:          key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "→ captured values")),
@@ -248,6 +254,13 @@ func (k *keyMap) applyContext(s *screen) {
 	k.Rebaseline.SetEnabled(stmtTable)
 	k.ResetStatements.SetEnabled(stmtTable)
 	k.ResetMinMax.SetEnabled(stmtTable)
+	// The three maintenance statements beyond `v`, all on the parts screen and
+	// all behind the same y-confirm. R is free here: the top-queries
+	// re-baseline that owns it elsewhere is not reachable from this level.
+	parts := s.level == levelParts
+	k.Analyze.SetEnabled(parts)
+	k.VacuumFreeze.SetEnabled(parts)
+	k.ReindexTable.SetEnabled(parts)
 	// Eviction needs a loaded buffers list to name a relation from; the detail
 	// screen already knows its own.
 	k.EvictBuffers.SetEnabled(s.level == levelBufferTables || s.level == levelBufferDetail)

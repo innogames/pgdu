@@ -171,10 +171,10 @@ func (m *Model) renderPartsTotals(s *screen) string {
 // renderVacuumBanner renders the one-line confirmation prompt for the vacuum
 // action on the parts level. Returns "" when there is nothing to show.
 func (m *Model) renderVacuumBanner(s *screen) string {
-	if s.level != levelParts || !s.parts.pendingVacuum {
+	if s.level != levelParts || s.parts.pendingMaint == "" {
 		return ""
 	}
-	return confirmBanner("VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) " + s.table.Qualified())
+	return confirmBanner(s.parts.pendingMaint.statement(s.table.Qualified()))
 }
 
 // renderVacuumPane renders the streaming VACUUM output pane (header + output body).
@@ -194,15 +194,15 @@ func (m *Model) renderVacuumPane(paneH int) string {
 	qual := vs.table.Qualified()
 	switch {
 	case vs.running:
-		hdr = "  " + m.spinner.View() + " " + styleSelected.Render("VACUUM") +
+		hdr = "  " + m.spinner.View() + " " + styleSelected.Render(vs.op.label()) +
 			mu(" "+qual) +
 			mu(fmt.Sprintf("  running %s", elapsed))
 	case vs.err != nil:
-		hdr = "  " + styleErr.Render("VACUUM "+qual+" failed: "+shortErr(vs.err)) +
+		hdr = "  " + styleErr.Render(vs.op.label()+" "+qual+" failed: "+shortErr(vs.err)) +
 			mu(fmt.Sprintf("  (after %s) · press ", elapsed)) +
 			styleBadge.Render("esc") + mu(" to dismiss")
 	default:
-		hdr = "  " + styleBadge.Render("VACUUM") +
+		hdr = "  " + styleBadge.Render(vs.op.label()) +
 			mu(" "+qual) +
 			mu(fmt.Sprintf("  done in %s · press ", elapsed)) +
 			styleBadge.Render("esc") + mu(" to dismiss")
@@ -270,9 +270,45 @@ func (m *Model) renderMaintPanel(s *screen) string {
 	if len(st.RelOptions) > 0 {
 		b.WriteString("  " + mu(padRight("options", maintLabelW)) + mu(strings.Join(st.RelOptions, " · ")) + "\n")
 	}
-	b.WriteString("  " + mu("hint: press ") + styleBadge.Render("v") + mu(" to run VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) on this table") + "\n")
+	b.WriteString(m.maintReclaimHint(s))
+	b.WriteString("  " + mu("hint: ") + styleBadge.Render("v") + mu(" VACUUM · ") +
+		styleBadge.Render("F") + mu(" VACUUM FREEZE · ") +
+		styleBadge.Render("a") + mu(" ANALYZE · ") +
+		styleBadge.Render("R") + mu(" REINDEX TABLE CONCURRENTLY") + "\n")
 	b.WriteString(m.maintReindexHint(s) + "\n")
 	return b.String()
+}
+
+// maintReclaimHint names what the measured waste would actually hand back, and
+// to which statement. The Σ row already totals the bytes; what it cannot say is
+// that VACUUM returns almost none of them to the filesystem — it makes the
+// space reusable by the table, which is usually what you want and never what
+// "reclaim" sounds like. Silent until something has been measured.
+func (m *Model) maintReclaimHint(s *screen) string {
+	mu := styleMuted.Render
+	var heapWaste, idxWaste int64
+	for _, it := range s.items {
+		p, ok := it.data.(pg.Part)
+		if !ok || !it.hasBloat {
+			continue
+		}
+		if p.Kind == pg.PartIndex {
+			idxWaste += it.bloat
+		} else {
+			heapWaste += it.bloat
+		}
+	}
+	if heapWaste+idxWaste == 0 {
+		return ""
+	}
+	var parts []string
+	if idxWaste > 0 {
+		parts = append(parts, humanize.Bytes(idxWaste)+" in indexes — REINDEX returns it to the filesystem")
+	}
+	if heapWaste > 0 {
+		parts = append(parts, humanize.Bytes(heapWaste)+" in the heap — VACUUM makes it reusable, only a rewrite shrinks the file")
+	}
+	return "  " + mu(padRight("reclaim", maintLabelW)+strings.Join(parts, "; ")) + "\n"
 }
 
 // maintReindexHint returns the per-index REINDEX hint shown beneath the vacuum

@@ -72,9 +72,13 @@ type Part struct {
 	// from a page scan, so it is an order of magnitude, not a measurement. The
 	// UI marks such a value and REINDEX never arms on one.
 	BloatEstimated bool
-	IsPrimary      bool
-	IsUnique       bool
-	AccessMethod   string // for indexes
+	// GinPendingPages is a GIN index's unmerged pending list, in pages. Live
+	// data, not bloat: a list that keeps growing means insertions are
+	// outrunning the merge. Zero for every other access method.
+	GinPendingPages int64
+	IsPrimary       bool
+	IsUnique        bool
+	AccessMethod    string // for indexes
 
 	// HeapStats is populated only for PartHeap (from pg_stat_all_tables).
 	// Nil for other kinds, or for the heap when stats are unavailable.

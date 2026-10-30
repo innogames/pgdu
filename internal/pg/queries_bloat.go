@@ -22,6 +22,27 @@ SELECT (dead_tuple_len + approx_free_space)::bigint AS wasted_bytes
 FROM   pgstattuple_approx($1::regclass)
 `
 
+// sqlBloatIndexFull measures an index that has no cheap density to read.
+// pgstatindex only understands btree; for GIN, GiST and hash this walks the
+// whole index, which is why the caller keeps it under the same size cap and
+// per-part timeout as the heap sample. "Wasted" is defined as it is for the
+// heap — dead entries plus free space — so the two columns mean the same
+// thing. BRIN and SP-GiST are not supported and raise, which the best-effort
+// path turns into an unmeasured row.
+const sqlBloatIndexFull = `
+SELECT (dead_tuple_len + free_space)::bigint AS wasted_bytes
+FROM   pgstattuple($1::regclass)
+`
+
+// sqlGinPendingPages reads a GIN index's pending list: entries inserted but not
+// yet merged into the main structure. This is a metapage read, not a scan. It
+// is not bloat — the pages are live and will be folded in by the next vacuum or
+// autoanalyze — but a pending list that keeps growing means insertions are
+// outrunning that merge, which is worth seeing next to the index's size.
+const sqlGinPendingPages = `
+SELECT pending_pages::bigint FROM pgstatginindex($1::regclass)
+`
+
 const sqlBloatIndex = `
 SELECT (CASE
           WHEN avg_leaf_density IS NULL OR avg_leaf_density = 0 THEN 0
@@ -59,4 +80,46 @@ SELECT GREATEST(0,
     / NULLIF(p.bs - 24, 0))::bigint * p.bs::bigint
 )::bigint AS wasted_bytes
 FROM target t, params p, stats s
+`
+
+// sqlBloatTablesEstimate is the set-returning sibling of sqlBloatHeapEstimate:
+// one estimate per table in a schema, for the bloat column on the tables list.
+//
+// It deliberately reuses that estimator rather than the richer ioguix one
+// behind the bloat_table diagnostic. The diagnostic models the null header and
+// so lands on a slightly different number; running it here would mean the
+// tables list and the parts screen quoting different bloat for the same table,
+// which is worse than either being a little off. It is also whole-database and
+// threshold-filtered, where this screen needs one schema and every row.
+//
+// can_estimate is false where the inputs aren't there — a table with no
+// pg_stats rows (never analyzed, or no column this role may read) and a
+// partitioned parent, whose relpages is 0 because the storage is in its
+// partitions. Those rows report unknown rather than a confident zero.
+const sqlBloatTablesEstimate = `
+WITH params AS (
+  SELECT current_setting('block_size')::numeric AS bs, 24::numeric AS hdr, 8::numeric AS ma
+),
+widths AS (
+  SELECT tablename, SUM((1 - null_frac) * avg_width)::numeric AS datawidth
+  FROM   pg_stats
+  WHERE  schemaname = $1
+  GROUP  BY tablename
+)
+SELECT c.oid,
+       c.relname,
+       (w.datawidth IS NOT NULL AND c.relpages > 0) AS can_estimate,
+       COALESCE(GREATEST(0,
+         (c.relpages::numeric * p.bs)::bigint
+         - CEIL(GREATEST(c.reltuples, 0) * (p.hdr + w.datawidth +
+             p.ma - (CASE WHEN (p.hdr + w.datawidth)::int % p.ma::int = 0
+                          THEN p.ma ELSE (p.hdr + w.datawidth)::int % p.ma::int END))
+           / NULLIF(p.bs - 24, 0))::bigint * p.bs::bigint
+       ), 0)::bigint AS wasted_bytes
+FROM   pg_class c
+JOIN   pg_namespace n ON n.oid = c.relnamespace
+CROSS  JOIN params p
+LEFT   JOIN widths w ON w.tablename = c.relname
+WHERE  n.nspname = $1
+  AND  c.relkind IN ('r','m','p')
 `

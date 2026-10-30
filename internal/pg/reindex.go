@@ -24,6 +24,22 @@ func (c *Client) ReindexIndex(ctx context.Context, t Table, indexName string) er
 	return nil
 }
 
+// ReindexTable runs REINDEX TABLE CONCURRENTLY, rebuilding every index on t in
+// one pass. It reports into the same pg_stat_progress_create_index view as the
+// single-index form (keyed by the table's relid), so the existing progress bar
+// follows it — index by index, which is what the server does.
+func (c *Client) ReindexTable(ctx context.Context, t Table) error {
+	pool, err := c.PoolFor(ctx, t.DB)
+	if err != nil {
+		return err
+	}
+	stmt := "REINDEX TABLE CONCURRENTLY " + qualifiedIdent(t.Schema, t.Name)
+	if _, err := pool.Exec(ctx, stmt); err != nil {
+		return fmt.Errorf("reindex table %q.%q: %w", t.Schema, t.Name, err)
+	}
+	return nil
+}
+
 // sqlReindexProgress reads pg_stat_progress_create_index for the (single)
 // build in flight on tableOID. REINDEX reports into the same view as CREATE
 // INDEX, keyed by the table's relid. Scan phases count in blocks and the

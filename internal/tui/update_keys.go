@@ -92,7 +92,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// (case-insensitive) executes; anything else cancels. Using y/n instead of
 	// a second Enter avoids running REINDEX on an accidental double-tap.
 	if s.reindex.pending != "" {
-		idx := s.reindex.pending
+		idx, whole := s.reindex.pending, s.reindex.whole
 		s.reindex.pending = ""
 		if confirmGate(msg) {
 			s.reindex.running = idx
@@ -101,15 +101,22 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			s.reindex.err = nil
 			// Run the (blocking) REINDEX and, alongside it, start polling
 			// pg_stat_progress_create_index so the banner shows a live bar.
-			return m, tea.Batch(m.reindexIndexCmd(s.table, idx), m.reindexTick())
+			// The whole-table form walks its indexes one at a time and reports
+			// into the same view, so the poller needs no special case.
+			run := m.reindexIndexCmd(s.table, idx)
+			if whole {
+				run = m.reindexTableCmd(s.table)
+			}
+			return m, tea.Batch(run, m.reindexTick())
 		}
 		return m, nil
 	}
-	// VACUUM confirmation on levelParts: `v` armed it, y/Y executes, any other key cancels.
-	if s.parts.pendingVacuum {
-		s.parts.pendingVacuum = false
+	// Maintenance confirmation on levelParts: v / F / a armed it, y/Y executes,
+	// any other key cancels.
+	if op := s.parts.pendingMaint; op != "" {
+		s.parts.pendingMaint = ""
 		if confirmGate(msg) {
-			return m, m.vacuumTableCmd(s.table)
+			return m, m.maintTableCmd(s.table, op)
 		}
 		return m, nil
 	}
@@ -523,6 +530,21 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if s.level == levelStatements {
 			s.stat.pendingReset = true
 		}
+	case key.Matches(msg, m.keys.Analyze):
+		// ANALYZE alone: the vacuum's statistics half without its scan. Every
+		// estimate on these screens — column sizes, the tables list's bloat —
+		// is only as good as the last one.
+		if s.level == levelParts && s.table.OID != 0 && !m.vacuum.running {
+			s.parts.pendingMaint = maintAnalyze
+		}
+	case key.Matches(msg, m.keys.VacuumFreeze):
+		if s.level == levelParts && s.table.OID != 0 && !m.vacuum.running {
+			s.parts.pendingMaint = maintFreeze
+		}
+	case key.Matches(msg, m.keys.ReindexTable):
+		if s.level == levelParts {
+			armReindexTable(s)
+		}
 	case key.Matches(msg, m.keys.ResetMinMax):
 		// min/max/stddev are cumulative since the last full reset and cannot be
 		// subtracted into a window, so they describe all of history however
@@ -699,10 +721,10 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// On the parts level, `v` arms the VACUUM VERBOSE confirmation.
 		if s.level == levelParts && s.table.OID != 0 {
 			if m.vacuum.running {
-				// A vacuum is already running; ignore.
+				// Something is already streaming into the pane; ignore.
 				break
 			}
-			s.parts.pendingVacuum = true
+			s.parts.pendingMaint = maintVacuum
 		}
 		// On the activity table, `v` toggles visibility of evergreen auxiliary
 		// backends (walwriter, checkpointer, launchers, io workers, …). The rebuild
