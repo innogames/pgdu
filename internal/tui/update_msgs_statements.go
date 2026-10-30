@@ -86,6 +86,11 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 	if s.stat.cumulative && !msg.statsReset.IsZero() {
 		s.stat.baselineAt = msg.statsReset
 	}
+	// Flag rows whose entry was evicted and re-added since the baseline — their
+	// delta is a floor, not a measurement. After the baselineAt fixup above, so
+	// a cumulative window compares against the reset rather than the tool's
+	// start time.
+	pg.MarkRestarted(s.stat.rows, s.stat.baselineAt)
 	// rebuildStatementItems preserves the user's chosen sort column (tracked by id)
 	// and the current column visibility across refreshes.
 	m.rebuildStatementItems(s)

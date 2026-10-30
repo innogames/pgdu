@@ -103,6 +103,10 @@ func (c *Client) StatementSnapshot(ctx context.Context, db string) ([]QueryStat,
 				&q.LocalBlkReadTime, &q.LocalBlkWriteTime,
 				&q.TempBlkReadTime, &q.TempBlkWriteTime,
 				&q.WALRecords, &q.WALFPI, &q.WALBytes,
+				&q.JITFunctions, &q.JITTotalTime, &q.StatsSince,
+				&q.WALBuffersFull,
+				&q.ParallelWorkersToLaunch, &q.ParallelWorkersLaunched,
+				&q.GenericPlanCalls, &q.CustomPlanCalls,
 			)
 			return q, err
 		})

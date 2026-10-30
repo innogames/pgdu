@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDiffStatements(t *testing.T) {
@@ -1030,5 +1031,120 @@ func TestParamSlotsOperatorsAndScopes(t *testing.T) {
 				t.Errorf("paramSlots()\n got: %+v\nwant: %+v", got, c.want)
 			}
 		})
+	}
+}
+
+// The counters read through to_jsonb must survive the diff as "absent", never
+// collapse to zero: a server that does not collect something is not a server
+// that measured it and found none.
+func TestDiffStatementsNullableCounters(t *testing.T) {
+	i64 := func(v int64) *int64 { return &v }
+	f64 := func(v float64) *float64 { return &v }
+
+	baseline := map[int64]QueryStat{
+		1: {QueryID: 1, Calls: 10, JITFunctions: i64(4), JITTotalTime: f64(100), WALBuffersFull: i64(7)},
+		2: {QueryID: 2, Calls: 10},                       // server collects none of them
+		3: {QueryID: 3, Calls: 10, JITFunctions: i64(1)}, // baseline has it, current won't
+	}
+	current := []QueryStat{
+		{QueryID: 1, Calls: 25, JITFunctions: i64(9), JITTotalTime: f64(250), WALBuffersFull: i64(7)},
+		{QueryID: 2, Calls: 25},
+		{QueryID: 3, Calls: 25},
+		// New since the baseline: full counters, pointers intact.
+		{QueryID: 4, Calls: 5, JITFunctions: i64(3)},
+	}
+
+	byID := map[int64]QueryStat{}
+	for _, q := range DiffStatements(baseline, current) {
+		byID[q.QueryID] = q
+	}
+
+	if got := byID[1]; got.JITFunctions == nil || *got.JITFunctions != 5 {
+		t.Errorf("q1 jit_functions delta = %v, want 5", got.JITFunctions)
+	}
+	if got := byID[1]; got.JITTotalTime == nil || *got.JITTotalTime != 150 {
+		t.Errorf("q1 jit time delta = %v, want 150", got.JITTotalTime)
+	}
+	// Unchanged across the window is a real zero, not an absence.
+	if got := byID[1]; got.WALBuffersFull == nil || *got.WALBuffersFull != 0 {
+		t.Errorf("q1 wal_buffers_full delta = %v, want a present 0", got.WALBuffersFull)
+	}
+	if got := byID[2]; got.JITFunctions != nil {
+		t.Errorf("q2 invented a jit_functions value: %v", *got.JITFunctions)
+	}
+	if got := byID[3]; got.JITFunctions != nil {
+		t.Errorf("q3 reported a delta against a counter the current row lacks: %v", *got.JITFunctions)
+	}
+	if got := byID[4]; got.JITFunctions == nil || *got.JITFunctions != 3 {
+		t.Errorf("q4 (new since baseline) jit_functions = %v, want its full 3", got.JITFunctions)
+	}
+
+	// The baseline must not be written through: a nil-baseline delta shares
+	// its pointer with the snapshot row.
+	if b := baseline[1]; *b.JITFunctions != 4 {
+		t.Errorf("the diff mutated the baseline: jit_functions = %d, want 4", *b.JITFunctions)
+	}
+}
+
+// An entry evicted at .max and re-added mid-window restarts from zero, so its
+// delta undercounts. Only stats_since can see that; the global stats_reset
+// cannot, because the reset is per entry.
+func TestMarkRestarted(t *testing.T) {
+	base := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	before := base.Add(-time.Hour)
+	after := base.Add(time.Hour)
+
+	rows := []QueryStat{
+		{QueryID: 1, StatsSince: &before},
+		{QueryID: 2, StatsSince: &after},
+		{QueryID: 3}, // extension < 1.11: nothing to judge by
+	}
+	MarkRestarted(rows, base)
+	if rows[0].Reset {
+		t.Error("an entry older than the baseline was marked as restarted")
+	}
+	if !rows[1].Reset {
+		t.Error("an entry that started after the baseline was not marked")
+	}
+	if rows[2].Reset {
+		t.Error("a row without stats_since must not be marked")
+	}
+
+	// No baseline time, nothing to compare against.
+	rows[1].Reset = false
+	MarkRestarted(rows, time.Time{})
+	if rows[1].Reset {
+		t.Error("marked a row against a zero baseline time")
+	}
+}
+
+// The newer counters must be read in a way that yields NULL rather than
+// failing the statement, so one query runs on every supported server and
+// extension version. That is the whole point of the to_jsonb form, and a
+// direct column reference would undo it silently.
+func TestStatementsQueryNewerCountersAreOptional(t *testing.T) {
+	q := statementsQuery(1, 11)
+	for _, col := range []string{
+		"jit_functions", "jit_deform_time", "stats_since", "wal_buffers_full",
+		"parallel_workers_to_launch", "parallel_workers_launched",
+		"generic_plan_calls", "custom_plan_calls",
+	} {
+		if !strings.Contains(q, "'"+col+"'") {
+			t.Errorf("%s is not read through to_jsonb", col)
+		}
+		// A bare reference would be resolved at parse time and fail on a
+		// server that lacks the column.
+		if strings.Contains(q, "       "+col+",") {
+			t.Errorf("%s is referenced directly as well as through to_jsonb", col)
+		}
+	}
+	// The alias is what to_jsonb(s) needs; without it the query will not parse.
+	if !strings.Contains(q, "FROM   pg_stat_statements s") {
+		t.Error("the inner select lost its alias, so to_jsonb(s) cannot resolve")
+	}
+	// No version ladder for these: the oldest supported extension asks for them
+	// too and simply gets NULL, which is the point.
+	if !strings.Contains(statementsQuery(1, 8), "'jit_functions'") {
+		t.Error("1.8 dropped the optional counters instead of degrading them to NULL")
 	}
 }

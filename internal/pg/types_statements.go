@@ -1,8 +1,11 @@
 package pg
 
-// QueryStat is one row of pg_stat_statements. We read the 1.11 column set,
-// which exists on PostgreSQL 17 (1.11) and is a subset of 18 (1.12), so the
-// same query works on both. Counter fields (Calls, Rows, *Blks*, WAL*, the
+import "time"
+
+// QueryStat is one row of pg_stat_statements. The columns every supported
+// version has are read directly; the ones that came later are read through
+// to_jsonb and land in pointer fields, so one query covers PostgreSQL 17 and
+// 18 and every extension version from 1.8 up. Counter fields (Calls, Rows, *Blks*, WAL*, the
 // total/exec times) are cumulative since the last stats reset — the TUI takes
 // a baseline snapshot on entry and shows the delta against it, which is how a
 // time window is fabricated without storing history (see DiffStatements).
@@ -49,6 +52,28 @@ type QueryStat struct {
 	WALRecords int64
 	WALFPI     int64
 	WALBytes   int64
+
+	// Counters newer servers and newer pg_stat_statements versions added, read
+	// through to_jsonb (see sqlStatementsNewer). A nil pointer means this
+	// server has no such counter — which is not the same as zero, and the
+	// cells render it differently.
+	JITFunctions            *int64
+	JITTotalTime            *float64 // milliseconds across all four JIT phases
+	WALBuffersFull          *int64
+	ParallelWorkersToLaunch *int64
+	ParallelWorkersLaunched *int64
+	GenericPlanCalls        *int64
+	CustomPlanCalls         *int64
+
+	// StatsSince is when this entry's counters started accumulating. It is not
+	// a counter and is never diffed: its job is to catch an entry that was
+	// evicted at pg_stat_statements.max and re-added mid-window, whose numbers
+	// are therefore not a delta against the baseline at all.
+	StatsSince *time.Time
+
+	// Reset is set by the diff when StatsSince postdates the baseline. The row
+	// is shown — the work really happened — but tagged, because it undercounts.
+	Reset bool
 }
 
 // intCounters returns the addresses of every window-decomposable integer
@@ -74,6 +99,37 @@ func (q *QueryStat) floatCounters() []*float64 {
 	}
 }
 
+// nullableCounters is the third sibling, for the counters that may not exist
+// on this server at all. They cannot join the address lists above: a nil there
+// means "absent", and absent minus absent is still absent, not zero.
+func (q *QueryStat) nullableCounters() []**int64 {
+	return []**int64{
+		&q.JITFunctions, &q.WALBuffersFull,
+		&q.ParallelWorkersToLaunch, &q.ParallelWorkersLaunched,
+		&q.GenericPlanCalls, &q.CustomPlanCalls,
+	}
+}
+
+// subNullableInt is the window delta of two optional counters: a value only
+// when both ends have one. Either side missing means the question cannot be
+// answered — the server does not collect it, or the baseline predates its
+// arrival — and nil says so where a 0 would claim the work did not happen.
+func subNullableInt(cur, base *int64) *int64 {
+	if cur == nil || base == nil {
+		return cur
+	}
+	d := *cur - *base
+	return &d
+}
+
+func subNullableFloat(cur, base *float64) *float64 {
+	if cur == nil || base == nil {
+		return cur
+	}
+	d := *cur - *base
+	return &d
+}
+
 // sub returns the window delta of q relative to a baseline snapshot b. Counter
 // fields are subtracted; identity (QueryID/Query/ids) comes from q (the newer
 // snapshot, in case the query text was re-normalised). MeanExecTime is
@@ -87,6 +143,10 @@ func (q QueryStat) sub(b QueryStat) QueryStat {
 	for i, p := range d.floatCounters() {
 		*p -= *bf[i]
 	}
+	for i, pp := range d.nullableCounters() {
+		*pp = subNullableInt(*pp, *b.nullableCounters()[i])
+	}
+	d.JITTotalTime = subNullableFloat(d.JITTotalTime, b.JITTotalTime)
 	d.MinExecTime, d.MaxExecTime, d.StddevExecTime = 0, 0, 0
 	if d.Calls > 0 {
 		d.MeanExecTime = d.TotalExecTime / float64(d.Calls)
@@ -169,6 +229,27 @@ func DiffStatements(baseline map[int64]QueryStat, current []QueryStat) []QuerySt
 	return diffStatements(baseline, current, false)
 }
 
+// MarkRestarted flags the window rows whose pg_stat_statements entry started
+// accumulating after the baseline was taken. At pg_stat_statements.max each
+// new statement evicts the least-used ~5 %, so a rarely-run query can be
+// dropped and re-added mid-window: its counters then begin at zero rather than
+// at the baseline, and the delta silently undercounts the work it did. The
+// global stats_reset guard cannot see this — the reset is per entry.
+//
+// Rows are kept, not hidden: the work happened and is worth seeing. The flag
+// says the number is a floor. A server without stats_since (extension < 1.11)
+// reports nothing here and nothing is marked.
+func MarkRestarted(rows []QueryStat, baselineAt time.Time) {
+	if baselineAt.IsZero() {
+		return
+	}
+	for i := range rows {
+		if ss := rows[i].StatsSince; ss != nil && ss.After(baselineAt) {
+			rows[i].Reset = true
+		}
+	}
+}
+
 // clampNonNeg zeroes any negative counter field. A delta against a *disk*
 // baseline can go negative when pg_stat_statements was reset, or the query was
 // evicted and re-added with smaller counters, between the snapshot and now —
@@ -179,6 +260,19 @@ func (q QueryStat) clampNonNeg() QueryStat {
 		if *p < 0 {
 			*p = 0
 		}
+	}
+	// The optional counters clamp the same way, but through a fresh value:
+	// a nil-baseline delta shares its pointer with the snapshot row, and
+	// writing through it would corrupt the baseline for the next tick.
+	for _, pp := range q.nullableCounters() {
+		if *pp != nil && **pp < 0 {
+			zero := int64(0)
+			*pp = &zero
+		}
+	}
+	if q.JITTotalTime != nil && *q.JITTotalTime < 0 {
+		zero := 0.0
+		q.JITTotalTime = &zero
 	}
 	for _, p := range q.floatCounters() {
 		if *p < 0 {

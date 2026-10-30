@@ -158,3 +158,48 @@ func TestStmtRateColumnsNeedAWindow(t *testing.T) {
 		}
 	}
 }
+
+// A counter this server does not collect must read "—" and carry no sort
+// value, so it sinks below a server that collects it and reports zero. The two
+// are different answers and the table must not conflate them.
+func TestStmtOptionalColumnsDistinguishAbsentFromZero(t *testing.T) {
+	byID := map[stmtColID]stmtColDesc{}
+	for _, d := range stmtColumnRegistry() {
+		byID[d.id] = d
+	}
+	i64 := func(v int64) *int64 { return &v }
+	f64 := func(v float64) *float64 { return &v }
+
+	// An older server: none of these counters exist. jit_total_time is a sum
+	// of COALESCEd parts so it arrives as a present zero even then — only
+	// jit_functions says whether JIT is accounted for at all.
+	absent := pg.QueryStat{Calls: 10, TotalExecTime: 100, JITTotalTime: f64(0)}
+	for _, id := range []stmtColID{colJITms, colJITPct, colParallelPct, colGenericPct, colWALBufFull} {
+		if got := byID[id].cell(absent, stmtCtx{}); got.Display != "—" || got.HasNum {
+			t.Errorf("%s on a server without the counter: got %+v, want an unset — cell", id, got)
+		}
+	}
+
+	// A server that collects them and measured none.
+	zero := pg.QueryStat{
+		Calls: 10, TotalExecTime: 100,
+		JITFunctions: i64(0), JITTotalTime: f64(0), WALBuffersFull: i64(0),
+	}
+	if got := byID[colWALBufFull].cell(zero, stmtCtx{}); !got.HasNum || got.Num != 0 {
+		t.Errorf("wal_buf_full measured-zero: got %+v, want a present 0", got)
+	}
+	if got := byID[colJITms].cell(zero, stmtCtx{}); !got.HasNum {
+		t.Errorf("jit_ms measured-zero: got %+v, want a present value", got)
+	}
+
+	// parallel% is a ratio: it needs both ends, and a zero denominator is not
+	// 0 % but no answer.
+	noDen := pg.QueryStat{ParallelWorkersLaunched: i64(0), ParallelWorkersToLaunch: i64(0)}
+	if got := byID[colParallelPct].cell(noDen, stmtCtx{}); got.HasNum {
+		t.Errorf("parallel pct with nothing planned: got %+v, want no value", got)
+	}
+	half := pg.QueryStat{ParallelWorkersLaunched: i64(2), ParallelWorkersToLaunch: i64(4)}
+	if got := byID[colParallelPct].cell(half, stmtCtx{}); !got.HasNum || got.Num != 50 {
+		t.Errorf("parallel pct, 2 of 4 launched: got %+v, want 50", got)
+	}
+}

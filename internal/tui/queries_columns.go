@@ -42,6 +42,11 @@ const (
 	colLocalRead   stmtColID = "local_read"
 	colLocalDirty  stmtColID = "local_dirtied"
 	colLocalWrit   stmtColID = "local_written"
+	colJITms       stmtColID = "jit_ms"
+	colJITPct      stmtColID = "jit%"
+	colParallelPct stmtColID = "parallel%"
+	colGenericPct  stmtColID = "generic%"
+	colWALBufFull  stmtColID = "wal_buf_full"
 	colWALRecs     stmtColID = "wal_recs"
 	colWALFPI      stmtColID = "wal_fpi"
 	colMainTable   stmtColID = "table"
@@ -61,6 +66,28 @@ type stmtCtx struct {
 	windowMs      float64
 	windowSec     float64
 	trackPlanning bool
+}
+
+// optCell renders a counter that may not exist on this server. nil is "—"
+// with no sort value, so a server that does not collect it sinks below one
+// that collects it and reports zero — which is a real difference: zero means
+// measured and none, "—" means nobody is counting.
+func optCell(v *int64, format func(int64) string) pg.DiagCell {
+	if v == nil {
+		return pg.DiagCell{Display: "—"}
+	}
+	return diagNum(format(*v), float64(*v))
+}
+
+// optRatio is the shared body of the columns that are a percentage of one
+// optional counter over another: "—" unless both are collected, and unless the
+// denominator is non-zero.
+func optRatio(num, den *int64) pg.DiagCell {
+	if num == nil || den == nil || *den <= 0 {
+		return pg.DiagCell{Display: "—"}
+	}
+	pct := float64(*num) / float64(*den) * 100
+	return diagNum(fmt1(pct), pct)
 }
 
 // perSec is the shared body of the rate columns: a counter over the window's
@@ -289,6 +316,48 @@ func stmtColumnRegistry() []stmtColDesc {
 		{id: colWALFPI, name: "wal_fpi", kind: pg.DiagCostGraded,
 			desc: "WAL full-page images written",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return diagNum(formatRows(q.WALFPI), float64(q.WALFPI)) }},
+		// Counters newer servers added, read through to_jsonb so one query
+		// covers PG17 and PG18 (sqlStatementsNewer). Every one of them renders
+		// "—" where the server does not collect it, which is not zero.
+		{id: colJITms, name: "jit_ms", kind: pg.DiagCostGraded,
+			desc: "time spent compiling the query (JIT generation, inlining, optimization, emission, deform)",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				if q.JITFunctions == nil || q.JITTotalTime == nil {
+					return pg.DiagCell{Display: "—"}
+				}
+				return diagNum(fmtMs(*q.JITTotalTime), *q.JITTotalTime)
+			}},
+		{id: colJITPct, name: "jit%", kind: pg.DiagPercentGraded,
+			desc: "share of execution time spent compiling — high means JIT is costing more than it saves",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				// JITFunctions is the gate, not JITTotalTime: the time is a
+				// sum of COALESCEd parts so it is never NULL, which is what
+				// lets it survive the two waves those columns arrived in.
+				if q.JITFunctions == nil || q.JITTotalTime == nil || q.TotalExecTime <= 0 {
+					return pg.DiagCell{Display: "—"}
+				}
+				pct := *q.JITTotalTime / q.TotalExecTime * 100
+				return diagNum(fmt1(pct), pct)
+			}},
+		{id: colParallelPct, name: "parallel%", kind: pg.DiagPercent,
+			desc: "parallel workers actually launched vs planned — below 100 means the server ran out (PG18+)",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				return optRatio(q.ParallelWorkersLaunched, q.ParallelWorkersToLaunch)
+			}},
+		{id: colGenericPct, name: "generic%", kind: pg.DiagPercent,
+			desc: "share of calls that used the generic plan rather than a custom one (PG18+) — plan flips live here",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				if q.GenericPlanCalls == nil || q.CustomPlanCalls == nil {
+					return pg.DiagCell{Display: "—"}
+				}
+				total := *q.GenericPlanCalls + *q.CustomPlanCalls
+				return optRatio(q.GenericPlanCalls, &total)
+			}},
+		{id: colWALBufFull, name: "wal_buf_full", kind: pg.DiagCostGraded,
+			desc: "times this query had to flush WAL because wal_buffers was full (PG18+)",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				return optCell(q.WALBuffersFull, formatRows)
+			}},
 		{id: colMainTable, name: "table", kind: pg.DiagText, defaultOn: true,
 			desc: "main table parsed from the statement (d describes it)",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return pg.DiagCell{Display: mainTableDisplay(q.Query)} }},
@@ -296,8 +365,17 @@ func stmtColumnRegistry() []stmtColDesc {
 			desc: "command type: S/SL/L/I/U/D/M/T",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return pg.DiagCell{Display: pg.QueryKind(q.Query)} }},
 		{id: colQuery, name: "query", kind: pg.DiagText, defaultOn: true, mandatory: true,
-			desc: "the normalized statement text",
-			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell { return pg.DiagCell{Display: flattenQuery(q.Query)} }},
+			desc: "the normalized statement text; ↺ marks an entry evicted and re-added mid-window",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				text := flattenQuery(q.Query)
+				if q.Reset {
+					// Its counters restarted from zero inside the window, so
+					// the delta is a floor. Marked rather than hidden: the work
+					// happened.
+					text = "↺ " + text
+				}
+				return pg.DiagCell{Display: text}
+			}},
 	}
 }
 

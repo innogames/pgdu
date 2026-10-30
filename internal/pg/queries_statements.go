@@ -111,8 +111,43 @@ SELECT queryid, userid, dbid, query,
        temp_blks_read, temp_blks_written,
 `
 
-const sqlStatementsTail = `       wal_records, wal_fpi, wal_bytes::bigint
-FROM   pg_stat_statements
+// sqlStatementsNewer reads the counters newer servers and newer extension
+// versions added, through to_jsonb — CLAUDE.md's second version tool. A key
+// the row does not have yields NULL instead of failing the statement, so one
+// query still runs on PG17 and PG18 alike and nothing has to be gated on a
+// version. That matters more than usual here because the skew is in the
+// *extension*, not the server: a PG17 cluster pg_upgraded without an ALTER
+// EXTENSION still carries 1.10's column set on 18's server.
+//
+// NULL therefore means "this server has no such counter", which is not zero,
+// which is why every one of these scans into a pointer.
+//
+// jit_total_time COALESCEs its parts because they arrived in two waves —
+// generation/inlining/optimization/emission in 1.9, deform in 1.11 — so a
+// plain sum would go NULL on 1.10 although four fifths of it is there.
+// jit_functions is the gate instead: present exactly when JIT accounting is.
+//
+// min/max_plan_time are deliberately left out. They are extrema, so the window
+// diff would zero them the way it zeroes the exec extrema, and they would read
+// as "—" on every row anyone is actually looking at.
+const sqlStatementsNewer = `
+       (to_jsonb(s) ->> 'jit_functions')::bigint              AS jit_functions,
+       (COALESCE((to_jsonb(s) ->> 'jit_generation_time')::float8, 0)
+      + COALESCE((to_jsonb(s) ->> 'jit_inlining_time')::float8, 0)
+      + COALESCE((to_jsonb(s) ->> 'jit_optimization_time')::float8, 0)
+      + COALESCE((to_jsonb(s) ->> 'jit_emission_time')::float8, 0)
+      + COALESCE((to_jsonb(s) ->> 'jit_deform_time')::float8, 0))  AS jit_total_time,
+       (to_jsonb(s) ->> 'stats_since')::timestamptz           AS stats_since,
+       (to_jsonb(s) ->> 'wal_buffers_full')::bigint           AS wal_buffers_full,
+       (to_jsonb(s) ->> 'parallel_workers_to_launch')::bigint AS parallel_workers_to_launch,
+       (to_jsonb(s) ->> 'parallel_workers_launched')::bigint  AS parallel_workers_launched,
+       (to_jsonb(s) ->> 'generic_plan_calls')::bigint         AS generic_plan_calls,
+       (to_jsonb(s) ->> 'custom_plan_calls')::bigint          AS custom_plan_calls
+`
+
+const sqlStatementsTail = `       wal_records, wal_fpi, wal_bytes::bigint,
+` + sqlStatementsNewer + `
+FROM   pg_stat_statements s
 WHERE  dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
   AND  queryid IS NOT NULL
   -- Hide pgdu's own footprints so the tool doesn't watch itself. These also
@@ -179,7 +214,19 @@ SELECT queryid,
        sum(temp_blk_write_time) AS temp_blk_write_time,
        sum(wal_records)::bigint AS wal_records,
        sum(wal_fpi)::bigint AS wal_fpi,
-       sum(wal_bytes)::bigint AS wal_bytes
+       sum(wal_bytes)::bigint AS wal_bytes,
+       -- sum() over all-NULL is NULL, which is exactly the signal wanted: the
+       -- counter does not exist here, as distinct from existing and being 0.
+       sum(jit_functions)::bigint AS jit_functions,
+       sum(jit_total_time) AS jit_total_time,
+       -- An entry's stats_since is per (userid, queryid); the newest is the one
+       -- that matters, because it is the one that can postdate a baseline.
+       max(stats_since) AS stats_since,
+       sum(wal_buffers_full)::bigint AS wal_buffers_full,
+       sum(parallel_workers_to_launch)::bigint AS parallel_workers_to_launch,
+       sum(parallel_workers_launched)::bigint AS parallel_workers_launched,
+       sum(generic_plan_calls)::bigint AS generic_plan_calls,
+       sum(custom_plan_calls)::bigint AS custom_plan_calls
 FROM (`
 
 const sqlStatementsAggTail = `
