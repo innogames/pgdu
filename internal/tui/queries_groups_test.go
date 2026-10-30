@@ -72,7 +72,7 @@ func TestGroupQueryStatsByTable(t *testing.T) {
 	}
 
 	m := newTestModel()
-	items, descs, total := m.buildStatementGroupItems(stmtViewByTable, rows, windowExecMs(rows), true)
+	items, descs, total := m.buildStatementGroupItems(stmtViewByTable, rows, stmtCtx{windowMs: windowExecMs(rows), trackPlanning: true})
 	if len(items) != 3 {
 		t.Fatalf("items = %d", len(items))
 	}
@@ -112,7 +112,7 @@ func TestGroupQueryStatsByTable(t *testing.T) {
 	if got := groupCellByID(descs, total, colGroup).Display; got != "← Sum" {
 		t.Errorf("footer label = %q", got)
 	}
-	if _, _, empty := m.buildStatementGroupItems(stmtViewByTable, nil, 0, true); empty != nil {
+	if _, _, empty := m.buildStatementGroupItems(stmtViewByTable, nil, stmtCtx{windowMs: 0, trackPlanning: true}); empty != nil {
 		t.Error("empty window has no footer")
 	}
 }
@@ -129,7 +129,7 @@ func TestGroupQueryStatsByType(t *testing.T) {
 		t.Errorf("by type = %v", got)
 	}
 	m := newTestModel()
-	_, descs, _ := m.buildStatementGroupItems(stmtViewByType, rows, windowExecMs(rows), true)
+	_, descs, _ := m.buildStatementGroupItems(stmtViewByType, rows, stmtCtx{windowMs: windowExecMs(rows), trackPlanning: true})
 	if descs[len(descs)-1].name != "T" {
 		t.Errorf("key column header = %q, want T", descs[len(descs)-1].name)
 	}
@@ -141,7 +141,7 @@ func TestGroupColumnProjectionParallel(t *testing.T) {
 	m := newTestModel()
 	rows := groupRows()
 	check := func(label string, v stmtView) {
-		items, descs, total := m.buildStatementGroupItems(v, rows, windowExecMs(rows), true)
+		items, descs, total := m.buildStatementGroupItems(v, rows, stmtCtx{windowMs: windowExecMs(rows), trackPlanning: true})
 		for _, it := range items {
 			if cells := it.data.([]pg.DiagCell); len(cells) != len(descs) {
 				t.Errorf("%s: row cells=%d, cols=%d", label, len(cells), len(descs))

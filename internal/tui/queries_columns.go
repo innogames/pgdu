@@ -24,6 +24,10 @@ const (
 	colCalls       stmtColID = "calls"
 	colRows        stmtColID = "rows"
 	colRowsPerCall stmtColID = "rows/call"
+	colCallsPerSec stmtColID = "calls/s"
+	colRowsPerSec  stmtColID = "rows/s"
+	colWALPerSec   stmtColID = "wal/s"
+	colActive      stmtColID = "active"
 	colHit         stmtColID = "hit"
 	colMiss        stmtColID = "miss"
 	colHitPct      stmtColID = "hit%"
@@ -34,6 +38,10 @@ const (
 	colWritten     stmtColID = "written"
 	colTempRead    stmtColID = "temp_read"
 	colTempWritten stmtColID = "temp_written"
+	colLocalHit    stmtColID = "local_hit"
+	colLocalRead   stmtColID = "local_read"
+	colLocalDirty  stmtColID = "local_dirtied"
+	colLocalWrit   stmtColID = "local_written"
 	colWALRecs     stmtColID = "wal_recs"
 	colWALFPI      stmtColID = "wal_fpi"
 	colMainTable   stmtColID = "table"
@@ -42,11 +50,27 @@ const (
 )
 
 // stmtCtx carries the per-build inputs a column's cell builder needs beyond the
-// QueryStat row itself: the window's total exec time (the time% denominator) and
+// QueryStat row itself: the window's total exec time (the time% denominator),
+// the window's wall-clock length in seconds (the rate columns' denominator) and
 // whether planning-time collection is on (gates the plan columns).
+//
+// windowSec is zero while the window is still opening and on a cumulative
+// anchor whose stats_reset the server would not tell us — the rate columns
+// render "—" rather than dividing by a span they don't have.
 type stmtCtx struct {
 	windowMs      float64
+	windowSec     float64
 	trackPlanning bool
+}
+
+// perSec is the shared body of the rate columns: a counter over the window's
+// wall-clock length, or an unset cell when there is no window to divide by.
+func perSec(n float64, ctx stmtCtx, format func(float64) string) pg.DiagCell {
+	if ctx.windowSec <= 0 {
+		return pg.DiagCell{Display: "—"}
+	}
+	v := n / ctx.windowSec
+	return diagNum(format(v), v)
 }
 
 // stmtColDesc is a top-queries column; stmtSpec binds the registry to its picker
@@ -151,6 +175,33 @@ func stmtColumnRegistry() []stmtColDesc {
 				v := q.RowsPerCall()
 				return diagNum(fmtFloat(v), v)
 			}},
+		// The window's wall-clock length is known exactly, so the rate columns
+		// are pure arithmetic over counters already in hand. "active" is the
+		// useful one: exec time per wall-second is the average number of
+		// backends this one statement keeps busy, which is what decides whether
+		// a query is worth tuning at all.
+		{id: colCallsPerSec, name: "calls/s", kind: pg.DiagFloat,
+			desc: "calls per second over the window",
+			cell: func(q pg.QueryStat, ctx stmtCtx) pg.DiagCell {
+				return perSec(float64(q.Calls), ctx, fmtFloat)
+			}},
+		{id: colRowsPerSec, name: "rows/s", kind: pg.DiagFloat,
+			desc: "rows returned / affected per second over the window",
+			cell: func(q pg.QueryStat, ctx stmtCtx) pg.DiagCell {
+				return perSec(float64(q.Rows), ctx, fmtFloat)
+			}},
+		{id: colWALPerSec, name: "wal/s", kind: pg.DiagCostGraded,
+			desc: "WAL bytes generated per second over the window",
+			cell: func(q pg.QueryStat, ctx stmtCtx) pg.DiagCell {
+				return perSec(float64(q.WALBytes), ctx, func(v float64) string {
+					return humanize.Bytes(int64(v)) + "/s"
+				})
+			}},
+		{id: colActive, name: "active", kind: pg.DiagCostGraded,
+			desc: "average backends busy with this statement (exec time ÷ wall time)",
+			cell: func(q pg.QueryStat, ctx stmtCtx) pg.DiagCell {
+				return perSec(q.TotalExecTime/1000, ctx, fmtFloat)
+			}},
 		{id: colHit, name: "hit", kind: pg.DiagInt, defaultOn: true,
 			desc: "shared blocks served from cache",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
@@ -206,6 +257,29 @@ func stmtColumnRegistry() []stmtColDesc {
 			desc: "temp blocks written — spills past work_mem",
 			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
 				return diagNum(formatRows(q.TempBlksWritten), float64(q.TempBlksWritten))
+			}},
+		// Local blocks are temp-table traffic. They already feed io_ms and the
+		// detail view; without columns here a temp-table-heavy statement looks
+		// like it touches nothing.
+		{id: colLocalHit, name: "local_hit", kind: pg.DiagInt,
+			desc: "local (temp-table) blocks served from the backend's own buffers",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				return diagNum(formatRows(q.LocalBlksHit), float64(q.LocalBlksHit))
+			}},
+		{id: colLocalRead, name: "local_read", kind: pg.DiagCostGraded,
+			desc: "local (temp-table) blocks read from disk/OS",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				return diagNum(formatRows(q.LocalBlksRead), float64(q.LocalBlksRead))
+			}},
+		{id: colLocalDirty, name: "local_dirtied", kind: pg.DiagCostGraded,
+			desc: "local (temp-table) blocks dirtied",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				return diagNum(formatRows(q.LocalBlksDirtied), float64(q.LocalBlksDirtied))
+			}},
+		{id: colLocalWrit, name: "local_written", kind: pg.DiagCostGraded,
+			desc: "local (temp-table) blocks written back to disk",
+			cell: func(q pg.QueryStat, _ stmtCtx) pg.DiagCell {
+				return diagNum(formatRows(q.LocalBlksWritten), float64(q.LocalBlksWritten))
 			}},
 		{id: colWALRecs, name: "wal_recs", kind: pg.DiagInt,
 			desc: "WAL records generated",

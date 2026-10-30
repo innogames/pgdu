@@ -172,6 +172,12 @@ func (m *Model) resetStatementsCmd(db string) tea.Cmd {
 	})
 }
 
+func (m *Model) resetStatementsMinMaxCmd(db string) tea.Cmd {
+	return resetCmd("statements", func(ctx context.Context) error {
+		return m.client.ResetStatementsMinMax(ctx, db)
+	})
+}
+
 func (m *Model) resetQualstatsCmd(db string) tea.Cmd {
 	return resetCmd("qualstats", func(ctx context.Context) error {
 		return m.client.ResetQualstats(ctx, db)

@@ -31,6 +31,7 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 		return nil
 	}
 	s.stat.sampledAt = time.Now()
+	s.stat.decoErr = msg.decoErr
 	s.stat.trackPlanning = msg.trackPlanning
 	s.stat.fill = msg.fill
 	s.stat.fill.StatsReset = msg.statsReset
@@ -107,10 +108,15 @@ func (m *Model) rebuildStatementItems(s *screen) {
 		m.defaultStatementSort(s)
 	}
 	windowMs := windowExecMs(s.stat.rows)
+	ctx := stmtCtx{
+		windowMs:      windowMs,
+		windowSec:     s.stat.windowSeconds(),
+		trackPlanning: s.stat.trackPlanning,
+	}
 	var total []pg.DiagCell
 	if v := s.stat.view; v.grouped() {
 		var descs []stmtGroupColDesc
-		s.items, descs, total = m.buildStatementGroupItems(v, s.stat.rows, windowMs, s.stat.trackPlanning)
+		s.items, descs, total = m.buildStatementGroupItems(v, s.stat.rows, ctx)
 		s.stat.groupCols, s.stat.cols = descs, nil
 		s.diagCols = diagColumnsFrom(descs)
 		stmtGroupSpec(v).syncSort(&m.stmtGroupTable, s, descs)
@@ -125,7 +131,7 @@ func (m *Model) rebuildStatementItems(s *screen) {
 			}
 		}
 		var descs []stmtColDesc
-		s.items, descs, total = m.buildStatementItems(rows, windowMs, s.stat.trackPlanning)
+		s.items, descs, total = m.buildStatementItems(rows, ctx)
 		s.stat.cols, s.stat.groupCols = descs, nil
 		s.diagCols = diagColumnsFrom(descs)
 		stmtSpec.syncSort(&m.stmtTable, s, descs)

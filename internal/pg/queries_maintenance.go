@@ -473,6 +473,13 @@ ORDER  BY category, name`
 	// Requires pg_read_all_stats or superuser.
 	sqlStatementsResetAll = `SELECT pg_stat_statements_reset()`
 
+	// sqlStatementsResetMinMax zeroes only the min/max/stddev columns and the
+	// minmax_stats_since timestamp, leaving every cumulative counter alone.
+	// The four-argument form arrived with extension 1.11 (PG17), which is why
+	// the caller gates on the version: there is no older spelling to degrade
+	// to. The three zeros mean "every user, every database, every query".
+	sqlStatementsResetMinMax = `SELECT pg_stat_statements_reset(0, 0, 0, true)`
+
 	// sqlQualstatsResetAll resets all pg_qualstats statistics.
 	// Requires superuser or pg_monitor on most versions.
 	sqlQualstatsResetAll = `SELECT pg_qualstats_reset()`

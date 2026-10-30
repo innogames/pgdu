@@ -356,6 +356,18 @@ type stmtState struct {
 	// statements are being evicted. pendingReset is the armed X confirm.
 	fill         pg.ExtCapacity
 	pendingReset bool
+	// pendingMinMax is the armed M confirm: the small reset that zeroes only
+	// the extrema and the spread, leaving every window already open intact.
+	pendingMinMax bool
+	// decoErr is why trackPlanning / fill / statsReset are missing, when they
+	// are: the header distinguishes "the GUC is off" from "this role may not
+	// read it".
+	decoErr error
+	// cumulativeDetail marks a detail screen opened from the activity list:
+	// it matches a live pg_stat_statements row by query id, so its counters
+	// are cumulative since the last reset, not the window delta every other
+	// route to this screen shows. The section title says so.
+	cumulativeDetail bool
 
 	// Session anchor: the very first in-memory baseline taken when the tool was
 	// entered, preserved unchanged even after a disk/cumulative baseline replaces

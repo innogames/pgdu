@@ -12,20 +12,22 @@ import (
 // statementColumns is the projected column schema for the current visibility set
 // and track_planning state, derived from stmtColumnRegistry. Used on the first
 // (empty) load before any rows exist; buildStatementItems returns the same
-// schema once rows arrive.
+// schema once rows arrive. No window is known yet, so the rate columns project
+// as present-but-empty, which is what they render until one is.
 func (m *Model) statementColumns(trackPlanning bool) []pg.DiagColumn {
 	return diagColumnsFrom(stmtSpec.visibleCols(&m.stmtTable, stmtCtx{trackPlanning: trackPlanning}))
 }
 
 // buildStatementItems converts window-delta QueryStats into generic-table rows
-// (item.data = []pg.DiagCell) over the currently visible columns. windowMs is
-// the whole window's exec time — the time% denominator — passed in rather than
-// summed here because rows may be the list narrowed to one group, whose shares
-// must still read against the window. It returns the items, the projected
+// (item.data = []pg.DiagCell) over the currently visible columns.
+// It returns the items, the projected
 // column descriptors (parallel to each item's cells), and the cells for a
 // pinned "← Sum" footer totalling the rows given (nil when there are none).
-func (m *Model) buildStatementItems(rows []pg.QueryStat, windowMs float64, trackPlanning bool) ([]item, []stmtColDesc, []pg.DiagCell) {
-	ctx := stmtCtx{windowMs: windowMs, trackPlanning: trackPlanning}
+// ctx carries the window: its exec time is the time% denominator and its
+// wall-clock length the rate columns'. Both are passed in rather than derived
+// here because rows may be the list narrowed to one group, whose shares must
+// still read against the whole window.
+func (m *Model) buildStatementItems(rows []pg.QueryStat, ctx stmtCtx) ([]item, []stmtColDesc, []pg.DiagCell) {
 	descs := stmtSpec.visibleCols(&m.stmtTable, ctx)
 
 	items := make([]item, 0, len(rows))
@@ -162,7 +164,14 @@ func (m *Model) renderStatementsHeader(s *screen) string {
 			mu(fmt.Sprintf("  ·  %s  ·  refresh %s  ·  %s", m.statementsCount(s), m.refreshLabel(),
 				m.statementsHints(s, "t cadence · C columns · R resets · S saves · L loads")))
 	}
-	if !s.stat.trackPlanning {
+	if s.stat.decoErr != nil {
+		// Say the decorations are missing rather than letting their zero values
+		// read as fact: without this an unreadable GUC is indistinguishable
+		// from track_planning genuinely being off, and a .max warning that
+		// never fires from one that has nothing to warn about.
+		line += "\n  " + styleBadge.Render("stats unreadable") +
+			mu("  track_planning / reset time / fill level unknown — " + firstLine(s.stat.decoErr.Error()))
+	} else if !s.stat.trackPlanning {
 		// The planning-time column is hidden (it would always read 0); point the
 		// user at the setting that turns planning-time collection on.
 		line += "\n  " + mu("planning time column hidden — ") + styleBadge.Render("track_planning off") +
@@ -180,6 +189,9 @@ func (m *Model) statementsNotes(s *screen) string {
 	}
 	if s.stat.pendingReset {
 		b.WriteString("\n" + confirmBanner("reset pg_stat_statements in every database (snapshots taken before it can no longer start a window)"))
+	}
+	if s.stat.pendingMinMax {
+		b.WriteString("\n" + confirmBanner("reset only min/max/stddev (cumulative counters, open windows and snapshots are untouched)"))
 	}
 	return b.String()
 }
@@ -306,7 +318,10 @@ func (m *Model) renderStatementsInfo(height int) string {
 	b.WriteString("    " + mu("‘since last reset’ (the raw cumulative counters). "+m.refreshSentence()) + "\n")
 	b.WriteString("    " + mu("press ") + styleBadge.Render("R") + mu(" to drop the baseline and restart the window. Stats are scoped to the current database.") + "\n")
 	b.WriteString("    " + styleBadge.Render("X") + mu(" resets pg_stat_statements itself (y to confirm, every database). At pg_stat_statements.max each new") + "\n")
-	b.WriteString("    " + mu("statement evicts the least-used ~5 %, so rarely-run queries keep restarting from zero — the header warns.") + "\n\n")
+	b.WriteString("    " + mu("statement evicts the least-used ~5 %, so rarely-run queries keep restarting from zero — the header warns.") + "\n")
+	b.WriteString("    " + styleBadge.Render("M") + mu(" is the small reset: min_ms / max_ms / stddev_ms are cumulative since the last full reset and cannot") + "\n")
+	b.WriteString("    " + mu("be windowed, so M zeroes just those and re-scopes them to what runs next. Counters, open windows and") + "\n")
+	b.WriteString("    " + mu("saved snapshots are untouched. Needs pg_stat_statements 1.11 (PostgreSQL 17).") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" columns ") + "  " +
 		mu("all sortable — ") + styleBadge.Render("←") + mu("/") + styleBadge.Render("→") +
@@ -322,12 +337,17 @@ func (m *Model) renderStatementsInfo(height int) string {
 	col("calls", "times the query was executed in the window")
 	col("rows", "rows returned / affected across those calls")
 	col("rows/call", "average rows per call (rows ÷ calls); opt-in — ‘—’ when no calls")
+	col("calls/s", "calls per second over the window; opt-in — ‘—’ until the window has a length")
+	col("rows/s", "rows per second over the window; opt-in")
+	col("active", "backends this statement keeps busy on average (exec time ÷ wall time); opt-in")
 	col("hit", "shared blocks served from cache (shared_blks_hit)")
 	col("miss", "shared blocks read from disk/OS (shared_blks_read)")
 	col("hit%", "cache hit ratio: hit ÷ (hit+miss); ‘—’ when the query touched no blocks")
 	col("blk/row", "shared blocks (hit+read) per row — work per result row; lower is better; ‘—’ when 0 rows")
 	col("io_ms", "time in block read+write I/O (needs track_io_timing for non-zero values)")
 	col("wal", "WAL bytes generated by the query")
+	col("wal/s", "WAL bytes per second over the window; opt-in")
+	col("local_*", "temp-table block traffic (hit/read/dirtied/written); opt-in")
 	col("table", "the main table parsed from the statement (FROM/UPDATE/INTO) — d describes it")
 	col("T", "command type: S select · SL select…for update · L advisory lock · I insert · U update · D delete · M merge · T begin/commit · P prepare")
 	col("query", "the normalized statement text ($1, $2 … in place of constants)")

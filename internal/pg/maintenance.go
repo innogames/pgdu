@@ -485,6 +485,28 @@ func (c *Client) ResetStatements(ctx context.Context, db string) error {
 	return c.resetExtStats(ctx, db, "pg_stat_statements", sqlStatementsResetAll)
 }
 
+// ResetStatementsMinMax zeroes only the extrema and the spread
+// (min/max/stddev_exec_time and their plan-time siblings), leaving the
+// cumulative counters — and therefore every window already open against them —
+// untouched. It is the small hammer next to ResetStatements: the extrema are
+// cumulative since the last full reset and cannot be subtracted into a window,
+// so resetting them here is what makes min_ms / max_ms / stddev_ms describe
+// the window about to be measured rather than all of history.
+//
+// Needs extension 1.11 (PG17). Below that the four-argument form does not
+// exist and there is nothing to degrade to, so this refuses by naming the
+// version — CLAUDE.md's third version tool.
+func (c *Client) ResetStatementsMinMax(ctx context.Context, db string) error {
+	major, minor, err := c.statementsVersion(ctx, db)
+	if err != nil {
+		return err
+	}
+	if !statementsAtLeast(major, minor, 1, 11) {
+		return fmt.Errorf("resetting only min/max/stddev needs pg_stat_statements 1.11 (PostgreSQL 17); this server has %d.%d", major, minor)
+	}
+	return c.resetExtStats(ctx, db, "pg_stat_statements", sqlStatementsResetMinMax)
+}
+
 // ResetQualstats runs pg_qualstats_reset() in db.
 // Requires superuser or pg_monitor depending on the qualstats version.
 func (c *Client) ResetQualstats(ctx context.Context, db string) error {

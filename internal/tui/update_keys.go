@@ -155,6 +155,14 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// The small sibling of X: zero only the extrema and the spread.
+	if s.stat.pendingMinMax {
+		s.stat.pendingMinMax = false
+		if confirmGate(msg) {
+			return m, m.resetStatementsMinMaxCmd(s.db)
+		}
+		return m, nil
+	}
 	// Snapshot delete confirmation, same y/n arming as reindex.
 	if m.pendingDeleteSnap != "" {
 		path := m.pendingDeleteSnap
@@ -514,6 +522,14 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// the server's counters, cluster-wide.
 		if s.level == levelStatements {
 			s.stat.pendingReset = true
+		}
+	case key.Matches(msg, m.keys.ResetMinMax):
+		// min/max/stddev are cumulative since the last full reset and cannot be
+		// subtracted into a window, so they describe all of history however
+		// narrow the window is. Zeroing just them re-scopes those columns to
+		// what runs next, without touching a counter any open window reads.
+		if s.level == levelStatements {
+			s.stat.pendingMinMax = true
 		}
 	case key.Matches(msg, m.keys.EvictBuffers):
 		// Arm the y-confirm for pg_buffercache_evict_*. On a row it is that

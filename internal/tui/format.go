@@ -281,6 +281,14 @@ func fmtMicros(us int64) string {
 	return fmtAge(float64(us) / 1000)
 }
 
+// firstLine trims a multi-line error down to something a one-line header can
+// carry. pgx wraps server errors with DETAIL/HINT lines that would otherwise
+// break the layout.
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(s, "\n")
+	return strings.TrimSpace(line)
+}
+
 // fmtDuration renders a window span with explicit units — "45s", "13m 12s",
 // "2h 05m", "3d 4h" — so it never reads as a wall-clock time. The old H:MM:SS
 // form made "13:12" ambiguous with a start timestamp, which is the whole reason

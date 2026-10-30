@@ -123,3 +123,38 @@ func TestLabelStmtFooter(t *testing.T) {
 		}
 	}
 }
+
+// The rate columns divide by the window's wall-clock length, which is not
+// known while the window is still opening or on a cumulative anchor whose
+// stats_reset the server withheld. They must say so rather than divide by zero
+// or quietly report the raw counter.
+func TestStmtRateColumnsNeedAWindow(t *testing.T) {
+	q := pg.QueryStat{Calls: 120, Rows: 600, WALBytes: 2048, TotalExecTime: 30_000}
+	byID := map[stmtColID]stmtColDesc{}
+	for _, d := range stmtColumnRegistry() {
+		byID[d.id] = d
+	}
+
+	for _, id := range []stmtColID{colCallsPerSec, colRowsPerSec, colWALPerSec, colActive} {
+		if got := byID[id].cell(q, stmtCtx{}); got.Display != "—" || got.HasNum {
+			t.Errorf("%s with no window: got %+v, want an unset — cell", id, got)
+		}
+	}
+
+	// A 60 s window: 120 calls → 2/s, 600 rows → 10/s, 30 s of exec time over
+	// 60 s of wall time → 0.5 backends busy on average.
+	ctx := stmtCtx{windowSec: 60}
+	for _, c := range []struct {
+		id   stmtColID
+		want float64
+	}{
+		{colCallsPerSec, 2},
+		{colRowsPerSec, 10},
+		{colActive, 0.5},
+	} {
+		got := byID[c.id].cell(q, ctx)
+		if !got.HasNum || got.Num != c.want {
+			t.Errorf("%s over a 60s window: got %+v, want Num=%v", c.id, got, c.want)
+		}
+	}
+}

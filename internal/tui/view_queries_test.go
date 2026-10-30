@@ -46,7 +46,7 @@ func TestRenderStatementsTable(t *testing.T) {
 	}
 	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil, "", "")
 	windowMs := windowExecMs(rows)
-	items, descs, total := m.buildStatementItems(rows, windowMs, true)
+	items, descs, total := m.buildStatementItems(rows, stmtCtx{windowMs: windowMs, trackPlanning: true})
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
 		loaded: true, stat: stmtState{rows: rows, windowExecMs: windowMs, cols: descs, baselineAt: time.Now().Add(-90 * time.Second), sampledAt: time.Now(), trackPlanning: true}, items: items,
@@ -68,7 +68,7 @@ func TestStatementsTotalRow(t *testing.T) {
 		{QueryID: 2, Query: "select 2", Calls: 10, Rows: 10, TotalExecTime: 50, SharedBlksHit: 5, SharedBlksRead: 5},
 	}
 	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil, "", "")
-	_, descs, total := m.buildStatementItems(rows, windowExecMs(rows), true)
+	_, descs, total := m.buildStatementItems(rows, stmtCtx{windowMs: windowExecMs(rows), trackPlanning: true})
 	if total == nil {
 		t.Fatal("expected a total row for a non-empty table")
 	}
@@ -92,7 +92,7 @@ func TestStatementsTotalRow(t *testing.T) {
 		t.Errorf("query column should be labelled, got %q", got)
 	}
 	// An empty table yields no footer.
-	if _, _, empty := m.buildStatementItems(nil, 0, true); empty != nil {
+	if _, _, empty := m.buildStatementItems(nil, stmtCtx{windowMs: 0, trackPlanning: true}); empty != nil {
 		t.Error("empty table should have no total row")
 	}
 }
@@ -105,7 +105,7 @@ func TestRenderStatementsTrackPlanningOff(t *testing.T) {
 	}
 	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil, "", "")
 	windowMs := windowExecMs(rows)
-	items, descs, total := m.buildStatementItems(rows, windowMs, false)
+	items, descs, total := m.buildStatementItems(rows, stmtCtx{windowMs: windowMs, trackPlanning: false})
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
 		loaded: true, stat: stmtState{rows: rows, windowExecMs: windowMs, cols: descs, baselineAt: time.Now().Add(-30 * time.Second), sampledAt: time.Now(), trackPlanning: false}, items: items,
@@ -420,7 +420,7 @@ func TestStatementColumnProjectionParallel(t *testing.T) {
 	rows := []pg.QueryStat{{QueryID: 1, Query: "select 1", Calls: 1, TotalExecTime: 1}}
 
 	check := func(label string) {
-		items, descs, total := m.buildStatementItems(rows, windowExecMs(rows), true)
+		items, descs, total := m.buildStatementItems(rows, stmtCtx{windowMs: windowExecMs(rows), trackPlanning: true})
 		cols := diagColumnsFrom(descs)
 		for _, it := range items {
 			cells, _ := it.data.([]pg.DiagCell)
@@ -444,7 +444,7 @@ func TestStatementColumnProjectionParallel(t *testing.T) {
 
 	// The query column is mandatory: it survives even when explicitly disabled.
 	m.stmtTable.visible[colQuery] = false
-	_, descs, _ := m.buildStatementItems(rows, windowExecMs(rows), true)
+	_, descs, _ := m.buildStatementItems(rows, stmtCtx{windowMs: windowExecMs(rows), trackPlanning: true})
 	if indexOfCol(descs, colQuery) < 0 {
 		t.Error("query column must always be present (mandatory)")
 	}
@@ -497,7 +497,7 @@ func TestColumnConfigToggleRebuilds(t *testing.T) {
 	m.width, m.height = 200, 40
 	rows := []pg.QueryStat{{QueryID: 1, Query: "select 1", Calls: 1, TotalExecTime: 1, TempBlksRead: 7}}
 	windowMs := windowExecMs(rows)
-	items, descs, total := m.buildStatementItems(rows, windowMs, true)
+	items, descs, total := m.buildStatementItems(rows, stmtCtx{windowMs: windowMs, trackPlanning: true})
 	s := &screen{
 		level: levelStatements, title: "queries", tool: toolQueries, db: "test",
 		loaded: true, stat: stmtState{rows: rows, windowExecMs: windowMs, cols: descs, baselineAt: time.Now().Add(-time.Minute), sampledAt: time.Now(), trackPlanning: true}, items: items,

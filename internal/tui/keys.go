@@ -17,6 +17,7 @@ type keyMap struct {
 	DiskUsage        key.Binding
 	Rebaseline       key.Binding
 	ResetStatements  key.Binding // X (top queries): pg_stat_statements_reset(), y-confirmed
+	ResetMinMax      key.Binding // M (top queries): pg_stat_statements_reset(…, minmax_only), y-confirmed
 	EvictBuffers     key.Binding // X (buffers): pg_buffercache_evict_*, y-confirmed — shares X with ResetStatements, only one is enabled per level
 	ToggleRefresh    key.Binding
 	Params           key.Binding
@@ -168,6 +169,7 @@ func defaultKeys() keyMap {
 		DiskUsage:       key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "→ disk usage")),
 		Rebaseline:      key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "reset window")),
 		ResetStatements: key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "reset pg_stat_statements")),
+		ResetMinMax:     key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "reset min/max/stddev")),
 		EvictBuffers:    key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "evict from cache")),
 		ToggleRefresh:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "refresh cadence")),
 		Params:          key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "→ captured values")),
@@ -245,6 +247,7 @@ func (k *keyMap) applyContext(s *screen) {
 
 	k.Rebaseline.SetEnabled(stmtTable)
 	k.ResetStatements.SetEnabled(stmtTable)
+	k.ResetMinMax.SetEnabled(stmtTable)
 	// Eviction needs a loaded buffers list to name a relation from; the detail
 	// screen already knows its own.
 	k.EvictBuffers.SetEnabled(s.level == levelBufferTables || s.level == levelBufferDetail)
@@ -496,7 +499,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Enter, k.Back},
 		{k.Filter, k.Seek, k.GinNextLeaf, k.CtidNext, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
 		{k.Refresh, k.Install, k.Describe, k.DiskUsage},
-		{k.Rebaseline, k.ResetStatements, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
+		{k.Rebaseline, k.ResetStatements, k.ResetMinMax, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
 		{k.EvictBuffers, k.StmtView, k.BufSplit, k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
 		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.JumpIO, k.Progress, k.Settings},

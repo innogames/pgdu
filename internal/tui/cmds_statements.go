@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"time"
 
@@ -15,7 +16,12 @@ type statementsLoadedMsg struct {
 	trackPlanning bool           // whether plan time is being collected
 	statsReset    time.Time      // pg_stat_statements_info.stats_reset — guards a disk baseline
 	fill          pg.ExtCapacity // entry count vs .max; zero Max when unreadable
-	err           error
+	// decoErr is the first failure among the three best-effort decorations
+	// (track_planning, stats_reset, the fill level). None of them is worth
+	// failing the load over, but silently dropping them makes an unreadable
+	// GUC look exactly like "track_planning is off" — the header says which.
+	decoErr error
+	err     error
 }
 
 // Snapshot persistence messages (levelStatements / levelSnapshots).
@@ -105,10 +111,17 @@ func (m *Model) loadStatementsCmd(db string) tea.Cmd {
 		if err != nil {
 			return statementsLoadedMsg{db: db, err: err}
 		}
-		tp, _ := m.client.TrackPlanning(ctx, db)     // best-effort column decoration
-		reset, _ := m.client.StatementsInfo(ctx, db) // best-effort reset guard for disk baselines
-		fill, _ := m.client.StatementsFill(ctx, db)  // best-effort "full" note in the header
-		return statementsLoadedMsg{db: db, stats: stats, trackPlanning: tp, statsReset: reset, fill: fill}
+		// All three are decorations: a failure (usually a role without
+		// pg_read_all_stats) must not cost the user the table. The first error
+		// rides along so the header can say the values are missing rather than
+		// false.
+		tp, tpErr := m.client.TrackPlanning(ctx, db)
+		reset, resetErr := m.client.StatementsInfo(ctx, db)
+		fill, fillErr := m.client.StatementsFill(ctx, db)
+		return statementsLoadedMsg{
+			db: db, stats: stats, trackPlanning: tp, statsReset: reset, fill: fill,
+			decoErr: cmp.Or(tpErr, resetErr, fillErr),
+		}
 	})
 }
 

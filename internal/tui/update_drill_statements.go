@@ -61,7 +61,8 @@ func (m *Model) drillActivityStatement(s *screen, cur item) tea.Cmd {
 		}
 	}
 	// Push a loading placeholder while we fetch the QueryStat snapshot.
-	next := &screen{level: levelStatementDetail, title: "query", tool: s.tool, db: db, loading: true}
+	next := &screen{level: levelStatementDetail, title: "query", tool: s.tool, db: db, loading: true,
+		stat: stmtState{cumulativeDetail: true}}
 	m.stack = append(m.stack, next)
 	return m.loadActivityStatementCmd(db, backendPID, cur.statQueryID, queryText)
 }

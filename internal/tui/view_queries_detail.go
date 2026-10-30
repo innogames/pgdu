@@ -14,6 +14,16 @@ import (
 
 // --- query detail (levelStatementDetail) ---
 
+// totalTimeShare annotates the total-time row with its share of the window —
+// except on a detail screen reached from the activity list, where there is no
+// window and the share would read as a flat 0 %.
+func totalTimeShare(s *screen, pct float64, mu func(...string) string) string {
+	if s.stat.cumulativeDetail {
+		return ""
+	}
+	return mu(fmt.Sprintf("  (%s%% of window)", fmtFloat(pct)))
+}
+
 func (m *Model) renderStatementDetail(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
@@ -42,11 +52,18 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	if bpr, ok := q.BlocksPerRow(); ok {
 		bprStr = blkPerRowStyle(bpr).Render(fmt1(bpr))
 	}
-	b.WriteString("  " + styleHeader.Render(" window metrics ") + "\n")
+	if s.stat.cumulativeDetail {
+		// Reached from the activity list, which matches a live row by query id:
+		// there is no baseline behind these numbers.
+		b.WriteString("  " + styleHeader.Render(" cumulative metrics ") + "  " +
+			mu("since the last pg_stat_statements reset — not a window") + "\n")
+	} else {
+		b.WriteString("  " + styleHeader.Render(" window metrics ") + "\n")
+	}
 	metrics := [][2]string{
 		{"calls", formatRows(q.Calls)},
 		{"rows", formatRows(q.Rows) + mu(fmt.Sprintf("  (%s/call)", fmtFloat(q.RowsPerCall())))},
-		{"total time", fmtMs(q.TotalExecTime) + " ms" + mu(fmt.Sprintf("  (%s%% of window)", fmtFloat(pct)))},
+		{"total time", fmtMs(q.TotalExecTime) + " ms" + totalTimeShare(s, pct, mu)},
 		{"mean time", fmtMs(q.MeanTime()) + " ms"},
 		{"plan time", planTimeMetric(*q, s.stat.trackPlanning, mu)},
 		{"shared hit ratio", hitStr},

@@ -231,12 +231,11 @@ func labelStmtGroupFooter(descs []stmtGroupColDesc, total []pg.DiagCell, nQuerie
 }
 
 // buildStatementGroupItems rolls the window rows up by the view's key into
-// generic-table rows (item.data = []pg.DiagCell). windowMs is the whole
-// window's exec time (the time% denominator, so a group's share reads against
-// the window). Returns the items, the projected descriptors and the Σ footer
+// generic-table rows (item.data = []pg.DiagCell). ctx carries the window the
+// shares and rates read against, so a group's time% is still its share of the
+// whole window. Returns the items, the projected descriptors and the Σ footer
 // (nil without rows).
-func (m *Model) buildStatementGroupItems(v stmtView, rows []pg.QueryStat, windowMs float64, trackPlanning bool) ([]item, []stmtGroupColDesc, []pg.DiagCell) {
-	ctx := stmtCtx{windowMs: windowMs, trackPlanning: trackPlanning}
+func (m *Model) buildStatementGroupItems(v stmtView, rows []pg.QueryStat, ctx stmtCtx) ([]item, []stmtGroupColDesc, []pg.DiagCell) {
 	descs := stmtGroupSpec(v).visibleCols(&m.stmtGroupTable, ctx)
 	groups := groupQueryStats(rows, v)
 	items := make([]item, 0, len(groups))

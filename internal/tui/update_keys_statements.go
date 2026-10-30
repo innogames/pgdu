@@ -171,6 +171,18 @@ func (m *Model) handleStatementEnter(s *screen, msg tea.KeyPressMsg) (tea.Cmd, b
 	return nil, false
 }
 
+// windowSeconds is the window's wall-clock length — the denominator of the
+// rate columns. It is zero until the window has two ends to measure between:
+// while the first sample is still opening the window, and on a cumulative
+// anchor whose stats_reset the server would not disclose. The rate cells
+// render "—" on a zero rather than dividing by a span that isn't there.
+func (st *stmtState) windowSeconds() float64 {
+	if st.baselineAt.IsZero() || st.sampledAt.IsZero() {
+		return 0
+	}
+	return max(st.sampledAt.Sub(st.baselineAt).Seconds(), 0)
+}
+
 // restartWindow drops the window's baseline so the next live sample opens a
 // new one, leaving any disk snapshot or cumulative window behind (R, and the
 // X reset whose zeroed counters no old baseline can be diffed against).
