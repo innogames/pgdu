@@ -81,3 +81,28 @@ func (m *Model) loadDescribeBuffersCmd(db string, oid uint32) tea.Cmd {
 		return describeBuffersLoadedMsg{db: db, oid: oid, stat: stat, err: err}
 	})
 }
+
+// bufferEvictedMsg carries the outcome of a pg_buffercache_evict_* call.
+type bufferEvictedMsg struct {
+	db     string
+	report string
+	err    error
+}
+
+// evictRelationCmd drops one relation's unpinned shared buffers. Not wrapped in
+// query()'s read timeout: eviction walks the whole buffer pool, which on a
+// large shared_buffers takes longer than a read is allowed to.
+func (m *Model) evictRelationCmd(db string, oid uint32) tea.Cmd {
+	return func() tea.Msg {
+		report, err := m.client.EvictRelation(context.Background(), db, oid)
+		return bufferEvictedMsg{db: db, report: report, err: err}
+	}
+}
+
+// evictAllCmd drops every unpinned shared buffer in the cluster.
+func (m *Model) evictAllCmd(db string) tea.Cmd {
+	return func() tea.Msg {
+		report, err := m.client.EvictAllBuffers(context.Background(), db)
+		return bufferEvictedMsg{db: db, report: report, err: err}
+	}
+}

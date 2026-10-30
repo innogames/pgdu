@@ -113,6 +113,22 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// Buffer eviction confirmation on the buffers screens: X armed it, y/Y
+	// executes, any other key cancels.
+	if s.buf.pendingEvict != "" {
+		what := s.buf.pendingEvict
+		oid := s.buf.evictOID
+		s.buf.pendingEvict = ""
+		if confirmGate(msg) {
+			s.buf.evictMsg = ""
+			s.buf.evictErr = nil
+			if what == "all" {
+				return m, m.evictAllCmd(s.db)
+			}
+			return m, m.evictRelationCmd(s.db, oid)
+		}
+		return m, nil
+	}
 	// Maintenance stats reset confirmation — same y/n pattern as reindex.
 	if s.maintenance.pendingReset != "" {
 		which := s.maintenance.pendingReset
@@ -490,6 +506,18 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// the server's counters, cluster-wide.
 		if s.level == levelStatements {
 			s.stat.pendingReset = true
+		}
+	case key.Matches(msg, m.keys.EvictBuffers):
+		// Arm the y-confirm for pg_buffercache_evict_*. On a row it is that
+		// relation; with no row to name (or on an empty list) it is the whole
+		// buffer pool, which is why the banner spells out the difference.
+		if st, ok := bufStatAt(s); ok {
+			s.buf.pendingEvict = "relation"
+			s.buf.evictTarget = bufEvictName(st)
+			s.buf.evictOID = st.Key()
+		} else if s.level == levelBufferTables {
+			s.buf.pendingEvict = "all"
+			s.buf.evictTarget = ""
 		}
 	case key.Matches(msg, m.keys.SaveSnapshot):
 		// Dump the current pg_stat_statements counters to disk. Available from the

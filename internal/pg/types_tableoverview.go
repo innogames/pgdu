@@ -42,6 +42,12 @@ type TableStat struct {
 	VacAgeMs *float64
 	AnaAgeMs *float64
 
+	// Cumulative milliseconds (auto)vacuum / (auto)analyze have spent on this
+	// table (PG18+). nil on PG17, which has no such counter, and on a table
+	// neither has ever touched.
+	VacTimeMs *float64
+	AnaTimeMs *float64
+
 	// pg_statio_all_tables block counters (shared-buffer hits vs disk reads).
 	HeapBlksRead, HeapBlksHit int64
 	IdxBlksRead, IdxBlksHit   int64

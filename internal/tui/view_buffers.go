@@ -491,3 +491,23 @@ func rankBuffersByOID(items []item) map[uint32]int {
 	}
 	return out
 }
+
+// renderEvictBanner is the buffers screens' line above the list: the armed
+// eviction confirmation, or the server's report of the last one. Returns ""
+// when neither applies.
+func renderEvictBanner(s *screen) string {
+	switch {
+	case s.buf.pendingEvict == "relation":
+		return confirmBanner("evict from shared_buffers: " + s.buf.evictTarget)
+	case s.buf.pendingEvict == "all":
+		// Named in full: this one costs every session on the server, not just
+		// the next query against one relation.
+		return confirmBanner("evict EVERY unpinned page in shared_buffers, cluster-wide — " +
+			"every database's working set goes cold")
+	case s.buf.evictErr != nil:
+		return "  " + styleErr.Render("evict failed: ") + styleMuted.Render(s.buf.evictErr.Error())
+	case s.buf.evictMsg != "":
+		return "  " + styleSelected.Render("evicted: ") + styleMuted.Render(s.buf.evictMsg)
+	}
+	return ""
+}

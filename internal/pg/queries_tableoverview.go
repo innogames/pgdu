@@ -5,6 +5,11 @@ package pg
 // freeze age) with the cumulative pg_stat_all_tables / pg_statio_all_tables
 // counters. The (auto)vacuum/(auto)analyze ages are computed server-side as
 // milliseconds (NULL when never run) so the client needs no clock of its own.
+// The two total_*_time sums are PG18's cumulative maintenance time per table,
+// read through to_jsonb so the statement still runs on PG17 (NULL there, and
+// NULL too when the table has never been vacuumed — the manual and automatic
+// halves are summed because what the overview answers is "how much time has
+// this table cost", not who spent it).
 // relfrozenxid age is forced to 0 for partitioned parents (relkind 'p'), whose
 // relfrozenxid is 0 and would otherwise report a meaningless huge age. toast
 // size uses pg_total_relation_size on the TOAST relation (main fork + its index
@@ -42,6 +47,8 @@ SELECT
     COALESCE(s.autoanalyze_count, 0),
     (EXTRACT(EPOCH FROM now() - GREATEST(s.last_vacuum,  s.last_autovacuum))  * 1000)::float8,
     (EXTRACT(EPOCH FROM now() - GREATEST(s.last_analyze, s.last_autoanalyze)) * 1000)::float8,
+    (js.j ->> 'total_vacuum_time')::float8   + COALESCE((js.j ->> 'total_autovacuum_time')::float8, 0),
+    (js.j ->> 'total_analyze_time')::float8  + COALESCE((js.j ->> 'total_autoanalyze_time')::float8, 0),
     COALESCE(io.heap_blks_read, 0),
     COALESCE(io.heap_blks_hit,  0),
     COALESCE(io.idx_blks_read,  0),
@@ -49,6 +56,7 @@ SELECT
 FROM   pg_class c
 JOIN   pg_namespace n            ON n.oid   = c.relnamespace
 LEFT   JOIN pg_stat_all_tables   s  ON s.relid  = c.oid
+CROSS  JOIN LATERAL (SELECT to_jsonb(s) AS j) js
 LEFT   JOIN pg_statio_all_tables io ON io.relid = c.oid
 WHERE  n.nspname = $1
   AND  c.relkind IN ('r','m','p')

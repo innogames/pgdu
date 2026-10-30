@@ -11,12 +11,14 @@ var diagVacuum = []Diagnostic{
 		Key:         "progress_all",
 		Title:       "Running operations (progress)",
 		Category:    "vacuum",
-		Description: "everything with a pg_stat_progress_* view — VACUUM, CREATE INDEX, ANALYZE, CLUSTER, COPY, base backups — with % done",
-		SQL:         sqlDiagProgressAll,
+		Description: "everything with a pg_stat_progress_* view — VACUUM, CREATE INDEX, ANALYZE, CLUSTER/REPACK, COPY, base backups — with % done",
+		SQL:         diagProgressAllSQL(progressCapsLegacy),
 		Bar:         "done_pct",
 		Help: `One row for every operation that reports progress — VACUUM, CREATE
 			INDEX, ANALYZE, CLUSTER, COPY and base backups — with a unified
-			done_pct. The pre-deploy / pre-restart glance: is anything
+			done_pct — and on PostgreSQL 19 also REPACK, which reports
+			CLUSTER and VACUUM FULL through its own view. The pre-deploy /
+			pre-restart glance: is anything
 			long-running still in flight, and how far along is it? done_pct can
 			be blank while an operation is in a phase with no measurable total,
 			and COPY's figure may be estimated from row counts. running_for is
@@ -83,6 +85,7 @@ var diagVacuum = []Diagnostic{
 			"toast_xid_age":          DiagFloat,
 			"mxid_age":               DiagFloat,
 			"autovacuum_count":       DiagFloat,
+			"autovacuum_secs":        DiagFloat,
 			"toast_autovacuum_count": DiagFloat,
 		},
 		// pct_freeze_max is the metric this view used to lead with; it stays
@@ -121,6 +124,10 @@ var diagVacuum = []Diagnostic{
 			a replication slot or a prepared transaction (the system overview's
 			xmin_horizon finding names the holder). An old or absent
 			last_autovacuum means autovacuum is not reaching the table at all.
+			autovacuum_secs (PostgreSQL 18 and newer; blank on 17) is the time
+			those runs actually cost: a high count with a high time is
+			autovacuum working and losing ground, a high count with almost no
+			time is it starting and giving up.
 			mxid_age tracks the independent multixact counter, driven by shared
 			row locks and FK checks, and can be old while the XID age is fine.`,
 	},

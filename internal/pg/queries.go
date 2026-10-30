@@ -5,6 +5,11 @@ package pg
 // files (bloat, buffers, pages, describe, diag, wal, statements); all of it is
 // kept as plain const strings so the queries can be audited in one package.
 
+// sqlServerVersionNum reads the numeric server version (major*10000 + minor).
+// Cheaper and more robust than parsing version() or pgx's server_version
+// parameter, which carries values like "19beta1".
+const sqlServerVersionNum = `SELECT current_setting('server_version_num')::int`
+
 const sqlDatabases = `
 SELECT d.datname,
        pg_database_size(d.datname) AS size_bytes

@@ -33,6 +33,36 @@ const (
 	DiagLogSeverity   = diagres.KindLogSeverity
 )
 
+// diagSQL returns the statement to run for d on this server. Almost every
+// diagnostic is a fixed string; progress_all is assembled per server because
+// its UNION names pg_stat_progress_* views that differ across major versions,
+// and one missing view would fail the whole statement. The registry's own
+// d.SQL stays the PG17/18 shape, which is what the query view displays.
+func (c *Client) diagSQL(ctx context.Context, db string, d Diagnostic) string {
+	if d.Key == "progress_all" {
+		return diagProgressAllSQL(c.progressCapabilities(ctx, db))
+	}
+	return d.SQL
+}
+
+// checkDiagVersion refuses a diagnostic the server is too old for, naming both
+// versions — far more useful than the "function ... does not exist" the server
+// would otherwise return from somewhere inside a long statement.
+func (c *Client) checkDiagVersion(ctx context.Context, db string, d Diagnostic) error {
+	if d.MinVersion == 0 {
+		return nil
+	}
+	ver, err := c.serverVersion(ctx, db)
+	if err != nil {
+		return err
+	}
+	if ver < d.MinVersion {
+		return fmt.Errorf("diagnostic %q needs PostgreSQL %s or newer (server is %s)",
+			d.Key, majorVersionString(d.MinVersion), majorVersionString(ver))
+	}
+	return nil
+}
+
 // RunDiagnostic executes d.SQL against db (or the default database when db is
 // empty) and returns the result in a generic column/row form suitable for the
 // TUI renderer. The 30-second query timeout is enforced by the caller (the
@@ -42,7 +72,10 @@ func (c *Client) RunDiagnostic(ctx context.Context, db string, d Diagnostic) (*D
 	if err != nil {
 		return nil, err
 	}
-	rows, err := pool.Query(ctx, d.SQL)
+	if err := c.checkDiagVersion(ctx, db, d); err != nil {
+		return nil, err
+	}
+	rows, err := pool.Query(ctx, c.diagSQL(ctx, db, d))
 	if err != nil {
 		return nil, fmt.Errorf("run diagnostic %q: %w", d.Key, err)
 	}
@@ -87,6 +120,9 @@ func colIndex(cols []DiagColumn, name string) int { return diagres.ColIndex(cols
 // surfaced only if no database yields a result. The whole sweep runs under the
 // caller's single 30-second query() budget.
 func (c *Client) RunDiagnosticAllDBs(ctx context.Context, d Diagnostic) (*DiagResult, error) {
+	if err := c.checkDiagVersion(ctx, "", d); err != nil {
+		return nil, err
+	}
 	dbs, err := c.ListDatabases(ctx)
 	if err != nil {
 		return nil, err
@@ -107,7 +143,7 @@ func (c *Client) RunDiagnosticAllDBs(ctx context.Context, d Diagnostic) (*DiagRe
 			}
 			continue
 		}
-		rs, qerr := pool.Query(ctx, d.SQL)
+		rs, qerr := pool.Query(ctx, c.diagSQL(ctx, db.Name, d))
 		if qerr != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("run diagnostic %q in %q: %w", d.Key, db.Name, qerr)

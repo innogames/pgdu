@@ -16,6 +16,13 @@ type Diagnostic struct {
 	Sort        string // default sort column name (descending); "" falls back to Bar, then column 0 ascending
 	PerDB       bool   // true = query reads only the connected database; the TUI prompts for which database to run against (or all)
 
+	// MinVersion is the lowest server_version_num this diagnostic can run on,
+	// for the few whose SQL names a view or function that simply does not
+	// exist earlier. 0 (the usual case) means every supported server. The
+	// runner refuses below it with a version-naming error rather than letting
+	// the server answer "function does not exist".
+	MinVersion int
+
 	// Kinds overrides the name-heuristic column kind (diagres.KindFromName) per
 	// column, so a diagnostic can opt into graded rendering the suffix rules
 	// can't infer — e.g. hit ratios as DiagPercentGraded (higher is better) or

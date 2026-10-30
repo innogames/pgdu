@@ -126,6 +126,16 @@ func (v maintView) guc(label, name, adviceKey string) string {
 	return maintRow(label, v.graded(adviceKey, settingOr(v.info.Settings, name))+v.note(adviceKey))
 }
 
+// gucIfSet is guc for a knob a newer server introduced: a server that has no
+// such setting prints nothing at all, instead of a row reading "unknown" that
+// only tells the reader their PostgreSQL is older than this line of code.
+func (v maintView) gucIfSet(label, name, adviceKey string) string {
+	if v.info == nil || v.info.Settings[name] == "" {
+		return ""
+	}
+	return v.guc(label, name, adviceKey)
+}
+
 // section assembles one overview section: the title carrying the panel's
 // glyph for the worst finding among keys, then the body. ok names the checks
 // that came back healthy and were folded out of the body in quiet mode; they
@@ -339,6 +349,16 @@ func renderMaintServer(v maintView, barW int) string {
 		}
 	}
 	return v.section("server", keys, ok, b.String())
+}
+
+// ioBytesSuffix renders PG18's true byte volume beside a block count. PG17 has
+// no such counter, so the row simply keeps the count it always showed rather
+// than printing a blocks×block_size guess as if it were measured.
+func ioBytesSuffix(has bool, n int64) string {
+	if !has || n <= 0 {
+		return ""
+	}
+	return "  " + styleMuted.Render(humanize.Bytes(n))
 }
 
 // avgMsTUI is time/count with an ok flag, for the timed pg_stat_io counters.
@@ -858,6 +878,10 @@ func renderMaintAutovacuum(v maintView, barW int) string {
 	b.WriteString(v.guc("freeze_max_age", "autovacuum_freeze_max_age", ""))
 	b.WriteString(v.guc("mxid_freeze_max_age", "autovacuum_multixact_freeze_max_age", ""))
 	b.WriteString(v.guc("failsafe_age", "vacuum_failsafe_age", ""))
+	// PG18's vacuum knobs. Both are absent on 17 and dropped at their default
+	// on 18, so this costs an operator nothing until someone has tuned them.
+	b.WriteString(v.gucIfSet("vacuum_max_threshold", "autovacuum_vacuum_max_threshold", ""))
+	b.WriteString(v.gucIfSet("eager_freeze_fail_rate", "vacuum_max_eager_freeze_failure_rate", ""))
 	b.WriteString(v.freezeAgeLine("xid age", info.XidAge, info.FreezeMaxAge, info.FailsafeAge, info.XidAgeDB, "wraparound", barW))
 	// The multixact age is a rarity worth a row only once it is on its way to
 	// a freeze cycle; the usual tiny fraction folds away.
@@ -998,6 +1022,14 @@ func renderMaintBufferCache(v maintView, barW int) string {
 		}
 	}
 
+	// PG18's asynchronous I/O: which mechanism reads are issued through, and
+	// how many workers serve them when it is the default "worker" method.
+	// Both rows disappear on PG17 (no such GUC) and at their defaults.
+	b.WriteString(v.gucIfSet("io_method", "io_method", ""))
+	if info.Settings["io_method"] == "worker" {
+		b.WriteString(v.gucIfSet("io_workers", "io_workers", ""))
+	}
+
 	io := info.IO
 	if !io.HasData {
 		b.WriteString(maintRow("i/o", mu("n/a (pg_stat_io unreadable)")))
@@ -1005,8 +1037,10 @@ func renderMaintBufferCache(v maintView, barW int) string {
 	}
 	b.WriteString(v.counterLegend(time.Time{}))
 	b.WriteString(maintRow("reads", formatRows(io.Reads)+"  "+mu("hits ")+formatRows(io.Hits)+
+		ioBytesSuffix(io.HasBytes, io.ReadBytes)+
 		v.rateSuffix(v.rates.ReadsPerMin, formatRows)))
 	b.WriteString(maintRow("writes", formatRows(io.Writes)+"  "+mu("extends ")+formatRows(io.Extends)+
+		ioBytesSuffix(io.HasBytes, io.WriteBytes)+
 		v.rateSuffix(v.rates.WritesPerMin, formatRows)))
 	ev := formatRows(io.Evictions)
 	if io.Hits > 0 {
@@ -1392,6 +1426,11 @@ func renderMaintObservability(v maintView) string {
 	set := info.Settings
 	b.WriteString(gucRow(set, "track_io_timing", "track_io_timing", v.note("track_io_timing")))
 	b.WriteString(gucRow(set, "track_wal_io_timing", "track_wal_io_timing", ""))
+	// PG18: without it the vacuum progress views report no delay time, so the
+	// "why is this vacuum slow" question has no answer. Absent on PG17.
+	if set["track_cost_delay_timing"] != "" {
+		b.WriteString(gucRow(set, "track_cost_delay_timing", "track_cost_delay_timing", ""))
+	}
 	b.WriteString(gucRow(set, "track_functions", "track_functions", ""))
 	b.WriteString(gucRow(set, "track_counts", "track_counts", v.note("track_counts")))
 	b.WriteString(gucRow(set, "log_min_duration_stmt", "log_min_duration_statement", ""))

@@ -136,7 +136,10 @@ WHERE  idx.indexrelid = $1
 // mix with last-scan times, vacuum/analyze recency and xid age. GREATEST folds
 // manual and auto timestamps into one "most recent" each (NULL only when both
 // are NULL). LEFT JOIN because foreign tables and partitioned parents may lack
-// a pg_stat row. $1 = table oid. PG 16+ (last_seq_scan/last_idx_scan).
+// a pg_stat row. relallfrozen is PG18's frozen-page counter, read through
+// to_jsonb so the statement still runs on PG17 — paired with relallvisible and
+// relpages it gives freeze coverage directly instead of inferring it from
+// age(relfrozenxid). $1 = table oid. PG 16+ (last_seq_scan/last_idx_scan).
 const sqlDescribeStats = `
 SELECT pg_relation_size(c.oid),
        pg_indexes_size(c.oid),
@@ -157,7 +160,10 @@ SELECT pg_relation_size(c.oid),
        GREATEST(s.last_analyze, s.last_autoanalyze),
        COALESCE(s.vacuum_count, 0)  + COALESCE(s.autovacuum_count, 0),
        COALESCE(s.analyze_count, 0) + COALESCE(s.autoanalyze_count, 0),
-       CASE WHEN c.relkind = 'p' THEN 0 ELSE age(c.relfrozenxid)::bigint END
+       CASE WHEN c.relkind = 'p' THEN 0 ELSE age(c.relfrozenxid)::bigint END,
+       c.relpages::bigint,
+       c.relallvisible::bigint,
+       (to_jsonb(c) ->> 'relallfrozen')::bigint
 FROM   pg_class c
 LEFT   JOIN pg_stat_all_tables s ON s.relid = c.oid
 WHERE  c.oid = $1

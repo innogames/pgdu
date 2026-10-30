@@ -297,27 +297,35 @@ ORDER BY consumed_pct DESC NULLS LAST
 // The *_time columns are cumulative milliseconds, divided to seconds like
 // database_stats does. Rows are ordered by total traffic so the busiest
 // backend/context pair leads.
+//
+// read_bytes/write_bytes are PG18's measured volumes, read through to_jsonb so
+// the same statement runs on PG17 (where they render as NULL). PG18 also files
+// WAL traffic here as object = 'wal'; the object column names it, so those rows
+// are informative rather than confusing and are deliberately kept.
 const sqlDiagIOStats = `
 SELECT
-    backend_type,
-    object,
-    context,
-    reads,
-    round((read_time / NULLIF(reads, 0))::numeric, 3) AS read_ms,
-    hits,
-    round(100.0 * hits / NULLIF(hits + reads, 0), 2) AS hit_pct,
-    writes,
-    round(write_time::numeric / 1000.0, 1) AS write_secs,
-    extends,
-    evictions,
-    reuses,
-    fsyncs,
-    round(fsync_time::numeric / 1000.0, 1) AS fsync_secs,
-    stats_reset
-FROM pg_stat_io
-WHERE COALESCE(reads, 0) + COALESCE(writes, 0) + COALESCE(hits, 0) + COALESCE(extends, 0)
-    + COALESCE(evictions, 0) + COALESCE(fsyncs, 0) > 0
-ORDER BY COALESCE(reads, 0) + COALESCE(writes, 0) + COALESCE(hits, 0) DESC
+    io.backend_type,
+    io.object,
+    io.context,
+    io.reads,
+    round((io.read_time / NULLIF(io.reads, 0))::numeric, 3) AS read_ms,
+    (js.j ->> 'read_bytes')::bigint AS read_bytes,
+    io.hits,
+    round(100.0 * io.hits / NULLIF(io.hits + io.reads, 0), 2) AS hit_pct,
+    io.writes,
+    round(io.write_time::numeric / 1000.0, 1) AS write_secs,
+    (js.j ->> 'write_bytes')::bigint AS write_bytes,
+    io.extends,
+    io.evictions,
+    io.reuses,
+    io.fsyncs,
+    round(io.fsync_time::numeric / 1000.0, 1) AS fsync_secs,
+    io.stats_reset
+FROM pg_stat_io io
+CROSS JOIN LATERAL (SELECT to_jsonb(io) AS j) js
+WHERE COALESCE(io.reads, 0) + COALESCE(io.writes, 0) + COALESCE(io.hits, 0) + COALESCE(io.extends, 0)
+    + COALESCE(io.evictions, 0) + COALESCE(io.fsyncs, 0) > 0
+ORDER BY COALESCE(io.reads, 0) + COALESCE(io.writes, 0) + COALESCE(io.hits, 0) DESC
 `
 
 // sqlDiagSLRU reports the SLRU (simple LRU) cache counters — transaction status

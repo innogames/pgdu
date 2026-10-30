@@ -401,6 +401,30 @@ type DescribeStats struct {
 	VacuumCount  int64      // manual + auto
 	AnalyzeCount int64      // manual + auto
 	FrozenXIDAge int64      // age(relfrozenxid); 0 for partitioned parents
+
+	// Visibility-map coverage. RelPages/AllVisible are the planner's own
+	// estimates; AllFrozen is PG18's relallfrozen and is nil on PG17, where
+	// the catalog has no such column.
+	RelPages   int64
+	AllVisible int64
+	AllFrozen  *int64
+}
+
+// VisibilityCoverage is the share of the table's pages marked all-visible and
+// all-frozen in the visibility map, in percent. ok is false for a table with no
+// pages; hasFrozen is false on PG17, which does not track relallfrozen. The
+// figures are the planner's estimates, refreshed by VACUUM — a low frozen share
+// on a large, cold table is work the next aggressive vacuum will have to do.
+func (s DescribeStats) VisibilityCoverage() (visible, frozen float64, hasFrozen, ok bool) {
+	if s.RelPages <= 0 {
+		return 0, 0, false, false
+	}
+	visible = 100 * float64(s.AllVisible) / float64(s.RelPages)
+	if s.AllFrozen != nil {
+		frozen = 100 * float64(*s.AllFrozen) / float64(s.RelPages)
+		hasFrozen = true
+	}
+	return visible, frozen, hasFrozen, true
 }
 
 // HotRatio is the share of updates that were HOT, in percent; ok is false

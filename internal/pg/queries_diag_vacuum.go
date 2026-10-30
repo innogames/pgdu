@@ -74,7 +74,10 @@ ORDER BY C.reltuples DESC
 // skipped all-visible pages — or that the xmin horizon is pinned, so no vacuum
 // can freeze past it (the system overview's xmin_horizon finding says which).
 // An old or absent last_autovacuum instead means autovacuum isn't reaching the
-// table at all.
+// table at all. autovacuum_secs (PG18's total_autovacuum_time, read through
+// to_jsonb so PG17 renders it blank rather than failing) separates those two
+// again: a large count next to a large time is autovacuum working and losing,
+// a large count next to almost no time is it giving up early.
 //
 // Only ordinary tables and matviews are considered; TOAST is attributed to its
 // parent via reltoastrelid, and partitioned parents (relfrozenxid 0, so age() is
@@ -98,6 +101,7 @@ SELECT
     pg_table_size(c.oid) AS size_bytes,
     st.n_dead_tup AS dead_tuples,
     st.autovacuum_count,
+    round((to_jsonb(st) ->> 'total_autovacuum_time')::numeric / 1000.0, 1) AS autovacuum_secs,
     st.last_autovacuum,
     ts.autovacuum_count AS toast_autovacuum_count,
     ts.last_autovacuum AS toast_last_autovacuum
@@ -137,9 +141,13 @@ FROM pg_stat_progress_vacuum p
 JOIN pg_stat_activity a ON p.pid = a.pid
 `
 
-// sqlDiagProgressAll is the point-in-time diagnostic over sqlProgressBase; the
-// live progress monitor uses sqlProgressOps for the same rows with raw counters.
-const sqlDiagProgressAll = sqlProgressBase + `
+// diagProgressAllSQL is the point-in-time diagnostic over progressBase; the
+// live progress monitor uses progressOpsSQL for the same rows with raw
+// counters. Both adapt their UNION to the progress views the server has, so
+// the diagnostic's SQL is resolved per server by Client.diagSQL — the registry
+// entry carries the PG17/18 shape for the query view to display.
+func diagProgressAllSQL(caps progressCaps) string {
+	return progressBase(caps) + `
 SELECT
     p.pid,
     p.command,
@@ -157,3 +165,4 @@ FROM prog p
 LEFT JOIN pg_stat_activity a USING (pid)
 ORDER BY done_pct DESC NULLS LAST
 `
+}

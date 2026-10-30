@@ -138,6 +138,12 @@ func (m *Model) render() string {
 		contentHeight--
 	}
 
+	if banner := renderEvictBanner(s); banner != "" {
+		b.WriteString(banner)
+		b.WriteString("\n")
+		contentHeight--
+	}
+
 	if s.level == levelActivity {
 		if banner := activityPendingBanner(s, m.width); banner != "" {
 			b.WriteString(banner)

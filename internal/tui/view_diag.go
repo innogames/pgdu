@@ -806,12 +806,22 @@ func (m *Model) renderDescribeStats(d *pg.Description) string {
 	if st.ModSinceAnalyze > 0 {
 		anaVal += mu(" · " + formatRows(st.ModSinceAnalyze) + " rows modified since")
 	}
-	b.WriteString("\n  " + styleHeader.Render(" maintenance ") + "\n")
-	b.WriteString(renderKVRows([][2]string{
+	rows := [][2]string{
 		{"vacuum", vacVal},
 		{"analyze", anaVal},
 		{"xid age", mu(formatRows(st.FrozenXIDAge))},
-	}))
+	}
+	// Visibility-map coverage says what the next vacuum can skip. The frozen
+	// share only exists from PG18 on, so the row shrinks rather than lying.
+	if vis, frz, hasFrozen, ok := st.VisibilityCoverage(); ok {
+		line := fmt1(vis) + "% " + mu("all-visible")
+		if hasFrozen {
+			line += mu(" · ") + fmt1(frz) + "% " + mu("frozen")
+		}
+		rows = append(rows, [2]string{"vm coverage", line})
+	}
+	b.WriteString("\n  " + styleHeader.Render(" maintenance ") + "\n")
+	b.WriteString(renderKVRows(rows))
 	return b.String()
 }
 

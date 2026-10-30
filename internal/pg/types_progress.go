@@ -1,7 +1,7 @@
 package pg
 
 // ProgressRow is one running operation from the unified pg_stat_progress_*
-// query (sqlProgressOps): a maintenance/DDL command, its target relation, the
+// query (progressOpsSQL): a maintenance/DDL command, its target relation, the
 // current phase, and raw done/total counters whose Unit says what they count
 // ("blocks" or "bytes").
 type ProgressRow struct {

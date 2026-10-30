@@ -57,4 +57,51 @@ var diagActivity = []Diagnostic{
 			table. For who blocks whom, use the Activity tool and its lock tree
 			(b).`,
 	},
+
+	{
+		Key:         "backend_io",
+		Title:       "I/O by backend",
+		Category:    "activity",
+		Description: "per-backend reads, writes and WAL next to the query doing them (PostgreSQL 18+)",
+		SQL:         sqlDiagBackendIO,
+		MinVersion:  pgVer18,
+		Bar:         "reads",
+		Kinds: map[string]DiagColumnKind{
+			// Per-backend counters: right-aligned numbers, but summing them
+			// across backends is meaningless, so keep them out of the Σ footer.
+			"wal_records": DiagFloat,
+			"wal_fpi":     DiagFloat,
+		},
+		DefaultHidden: []string{"extends", "evictions", "fsyncs", "username"},
+		Help: `What each *backend* has read, written and logged since it
+			started — PostgreSQL 18's per-backend statistics, which the
+			cluster-wide "I/O by backend type" diagnostic cannot separate.
+			Use it when the server is busy and you need the one session
+			responsible: a backend with a large reads/read_bytes is scanning
+			far more than it should (check its query and the index
+			diagnostics), one with large writes is evicting dirty pages
+			itself because the checkpointer is behind, and a large wal_bytes
+			with a high wal_fpi share is a write burst landing just after a
+			checkpoint. The counters are cumulative for the life of that
+			backend, so a long-lived pooled connection accumulates work from
+			queries it has long finished — read them next to state and query,
+			not as a verdict on the statement shown.`,
+	},
+	{
+		Key:         "aios",
+		Title:       "Async I/O in flight",
+		Category:    "activity",
+		Description: "pg_aios: the asynchronous I/O handles currently outstanding (PostgreSQL 18+)",
+		SQL:         sqlDiagAIOs,
+		MinVersion:  pgVer18,
+		Help: `A point-in-time look at PostgreSQL 18's asynchronous I/O: the
+			handles in flight right now, who submitted them and what state
+			they are in. Mostly empty on a quiet server — each row is an I/O
+			that has been handed off and not yet completed, so a persistently
+			long list means I/O is not keeping up rather than that work is
+			being done efficiently. Relevant only with io_method set to
+			worker (the default) or io_uring; with io_method = sync nothing
+			is ever queued here. Reading the view may need elevated
+			privileges.`,
+	},
 }

@@ -272,6 +272,7 @@ func (c *Client) DescribeTable(ctx context.Context, t Table) (*Description, erro
 		&st.SeqScans, &st.IdxScans, &st.LastSeqScan, &st.LastIdxScan,
 		&st.LastVacuum, &st.LastAnalyze, &st.VacuumCount, &st.AnalyzeCount,
 		&st.FrozenXIDAge,
+		&st.RelPages, &st.AllVisible, &st.AllFrozen,
 	); err != nil {
 		return nil, fmt.Errorf("describe stats for %q.%q: %w", t.Schema, t.Name, err)
 	}

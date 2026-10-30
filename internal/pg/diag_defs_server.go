@@ -168,7 +168,9 @@ var diagServer = []Diagnostic{
 			sub-millisecond means the OS page cache served them). Client-backend
 			writes and fsyncs mean backends had to flush dirty pages themselves
 			because the checkpointer/bgwriter were behind. evictions count pages
-			pushed out of shared_buffers; reuses are ring-buffer slots recycled.`,
+			pushed out of shared_buffers; reuses are ring-buffer slots recycled.
+			read_bytes/write_bytes are the measured volumes PG18 added — blank
+			on PG17, where only the block counts exist.`,
 	},
 	{
 		Key:         "slru_stats",

@@ -44,6 +44,8 @@ const (
 	tblColInsSince  tblColID = "ins_since_vacuum"
 	tblColVacAge    tblColID = "vac_age"
 	tblColAnaAge    tblColID = "ana_age"
+	tblColVacTime   tblColID = "vac_time"
+	tblColAnaTime   tblColID = "ana_time"
 	tblColVacuumN   tblColID = "vacuum_count"
 	tblColAutovacN  tblColID = "autovacuum_count"
 	tblColXidAge    tblColID = "xid_age"
@@ -84,6 +86,17 @@ func tblPct(pct float64, ok bool) pg.DiagCell {
 func tblAge(ms *float64) pg.DiagCell {
 	if ms == nil {
 		return pg.DiagCell{Display: "never"}
+	}
+	return diagNum(fmtAge(*ms), *ms)
+}
+
+// tblMaintTime renders cumulative maintenance time. nil is "—" rather than
+// "never": on PG17 the counter does not exist at all, which is a different
+// thing from a table nothing has vacuumed yet, and the column cannot tell
+// them apart.
+func tblMaintTime(ms *float64) pg.DiagCell {
+	if ms == nil {
+		return pg.DiagCell{Display: "—"}
 	}
 	return diagNum(fmtAge(*ms), *ms)
 }
@@ -213,6 +226,12 @@ func tableColumnRegistry() []tblColDesc {
 		{id: tblColAnaAge, name: "ana_age", kind: pg.DiagDuration,
 			desc: "time since the most recent (auto)analyze",
 			cell: func(r pg.TableStat, _ tblCtx) pg.DiagCell { return tblAge(r.AnaAgeMs) }},
+		{id: tblColVacTime, name: "vac_time", kind: pg.DiagDuration,
+			desc: "cumulative time (auto)vacuum has spent on this table (PG18+; blank on 17)",
+			cell: func(r pg.TableStat, _ tblCtx) pg.DiagCell { return tblMaintTime(r.VacTimeMs) }},
+		{id: tblColAnaTime, name: "ana_time", kind: pg.DiagDuration,
+			desc: "cumulative time (auto)analyze has spent on this table (PG18+; blank on 17)",
+			cell: func(r pg.TableStat, _ tblCtx) pg.DiagCell { return tblMaintTime(r.AnaTimeMs) }},
 		{id: tblColVacuumN, name: "vac#", kind: pg.DiagInt,
 			desc: "manual + auto vacuum runs (vacuum_count + autovacuum_count)",
 			cell: func(r pg.TableStat, _ tblCtx) pg.DiagCell { return tblCount(r.VacuumCount + r.AutovacuumCount) }},
@@ -278,8 +297,8 @@ func (m *Model) buildTableStatItems(rows []pg.TableStat) ([]item, []tblColDesc) 
 // that matters — since adding transaction ages together is meaningless.
 func sumTableStats(rows []pg.TableStat) pg.TableStat {
 	var t pg.TableStat
-	var vacSum, anaSum float64
-	var vacN, anaN int
+	var vacSum, anaSum, vacTimeSum, anaTimeSum float64
+	var vacN, anaN, vacTimeN, anaTimeN int
 	for _, r := range rows {
 		t.HeapBytes += r.HeapBytes
 		t.IndexesBytes += r.IndexesBytes
@@ -319,6 +338,22 @@ func sumTableStats(rows []pg.TableStat) pg.TableStat {
 			anaSum += *r.AnaAgeMs
 			anaN++
 		}
+		if r.VacTimeMs != nil {
+			vacTimeSum += *r.VacTimeMs
+			vacTimeN++
+		}
+		if r.AnaTimeMs != nil {
+			anaTimeSum += *r.AnaTimeMs
+			anaTimeN++
+		}
+	}
+	if vacTimeN > 0 {
+		// Unlike the ages above, cumulative time genuinely adds up: the Σ row
+		// is the maintenance cost of the whole schema.
+		t.VacTimeMs = &vacTimeSum
+	}
+	if anaTimeN > 0 {
+		t.AnaTimeMs = &anaTimeSum
 	}
 	if vacN > 0 {
 		v := vacSum / float64(vacN)

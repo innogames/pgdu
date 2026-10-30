@@ -17,6 +17,7 @@ type keyMap struct {
 	DiskUsage        key.Binding
 	Rebaseline       key.Binding
 	ResetStatements  key.Binding // X (top queries): pg_stat_statements_reset(), y-confirmed
+	EvictBuffers     key.Binding // X (buffers): pg_buffercache_evict_*, y-confirmed — shares X with ResetStatements, only one is enabled per level
 	ToggleRefresh    key.Binding
 	Params           key.Binding
 	Execute          key.Binding
@@ -163,6 +164,7 @@ func defaultKeys() keyMap {
 		DiskUsage:       key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "→ disk usage")),
 		Rebaseline:      key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "reset window")),
 		ResetStatements: key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "reset pg_stat_statements")),
+		EvictBuffers:    key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "evict from cache")),
 		ToggleRefresh:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "refresh cadence")),
 		Params:          key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "→ captured values")),
 		Execute:         key.NewBinding(key.WithKeys("E"), key.WithHelp("E", "execute query")),
@@ -238,6 +240,9 @@ func (k *keyMap) applyContext(s *screen) {
 
 	k.Rebaseline.SetEnabled(stmtTable)
 	k.ResetStatements.SetEnabled(stmtTable)
+	// Eviction needs a loaded buffers list to name a relation from; the detail
+	// screen already knows its own.
+	k.EvictBuffers.SetEnabled(s.level == levelBufferTables || s.level == levelBufferDetail)
 	k.Snapshots.SetEnabled(stmtTable)
 	// tab cycles the top-queries table through its roll-ups (by table / by
 	// type) and back; the physical key is the log analyzer's pane cycle
@@ -467,7 +472,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Refresh, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ResetStatements, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
-		{k.StmtView, k.BufSplit, k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
+		{k.EvictBuffers, k.StmtView, k.BufSplit, k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
 		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.JumpIO, k.Progress, k.Settings},
 		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump, k.LogParams, k.OpenLog},
 		{k.Help, k.Quit},

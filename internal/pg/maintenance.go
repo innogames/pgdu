@@ -260,10 +260,19 @@ func (c *Client) Maintenance(ctx context.Context, db string) (*MaintenanceInfo, 
 	}
 
 	// --- I/O stats (pg_stat_io): totals, then the by-backend-type split ---
+	var readBytes, writeBytes, extendBytes *int64
 	if pool.QueryRow(ctx, sqlMaintIO).Scan(
 		&info.IO.Reads, &info.IO.Writes, &info.IO.Extends, &info.IO.Hits,
-		&info.IO.Evictions, &info.IO.Fsyncs, &info.IO.BackendFsyncs) == nil {
+		&info.IO.Evictions, &info.IO.Fsyncs, &info.IO.BackendFsyncs,
+		&readBytes, &writeBytes, &extendBytes) == nil {
 		info.IO.HasData = true
+		// NULL means the columns aren't there (PG17), not that nothing moved.
+		if readBytes != nil {
+			info.IO.HasBytes = true
+			info.IO.ReadBytes = *readBytes
+			info.IO.WriteBytes = deref(writeBytes)
+			info.IO.ExtendBytes = deref(extendBytes)
+		}
 	}
 	sp := &info.IOSplit
 	if pool.QueryRow(ctx, sqlMaintIOSplit).Scan(
@@ -520,4 +529,13 @@ func (c *Client) ResetTableStatsAllDBs(ctx context.Context) error {
 		return fmt.Errorf("reset table statistics in %d/%d databases: %w", done, len(dbs), firstErr)
 	}
 	return nil
+}
+
+// deref is zero-for-NULL, for the nullable counters a newer server adds and an
+// older one simply doesn't have.
+func deref(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
