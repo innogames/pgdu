@@ -1164,9 +1164,9 @@ type Model struct {
 	logStatsTable    colTable[logColID]
 	logSlowSortColID logColID
 
-	// statRefresh is the top-queries re-sample cadence (from --queries-refresh /
-	// PGDU_QUERIES_REFRESH). Zero disables auto-refresh entirely. The t key cycles
-	// it through the 2s default, a calmer 60s, then off (see cycleStatRefresh).
+	// statRefresh is the top-queries re-sample cadence. Zero disables
+	// auto-refresh entirely. The t key cycles it through the 2s default, a
+	// calmer 60s, then off (see cycleStatRefresh).
 	statRefresh time.Duration
 
 	// notice is a transient one-line status shown in the header (e.g. the path
@@ -1245,7 +1245,7 @@ func toolByName(name string) (tool, bool) {
 	return 0, false
 }
 
-func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir string, colPrefs *prefs.Prefs, initialTool, logFile string) *Model {
+func NewModel(client *pg.Client, snapshotDir string, colPrefs *prefs.Prefs, initialTool, logFile string) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	m := &Model{
@@ -1253,7 +1253,7 @@ func NewModel(client *pg.Client, queriesRefresh time.Duration, snapshotDir strin
 		spinner:         sp,
 		help:            help.New(),
 		keys:            defaultKeys(),
-		statRefresh:     queriesRefresh,
+		statRefresh:     defaultStatRefresh,
 		activityRefresh: 2 * time.Second,
 		pgbRefresh:      2 * time.Second,
 		snapshotDir:     snapshotDir,

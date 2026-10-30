@@ -16,8 +16,8 @@ func (m *Model) renderPgBouncers(_ *screen, height int) string {
 	mu := styleMuted.Render
 	b.WriteString("  " + mu("no pgbouncer instance found") + "\n\n")
 	b.WriteString("  " + mu("Looked for running pgbouncer processes in /proc, for /etc/pgbouncer/*.ini, and checked whether pgdu's own") + "\n")
-	b.WriteString("  " + mu("connection goes through a pooler. Pass --pgbouncer-target INI|SOCKETDIR|HOST[:PORT] (repeatable, or") + "\n")
-	b.WriteString("  " + mu("PGDU_PGBOUNCER_TARGET comma-separated) to add an instance by hand, e.g. --pgbouncer-target /var/run/pgbouncer_1.") + "\n")
+	b.WriteString("  " + mu("connection goes through a pooler. An instance started with an ini outside /etc/pgbouncer is only found while") + "\n")
+	b.WriteString("  " + mu("it is running, and only when its /proc entry is readable.") + "\n")
 	return padInfo(&b, height)
 }
 
@@ -205,7 +205,7 @@ func (m *Model) renderPgBouncerInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" where instances come from ") + "\n")
 	b.WriteString("    " + mu("Running pgbouncer processes in /proc (the ini on their command line is parsed), /etc/pgbouncer/*.ini,") + "\n")
-	b.WriteString("    " + mu("pgdu's own connection when it evidently ends at a pooler, and anything given with --pgbouncer-target.") + "\n")
+	b.WriteString("    " + mu("and pgdu's own connection when it evidently ends at a pooler.") + "\n")
 	b.WriteString("    " + mu("The same instance seen twice is merged; 'via' says which source found it first.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" why the unix socket, not TCP ") + "\n")
@@ -216,7 +216,7 @@ func (m *Model) renderPgBouncerInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" logging in ") + "\n")
 	b.WriteString("    " + mu("The console is the virtual database \"pgbouncer\". Only admin_users and stats_users may log in; stats_users") + "\n")
-	b.WriteString("    " + mu("are read-only and enough for everything here. The login is -U (or --pgbouncer-user) and must have a password") + "\n")
+	b.WriteString("    " + mu("are read-only and enough for everything here. The login is pgdu's own -U and must have a password") + "\n")
 	b.WriteString("    " + mu("in auth_file: PGDU_PGBOUNCER_PASSWORD, PGPASSWORD, or ~/.pgpass keyed by the socket directory (as libpq does)") + "\n")
 	b.WriteString("    " + mu("or by localhost. 'auth denied' rows show the exact ini change. One connection per instance is kept open:") + "\n")
 	b.WriteString("    " + mu("pgbouncer logs every console login/logout, and console connections hold no server slot.") + "\n\n")

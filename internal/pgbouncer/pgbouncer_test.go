@@ -2,7 +2,6 @@ package pgbouncer
 
 import (
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,41 +105,6 @@ func TestPgbIniFromArgv(t *testing.T) {
 	}
 }
 
-func TestParsePgBouncerTarget(t *testing.T) {
-	dir := t.TempDir()
-	// A socket dir is recognised by being a directory; the port comes from the
-	// socket file inside it.
-	l, err := net.Listen("unix", filepath.Join(dir, ".s.PGSQL.7432"))
-	if err != nil {
-		t.Skip("unix sockets unavailable:", err)
-	}
-	defer func() { _ = l.Close() }()
-
-	inst, ok := parseTarget(dir)
-	if !ok || inst.SocketDir != dir || inst.Port() != 7432 {
-		t.Errorf("socket dir target: ok=%v %+v", ok, inst)
-	}
-	host, port, unix := inst.Target()
-	if !unix || host != dir || port != 7432 {
-		t.Errorf("Target() should pick the existing socket: %q %d %v", host, port, unix)
-	}
-	if !strings.HasPrefix(inst.Key(), "unix:") {
-		t.Errorf("Key = %q", inst.Key())
-	}
-
-	inst, ok = parseTarget("10.0.0.5:6433")
-	if !ok || inst.ListenAddr != "10.0.0.5" || inst.ListenPort != 6433 || inst.Name != "10.0.0.5:6433" {
-		t.Errorf("host:port target: ok=%v %+v", ok, inst)
-	}
-	inst, ok = parseTarget("pooler.example")
-	if !ok || inst.ListenAddr != "pooler.example" || inst.Port() != defaultPort {
-		t.Errorf("bare host target: ok=%v %+v", ok, inst)
-	}
-	if _, ok := parseTarget("  "); ok {
-		t.Errorf("blank target accepted")
-	}
-}
-
 func TestInstanceTargetFallsBackToTCP(t *testing.T) {
 	inst := Instance{SocketDir: t.TempDir(), ListenAddr: "*", ListenPort: 6432}
 	host, port, unix := inst.Target()
@@ -154,11 +118,10 @@ func TestInstanceTargetFallsBackToTCP(t *testing.T) {
 }
 
 func TestDedupePgBouncers(t *testing.T) {
-	// The same instance seen via --pgbouncer-target (first), /proc (with PID)
-	// and the /etc glob must collapse to one record that keeps the explicit
-	// reason and picks up the PID.
+	// The same instance seen twice must collapse to one record that keeps the
+	// first sighting's reason and picks up whatever the later ones add.
 	found := []Instance{
-		{Name: "b", SocketDir: "/run/b", ListenPort: 6432, Reason: "--pgbouncer-target", IniPath: "/etc/b.ini"},
+		{Name: "b", SocketDir: "/run/b", ListenPort: 6432, Reason: "/etc/pgbouncer", IniPath: "/etc/b.ini"},
 		{Name: "a", SocketDir: "/run/a", ListenPort: 6432, Reason: "/proc", PID: 7, IniPath: "/etc/a.ini", Logfile: "/var/log/a.log"},
 		{Name: "b", SocketDir: "/run/b", ListenPort: 6432, Reason: "/proc", PID: 9, IniPath: "/etc/b.ini"},
 		{Name: "a", SocketDir: "/run/a", ListenPort: 6432, Reason: "/etc/pgbouncer", IniPath: "/etc/a.ini"},
@@ -170,8 +133,8 @@ func TestDedupePgBouncers(t *testing.T) {
 	if out[0].Name != "a" || out[0].PID != 7 || out[0].Reason != "/proc" || out[0].Logfile != "/var/log/a.log" {
 		t.Errorf("a: %+v", out[0])
 	}
-	if out[1].Name != "b" || out[1].PID != 9 || out[1].Reason != "--pgbouncer-target" {
-		t.Errorf("b must keep the explicit reason and gain the pid: %+v", out[1])
+	if out[1].Name != "b" || out[1].PID != 9 || out[1].Reason != "/etc/pgbouncer" {
+		t.Errorf("b must keep the first reason and gain the pid: %+v", out[1])
 	}
 }
 

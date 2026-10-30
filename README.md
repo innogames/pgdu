@@ -231,8 +231,7 @@ Finds every pgbouncer on the host without configuration: running processes in
 `/proc` (their ini is parsed for `unix_socket_dir`, `listen_port`, `logfile`,
 `pool_mode`, `admin_users` / `stats_users`), `/etc/pgbouncer/*.ini` for
 configured-but-stopped instances, and pgdu's own connection when it evidently
-ends at a pooler. `--pgbouncer-target INI|SOCKETDIR|HOST[:PORT]` (repeatable, or
-`PGDU_PGBOUNCER_TARGET`) adds one by hand. Each instance is reached over its own
+ends at a pooler. Each instance is reached over its own
 unix socket whenever it exists — several instances commonly share a TCP port via
 `so_reuseport`, and a TCP connection then lands on a random one — with TCP on
 `listen_addr` as the fallback.
@@ -252,7 +251,7 @@ understands pgbouncer's line format (socket events under *conn*, the periodic
 `stats:` lines in their own pooler stats pane).
 
 The tool is read-only: it never issues RELOAD, PAUSE, RESUME or KILL. The console
-login is `-U` (or `--pgbouncer-user`) and must be in `stats_users` (read-only
+login is pgdu's own `-U` and must be in `stats_users` (read-only
 suffices) or `admin_users`, with a password in `auth_file`; pgdu reads it from
 `PGDU_PGBOUNCER_PASSWORD`, `PGPASSWORD`, or `~/.pgpass` keyed by the socket
 directory (`/var/run/pgbouncer_1:6432:pgbouncer:postgres:…`, the libpq
@@ -506,14 +505,12 @@ Skip the tool picker and start in a specific view:
 pgdu --disk-usage
 pgdu --shared-buffers
 pgdu --activity
-pgdu --top-queries --queries-refresh 5s --snapshot-dir /var/lib/pgdu/snapshots
+pgdu --top-queries --snapshot-dir /var/lib/pgdu/snapshots
 pgdu --logs --log-file /var/log/postgresql/postgresql-17-main.log.2.gz
 pgdu --pgbouncer
-pgdu --pgbouncer --pgbouncer-target /var/run/pgbouncer_2 --pgbouncer-user nagios
 ```
 
-`PGDU_LOG_FILE`, `PGDU_SNAPSHOT_DIR`, `PGDU_PGBOUNCER_TARGET` and
-`PGDU_PGBOUNCER_USER` set the same defaults from the
+`PGDU_LOG_FILE` and `PGDU_SNAPSHOT_DIR` set the same defaults from the
 environment; `PGDU_CONFIG_DIR` relocates the per-user preferences (column
 choices) from `~/.config/pgdu`.
 

@@ -16,7 +16,7 @@ import (
 // newTestModel builds a Model with the default key map and no live connection,
 // enough to drive the pure Update paths (message handlers, key dispatch).
 func newTestModel(stack ...*screen) *Model {
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil, "", "")
+	m := NewModel(pg.New(cli.Config{}), "", nil, "", "")
 	m.target = "db:5432"
 	m.hostLabel = "db:5432"
 	if len(stack) > 0 {

@@ -195,10 +195,15 @@ func (m *Model) deleteSnapshotCmd(path, dir, db string) tea.Cmd {
 	})
 }
 
+// defaultStatRefresh is the cadence the top-queries window starts at:
+// responsive enough to watch load build without hammering the server with
+// snapshot queries. The t key cycles away from it (see cycleStatRefresh).
+const defaultStatRefresh = 2 * time.Second
+
 // statementsTick schedules the next top-queries re-sample, or returns nil when
-// auto-refresh is off — disabled by config (--queries-refresh 0) or cycled off
-// at runtime (t key). Returning nil stops the self-rescheduling loop; cycling
-// refresh back on or re-entering the tool restarts it.
+// auto-refresh has been cycled off (t key). Returning nil stops the
+// self-rescheduling loop; cycling refresh back on or re-entering the tool
+// restarts it.
 func (m *Model) statementsTick() tea.Cmd {
 	if m.statRefresh <= 0 {
 		return nil
@@ -209,16 +214,15 @@ func (m *Model) statementsTick() tea.Cmd {
 }
 
 // cycleStatRefresh steps the live-window cadence through the t-key cycle:
-// 2s (the default) → 60s → off → 2s. Any other value — a custom configured
-// interval or 0 (off) — snaps to the 2s default on the first press.
+// 2s (the default) → 60s → off → 2s.
 func (m *Model) cycleStatRefresh() {
 	switch m.statRefresh {
-	case 2 * time.Second:
+	case defaultStatRefresh:
 		m.statRefresh = 60 * time.Second
 	case 60 * time.Second:
 		m.statRefresh = 0
 	default:
-		m.statRefresh = 2 * time.Second
+		m.statRefresh = defaultStatRefresh
 	}
 }
 

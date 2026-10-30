@@ -62,13 +62,10 @@ var showAllowed = map[string]bool{
 	"dns_hosts": true, "dns_zones": true, "fds": true,
 }
 
-// User is the console login: --pgbouncer-user, else pgdu's own user.
+// User is the console login: pgdu's own user.
 func (c *Client) User() string { return c.loginUser() }
 
 func (c *Client) loginUser() string {
-	if u := c.cfg.PgBouncerUser; u != "" {
-		return u
-	}
 	if c.cfg.User != "" {
 		return c.cfg.User
 	}
@@ -381,7 +378,7 @@ func AuthHint(inst Instance, usr string) string {
 		host, _, _ = inst.Target()
 	}
 	return fmt.Sprintf("%q must be in stats_users (read-only) or admin_users in %s (RELOAD after) and have a password in %s; "+
-		"pgdu reads it from PGDU_PGBOUNCER_PASSWORD, PGPASSWORD or ~/.pgpass (\"%s:%d:pgbouncer:%s:…\"); --pgbouncer-user picks another login",
+		"pgdu reads it from PGDU_PGBOUNCER_PASSWORD, PGPASSWORD or ~/.pgpass (\"%s:%d:pgbouncer:%s:…\"); -U picks another login",
 		usr, ini, auth, host, inst.Port(), usr)
 }
 

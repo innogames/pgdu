@@ -168,29 +168,15 @@ func TestParseRequiresUser(t *testing.T) {
 	}
 }
 
-func TestParsePgBouncerFlags(t *testing.T) {
-	cfg, err := Parse([]string{"-U", "postgres", "--pgbouncer", "--pgbouncer-target", "/etc/pgbouncer/a.ini", "--pgbouncer-target", "10.0.0.1:6432", "--pgbouncer-user", "nagios"})
+func TestParsePgBouncerTool(t *testing.T) {
+	cfg, err := Parse([]string{"-U", "postgres", "--pgbouncer"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Tool != "pgbouncer" {
 		t.Errorf("Tool = %q", cfg.Tool)
 	}
-	if len(cfg.PgBouncerTargets) != 2 || cfg.PgBouncerTargets[1] != "10.0.0.1:6432" {
-		t.Errorf("targets = %v", cfg.PgBouncerTargets)
-	}
-	if cfg.PgBouncerUser != "nagios" {
-		t.Errorf("user = %q", cfg.PgBouncerUser)
-	}
 	if _, err := Parse([]string{"-U", "x", "--pgbouncer", "--logs"}); err == nil || !strings.Contains(err.Error(), "--pgbouncer") {
 		t.Errorf("two tool flags must be rejected naming --pgbouncer: %v", err)
-	}
-	t.Setenv("PGDU_PGBOUNCER_TARGET", "/run/a, /run/b")
-	cfg, err = Parse([]string{"-U", "x"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cfg.PgBouncerTargets) != 2 || cfg.PgBouncerTargets[1] != "/run/b" {
-		t.Errorf("env targets = %v", cfg.PgBouncerTargets)
 	}
 }

@@ -8,15 +8,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/pflag"
 )
-
-// defaultQueriesRefresh is the out-of-the-box re-sample cadence for the
-// top-queries window — responsive enough to watch load build without hammering
-// the server with snapshot queries.
-const defaultQueriesRefresh = 2 * time.Second
 
 // ErrHelp is returned by Parse when the user asked for --help so callers can
 // exit cleanly without printing a redundant error.
@@ -36,11 +30,6 @@ type Config struct {
 	SSLMode  string
 	DSN      string
 
-	// QueriesRefresh is how often the top-queries window re-samples. Zero (or
-	// negative) disables auto-refresh, leaving the window static until the user
-	// resets it (R) or toggles refresh back on (t).
-	QueriesRefresh time.Duration
-
 	// SnapshotDir is where top-queries snapshots are written (S) and read (L).
 	// Defaults to a shared directory under the system temp dir
 	// ($TMPDIR/pgdu-snapshots, i.e. /tmp/pgdu-snapshots) so snapshots taken by
@@ -55,16 +44,6 @@ type Config struct {
 	// LogFile is an explicit server log to analyze (--log-file / PGDU_LOG_FILE).
 	// Empty means auto-detect: pg_current_logfile(), then /var/log/postgresql.
 	LogFile string
-
-	// PgBouncerTargets are explicit pgbouncer instances for the pgbouncer tool
-	// (--pgbouncer-target, repeatable; PGDU_PGBOUNCER_TARGET comma-separated):
-	// an ini path, a unix socket directory, or host[:port]. Discovery via /proc
-	// and /etc/pgbouncer runs regardless; these are added to it.
-	PgBouncerTargets []string
-
-	// PgBouncerUser is the console login for the pgbouncer tool
-	// (--pgbouncer-user / PGDU_PGBOUNCER_USER). Empty means pgdu's own User.
-	PgBouncerUser string
 }
 
 func Parse(args []string) (Config, error) {
@@ -81,12 +60,8 @@ func Parse(args []string) (Config, error) {
 		Password: os.Getenv("PGPASSWORD"),
 		SSLMode:  os.Getenv("PGSSLMODE"),
 
-		QueriesRefresh: envDurationOr("PGDU_QUERIES_REFRESH", defaultQueriesRefresh),
-		SnapshotDir:    envOr("PGDU_SNAPSHOT_DIR", defaultSnapshotDir()),
-		LogFile:        os.Getenv("PGDU_LOG_FILE"),
-
-		PgBouncerTargets: envListOr("PGDU_PGBOUNCER_TARGET"),
-		PgBouncerUser:    os.Getenv("PGDU_PGBOUNCER_USER"),
+		SnapshotDir: envOr("PGDU_SNAPSHOT_DIR", defaultSnapshotDir()),
+		LogFile:     os.Getenv("PGDU_LOG_FILE"),
 	}
 
 	fs.StringVarP(&cfg.Host, "host", "h", cfg.Host, "database server host or socket path (empty = libpq default)")
@@ -95,11 +70,8 @@ func Parse(args []string) (Config, error) {
 	fs.StringVarP(&cfg.Database, "dbname", "d", cfg.Database, "initial database to connect to (empty = same as user)")
 	fs.StringVar(&cfg.SSLMode, "sslmode", cfg.SSLMode, "SSL mode (disable|allow|prefer|require|verify-ca|verify-full)")
 	fs.StringVar(&cfg.DSN, "dsn", "", "full PostgreSQL connection URL (overrides individual flags)")
-	fs.DurationVar(&cfg.QueriesRefresh, "queries-refresh", cfg.QueriesRefresh, "top-queries auto-refresh interval (e.g. 5s, 1m; 0 disables)")
 	fs.StringVar(&cfg.SnapshotDir, "snapshot-dir", cfg.SnapshotDir, "directory for top-queries snapshots (S saves, L loads)")
 	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "server log to analyze (plain or .gz; default: auto-detect via pg_current_logfile / /var/log/postgresql)")
-	fs.StringArrayVar(&cfg.PgBouncerTargets, "pgbouncer-target", cfg.PgBouncerTargets, "pgbouncer instance to add to auto-discovery: ini file, unix socket dir, or host[:port] (repeatable)")
-	fs.StringVar(&cfg.PgBouncerUser, "pgbouncer-user", cfg.PgBouncerUser, "login for the pgbouncer console (default: same as -U)")
 
 	var showVersion bool
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
@@ -309,33 +281,10 @@ func envOr(key, def string) string {
 	return def
 }
 
-// envListOr splits a comma-separated environment value, dropping blanks; nil
-// when unset.
-func envListOr(key string) []string {
-	var out []string
-	for s := range strings.SplitSeq(os.Getenv(key), ",") {
-		if s = strings.TrimSpace(s); s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
 func envIntOr(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
-		}
-	}
-	return def
-}
-
-// envDurationOr parses a Go duration string (e.g. "5s", "0") from the
-// environment, falling back to def when unset or unparseable.
-func envDurationOr(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
 		}
 	}
 	return def

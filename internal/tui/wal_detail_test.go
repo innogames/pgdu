@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"strings"
 	"testing"
-	"time"
 
 	"pgdu/internal/cli"
 	"pgdu/internal/pg"
@@ -202,7 +201,7 @@ func TestDecodeWALBtreePayloadRejectsBogusSize(t *testing.T) {
 // must surface the install affordance: the `i` hint on the screen and the note
 // row pointing at it. The record itself loaded, so the prompt must not block.
 func TestWALBlockDetailMissingPageInspectOffersInstall(t *testing.T) {
-	m := NewModel(pg.New(cli.Config{}), 2*time.Second, "", nil, "", "")
+	m := NewModel(pg.New(cli.Config{}), "", nil, "", "")
 	ref := pg.WALBlockRef{StartLSN: "0/10", BlockID: 0, FPILength: 8192}
 	s := &screen{level: levelWALBlockDetail, tool: toolWAL, db: "un1_game", wal: walState{blockRef: &ref}}
 	m.stack = []*screen{s}

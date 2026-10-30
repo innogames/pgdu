@@ -283,7 +283,7 @@ func (m *Model) statementsHints(s *screen, window string) string {
 
 // refreshLabel describes the current auto-refresh state for the header and the
 // ? overlay: the interval (e.g. "2s") or "off" when the cadence has been cycled
-// off (t) or disabled by config (--queries-refresh 0).
+// off (t).
 func (m *Model) refreshLabel() string {
 	if m.statRefresh <= 0 {
 		return "off"
@@ -292,8 +292,7 @@ func (m *Model) refreshLabel() string {
 }
 
 // refreshSentence is the ? overlay's prose description of the re-sample cadence,
-// adapting to whether auto-refresh is configured on or off and noting the t
-// toggle.
+// adapting to whether auto-refresh is on or off and noting the t toggle.
 func (m *Model) refreshSentence() string {
 	if m.statRefresh <= 0 {
 		return "Auto-refresh is off; press t to cycle the cadence (2s → 60s → off)."

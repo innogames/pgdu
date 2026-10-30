@@ -52,7 +52,7 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "pgdu: warning: postgres unreachable, continuing with the pgbouncer tool only:", err)
 	}
 
-	model := tui.NewModel(client, cfg.QueriesRefresh, cfg.SnapshotDir, prefs.Load(), cfg.Tool, cfg.LogFile)
+	model := tui.NewModel(client, cfg.SnapshotDir, prefs.Load(), cfg.Tool, cfg.LogFile)
 	p := tea.NewProgram(model)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "pgdu:", err)

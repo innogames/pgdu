@@ -1,11 +1,8 @@
 package pgbouncer
 
 import (
-	"net"
-	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	"pgdu/internal/procfs"
@@ -19,22 +16,15 @@ const defaultIni = "/etc/pgbouncer/pgbouncer.ini"
 // and deduped by Key(). Sources, in priority order (the first sighting owns the
 // Reason; later ones only fill in blanks):
 //
-//  1. explicit --pgbouncer-target values (ini path, socket dir, or host:port);
-//  2. running processes from /proc, each parsed from the ini on its command line;
-//  3. /etc/pgbouncer/*.ini for configured-but-stopped instances;
-//  4. pgdu's own connection when viaPooler says it evidently goes through a
+//  1. running processes from /proc, each parsed from the ini on its command line;
+//  2. /etc/pgbouncer/*.ini for configured-but-stopped instances;
+//  3. pgdu's own connection when viaPooler says it evidently goes through a
 //     pooler (pg.Client judges that from the pool's socket addresses).
 //
 // Nothing here fails: an unreadable ini leaves IniErr set, a missing /proc
 // yields nothing from that source, and so on.
 func (c *Client) Discover(viaPooler bool) []Instance {
 	var found []Instance
-
-	for _, t := range c.cfg.PgBouncerTargets {
-		if inst, ok := parseTarget(t); ok {
-			found = append(found, inst)
-		}
-	}
 
 	for _, p := range procfs.ListByComm("pgbouncer") {
 		ini := iniFromArgv(p.Argv)
@@ -66,7 +56,7 @@ func (c *Client) Discover(viaPooler bool) []Instance {
 // dedupe merges sightings of the same instance (same Key) and sorts
 // the result by name. The first sighting wins for Reason and for every field
 // it set; later sightings only fill zero fields — so /proc's PID lands on the
-// ini-derived record and an explicit target keeps its "--pgbouncer-target".
+// ini-derived record and the first source to name an instance keeps its Reason.
 func dedupe(found []Instance) []Instance {
 	byKey := map[string]int{}
 	var out []Instance
@@ -116,47 +106,6 @@ func iniFromArgv(argv []string) string {
 		}
 	}
 	return defaultIni
-}
-
-// parseTarget interprets one --pgbouncer-target value: an ini file, a
-// unix socket directory, or host[:port]. Unrecognisable input is dropped rather
-// than surfaced — the instance list explains the accepted forms.
-func parseTarget(t string) (Instance, bool) {
-	t = strings.TrimSpace(t)
-	if t == "" {
-		return Instance{}, false
-	}
-	inst := Instance{Reason: "--pgbouncer-target"}
-	if strings.HasSuffix(t, ".ini") {
-		instanceFromIni(&inst, t)
-		return inst, true
-	}
-	if fi, err := os.Stat(t); err == nil && fi.IsDir() {
-		inst.SocketDir = t
-		inst.Name = t
-		// Prefer the port the socket file itself advertises: several instances
-		// on one host differ only in their socket dir, not their port.
-		if socks, _ := filepath.Glob(filepath.Join(t, ".s.PGSQL.*")); len(socks) > 0 {
-			if n, err := strconv.Atoi(strings.TrimPrefix(filepath.Base(socks[0]), ".s.PGSQL.")); err == nil {
-				inst.ListenPort = n
-			}
-		}
-		return inst, true
-	}
-	host, port := t, defaultPort
-	if h, p, err := net.SplitHostPort(t); err == nil {
-		host = h
-		if n, err := strconv.Atoi(p); err == nil {
-			port = n
-		}
-	}
-	if host == "" {
-		return Instance{}, false
-	}
-	inst.ListenAddr = host
-	inst.ListenPort = port
-	inst.Name = net.JoinHostPort(host, strconv.Itoa(port))
-	return inst, true
 }
 
 // iniGlob lists the packaged config directory for instances that are

@@ -28,7 +28,7 @@ type Instance struct {
 	AuthFile   string
 	AdminUsers []string
 	StatsUsers []string
-	Reason     string // discovery source: --pgbouncer-target, /proc, /etc/pgbouncer, connection target
+	Reason     string // discovery source: /proc, /etc/pgbouncer, connection target
 	IniErr     error
 	// DSN, when set, overrides the target derived from the fields above. Only
 	// the "connection target" source uses it: that instance is whatever pgdu's
