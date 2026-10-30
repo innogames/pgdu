@@ -856,7 +856,8 @@ func (m *Model) renderListWithFooter(s *screen, height int, footer string) strin
 	for vi := s.offset; vi < end; vi++ {
 		it := s.items[vis[vi]]
 		b.WriteString(renderRow(row{
-			size: it.size, bloat: it.bloat, hasBloat: it.hasBloat, hasChildren: it.hasChildren, maxSize: maxSz,
+			size: it.size, bloat: it.bloat, hasBloat: it.hasBloat, bloatEstimated: it.bloatEstimated,
+			hasChildren: it.hasChildren, maxSize: maxSz,
 			barW: barW, bloatCols: bloatCols,
 			heap: it.heap, idx: it.idx, toast: it.toast, hasBreakdown: breakdown,
 			rows: it.rows, hasRows: it.hasRows,

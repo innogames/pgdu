@@ -114,12 +114,15 @@ func (t tool) Name() string {
 
 // item is the row data the renderer consumes; concrete payload is in `data`.
 type item struct {
-	name        string
-	size        int64
-	bloat       int64
-	hasBloat    bool // true once bloat has been measured (even if zero)
-	hasChildren bool // true when pressing Enter on this row drills into a submenu
-	detail      string
+	name     string
+	size     int64
+	bloat    int64
+	hasBloat bool // true once bloat has been measured (even if zero)
+	// bloatEstimated marks a bloat figure that came from planner statistics
+	// rather than a page scan (pg.Part.BloatEstimated).
+	bloatEstimated bool
+	hasChildren    bool // true when pressing Enter on this row drills into a submenu
+	detail         string
 	// detailStyled marks detail as carrying its own lipgloss styling (colored
 	// segments). renderRow then prints it verbatim instead of wrapping it in
 	// styleMuted, which would clobber the inner colors after their resets.

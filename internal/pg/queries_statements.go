@@ -37,6 +37,14 @@ WHERE  dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
 //   - 1.10:   adds temp_blk_{read,write}_time
 //   - 1.11:   renames blk_*_time → shared_blk_*_time and adds local_blk_*_time
 //
+// 1.10 also added toplevel, which the WHERE clause filters on from that
+// version up. Under pg_stat_statements.track = all the server records a
+// nested statement *and* its top-level caller, whose counters already include
+// it; summing both into one queryid row double-counts the time and inflates
+// every share computed from it. Below 1.10 the column does not exist and the
+// setting it guards against is not available either, so the filter is simply
+// left out.
+//
 // We always alias to the 1.11 names so StatementSnapshot's Scan order is fixed;
 // columns missing in older versions are selected as 0 (typed double precision so
 // they scan into float64). We avoid the 1.12-only parallel_workers_* columns so
@@ -59,8 +67,10 @@ func statementsQuery(major, minor int) string {
 		shared = "blk_read_time AS shared_blk_read_time, blk_write_time AS shared_blk_write_time"
 		local = "0::float8 AS local_blk_read_time, 0::float8 AS local_blk_write_time"
 	}
+	topLevelFilter := "  AND  toplevel\n"
 	if !statementsAtLeast(major, minor, 1, 10) {
 		temp = "0::float8 AS temp_blk_read_time, 0::float8 AS temp_blk_write_time"
+		topLevelFilter = ""
 	}
 	// Plain concatenation rather than fmt.Sprintf: the WHERE clause's LIKE
 	// patterns contain literal % characters that Sprintf would treat as verbs.
@@ -68,7 +78,7 @@ func statementsQuery(major, minor int) string {
 		"       " + shared + ",\n" +
 		"       " + local + ",\n" +
 		"       " + temp + ",\n" +
-		sqlStatementsTail
+		sqlStatementsTail + topLevelFilter
 	return sqlStatementsAggHead + inner + sqlStatementsAggTail
 }
 
@@ -124,9 +134,16 @@ WHERE  dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
 // StatementSnapshot's Scan exactly. Integer counters are summed and cast back to
 // bigint (sum() of bigint is numeric, which won't scan into int64); timing/exec
 // floats sum to double precision. mean_exec_time is recomputed as a calls-weighted
-// mean (per-row means aren't additive); min/max collapse with min()/max(); stddev
-// can't be combined across rows, so it's emitted as 0 (the window diff zeroes
-// min/max/stddev anyway). userid/dbid are unused downstream and emit 0.
+// mean (per-row means aren't additive) and min/max collapse with min()/max().
+//
+// stddev_exec_time is the pooled standard deviation of the union of the rows,
+// which *is* recoverable from each row's (calls, mean, stddev): E[x²] of a
+// mixture is the calls-weighted mean of each part's (σ² + μ²), and the pooled
+// variance is that minus the square of the pooled mean. GREATEST(…, 0) guards
+// the float subtraction from landing a hair below zero on identical rows.
+// (The window diff still zeroes it — extrema and spreads aren't subtractable —
+// so it carries a value on the cumulative anchor and on statements new since
+// the baseline.) userid/dbid are unused downstream and emit 0.
 const sqlStatementsAggHead = `
 SELECT queryid,
        0::oid AS userid,
@@ -138,7 +155,10 @@ SELECT queryid,
        min(min_exec_time) AS min_exec_time,
        max(max_exec_time) AS max_exec_time,
        (sum(mean_exec_time * calls) / GREATEST(sum(calls), 1))::float8 AS mean_exec_time,
-       0::float8 AS stddev_exec_time,
+       sqrt(GREATEST(
+              sum(calls * (stddev_exec_time ^ 2 + mean_exec_time ^ 2)) / GREATEST(sum(calls), 1)
+            - (sum(mean_exec_time * calls) / GREATEST(sum(calls), 1)) ^ 2,
+            0))::float8 AS stddev_exec_time,
        sum(plans)::bigint AS plans,
        sum(total_plan_time) AS total_plan_time,
        sum(shared_blks_hit)::bigint AS shared_blks_hit,

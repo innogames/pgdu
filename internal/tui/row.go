@@ -16,16 +16,17 @@ import (
 // human-readable size, the row's name (highlighted when selected), and a
 // trailing detail string.
 type row struct {
-	size         int64
-	bloat        int64 // 0 when unknown or none
-	hasBloat     bool  // true once bloat has been measured for this row
-	hasChildren  bool  // true when this row can be drilled into
-	maxSize      int64 // largest sibling, used to scale the bar
-	barW         int   // bar width in cells; chosen by the caller from terminal width
-	name         string
-	detail       string
-	detailStyled bool // detail is pre-styled; render verbatim (see item.detailStyled)
-	selected     bool
+	size           int64
+	bloat          int64 // 0 when unknown or none
+	hasBloat       bool  // true once bloat has been measured for this row
+	bloatEstimated bool  // the figure is a statistics estimate, marked with a leading ~
+	hasChildren    bool  // true when this row can be drilled into
+	maxSize        int64 // largest sibling, used to scale the bar
+	barW           int   // bar width in cells; chosen by the caller from terminal width
+	name           string
+	detail         string
+	detailStyled   bool // detail is pre-styled; render verbatim (see item.detailStyled)
+	selected       bool
 
 	// typeTag, when non-empty, renders a kind column (tinted by typeStyle) just
 	// before the name — used by the parts level to surface heap/toast/btree/…
@@ -101,6 +102,12 @@ func renderRow(r row) string {
 		if r.size > 0 {
 			pct = int(float64(r.bloat) * 100.0 / float64(r.size))
 		}
+		// A statistics estimate is an order of magnitude, not a measurement, so
+		// it wears a "~" and never looks like a scanned figure.
+		approx := ""
+		if r.bloatEstimated {
+			approx = "~"
+		}
 		switch {
 		case pct <= 0 && r.bloatCols:
 			// Measured, but no (or negligible) waste — a dash reads as "checked,
@@ -111,10 +118,10 @@ func renderRow(r row) string {
 			bloatStr = styleMuted.Render(padRight("-", 12)) + "  "
 		case r.bloatCols:
 			st := bloatPercentStyle(pct)
-			bloatStr = st.Render(padRight(humanize.Bytes(r.bloat), bloatByteColW)) + "  " +
-				st.Render(padRight(fmt.Sprintf("%d%%", pct), bloatPctColW)) + "  "
+			bloatStr = st.Render(padRight(approx+humanize.Bytes(r.bloat), bloatByteColW)) + "  " +
+				st.Render(padRight(fmt.Sprintf("%s%d%%", approx, pct), bloatPctColW)) + "  "
 		default:
-			bloatStr = bloatPercentStyle(pct).Render(padRight(fmt.Sprintf("%d%% bloat", pct), 12)) + "  "
+			bloatStr = bloatPercentStyle(pct).Render(padRight(fmt.Sprintf("%s%d%% bloat", approx, pct), 12)) + "  "
 		}
 	}
 	breakdownStr := ""

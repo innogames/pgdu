@@ -757,15 +757,16 @@ func partToItem(p pg.Part) item {
 		detail = strings.Join(tags, " · ")
 	}
 	return item{
-		name:        p.Name,
-		size:        p.SizeBytes,
-		bloat:       p.WastedBytes,
-		hasBloat:    p.HasBloat,
-		hasChildren: p.Kind == pg.PartHeap, // only heap drills into per-column view
-		detail:      detail,
-		typeTag:     partTypeLabel(p),
-		typeStyle:   partTypeStyle(p),
-		data:        p,
+		name:           p.Name,
+		size:           p.SizeBytes,
+		bloat:          p.WastedBytes,
+		hasBloat:       p.HasBloat,
+		bloatEstimated: p.BloatEstimated,
+		hasChildren:    p.Kind == pg.PartHeap, // only heap drills into per-column view
+		detail:         detail,
+		typeTag:        partTypeLabel(p),
+		typeStyle:      partTypeStyle(p),
+		data:           p,
 	}
 }
 

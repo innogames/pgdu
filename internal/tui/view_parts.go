@@ -89,8 +89,14 @@ func renderPartsLegend(s *screen) string {
 		return ""
 	}
 	sep := styleMuted.Render("  ·  ")
+	// "~" and the blank row are the two things about the bloat column that are
+	// not self-evident: which figures were scanned, and why some rows have
+	// none (toast without pgstattuple, a non-btree index, anything past the
+	// size cap or the per-part timeout).
 	return "  " + swatch(styleBar) + " " + styleMuted.Render("size") + sep +
-		swatch(styleBloat) + " " + styleMuted.Render("bloat")
+		swatch(styleBloat) + " " + styleMuted.Render("bloat") + sep +
+		styleMuted.Render("~ estimated from statistics") + sep +
+		styleMuted.Render("blank not measured")
 }
 
 // renderPartsTotals sums the parts sizes and wasted bytes and renders a pinned
@@ -282,7 +288,7 @@ func (m *Model) maintReindexHint(s *screen) string {
 		return "  " + mu("hint: press ") + styleBadge.Render("enter") +
 			mu(" to REINDEX "+cand+" CONCURRENTLY")
 	}
-	return "  " + mu("hint: select an index over 5% bloat, then press ") +
+	return "  " + mu("hint: select a btree index over 5% measured bloat, then press ") +
 		styleBadge.Render("enter") + mu(" to REINDEX it CONCURRENTLY")
 }
 

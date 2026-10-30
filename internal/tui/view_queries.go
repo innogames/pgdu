@@ -385,15 +385,20 @@ func (m *Model) renderStatementsInfo(height int) string {
 
 	b.WriteString("  " + styleHeader.Render(" snapshots ") + "  " +
 		mu("capture the window to disk and diff it later") + "\n")
+	// Name the directory actually in use rather than a default spelled out
+	// here: it moves with --snapshot-dir / PGDU_SNAPSHOT_DIR, and this text
+	// had drifted from where the snapshots really land.
 	b.WriteString("    " + mu("Press ") + styleBadge.Render("S") +
-		mu(" to dump the current pg_stat_statements counters to a file (under ~/.local/state/pgdu/snapshots") + "\n")
-	b.WriteString("    " + mu("by default; --snapshot-dir to change). Press ") + styleBadge.Render("L") +
-		mu(" to browse saved snapshots — a timeline range picker") + "\n")
-	b.WriteString("    " + mu("whose ") + styleSelected.Render("◀ start") + mu(" / ") + styleSelected.Render("◀ end") +
-		mu(" markers show the applied window (session start → now by default). ") + styleBadge.Render("↵") + "\n")
-	b.WriteString("    " + mu("picks an endpoint: the first pick spans ‘pick → now’ (live); with a start applied, ↵ on") + "\n")
-	b.WriteString("    " + mu("another row spans the range between the two, frozen — no re-sampling — unless an endpoint") + "\n")
-	b.WriteString("    " + mu("is ‘now’. ") + styleBadge.Render("D") + mu(" deletes a file.") + "\n")
+		mu(" to dump the current pg_stat_statements counters to a file in "+m.snapshotDir) + "\n")
+	b.WriteString("    " + mu("(--snapshot-dir or PGDU_SNAPSHOT_DIR to change). Press ") + styleBadge.Render("L") +
+		mu(" to browse saved") + "\n")
+	b.WriteString("    " + mu("snapshots — a timeline range picker whose ") + styleSelected.Render("◀ start") +
+		mu(" / ") + styleSelected.Render("◀ end") + mu(" markers show the") + "\n")
+	b.WriteString("    " + mu("applied window (session start → now by default). ") + styleBadge.Render("↵") +
+		mu(" picks an endpoint: the first") + "\n")
+	b.WriteString("    " + mu("pick spans ‘pick → now’ (live); with a start applied, ↵ on another row spans the range") + "\n")
+	b.WriteString("    " + mu("between the two, frozen — no re-sampling — unless an endpoint is ‘now’. ") +
+		styleBadge.Render("D") + mu(" deletes a file.") + "\n")
 	b.WriteString("    " + mu("Press ") + styleBadge.Render("R") +
 		mu(" to drop a loaded snapshot and return to the live window. Snapshots invalidated by a") + "\n")
 	b.WriteString("    " + mu("counter reset since their capture are left out of the list — they can't serve as a baseline.") + "\n")

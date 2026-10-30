@@ -3,6 +3,10 @@ package pg
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ProbeBloat decides which bloat path to use for a given database. The result
@@ -33,18 +37,31 @@ func (c *Client) ProbeBloat(ctx context.Context, db string) (BloatMode, error) {
 	return mode, nil
 }
 
-// bloatExactMaxBytes is the relation size above which we skip
-// pgstattuple_approx and fall back to the cheap estimate (or skip
-// altogether for TOAST). pgstattuple_approx samples enough pages that its
-// runtime scales with relation size — a single call on a multi-hundred-GB
-// relation can block the parts view for minutes.
+// bloatExactMaxBytes is the relation size above which we skip the page-reading
+// statistics functions and fall back to the cheap estimate (or to nothing).
+// pgstattuple_approx samples enough pages that its runtime scales with
+// relation size, and pgstatindex walks the whole index — a single call on a
+// multi-hundred-GB relation can block its part of the scan for minutes.
 const bloatExactMaxBytes int64 = 50 * 1024 * 1024 * 1024
 
-// FillBloat populates WastedBytes/HasBloat on each part of a table.
-// For the heap, runs pgstattuple_approx or the estimate query.
-// For each index, runs pgstatindex (when available) or a 10% heuristic.
-// Toast bloat is reported via the toast table itself when pgstattuple is
-// available; otherwise left at zero.
+const (
+	// bloatPartTimeout bounds one part's measurement. A part that overruns it
+	// stays unmeasured and renders blank cells; it no longer takes the rest of
+	// the table's scan with it.
+	bloatPartTimeout = 10 * time.Second
+	// bloatFanout is how many measurements run at once. These functions read
+	// pages, so it is deliberately the same modest number the schema-health
+	// sweep uses: enough that a table with twenty indexes doesn't cost twenty
+	// sequential round-trips, without stampeding a server that is already busy.
+	bloatFanout = 3
+)
+
+// FillBloat populates WastedBytes/HasBloat/BloatEstimated on each part of a
+// table. Parts are measured concurrently and independently: an error, a
+// timeout or an access method with no estimator leaves that one part
+// unmeasured (HasBloat false) and the others intact, so the view degrades row
+// by row instead of all at once. The returned error covers only the
+// per-database setup — a failure to connect or to probe the extension.
 func (c *Client) FillBloat(ctx context.Context, t Table, parts []Part) error {
 	mode, err := c.ProbeBloat(ctx, t.DB)
 	if err != nil {
@@ -56,44 +73,67 @@ func (c *Client) FillBloat(ctx context.Context, t Table, parts []Part) error {
 	}
 	qualified := qualifiedIdent(t.Schema, t.Name)
 
+	sem := make(chan struct{}, bloatFanout)
+	var wg sync.WaitGroup
 	for i := range parts {
-		p := &parts[i]
-		switch p.Kind {
-		case PartHeap:
-			useExact := mode == BloatExact && p.SizeBytes <= bloatExactMaxBytes
-			if useExact {
-				if err := pool.QueryRow(ctx, sqlBloatHeapApprox, qualified).Scan(&p.WastedBytes); err != nil {
-					return fmt.Errorf("heap bloat (approx) %s: %w", qualified, err)
-				}
-			} else {
-				if err := pool.QueryRow(ctx, sqlBloatHeapEstimate, t.OID).Scan(&p.WastedBytes); err != nil {
-					p.WastedBytes = 0
-				}
+		wg.Add(1)
+		// Each goroutine owns exactly one element of parts, so the writes
+		// don't need a lock; wg.Wait is the only synchronisation needed before
+		// the caller reads the slice back.
+		go func(p *Part) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			pctx, cancel := context.WithTimeout(ctx, bloatPartTimeout)
+			defer cancel()
+			fillPartBloat(pctx, pool, t, qualified, mode, p)
+		}(&parts[i])
+	}
+	wg.Wait()
+	return nil
+}
+
+// fillPartBloat measures one part. Every failure is silent by design: the
+// result is "no number", which the parts view renders as blank cells and
+// bloatScanLabel counts as unscanned.
+func fillPartBloat(ctx context.Context, pool *pgxpool.Pool, t Table, qualified string, mode BloatMode, p *Part) {
+	switch p.Kind {
+	case PartHeap:
+		if mode == BloatExact && p.SizeBytes <= bloatExactMaxBytes {
+			if err := pool.QueryRow(ctx, sqlBloatHeapApprox, qualified).Scan(&p.WastedBytes); err == nil {
+				p.HasBloat = true
+				return
 			}
+			// Fall through: a refused or failed sample still leaves the
+			// statistics estimate worth showing, flagged as an estimate.
+		}
+		if err := pool.QueryRow(ctx, sqlBloatHeapEstimate, t.OID).Scan(&p.WastedBytes); err == nil {
+			p.HasBloat, p.BloatEstimated = true, true
+		}
+	case PartToast:
+		// Toast is opaque without pgstattuple. Above the size cap the sample
+		// would block the scan, and toast bloat is rarely actionable anyway
+		// (vacuum reclaims it), so it simply goes unmeasured.
+		if mode != BloatExact || p.SizeBytes > bloatExactMaxBytes {
+			return
+		}
+		toastRef := fmt.Sprintf("pg_toast.pg_toast_%d", t.OID)
+		if err := pool.QueryRow(ctx, sqlBloatHeapApprox, toastRef).Scan(&p.WastedBytes); err == nil {
 			p.HasBloat = true
-		case PartToast:
-			// Toast is opaque without pgstattuple. Leave zero in estimate
-			// mode, and above the size cap — pgstattuple_approx on a
-			// multi-hundred-GB toast blocks the whole scan, and toast bloat
-			// is rarely actionable anyway (vacuum reclaims it).
-			if mode == BloatExact && p.SizeBytes <= bloatExactMaxBytes {
-				toastRef := fmt.Sprintf("pg_toast.pg_toast_%d", t.OID)
-				if err := pool.QueryRow(ctx, sqlBloatHeapApprox, toastRef).Scan(&p.WastedBytes); err == nil {
-					p.HasBloat = true
-				}
-			}
-		case PartIndex:
-			indexRef := qualifiedIdent(t.Schema, p.Name)
-			if mode == BloatExact && p.AccessMethod == "btree" {
-				if err := pool.QueryRow(ctx, sqlBloatIndex, indexRef).Scan(&p.WastedBytes); err == nil {
-					p.HasBloat = true
-				}
-			} else {
-				if err := pool.QueryRow(ctx, sqlBloatIndexEstimate, indexRef).Scan(&p.WastedBytes); err == nil {
-					p.HasBloat = true
-				}
-			}
+		}
+	case PartIndex:
+		// btree is the only access method with a density pgdu can read without
+		// a full scan (pgstatindex). GIN, GiST, BRIN, SP-GiST and hash would
+		// need pgstattuple over the whole index, so they stay unmeasured — a
+		// blank cell is honest, where the flat 10 % guess this used to emit
+		// sorted, summed into the Σ row and armed REINDEX exactly like a
+		// measured value.
+		if mode != BloatExact || p.AccessMethod != "btree" || p.SizeBytes > bloatExactMaxBytes {
+			return
+		}
+		indexRef := qualifiedIdent(t.Schema, p.Name)
+		if err := pool.QueryRow(ctx, sqlBloatIndex, indexRef).Scan(&p.WastedBytes); err == nil {
+			p.HasBloat = true
 		}
 	}
-	return nil
 }

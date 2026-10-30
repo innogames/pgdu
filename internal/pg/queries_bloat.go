@@ -1,12 +1,17 @@
 package pg
 
-// Detect whether the pgstattuple extension is installed AND the current user
-// has EXECUTE privilege on pgstattuple_approx — both are needed for the cheap
-// sampling path.
+// Detect whether pgstattuple_approx is both present and executable by this
+// user — both are needed for the cheap sampling path. to_regprocedure yields
+// NULL for a function that isn't there and has_function_privilege is strict,
+// so the expression collapses to NULL rather than raising: the text-signature
+// form would error on a missing function before any AND could help, and SQL
+// guarantees no short-circuit anyway. Resolution goes through search_path,
+// which is the right test — FillBloat calls pgstattuple_approx unqualified
+// too, so a copy pgdu cannot resolve here is one it could not call either.
 const sqlBloatProbe = `
-SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pgstattuple')
-       AND has_function_privilege(current_user,
-             'pgstattuple_approx(regclass)', 'EXECUTE') AS available
+SELECT COALESCE(has_function_privilege(current_user,
+           to_regprocedure('pgstattuple_approx(regclass)')::oid, 'EXECUTE'),
+       false) AS available
 `
 
 // pgstattuple_approx returns approx_free_percent, approx_free_space,
@@ -54,10 +59,4 @@ SELECT GREATEST(0,
     / NULLIF(p.bs - 24, 0))::bigint * p.bs::bigint
 )::bigint AS wasted_bytes
 FROM target t, params p, stats s
-`
-
-// Crude btree index bloat estimate based on free space % from pgstatindex
-// fallback: use 10% as a placeholder when no extension is available.
-const sqlBloatIndexEstimate = `
-SELECT (pg_relation_size($1::regclass) * 0.10)::bigint AS wasted_bytes
 `

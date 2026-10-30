@@ -779,6 +779,44 @@ func TestStatementsQueryVersionColumns(t *testing.T) {
 	}
 }
 
+// toplevel exists from extension 1.10 on. From there the aggregation must
+// filter to it, or `track = all` makes a nested statement and the top-level
+// caller whose counters already contain it both land in the same queryid row.
+func TestStatementsQueryTopLevelFilter(t *testing.T) {
+	for _, v := range [][2]int{{1, 10}, {1, 11}, {1, 12}} {
+		if q := statementsQuery(v[0], v[1]); !strings.Contains(q, "AND  toplevel") {
+			t.Errorf("%d.%d query does not filter to toplevel rows", v[0], v[1])
+		}
+	}
+	// Below 1.10 the column does not exist; filtering on it would fail the
+	// whole statement.
+	for _, v := range [][2]int{{1, 8}, {1, 9}} {
+		if q := statementsQuery(v[0], v[1]); strings.Contains(q, "toplevel") {
+			t.Errorf("%d.%d query references toplevel, which that version lacks", v[0], v[1])
+		}
+	}
+}
+
+// pg_stat_statements keys on (userid, dbid, queryid), so the aggregation folds
+// one row per role into one row per statement. The spread of the union is
+// recoverable from each row's (calls, mean, stddev) — it used to be given up
+// and emitted as a literal zero, which left the stddev_ms and cv columns
+// permanently blank.
+func TestStatementsQueryPooledStddev(t *testing.T) {
+	q := statementsQuery(1, 11)
+	if strings.Contains(q, "0::float8 AS stddev_exec_time") {
+		t.Error("stddev is still discarded as a literal zero")
+	}
+	for _, want := range []string{
+		"sum(calls * (stddev_exec_time ^ 2 + mean_exec_time ^ 2))",
+		"AS stddev_exec_time",
+	} {
+		if !strings.Contains(q, want) {
+			t.Errorf("pooled stddev expression missing %q", want)
+		}
+	}
+}
+
 // The IN-list case from the field: the planner folds `id IN ($1,…,$n)` into one
 // `id = ANY('{…}')` qual, so pg_qualstats holds a single array constant — cut at
 // its 80-byte buffer — for a run of scalar placeholders. The complete elements

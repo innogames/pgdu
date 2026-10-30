@@ -62,15 +62,19 @@ func (k PartKind) String() string {
 // Part is one piece of a table's storage: the heap, the toast relation, or
 // one of its indexes. WastedBytes is populated for the kinds we can measure.
 type Part struct {
-	Kind         PartKind
-	OID          uint32 // index relation oid; 0 for heap/toast
-	Name         string // e.g. "heap", "toast", "idx_users_email"
-	SizeBytes    int64
-	WastedBytes  int64 // bloat, when known
-	HasBloat     bool  // true once bloat has been computed (even if 0)
-	IsPrimary    bool
-	IsUnique     bool
-	AccessMethod string // for indexes
+	Kind        PartKind
+	OID         uint32 // index relation oid; 0 for heap/toast
+	Name        string // e.g. "heap", "toast", "idx_users_email"
+	SizeBytes   int64
+	WastedBytes int64 // bloat, when known
+	HasBloat    bool  // true once bloat has been computed (even if 0)
+	// BloatEstimated says WastedBytes came from planner statistics rather than
+	// from a page scan, so it is an order of magnitude, not a measurement. The
+	// UI marks such a value and REINDEX never arms on one.
+	BloatEstimated bool
+	IsPrimary      bool
+	IsUnique       bool
+	AccessMethod   string // for indexes
 
 	// HeapStats is populated only for PartHeap (from pg_stat_all_tables).
 	// Nil for other kinds, or for the heap when stats are unavailable.

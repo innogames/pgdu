@@ -7,9 +7,10 @@ import (
 )
 
 // reindexCandidate returns the index name to reindex if the current row on a
-// parts screen is an index part with bloat > reindexBloatThreshold. Returns
-// "" when the row doesn't qualify (wrong level, wrong kind, bloat unknown or
-// below threshold, or another reindex is already in flight on this screen).
+// parts screen is an index part whose *measured* bloat is above
+// reindexBloatThreshold. Returns "" when the row doesn't qualify (wrong level,
+// wrong kind, bloat unknown or merely estimated or below threshold, or another
+// reindex is already in flight on this screen).
 func reindexCandidate(s *screen) string {
 	if s.level != levelParts || s.reindex.running != "" {
 		return ""
@@ -23,7 +24,11 @@ func reindexCandidate(s *screen) string {
 	if !ok || p.Kind != pg.PartIndex {
 		return ""
 	}
-	if !it.hasBloat || it.size <= 0 {
+	if !it.hasBloat || it.bloatEstimated || it.size <= 0 {
+		// An estimate is never grounds for a REINDEX: before the per-access-
+		// method split every non-btree index carried a flat 10 % guess, which
+		// cleared the threshold and armed the key on indexes nobody had
+		// measured.
 		return ""
 	}
 	if float64(it.bloat)/float64(it.size) <= reindexBloatThreshold {

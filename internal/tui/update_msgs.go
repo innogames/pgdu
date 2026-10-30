@@ -198,6 +198,7 @@ func (m *Model) onBloatFilled(msg bloatFilledMsg) tea.Cmd {
 		if p, ok := byName[s.items[i].name]; ok {
 			s.items[i].bloat = p.WastedBytes
 			s.items[i].hasBloat = p.HasBloat
+			s.items[i].bloatEstimated = p.BloatEstimated
 		}
 	}
 	m.applySort(s)
