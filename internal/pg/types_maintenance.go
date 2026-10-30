@@ -651,7 +651,9 @@ type WalReceiverStat struct {
 	ReplayDelay time.Duration
 }
 
-// IOStat holds aggregate I/O counters from pg_stat_io (PG 16+).
+// IOStat holds aggregate I/O counters from pg_stat_io (PG 16+), summed over
+// every backend type but excluding PG18's WAL rows, so the figures mean the
+// same thing on 17 and 18 (IOSplitStat carries the WAL side).
 // HasData is false on older clusters where the view doesn't exist.
 type IOStat struct {
 	HasData       bool
@@ -662,6 +664,14 @@ type IOStat struct {
 	Evictions     int64 // blocks evicted from shared_buffers to make room
 	Fsyncs        int64
 	BackendFsyncs int64 // fsyncs issued by client backends (checkpointer overloaded)
+
+	// Byte volumes behind the counts above (PG18+). HasBytes is false on PG17,
+	// which has no such columns — there the counts times block_size is the
+	// only estimate available.
+	HasBytes    bool
+	ReadBytes   int64
+	WriteBytes  int64
+	ExtendBytes int64
 }
 
 // BlockedStat is one blocked query from pg_stat_activity.

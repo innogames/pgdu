@@ -54,6 +54,17 @@ type Client struct {
 	statStatementsVer      map[string][2]int
 	statStatementsVerKnown map[string]bool
 
+	// Cached server_version_num. One value for the whole client, not a map:
+	// every pool reaches the same server. Gates the handful of features that
+	// SQL alone cannot degrade (see version.go).
+	serverVer      int
+	serverVerKnown bool
+
+	// Which optional pg_stat_progress_* views this server has, probed once
+	// (see progressCaps).
+	progCaps      progressCaps
+	progCapsKnown bool
+
 	// PgBouncer is the console client for every discovered pgbouncer; it lives
 	// here so one pg.Client hands the TUI both worlds, but shares no pool.
 	PgBouncer *pgbouncer.Client

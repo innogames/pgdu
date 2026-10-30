@@ -609,6 +609,18 @@ FROM   pg_stat_user_tables`
 	// sqlMaintIO aggregates I/O counters across all backend types from
 	// pg_stat_io (PG 16+). BackendFsyncs is fsyncs by client backends —
 	// non-zero means the checkpointer can't keep up.
+	//
+	// WAL rows are excluded so the totals keep one meaning across versions:
+	// PG18 moved WAL writes and fsyncs into this view as object = 'wal', which
+	// would otherwise inflate these counters on 18+ against the same cluster's
+	// PG17 reading — and double-count traffic sqlMaintIOSplit already reports
+	// on its own WAL rows. The filter is a no-op on PG17, where no such row
+	// exists.
+	//
+	// The three *_bytes sums are PG18's true byte counters, read through
+	// to_jsonb so the same statement still runs on PG17 — where every column
+	// is missing and the sums come back NULL rather than 0, which is how
+	// IOStat tells "no such counter" from "no I/O yet".
 	sqlMaintIO = `
 SELECT COALESCE(sum(reads),    0),
        COALESCE(sum(writes),   0),
@@ -616,8 +628,13 @@ SELECT COALESCE(sum(reads),    0),
        COALESCE(sum(hits),     0),
        COALESCE(sum(evictions),0),
        COALESCE(sum(fsyncs),   0),
-       COALESCE(sum(fsyncs) FILTER (WHERE backend_type = 'client backend'), 0)
-FROM   pg_stat_io`
+       COALESCE(sum(fsyncs) FILTER (WHERE backend_type = 'client backend'), 0),
+       sum((js.j ->> 'read_bytes')::numeric)::bigint,
+       sum((js.j ->> 'write_bytes')::numeric)::bigint,
+       sum((js.j ->> 'extend_bytes')::numeric)::bigint
+FROM   pg_stat_io io
+CROSS  JOIN LATERAL (SELECT to_jsonb(io) AS j) js
+WHERE  io.object <> 'wal'`
 
 	// sqlMaintBlocked returns currently blocked queries, longest waits first.
 	// pg_blocking_pids() returns the array of PIDs that block a given PID.
@@ -711,6 +728,14 @@ var maintSettingsKeys = []string{
 	"autovacuum_work_mem",
 	"autovacuum_vacuum_cost_delay",
 	"autovacuum_vacuum_cost_limit",
+	// PG18 vacuum knobs; absent (and so "unknown") on 17.
+	// autovacuum_vacuum_max_threshold caps the dead-tuple trigger so a very
+	// large table is still vacuumed on time; vacuum_max_eager_freeze_failure_rate
+	// bounds the eager freezing PG18 added; track_cost_delay_timing turns on the
+	// delay accounting the vacuum progress views report.
+	"autovacuum_vacuum_max_threshold",
+	"vacuum_max_eager_freeze_failure_rate",
+	"track_cost_delay_timing",
 	"huge_pages",
 	"huge_page_size",
 	"shared_memory_size_in_huge_pages",
@@ -721,6 +746,9 @@ var maintSettingsKeys = []string{
 	"idle_in_transaction_session_timeout",
 	"track_io_timing",
 	"track_wal_io_timing",
+	// PG18 asynchronous I/O; absent on 17, where all reads are synchronous.
+	"io_method",
+	"io_workers",
 	"track_functions",
 	"track_counts",
 	"log_min_duration_statement",

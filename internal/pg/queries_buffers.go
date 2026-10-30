@@ -246,3 +246,23 @@ SELECT name, off, size, allocated_size
 FROM   pg_shmem_allocations
 ORDER  BY allocated_size DESC
 `
+
+// --- buffer eviction (pg_buffercache 1.6 / PostgreSQL 18) ---
+
+// sqlEvictRelation drops every unpinned shared buffer belonging to one
+// relation — the cold-cache setup for a repeatable query measurement, without
+// restarting the server or disturbing anything else.
+//
+// The result is returned as JSON rather than named columns on purpose: the
+// function is new and reports its counts as a composite whose fields we do not
+// want to pin here, and row_to_json keeps the banner readable whatever they
+// are called. $1 = the relation's oid (from the catalog, never user input).
+const sqlEvictRelation = `
+SELECT row_to_json(t)::text FROM pg_buffercache_evict_relation($1::oid::regclass) t
+`
+
+// sqlEvictAll drops every unpinned shared buffer in the cluster. Same JSON
+// result shape as sqlEvictRelation.
+const sqlEvictAll = `
+SELECT row_to_json(t)::text FROM pg_buffercache_evict_all() t
+`

@@ -70,3 +70,21 @@ func (m *Model) onShmemLoaded(msg shmemLoadedMsg) tea.Cmd {
 	m.applySort(s)
 	return nil
 }
+
+// onBufferEvicted records the outcome of a pg_buffercache_evict_* call and
+// reloads, so the list's footprint figures show what the eviction actually
+// did rather than the pre-eviction snapshot. The report (or the error) stays
+// on screen afterwards — it is the only record of what was dropped — and is
+// cleared by arming the next eviction or by leaving the screen.
+func (m *Model) onBufferEvicted(msg bufferEvictedMsg) tea.Cmd {
+	s := m.top()
+	if s == nil || (s.level != levelBufferTables && s.level != levelBufferDetail) {
+		return nil
+	}
+	s.buf.evictErr = msg.err
+	s.buf.evictMsg = msg.report
+	if msg.err != nil {
+		return nil
+	}
+	return m.loadCurrent()
+}

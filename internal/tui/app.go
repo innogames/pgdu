@@ -627,6 +627,17 @@ type bufState struct {
 	usage     []pg.BufferUsageCount
 	blockSize int64 // cluster block_size, for expressing the histogram in bytes
 	usageErr  error
+
+	// Eviction (PG18's pg_buffercache_evict_* functions). pendingEvict names
+	// what X armed — "relation" for the row under the cursor, "all" for the
+	// whole buffer pool — and follows the shared two-step confirm: any other
+	// key cancels, y executes. evictMsg is the server's report of the last
+	// eviction (or the error), shown until the next load replaces it.
+	pendingEvict string // "relation" | "all" | ""
+	evictTarget  string // display name armed with pendingEvict == "relation"
+	evictOID     uint32
+	evictMsg     string
+	evictErr     error
 }
 
 // maintState: Maintenance / system overview and settings browser state.

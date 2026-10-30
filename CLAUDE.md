@@ -114,8 +114,13 @@ fails (missing/corrupt → empty).
   row and disables the key on leaves; cross-view key help reads `→ <where>`. Adding a
   level or a drill means touching all three.
 - **Two-step confirm is one shared pattern**: reindex, snapshot delete, backend
-  cancel/terminate, VACUUM, extension reset and diagnostic fixes all arm a `pending*`
-  field on Enter; any other key cancels, `y` executes. Reuse it, don't invent a new flow.
+  cancel/terminate, VACUUM, extension reset, buffer eviction and diagnostic fixes all
+  arm a `pending*` field on Enter; any other key cancels, `y` executes. Reuse it, don't
+  invent a new flow. Buffer eviction (`X` on the buffers screens, PG18's
+  `pg_buffercache_evict_relation`/`_evict_all`) is the one that costs other sessions:
+  the per-table row evicts the heap only — `pg_buffercache_evict_relation` does not
+  reach the TOAST heap or the indexes the folded row counts, which is why `bufEvictName`
+  says so — and `evict_all` goes cluster-wide, so its banner spells that out.
 - **Column-picker tables share one generic** (`colregistry.go`): each table is a registry
   of `colDesc` entries plus a static `colSpec` (registry, prefs key, sort fallback, picker
   title) and a `colTable` state on `Model` (`stmtTable`, `actTable`, `tblTable`,
@@ -136,6 +141,21 @@ fails (missing/corrupt → empty).
   bounded prefix and shown as `zstd:`/`gzip:`/`zlib:` + content, degrading to
   `zstd · 4.48 KB raw` when only the frame header can be read. zstd is the sole reason
   the binary has a non-pg dependency (`klauspost/compress`, isolated in `blob_zstd.go`).
+- **Server-version differences have four tools, in this order of preference**:
+  (1) write SQL every supported version accepts; (2) read a column a newer server
+  added through `to_jsonb(row) ->> 'col'`, which yields NULL instead of failing
+  the statement (`queries_diag_server.go`, `sqlMaintIO`, `sqlTableStats`,
+  `sqlDescribeStats`) — NULL then means "no such counter", distinct from zero;
+  (3) `Client.serverVersion` (`version.go`, cached once for the whole client,
+  `pgVer18`/`pgVer19`) for a function or view that does not exist at all, where
+  there is nothing to degrade to — `Diagnostic.MinVersion` is this gate for a
+  diagnostic and refuses with a version-naming error; (4) probe the catalog
+  (`to_regclass`) when even the version is not a safe predictor, as the progress
+  UNION does: `progressBase(progressCaps)` assembles the `pg_stat_progress_*`
+  arms the server actually has, because one missing view fails the whole
+  statement and takes the screen with it, and `Client.diagSQL` resolves the
+  diagnostic's SQL per server while the registry keeps the PG17/18 shape for
+  the query view to display. Prefer the lowest-numbered tool that works.
 - **Best-effort enrichments must degrade, never break**: the tuple row-content query
   (`sqlHeapTuplesCols`: pk + picked columns as visible-row text and as page bytes →
   `sqlHeapTuplesDecode` → plain `sqlHeapTuples`) and the HOT-chain hop (`fillHotChains`,

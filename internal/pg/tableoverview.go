@@ -36,6 +36,7 @@ func (c *Client) ListTableStats(ctx context.Context, db, schema string) ([]Table
 				&t.SeqScan, &t.IdxScan, &t.SeqTupRead, &t.IdxTupFetch,
 				&t.VacuumCount, &t.AutovacuumCount, &t.AnalyzeCount, &t.AutoanalyzeCount,
 				&t.VacAgeMs, &t.AnaAgeMs,
+				&t.VacTimeMs, &t.AnaTimeMs,
 				&t.HeapBlksRead, &t.HeapBlksHit, &t.IdxBlksRead, &t.IdxBlksHit,
 			)
 			return t, err

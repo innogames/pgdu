@@ -62,3 +62,15 @@ func bufDescribeTarget(s *screen) (descTarget, bool) {
 	}
 	return descTarget{table: bufStatTable(st)}, true
 }
+
+// bufEvictName names exactly what an eviction will drop. On the split view that
+// is the one storage relation under the cursor; on the per-table roll-up it is
+// the table's own relation only — pg_buffercache_evict_relation does not reach
+// the TOAST heap or the indexes the folded row counts, so the banner must not
+// imply it does.
+func bufEvictName(st pg.TableBufferStat) string {
+	if st.Rel != nil {
+		return bufTableName(st) + " › " + bufRelLabel(st.Rel)
+	}
+	return bufTableName(st) + " " + styleMuted.Render("(heap only — tab splits out toast and indexes)")
+}

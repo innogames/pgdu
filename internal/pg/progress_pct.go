@@ -61,7 +61,7 @@ var analyzePhaseSpan = map[string][2]float64{
 // clusterPhaseSpan covers pg_stat_progress_cluster (CLUSTER and VACUUM FULL).
 // Only the seq-scan phase has a block total; the two scan strategies are
 // alternatives, so they share a span, and the tuple-counted phases after them
-// pin to their span starts (sqlProgressBase zeroes their counters).
+// pin to their span starts (progressBase zeroes their counters).
 var clusterPhaseSpan = map[string][2]float64{
 	"initializing":             {0, 1},
 	"seq scanning heap":        {1, 40},
@@ -85,7 +85,7 @@ var basebackupPhaseSpan = map[string][2]float64{
 	"transferring wal files":              {99, 100},
 }
 
-// commandPhaseSpans keys the span maps by the command tag sqlProgressBase puts
+// commandPhaseSpans keys the span maps by the command tag progressBase puts
 // on each row. COPY is deliberately absent — it has no phases, so its raw
 // counters already are the overall progress.
 var commandPhaseSpans = map[string]map[string][2]float64{
@@ -93,7 +93,13 @@ var commandPhaseSpans = map[string]map[string][2]float64{
 	"VACUUM":       vacuumPhaseSpan,
 	"ANALYZE":      analyzePhaseSpan,
 	"CLUSTER":      clusterPhaseSpan,
-	"BASE BACKUP":  basebackupPhaseSpan,
+	// PG19's REPACK rewrites a table the same way CLUSTER does and reports the
+	// same phases, so it shares the span map. REPACK CONCURRENTLY phases we
+	// don't know yet fall through resolvePhaseSpan unmapped, which holds the
+	// bar instead of jumping.
+	"REPACK":      clusterPhaseSpan,
+	"VACUUM FULL": clusterPhaseSpan,
+	"BASE BACKUP": basebackupPhaseSpan,
 }
 
 // resolvePhaseSpan looks a phase up in its command's span map. An unmapped

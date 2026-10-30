@@ -8,6 +8,35 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// progressCapabilities reports which optional pg_stat_progress_* views this
+// server has, cached for the session (they can only change across a major
+// upgrade). A failed probe answers the PG17/18 shape, which is what every
+// server we support has carried so far — the worst case is that a REPACK on
+// PG19 stays invisible, not a broken screen.
+func (c *Client) progressCapabilities(ctx context.Context, db string) progressCaps {
+	c.mu.Lock()
+	if c.progCapsKnown {
+		caps := c.progCaps
+		c.mu.Unlock()
+		return caps
+	}
+	c.mu.Unlock()
+
+	caps := progressCapsLegacy
+	if pool, err := c.PoolFor(ctx, db); err == nil {
+		var repack, cluster bool
+		if err := pool.QueryRow(ctx, sqlProgressCaps).Scan(&repack, &cluster); err == nil {
+			caps = progressCaps{repack: repack, cluster: cluster}
+		}
+	}
+
+	c.mu.Lock()
+	c.progCaps = caps
+	c.progCapsKnown = true
+	c.mu.Unlock()
+	return caps
+}
+
 // ListProgress returns every operation currently reporting into a
 // pg_stat_progress_* view. The views are cluster-wide, so db only selects the
 // pool to query through; an empty result means nothing is in flight.
@@ -31,7 +60,8 @@ func (c *Client) ListProgressRaw(ctx context.Context, db string) ([]ProgressRow,
 	if err != nil {
 		return nil, fmt.Errorf("list progress in %q: %w", db, err)
 	}
-	return collect(ctx, pool, fmt.Sprintf("list progress in %q", db), sqlProgressOps, nil,
+	sql := progressOpsSQL(c.progressCapabilities(ctx, db))
+	return collect(ctx, pool, fmt.Sprintf("list progress in %q", db), sql, nil,
 		func(row pgx.CollectableRow) (ProgressRow, error) {
 			var r ProgressRow
 			err := row.Scan(

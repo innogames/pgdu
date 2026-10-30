@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -301,4 +302,50 @@ func (c *Client) ShmemAllocations(ctx context.Context, db string) ([]ShmemAlloca
 			}
 			return a, nil
 		})
+}
+
+// EvictRelation drops this relation's unpinned pages from shared buffers and
+// returns the server's own report of what it did. Requires PostgreSQL 18 with
+// pg_buffercache 1.6 or newer, and superuser; an older server has no such
+// function, so the error is annotated rather than passed through bare — there
+// is nothing here that can degrade.
+//
+// This throws away cache state: the next reads of the relation go to the OS or
+// the disk. Callers must confirm with the user first.
+func (c *Client) EvictRelation(ctx context.Context, db string, oid uint32) (string, error) {
+	return c.evict(ctx, db, sqlEvictRelation, []any{oid}, "evict relation buffers")
+}
+
+// EvictAllBuffers drops every unpinned page in shared_buffers, cluster-wide.
+// Same requirements and the same caveat as EvictRelation, one scale up: every
+// database's working set goes cold at once, so every session on the server
+// pays for it.
+func (c *Client) EvictAllBuffers(ctx context.Context, db string) (string, error) {
+	return c.evict(ctx, db, sqlEvictAll, nil, "evict all buffers")
+}
+
+func (c *Client) evict(ctx context.Context, db, sql string, args []any, op string) (string, error) {
+	pool, err := c.PoolFor(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	var report *string
+	if err := pool.QueryRow(ctx, sql, args...).Scan(&report); err != nil {
+		if !c.serverAtLeast(ctx, db, pgVer18) {
+			return "", fmt.Errorf("%s in %q: needs PostgreSQL 18 or newer: %w", op, db, err)
+		}
+		return "", fmt.Errorf("%s in %q (needs pg_buffercache 1.6+ and superuser): %w", op, db, err)
+	}
+	if report == nil {
+		return "", nil
+	}
+	return evictReport(*report), nil
+}
+
+// evictReport turns the function's row_to_json output into one readable line.
+// Keeping the server's own field names means a changed or extended result
+// still reads correctly instead of being silently dropped.
+func evictReport(j string) string {
+	r := strings.NewReplacer("{", "", "}", "", `"`, "", ":", " ", ",", " · ")
+	return strings.TrimSpace(r.Replace(j))
 }
