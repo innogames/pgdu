@@ -1,7 +1,9 @@
 package pageinspect
 
 import (
+	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 
 	"pgdu/internal/pg"
@@ -131,5 +133,54 @@ func TestDecodeAttrValueJsonb(t *testing.T) {
 	attr := pg.TupleAttr{Len: -1, TypName: "jsonb", TypCategory: "U", Value: val}
 	if got := DecodeAttrValue(attr); got != `{"a": true}` {
 		t.Errorf("decodeAttrValue = %q, want %q", got, `{"a": true}`)
+	}
+}
+
+// TestDecodeJsonbOffsetStride covers the JENTRY_HAS_OFF path, which every
+// other fixture is too short to reach: PostgreSQL stores an end offset instead
+// of a length on every JB_OFFSET_STRIDE-th entry, so a child past the first
+// stride is located by summing lengths back to the nearest offset-bearing one.
+// The array here holds 40 one-byte strings, so entries 0 and 32 carry offsets.
+func TestDecodeJsonbOffsetStride(t *testing.T) {
+	const n = 40
+	entries := make([][]byte, 0, n)
+	data := make([]byte, 0, n)
+	for i := range n {
+		e := uint32(jEntryString | 1)
+		if i%jbOffsetStride == 0 {
+			// An offset-bearing entry stores the element's END offset.
+			e = jEntryString | jEntryHasOff | uint32(i+1)
+		}
+		entries = append(entries, le32b(e))
+		data = append(data, byte('a'+i%26))
+	}
+	arr := concat(append([][]byte{le32b(jbFArray | n)}, entries...)...)
+	arr = concat(arr, data)
+
+	elems := make([]string, 0, n)
+	for i := range n {
+		elems = append(elems, `"`+string(rune('a'+i%26))+`"`)
+	}
+	want := "[" + strings.Join(elems, ", ") + "]"
+
+	got, ok := decodeJsonb(arr)
+	if !ok || got != want {
+		t.Errorf("decodeJsonb over %d entries = %q, %v; want %q", n, got, ok, want)
+	}
+}
+
+// A container whose entries never bear an offset within the stride is not
+// jsonb PostgreSQL wrote; walking it anyway is quadratic in the entry count,
+// so the decoder must refuse rather than scan.
+func TestDecodeJsonbRejectsUnstridedOffsets(t *testing.T) {
+	const n = jbOffsetStride + 8
+	parts := make([][]byte, 0, 1+n)
+	parts = append(parts, le32b(jbFArray|n))
+	for range n {
+		parts = append(parts, le32b(jEntryString|1)) // all lengths, no offsets
+	}
+	arr := concat(concat(parts...), bytes.Repeat([]byte{'a'}, n))
+	if got, ok := decodeJsonb(arr); ok {
+		t.Errorf("decoded an unstrided container: %q", got)
 	}
 }

@@ -383,7 +383,7 @@ func (m *Model) renderToastValue(b *strings.Builder, tv *toastValueState) {
 		b.WriteString("  " + mu(fmt.Sprintf("chunk_id %d  ·  no chunks — the value was vacuumed away since the page was read", v.ChunkID)) + "\n\n")
 		return
 	}
-	d := pageinspect.DecodeToastValue(v)
+	d := tv.decoded
 	meta := fmt.Sprintf("chunk_id %d  ·  %d chunks  ·  %s on disk", v.ChunkID, v.Chunks, humanize.Bytes(v.StoredBytes))
 	switch {
 	case d.Method != "":

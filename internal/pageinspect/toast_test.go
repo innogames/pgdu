@@ -107,9 +107,10 @@ func TestDecodeToastValueCompressed(t *testing.T) {
 	}
 }
 
-// An uncompressed value whose first bytes happen to read as a plausible header
-// ("hell" → lz4, ~745 MB raw) must come through as stored, with the failed
-// attempt explained rather than hidden.
+// An uncompressed value whose first bytes happen to read as a header must come
+// through as stored. "hell" parses as lz4 claiming ~745 MB, which 7 stored
+// bytes cannot expand to, so the header is ruled out before any inflate is
+// attempted — same silent path as any other implausible header.
 func TestDecodeToastValueUncompressedLookalike(t *testing.T) {
 	d := DecodeToastValue(pg.ToastValue{Data: []byte("hello world"), StoredBytes: 11, Chunks: 1})
 	if d.Method != "" || d.RawSize != 0 {
@@ -118,8 +119,8 @@ func TestDecodeToastValueUncompressedLookalike(t *testing.T) {
 	if d.Text != "hello world" || string(d.Payload) != "hello world" {
 		t.Errorf("text %q payload %q, want the stored bytes", d.Text, d.Payload)
 	}
-	if !strings.Contains(d.Note, "lz4") || !strings.Contains(d.Note, "did not inflate") {
-		t.Errorf("note %q should explain the rejected header", d.Note)
+	if d.Note != "" {
+		t.Errorf("note %q for a header never tried", d.Note)
 	}
 
 	// A header claiming less than what is stored is not even tried; bytes that
@@ -128,6 +129,58 @@ func TestDecodeToastValueUncompressedLookalike(t *testing.T) {
 	d = DecodeToastValue(pg.ToastValue{Data: raw, StoredBytes: int64(len(raw)), Chunks: 1})
 	if d.Note != "" || d.Method != "" || d.Text != `\x01000000ffffffffffffffff` {
 		t.Errorf("implausible header: method %q note %q text %q", d.Method, d.Note, d.Text)
+	}
+
+	// Within the expansion limit the header is plausible, so the inflate runs
+	// and its failure is explained rather than hidden.
+	garbage := concat(tcinfo(1, 64), bytes.Repeat([]byte{0xff}, 32))
+	d = DecodeToastValue(pg.ToastValue{Data: garbage, StoredBytes: int64(len(garbage)), Chunks: 1})
+	if d.Method != "" || !strings.Contains(d.Note, "lz4") || !strings.Contains(d.Note, "did not inflate") {
+		t.Errorf("plausible-but-bad header: method %q note %q", d.Method, d.Note)
+	}
+}
+
+// A header may not size an allocation on its own: a few stored bytes claiming
+// near the 1 GiB varlena limit is a misread header, whichever codec it names,
+// and must be rejected without inflating or preallocating.
+func TestToastCompressionHeaderExpansionLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		id      uint32
+		rawSize int
+		stored  int
+		want    bool
+	}{
+		{"pglz absurd", 0, 1<<30 - 1, 32, false},
+		{"lz4 absurd", 1, 1<<30 - 1, 32, false},
+		{"pglz at limit", 0, 32 * pglzMaxExpansion, 32, true},
+		{"pglz past limit", 0, 32*pglzMaxExpansion + 1, 32, false},
+		{"lz4 past pglz limit is fine", 1, 32*pglzMaxExpansion + 1, 32, true},
+		{"lz4 past limit", 1, 32*lz4MaxExpansion + 1, 32, false},
+	} {
+		data := concat(tcinfo(tc.id, tc.rawSize), bytes.Repeat([]byte{0x00}, tc.stored))
+		if _, _, ok := toastCompressionHeader(data, false); ok != tc.want {
+			t.Errorf("%s: ok=%v, want %v", tc.name, ok, tc.want)
+		}
+	}
+
+	// A truncated fetch says nothing about what the whole stream expands to,
+	// so the ratio gate steps aside and the value is merely flagged unverified.
+	data := concat(tcinfo(1, 1<<29), bytes.Repeat([]byte{0x00}, 32))
+	if _, _, ok := toastCompressionHeader(data, true); !ok {
+		t.Error("truncated value: ratio gate must not reject the header")
+	}
+}
+
+// Neither decompressor may preallocate by an unvalidated rawSize: a tiny
+// malformed stream claiming 1 GiB must fail cheaply.
+func TestDecompressRejectsAbsurdRawSize(t *testing.T) {
+	src := bytes.Repeat([]byte{0xff}, 12)
+	if _, ok := pglzDecompress(src, 1<<30-1); ok {
+		t.Error("pglz accepted a 1 GiB claim from 12 bytes")
+	}
+	if _, ok := lz4BlockDecompress(src, 1<<30-1); ok {
+		t.Error("lz4 accepted a 1 GiB claim from 12 bytes")
 	}
 }
 

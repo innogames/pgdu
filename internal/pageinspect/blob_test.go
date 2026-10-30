@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 func gzipBytes(t *testing.T, payload []byte) []byte {
@@ -151,9 +152,12 @@ func TestCompressedBlobValue(t *testing.T) {
 			ok:      true,
 		},
 		{
+			// Nothing inflated and no declared size: the format name is still
+			// worth having (a 4-byte magic is near-certain), but the stored
+			// bytes must come along or the rendering hides the whole value.
 			name:    "zstd undecodable and unsized",
 			payload: []byte{0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x59, 0x01},
-			want:    "zstd · undecoded",
+			want:    `zstd · undecoded · \x28b52ffd005901`,
 			ok:      true,
 		},
 		{
@@ -243,5 +247,36 @@ func TestGzipRawSize(t *testing.T) {
 	// Sanity-check the fixture against the trailer's own encoding.
 	if want := binary.LittleEndian.Uint32(b[len(b)-4:]); want != 1234 {
 		t.Errorf("gzip ISIZE = %d, want 1234", want)
+	}
+}
+
+// A payload ending in a correctly encoded U+FFFD must keep it: DecodeLastRune
+// reports RuneError for that rune as well as for a stray byte, and only the
+// decoded width separates the two.
+func TestTrimPartialRuneKeepsEncodedReplacement(t *testing.T) {
+	full := []byte("ok�")
+	if got := trimPartialRune(full); !bytes.Equal(got, full) {
+		t.Errorf("trimPartialRune(%q) = %q, want it unchanged", full, got)
+	}
+	// A genuine partial sequence (the first two bytes of a 3-byte rune) goes.
+	partial := append([]byte("ok"), 0xEF, 0xBF)
+	if got := trimPartialRune(partial); string(got) != "ok" {
+		t.Errorf("trimPartialRune(partial) = %q, want %q", got, "ok")
+	}
+}
+
+// A stream that errors part-way still shows what it decoded, but must be
+// marked truncated so the caller's ellipsis says the rendering is partial.
+// Running out of input is not an error: that is how a short complete stream
+// ends against an oversized buffer.
+func TestReadBoundedMarksCorruptStreamTruncated(t *testing.T) {
+	data, truncated, ok := readBounded(iotest.TimeoutReader(bytes.NewReader([]byte("partial"))))
+	if !ok || string(data) != "partial" || !truncated {
+		t.Errorf("corrupt stream: data %q truncated %v ok %v", data, truncated, ok)
+	}
+
+	data, truncated, ok = readBounded(bytes.NewReader([]byte("complete")))
+	if !ok || string(data) != "complete" || truncated {
+		t.Errorf("clean stream: data %q truncated %v ok %v", data, truncated, ok)
 	}
 }

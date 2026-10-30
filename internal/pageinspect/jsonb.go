@@ -42,11 +42,26 @@ const (
 	jEntryContainer = 0x50000000
 
 	jbMaxDepth = 128 // guard against a malformed/cyclic-looking container header
+
+	// jbOffsetStride is JB_OFFSET_STRIDE (jsonb.h): PostgreSQL stores an end
+	// offset instead of a length every this many JEntries, so a backward scan
+	// for one is bounded. Nothing in the bytes enforces that, and offsetAt
+	// runs per child — an unbounded scan over a corrupt container with a few
+	// hundred thousand entries is quadratic, so exceeding the stride is taken
+	// as "not jsonb" rather than walked.
+	jbOffsetStride = 32
+
+	// jbMaxText caps the rendered document. Entries may declare overlapping
+	// byte ranges, so a container far smaller than this can still describe
+	// quadratically more output than it occupies. Well above the callers' own
+	// clips (toastDecodeMaxText, maxBlobDecode), so it only ever fires on
+	// bytes that are not a real document.
+	jbMaxText = 4 << 20
 )
 
 func decodeJsonb(payload []byte) (string, bool) {
 	var sb strings.Builder
-	if !jbWriteContainer(&sb, payload, 0) {
+	if !jbWriteContainer(&sb, payload, 0) || sb.Len() > jbMaxText {
 		return "", false
 	}
 	return sb.String(), true
@@ -89,28 +104,41 @@ func jbWriteContainer(sb *strings.Builder, c []byte, depth int) bool {
 	// hold a length, but every JB_OFFSET_STRIDE-th one holds an end offset to
 	// cap the walk, so a child's start is found by summing lengths back to the
 	// nearest offset-bearing entry.
-	offsetAt := func(i int) int {
+	offsetAt := func(i int) (int, bool) {
 		off := 0
 		for k := i - 1; k >= 0; k-- {
+			if i-k > jbOffsetStride {
+				return 0, false // no offset-bearing entry within the stride
+			}
 			off += int(entry(k) & jEntryOffLenMask)
 			if entry(k)&jEntryHasOff != 0 {
 				break
 			}
 		}
-		return off
+		return off, true
 	}
-	lengthAt := func(i int) int {
+	lengthAt := func(i int) (int, bool) {
 		e := entry(i)
-		if e&jEntryHasOff != 0 {
-			return int(e&jEntryOffLenMask) - offsetAt(i)
+		if e&jEntryHasOff == 0 {
+			return int(e & jEntryOffLenMask), true
 		}
-		return int(e & jEntryOffLenMask)
+		off, ok := offsetAt(i)
+		if !ok {
+			return 0, false
+		}
+		return int(e&jEntryOffLenMask) - off, true
 	}
 	// childBytes returns entry i's raw data slice and the INTALIGN pad that
 	// precedes numeric/container values (the JEntry length includes that pad).
 	childBytes := func(i int) (data []byte, pad int, ok bool) {
-		off := offsetAt(i)
-		length := lengthAt(i)
+		off, ok := offsetAt(i)
+		if !ok {
+			return nil, 0, false
+		}
+		length, ok := lengthAt(i)
+		if !ok {
+			return nil, 0, false
+		}
 		start := dataStart + off
 		end := start + length
 		if off < 0 || length < 0 || start < dataStart || end > len(c) {
@@ -120,6 +148,12 @@ func jbWriteContainer(sb *strings.Builder, c []byte, depth int) bool {
 	}
 
 	writeVal := func(i int) bool {
+		// Checked per value, not once at the end: overlapping entry ranges can
+		// describe far more output than the container holds, and the point of
+		// the budget is to stop before building it.
+		if sb.Len() > jbMaxText {
+			return false
+		}
 		switch entry(i) & jEntryTypeMask {
 		case jEntryNull:
 			sb.WriteString("null")

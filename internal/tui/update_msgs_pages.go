@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
 )
 
@@ -87,6 +88,7 @@ func (m *Model) applyAMPages(s *screen, err error, totalPages int32, keyCols []p
 		s.items = append(s.items, toItem(i))
 	}
 	m.applySort(s)
+	focusPageBlkno(s)
 	return nil
 }
 
@@ -120,6 +122,7 @@ func (m *Model) onHeapPagesLoaded(msg heapPagesLoadedMsg) tea.Cmd {
 		s.items = append(s.items, withPageBuf(heapPageToItem(p), msg.bufs))
 	}
 	m.applySort(s)
+	focusPageBlkno(s)
 	return nil
 }
 
@@ -135,6 +138,10 @@ func (m *Model) onToastValueLoaded(msg toastValueLoadedMsg) tea.Cmd {
 	s.pages.toastVal.loading = false
 	s.pages.toastVal.val = msg.val
 	s.pages.toastVal.err = msg.err
+	if msg.err == nil {
+		// Decoded once here, not in the renderer: see toastValueState.decoded.
+		s.pages.toastVal.decoded = pageinspect.DecodeToastValue(msg.val)
+	}
 	return nil
 }
 
@@ -388,22 +395,24 @@ func (m *Model) onGinPagesLoaded(msg ginPagesLoadedMsg) tea.Cmd {
 		len(msg.pages),
 		func(i int) item { return withPageBuf(ginPageToItem(msg.pages[i]), msg.bufs) },
 		func(s *screen) { s.pages.ginMeta = msg.meta })
-	focusGinBlkno(s)
 	return cmd
 }
 
-// focusGinBlkno lands the cursor on the page a GIN data-leaf jump asked for,
-// once its window has loaded and been sorted. Consumed on the first window
-// that arrives so a later PgDn/reload doesn't yank the cursor back.
-func focusGinBlkno(s *screen) {
+// focusPageBlkno lands the cursor on the block a window move asked for, once
+// that window has loaded and been sorted — the s "go to block" seek on either
+// page list, and GIN's n data-leaf jump. Consumed on the first window that
+// arrives so a later PgDn/reload doesn't yank the cursor back. itemBlkno keys
+// it, so one helper serves the heap list and all four index AMs.
+func focusPageBlkno(s *screen) {
 	want := s.pages.focusBlkno
 	if want == 0 || !s.loaded {
 		return
 	}
 	s.pages.focusBlkno = 0
 	for i, idx := range s.visibleIndexes() {
-		if p, ok := s.items[idx].data.(pg.GinPageStat); ok && p.Blkno == want {
+		if blk, ok := itemBlkno(s.items[idx]); ok && blk == int64(want) {
 			s.cursor = i
+			s.clampCursor()
 			return
 		}
 	}
@@ -439,7 +448,7 @@ func (m *Model) onGinDataLeafFound(msg ginDataLeafFoundMsg) tea.Cmd {
 		s.resetCursor()
 		return m.loadCurrent()
 	}
-	focusGinBlkno(s)
+	focusPageBlkno(s)
 	return nil
 }
 

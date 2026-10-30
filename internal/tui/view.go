@@ -751,19 +751,29 @@ func (m *Model) renderFilterLine(s *screen) string {
 	return "  " + styleMuted.Render("filter: ") + s.filter + "  " + hint
 }
 
-// renderSeekLine draws the seek-to-key affordance on the index-tuples view:
-// "seek (player_id): <value>▏  <status>". The status reports where the cursor
-// jumped. Returns "" unless the seek input is focused or carries a query.
+// renderSeekLine draws the seek affordance: "seek (player_id): <value>▏
+// <status>" on the index-tuples view, "go to block: …" on the two page lists.
+// The status reports where the cursor jumped. Returns "" unless the seek input
+// is focused or carries a query.
 func (m *Model) renderSeekLine(s *screen) string {
-	if s.level != levelIndexTuples || (s.pages.seekQuery == "" && !s.pages.seekFocused) {
+	seekable := s.level == levelIndexTuples || seeksWindow(s)
+	if !seekable || (s.pages.seekQuery == "" && !s.pages.seekFocused) {
 		return ""
 	}
 	label := "seek"
-	if s.pages.index.AccessMethod == "brin" {
+	switch {
+	case seeksWindow(s):
+		// The page lists seek a block number, and only on Enter — the jump
+		// may have to fetch another window, so say so rather than leaving the
+		// user waiting for a live jump that never comes.
+		label = "go to block (↵)"
+	case s.pages.index.AccessMethod == "brin":
 		// BRIN seeks by heap block number, not by key value.
 		label = "seek (heap block)"
-	} else if col := firstKeyColName(s.pages.indexKeyCols); col != "" {
-		label = "seek (" + col + ")"
+	default:
+		if col := firstKeyColName(s.pages.indexKeyCols); col != "" {
+			label = "seek (" + col + ")"
+		}
 	}
 	var status string
 	if s.pages.seekStatus != "" {

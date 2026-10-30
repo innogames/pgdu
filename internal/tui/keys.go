@@ -35,8 +35,12 @@ type keyMap struct {
 	// GinNextLeaf jumps the GIN page list to the next posting-tree leaf page,
 	// found server-side across the whole index (only those pages itemize).
 	GinNextLeaf key.Binding
-	Help        key.Binding
-	Quit        key.Binding
+	// CtidNext follows a superseded heap tuple's t_ctid to the row version
+	// that replaced it. Shares the physical key with GinNextLeaf, which lives
+	// on levelIndexPages — the two never apply to the same screen.
+	CtidNext key.Binding
+	Help     key.Binding
+	Quit     key.Binding
 
 	// Activity-tool-specific bindings.
 	ActivityFilter   key.Binding // f: cycle backend filter mode
@@ -178,8 +182,9 @@ func defaultKeys() keyMap {
 		BufSplit:        key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "by relation")),
 		ResetCols:       key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reset to defaults")),
 		Filter:          key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
-		Seek:            key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "seek to key")),
+		Seek:            key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "seek")), // relabelled per level in applyContext
 		GinNextLeaf:     key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next data-leaf page")),
+		CtidNext:        key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "→ next version")),
 		Help:            key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:            key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
 
@@ -396,16 +401,34 @@ func (k *keyMap) applyContext(s *screen) {
 
 	// s seeks on the index-tuples view: a key value on B-tree, a heap block
 	// number on BRIN. GiST/GIN keys have no total order, so seek is disabled
-	// there (use the / filter). The physical key is otherwise ShowQuery
+	// there (use the / filter). On the two page lists it seeks a block number
+	// instead, which is the only way to reach a block a long way outside the
+	// loaded window — PgDn steps one window at a time, and a big relation has
+	// thousands of them. The physical key is otherwise ShowQuery
 	// (diagnostic-result only), so the two never overlap.
-	k.Seek.SetEnabled(s.level == levelIndexTuples &&
-		(s.pages.index.AccessMethod == "btree" || s.pages.index.AccessMethod == "brin"))
+	switch {
+	case s.level == levelHeapPages || s.level == levelIndexPages:
+		k.Seek.SetEnabled(true)
+		k.Seek.SetHelp("s", "go to block")
+	case s.level == levelIndexTuples && s.pages.index.AccessMethod == "brin":
+		k.Seek.SetEnabled(true)
+		k.Seek.SetHelp("s", "seek to block")
+	case s.level == levelIndexTuples && s.pages.index.AccessMethod == "btree":
+		k.Seek.SetEnabled(true)
+		k.Seek.SetHelp("s", "seek to key")
+	default:
+		k.Seek.SetEnabled(false)
+	}
 	// n on the GIN page list hops to the next data-leaf page across the whole
 	// index. Sorting by type only reorders the loaded window, and a GIN's few
 	// posting-tree pages are usually nowhere near the first one — so the hop is
 	// the only practical way to reach the pages that drill. Footer-advertised
 	// since nothing else hints at it.
 	k.GinNextLeaf.SetEnabled(s.level == levelIndexPages && s.pages.index.AccessMethod == "gin")
+	// n on a superseded heap tuple follows t_ctid to the version that replaced
+	// it. Advertised only on a row that has a successor, since most don't:
+	// the forward pointer of a current row is its own tid.
+	k.CtidNext.SetEnabled(s.level == levelHeapTuples && ctidSuccessor(s) != nil)
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
@@ -461,6 +484,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	if k.GinNextLeaf.Enabled() {
 		b = append(b, k.GinNextLeaf)
 	}
+	if k.CtidNext.Enabled() {
+		b = append(b, k.CtidNext)
+	}
 	return b
 }
 
@@ -468,7 +494,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Top, k.Bottom},
 		{k.Enter, k.Back},
-		{k.Filter, k.Seek, k.GinNextLeaf, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
+		{k.Filter, k.Seek, k.GinNextLeaf, k.CtidNext, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
 		{k.Refresh, k.Install, k.Describe, k.DiskUsage},
 		{k.Rebaseline, k.ResetStatements, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -195,4 +196,66 @@ func (m *Model) jumpGinDataLeaf(s *screen) tea.Cmd {
 	}
 	s.pages.ginSeeking = true
 	return m.findGinDataLeafCmd(s.pages.index, from)
+}
+
+// ctidSuccessor returns the heap tuple under the cursor when its t_ctid names
+// a *different* line pointer — the row version that replaced it. A current
+// row's forward pointer is its own tid, so this is exactly "superseded".
+//
+// REDIRECT/DEAD/UNUSED pointers carry no t_ctid of their own and Enter already
+// walks a REDIRECT within the page; this is the hop Enter cannot make, the one
+// a non-HOT update leaves behind when the new version did not fit on the page.
+func ctidSuccessor(s *screen) *pg.HeapTuple {
+	if s.level != levelHeapTuples {
+		return nil
+	}
+	cur, ok := s.currentItem()
+	if !ok {
+		return nil
+	}
+	t, ok := cur.data.(pg.HeapTuple)
+	if !ok || t.LPFlags != pg.LPNormal || t.Ctid == nil {
+		return nil
+	}
+	blk, okB := parseCtidBlock(t.Ctid)
+	off, okO := parseCtidOffset(t.Ctid)
+	if !okB || !okO || (blk == s.pages.heapPageBlkno && off == t.LP) {
+		return nil
+	}
+	return &t
+}
+
+// followCtid (n on a heap tuple) walks t_ctid to the next row version. Within
+// the page it only moves the cursor, like the REDIRECT hop; onto another page
+// it pushes that page's tuple list with focusLP armed, so the load lands on
+// the successor and opens its byte layout — the same landing an index entry's
+// drill gets. Repeating the key walks an update chain version by version.
+func (m *Model) followCtid(s *screen) tea.Cmd {
+	t := ctidSuccessor(s)
+	if t == nil {
+		return nil
+	}
+	blk, _ := parseCtidBlock(t.Ctid)
+	off, _ := parseCtidOffset(t.Ctid)
+
+	if blk == s.pages.heapPageBlkno {
+		for vi, idx := range s.visibleIndexes() {
+			if target, ok := s.items[idx].data.(pg.HeapTuple); ok && target.LP == off {
+				s.cursor = vi
+				s.clampCursor()
+				return nil
+			}
+		}
+		m.notice = fmt.Sprintf("line pointer %d is not in view — clear the filter to reach it", off)
+		return nil
+	}
+
+	next := &screen{
+		level: levelHeapTuples, title: "tuples", tool: s.tool,
+		db: s.db, schema: s.schema, table: s.table,
+		pages: pageState{heapPageBlkno: blk, focusLP: off, tuplePick: s.pages.tuplePick},
+		sort:  sortByLP, sortDesc: sortByLP.defaultDesc()}
+	m.notice = fmt.Sprintf("row version at (%d,%d) — followed t_ctid", blk, off)
+	m.stack = append(m.stack, next)
+	return m.loadCurrent()
 }

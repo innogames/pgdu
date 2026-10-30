@@ -22,6 +22,16 @@ type HeapPageStat struct {
 	HasExternal int32
 }
 
+// IsNew reports a page that was extended but never initialised — PageIsNew in
+// bufpage.h, an all-zero page. It happens between a relation extension and the
+// write that fills it, and is left behind by a crash in that window; VACUUM
+// initialises such pages when it meets them. Worth distinguishing because an
+// uninitialised page and an initialised empty one look identical in every
+// other column: both report no tuples and all their space free.
+func (p HeapPageStat) IsNew() bool {
+	return p.PageSize == 0 && p.Lower == 0 && p.Upper == 0
+}
+
 // DeadFrac returns DeadLP / (LiveLP + DeadLP) in [0,1], or -1 when the page
 // has no live or dead tuples (e.g. a freshly-allocated page).
 func (p HeapPageStat) DeadFrac() float64 {
@@ -137,10 +147,21 @@ const (
 // TUI (heap-only OID, frozen-via-multi, etc.) are intentionally omitted to
 // keep the badge list scannable.
 const (
-	HeapHasNull       = 0x0001
-	HeapHasVarWidth   = 0x0002
-	HeapHasExternal   = 0x0004
-	HeapHasOid        = 0x0008
+	HeapHasNull        = 0x0001
+	HeapHasVarWidth    = 0x0002
+	HeapHasExternal    = 0x0004
+	HeapHasOid         = 0x0008
+	HeapXmaxKeyshrLock = 0x0010
+	// HeapComboCid says t_field3 holds a combo cid rather than a plain cmin,
+	// which is what the layout legend needs to label that header field.
+	HeapComboCid     = 0x0020
+	HeapXmaxExclLock = 0x0040
+	// HeapXmaxLockOnly says t_xmax is a locker, not a deleter: the row is
+	// live however the xmax commit bits read. Without it a row locked by
+	// SELECT … FOR UPDATE (or by a foreign-key check) is indistinguishable
+	// from a deleted one once HeapXmaxCommitted gets set. The two bits above
+	// name the mode (HEAP_XMAX_IS_*_LOCKED): both set is FOR SHARE.
+	HeapXmaxLockOnly  = 0x0080
 	HeapXminCommitted = 0x0100
 	HeapXminInvalid   = 0x0200
 	HeapXmaxCommitted = 0x0400

@@ -683,7 +683,7 @@ func walIndexItemRow(t *pg.IndexTuple, cols []pg.IndexKeyColumn, touched bool) i
 		parts = append(parts, styleMuted.Render("→ heap "+*t.Ctid))
 	}
 	if t.Data != nil && len(cols) > 0 {
-		if k, ok := pageinspect.DecodeIndexKey(*t.Data, cols); ok {
+		if k, ok := pageinspect.DecodeIndexKey(*t.Data, cols, t.Nulls); ok {
 			parts = append(parts, k)
 		}
 	}

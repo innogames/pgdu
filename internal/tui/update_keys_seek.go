@@ -12,12 +12,18 @@ import (
 	"pgdu/internal/pg"
 )
 
-// handleSeekKey is the input handler while s.seekFocused is true (levelIndexTuples
-// only). It mirrors handleFilterKey: Esc clears + blurs, Enter blurs (keeping the
-// cursor where it landed), Backspace edits (and blurs when it empties the query),
-// Up/Down nudge the cursor, and printable input extends the query. Every edit
-// re-runs the seek so the cursor jumps live to the covering entry.
+// handleSeekKey is the input handler while s.seekFocused is true. It mirrors
+// handleFilterKey: Esc clears + blurs, Enter blurs (keeping the cursor where it
+// landed), Backspace edits (and blurs when it empties the query), Up/Down nudge
+// the cursor, and printable input extends the query.
+//
+// On the per-page views every edit re-runs the seek, so the cursor jumps live
+// to the covering entry — the whole page is already loaded. The page lists
+// (levelHeapPages/levelIndexPages) instead seek on Enter only: landing on a
+// block outside the loaded window means re-reading a window's worth of pages
+// from the server, which is not something to do once per keystroke.
 func (m *Model) handleSeekKey(s *screen, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	live := !seeksWindow(s)
 	switch msg.Code {
 	case tea.KeyEsc:
 		s.pages.seekFocused = false
@@ -25,10 +31,15 @@ func (m *Model) handleSeekKey(s *screen, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 		s.pages.seekStatus = ""
 	case tea.KeyEnter:
 		s.pages.seekFocused = false
+		if !live {
+			return m, m.seekToPage(s)
+		}
 	case tea.KeyBackspace, tea.KeyDelete:
 		if r := []rune(s.pages.seekQuery); len(r) > 0 {
 			s.pages.seekQuery = string(r[:len(r)-1])
-			seekApply(s)
+			if live {
+				seekApply(s)
+			}
 		} else {
 			s.pages.seekFocused = false
 			s.pages.seekStatus = ""
@@ -46,9 +57,17 @@ func (m *Model) handleSeekKey(s *screen, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 			return m, nil
 		}
 		s.pages.seekQuery += msg.Text
-		seekApply(s)
+		if live {
+			seekApply(s)
+		}
 	}
 	return m, nil
+}
+
+// seeksWindow reports whether this screen's seek moves the loaded page window
+// (and so costs a server round-trip) rather than only the cursor.
+func seeksWindow(s *screen) bool {
+	return s.level == levelHeapPages || s.level == levelIndexPages
 }
 
 // seekApply routes a seek edit to the right scan for the index access method:
@@ -59,6 +78,66 @@ func seekApply(s *screen) {
 		return
 	}
 	seekToKey(s)
+}
+
+// seekToPage jumps either page list to a block number. A block already in the
+// loaded window only moves the cursor; anything else slides the window to the
+// grid-aligned span holding it (the alignment drillBrinItem uses, so a seek and
+// a BRIN drill to the same block land on the same window) and reloads, with
+// focusBlkno asking that load to put the cursor on the block itself.
+//
+// The clamps mirror PgUp/PgDn: never below 0, never past the last full window,
+// because get_raw_page errors hard past EOF. heapPageCount is the relation's
+// real block count, so a block beyond it cannot be reached and says so.
+func (m *Model) seekToPage(s *screen) tea.Cmd {
+	s.pages.seekStatus = ""
+	q := strings.TrimSpace(s.pages.seekQuery)
+	if q == "" {
+		return nil
+	}
+	blk, err := strconv.ParseInt(q, 10, 64)
+	if err != nil || blk < 0 {
+		s.pages.seekStatus = "enter a block number"
+		return nil
+	}
+	if total := int64(s.pages.heapPageCount); total > 0 && blk >= total {
+		s.pages.seekStatus = fmt.Sprintf("block %d is past the end (%d pages)", blk, total)
+		return nil
+	}
+
+	want := int32(blk)
+	if cur, ok := blockInWindow(s, want); ok {
+		s.cursor = cur
+		s.clampCursor()
+		s.pages.seekStatus = fmt.Sprintf("→ block %d", want)
+		return nil
+	}
+
+	step := s.pages.heapWindowCount
+	if step <= 0 {
+		step = heapWindowDefault
+	}
+	start := (want / step) * step
+	if s.pages.heapPageCount > 0 && start+step > s.pages.heapPageCount {
+		start = max32(s.pages.heapPageCount-step, 0)
+	}
+	s.pages.heapWindowStart = start
+	s.pages.focusBlkno = want
+	s.pages.seekStatus = fmt.Sprintf("→ block %d", want)
+	s.resetCursor()
+	return m.loadCurrent()
+}
+
+// blockInWindow finds a block among the currently visible rows, so a seek
+// inside the loaded window costs nothing. Visible, not loaded: a seek honours
+// an active filter the same way seekTargets does.
+func blockInWindow(s *screen, blk int32) (int, bool) {
+	for visPos, idx := range s.visibleIndexes() {
+		if got, ok := itemBlkno(s.items[idx]); ok && got == int64(blk) {
+			return visPos, true
+		}
+	}
+	return 0, false
 }
 
 // seekToBlock jumps the cursor to the BRIN summary range covering the heap block
@@ -93,7 +172,9 @@ func seekToBlock(s *screen) {
 		s.pages.seekStatus = "no ranges to seek"
 		return
 	}
-	sort.Slice(cands, func(i, j int) bool { return cands[i].start < cands[j].start })
+	// Stable: a BRIN range has one item per indexed attribute, so BlockNum is
+	// not unique and an unstable sort would pick an arbitrary one of them.
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].start < cands[j].start })
 	chosen := 0
 	for i, c := range cands {
 		if c.start > blk {

@@ -341,14 +341,13 @@ func (m *Model) loadHeapPagesCmd(t pg.Table, start, count int32) tea.Cmd {
 		// would report the inspector's own reads (every page cached at
 		// usagecount 1), not the pre-inspection residency.
 		bufs, bufsErr := m.client.PageBuffers(ctx, t.DB, t.OID, start, count)
-		pages, err := m.client.ListHeapPages(ctx, t, start, count)
+		// rp is the relation's whole block count, read by the same clamp that
+		// sized the window — the status line needs it and a second RelPages
+		// round-trip per load would buy nothing.
+		pages, rp, err := m.client.ListHeapPages(ctx, t, start, count)
 		if err != nil {
 			return heapPagesLoadedMsg{table: t, start: start, count: count, err: err}
 		}
-		// RelPages failure is non-fatal: the page list still renders, only the
-		// "pages N–M / total" status snippet shows ?/?? — much better than
-		// dropping the whole load on a transient pg_class read error.
-		rp, _ := m.client.RelPages(ctx, t)
 		return heapPagesLoadedMsg{table: t, start: start, count: count, pages: pages, totalPages: rp, bufs: bufs, bufsErr: bufsErr}
 	})
 }
@@ -393,13 +392,10 @@ func (m *Model) loadIndexPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		// Sampled before the page walk for the same reason as loadHeapPagesCmd:
 		// bt_page_stats pulls every window page into shared buffers.
 		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
-		pages, err := m.client.ListIndexPages(ctx, r, start, count)
+		pages, rp, err := m.client.ListIndexPages(ctx, r, start, count)
 		if err != nil {
 			return indexPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
 		}
-		// RelPages errors are non-fatal: render the page list and accept "?"
-		// for the totals, same approach as the heap-pages Cmd.
-		rp, _ := m.client.RelPages(ctx, pg.Table{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
 		// Banner data is best-effort decoration over the page list — a metap
 		// or key-column read may fail (privileges, a redefined index) without
 		// dropping the load. keyCols nil → no keys banner; meta nil → no
@@ -453,11 +449,10 @@ func (m *Model) loadGistPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		// Sampled before the page walk for the same reason as loadHeapPagesCmd:
 		// get_raw_page pulls every window page into shared buffers.
 		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
-		pages, err := m.client.ListGistPages(ctx, r, start, count)
+		pages, rp, err := m.client.ListGistPages(ctx, r, start, count)
 		if err != nil {
 			return gistPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
 		}
-		rp, _ := m.client.RelPages(ctx, pg.Table{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
 		keyCols, _ := m.client.IndexKeyColumns(ctx, r) // best-effort banner
 		return gistPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, bufs: bufs, bufsErr: bufsErr}
 	})
@@ -482,11 +477,10 @@ func (m *Model) loadBrinPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		// Sampled before the page walk for the same reason as loadHeapPagesCmd:
 		// get_raw_page pulls every window page into shared buffers.
 		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
-		pages, err := m.client.ListBrinPages(ctx, r, start, count)
+		pages, rp, err := m.client.ListBrinPages(ctx, r, start, count)
 		if err != nil {
 			return brinPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
 		}
-		rp, _ := m.client.RelPages(ctx, pg.Table{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
 		keyCols, _ := m.client.IndexKeyColumns(ctx, r)
 		var meta *pg.BrinMeta
 		if bm, err := m.client.BrinMeta(ctx, r); err == nil {
@@ -508,11 +502,10 @@ func (m *Model) loadGinPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
 		// Sampled before the page walk for the same reason as loadHeapPagesCmd:
 		// get_raw_page pulls every window page into shared buffers.
 		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
-		pages, err := m.client.ListGinPages(ctx, r, start, count)
+		pages, rp, err := m.client.ListGinPages(ctx, r, start, count)
 		if err != nil {
 			return ginPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
 		}
-		rp, _ := m.client.RelPages(ctx, pg.Table{DB: r.DB, Schema: r.Schema, Name: r.Name, OID: r.OID})
 		keyCols, _ := m.client.IndexKeyColumns(ctx, r)
 		var meta *pg.GinMeta
 		if gm, err := m.client.GinMeta(ctx, r); err == nil {

@@ -181,6 +181,31 @@ func InfomaskText(im int32) string {
 	if im&pg.HeapXmaxIsMulti != 0 {
 		flags = append(flags, "multixact")
 	}
+	// Without lock-only an xmax reads as a deleting xid, which is the whole
+	// difference between a live locked row and a dead one; the mode bits say
+	// which lock it is (both together are FOR SHARE, see xmaxLockMode).
+	if im&pg.HeapXmaxLockOnly != 0 {
+		flags = append(flags, "xmax-lock-only")
+	}
+	switch {
+	case im&pg.HeapXmaxExclLock != 0 && im&pg.HeapXmaxKeyshrLock != 0:
+		flags = append(flags, "shr-lock")
+	case im&pg.HeapXmaxExclLock != 0:
+		flags = append(flags, "excl-lock")
+	case im&pg.HeapXmaxKeyshrLock != 0:
+		flags = append(flags, "keyshr-lock")
+	}
+	// t_field3 is labelled "cid or xvac" in the layout legend; these are the
+	// bits that decide which of the two it holds.
+	if im&pg.HeapComboCid != 0 {
+		flags = append(flags, "combo-cid")
+	}
+	if im&pg.HeapMovedOff != 0 {
+		flags = append(flags, "moved-off")
+	}
+	if im&pg.HeapMovedIn != 0 {
+		flags = append(flags, "moved-in")
+	}
 	if im&pg.HeapUpdated != 0 {
 		flags = append(flags, "updated")
 	}
@@ -233,7 +258,11 @@ func classifyAttr(a pg.TupleAttr) string {
 	b0 := a.Value[0]
 	switch {
 	case b0 == 0x01:
-		if len(a.Value) == toastPointerLen {
+		// Same VARTAG_ONDISK guard describeToastPointer and ToastPointerRef
+		// apply: an 18-byte varattrib_1b_e is only a TOAST pointer when its
+		// tag says so. VARTAG_INDIRECT and VARTAG_EXPANDED_* are the same
+		// width and would otherwise be named — and drilled — as one.
+		if len(a.Value) == toastPointerLen && a.Value[1] == 0x12 {
 			return "TOAST pointer"
 		}
 		return "external"
@@ -259,7 +288,12 @@ func classifyAttr(a pg.TupleAttr) string {
 // *positive* residue (walk ended short of lp_len) keeps ok=true and surfaces
 // as an explicit trailing SegUnaccounted instead.
 func Layout(t pg.HeapTuple, attrs []pg.TupleAttr) (segs []Seg, ok bool) {
-	lpLen := int(t.LPLen)
+	// Clamped at zero throughout: every unaccounted run below is a difference
+	// against lp_len, and a corrupt lp_len / t_hoff would make one negative —
+	// which silently breaks the Σ-vs-lp_len footer and the proportional bar
+	// (which just skips non-positive widths) instead of reading as the bad
+	// metadata it is. ok=false already tells the caller not to trust the split.
+	lpLen := max(int(t.LPLen), 0)
 	if t.Hoff == nil {
 		return []Seg{{Kind: SegUnaccounted, Start: 0, Bytes: lpLen, Class: "unaccounted"}}, false
 	}
@@ -306,7 +340,7 @@ func Layout(t pg.HeapTuple, attrs []pg.TupleAttr) (segs []Seg, ok bool) {
 	} else if pad < 0 {
 		// bitmap ran past t_hoff — metadata is inconsistent, don't guess.
 		return append(headerSegs(t), Seg{
-			Kind: SegUnaccounted, Start: HeapTupleHeaderLen, Bytes: lpLen - HeapTupleHeaderLen, Class: "unaccounted",
+			Kind: SegUnaccounted, Start: HeapTupleHeaderLen, Bytes: max(lpLen-HeapTupleHeaderLen, 0), Class: "unaccounted",
 		}), false
 	}
 
@@ -354,7 +388,7 @@ func Layout(t pg.HeapTuple, attrs []pg.TupleAttr) (segs []Seg, ok bool) {
 	switch total := hoff + off; {
 	case total > lpLen:
 		return append(header, Seg{
-			Kind: SegUnaccounted, Start: hoff, Bytes: lpLen - hoff, Class: "unaccounted",
+			Kind: SegUnaccounted, Start: hoff, Bytes: max(lpLen-hoff, 0), Class: "unaccounted",
 		}), false
 	case total < lpLen:
 		segs = append(segs, Seg{

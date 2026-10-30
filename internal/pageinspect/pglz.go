@@ -15,7 +15,7 @@ func pglzDecompress(src []byte, rawSize int) ([]byte, bool) {
 	if rawSize < 0 || rawSize > toastMaxRawSize {
 		return nil, false
 	}
-	dst := make([]byte, 0, rawSize)
+	dst := make([]byte, 0, min(rawSize, decodeInitialCap))
 	sp := 0
 	for sp < len(src) && len(dst) < rawSize {
 		ctrl := src[sp]

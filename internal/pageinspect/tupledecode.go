@@ -120,8 +120,12 @@ func describeToastPointer(v []byte) string {
 	if len(v) != toastPointerLen || v[1] != 0x12 { // VARTAG_ONDISK
 		return "out-of-line"
 	}
-	rawSize := int64(binary.LittleEndian.Uint32(v[2:6])) - 4
-	extSize := int64(binary.LittleEndian.Uint32(v[6:10]) & 0x3FFFFFFF)
+	// va_rawsize counts the 4-byte varlena header a real value carries; a
+	// corrupt pointer can make the subtraction negative, which humanize would
+	// render as a nonsense size and the chunk estimate below would compound.
+	rawSize := max(int64(binary.LittleEndian.Uint32(v[2:6]))-4, 0)
+	extInfo := binary.LittleEndian.Uint32(v[6:10])
+	extSize := int64(extInfo & 0x3FFFFFFF)
 	valueID := binary.LittleEndian.Uint32(v[10:14])
 	s := fmt.Sprintf("→ toast chunk %d · %s", valueID, humanize.Bytes(rawSize))
 	if extSize < rawSize {
@@ -131,7 +135,7 @@ func describeToastPointer(v []byte) string {
 		if rawSize > 0 {
 			pct = 100 * float64(extSize) / float64(rawSize)
 		}
-		s += fmt.Sprintf(" (%s compressed · %.0f%%)", humanize.Bytes(extSize), pct)
+		s += fmt.Sprintf(" (%s %s · %.0f%%)", humanize.Bytes(extSize), toastPointerMethod(extInfo), pct)
 	} else {
 		s += " (uncompressed)"
 	}
@@ -143,6 +147,20 @@ func describeToastPointer(v []byte) string {
 		s += " · 1 chunk"
 	}
 	return s
+}
+
+// toastPointerMethod names the compression a PG14+ on-disk pointer records in
+// the top two bits of va_extinfo (TOAST_COMPRESS_METHOD, postgres.h). Before
+// PG14 the whole word was the size and those bits were zero, which reads as
+// pglz — the only method that existed then, so the label stays true.
+func toastPointerMethod(extInfo uint32) string {
+	switch extInfo >> 30 {
+	case 0:
+		return "pglz"
+	case 1:
+		return "lz4"
+	}
+	return "compressed"
 }
 
 // toastMaxChunkSize is TOAST_MAX_CHUNK_SIZE for a standard 8 KiB-BLCKSZ build

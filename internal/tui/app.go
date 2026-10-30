@@ -911,6 +911,11 @@ type toastValueState struct {
 	loading bool
 	err     error
 	val     pg.ToastValue
+	// decoded is the inflate + jsonb/text render of val, done once when the
+	// value lands. The pane redraws on every keystroke and every spinner
+	// tick, and decoding a multi-megabyte value there would redo the whole
+	// inflate per frame.
+	decoded pageinspect.ToastDecoded
 }
 
 // reindexBloatThreshold is the bloat % above which the parts view offers an

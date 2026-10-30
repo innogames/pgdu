@@ -32,14 +32,18 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 	b.WriteString("    " + mu("         REDIRECT (HOT hop) slots have no tuple bytes so they don't appear in the bar;") + "\n")
 	b.WriteString("    " + mu("         their count shows in the Red column (each of live / Red / dead sorts on its own)") + "\n\n")
 
-	b.WriteString("  " + styleHeader.Render(" page flag ") + "  " +
-		mu("one glyph per page summarising its tuple-mix state") + "\n")
+	b.WriteString("  " + styleHeader.Render(" page flags ") + "  " +
+		mu("three independent slots; a page may raise any, all or none of them") + "\n")
 	b.WriteString("    " + styleHeapHot.Render("H") + "  " +
 		mu("hot-updated    at least one tuple was updated via the HOT path (same page, no index update)") + "\n")
 	b.WriteString("    " + styleHeapToastTag.Render("T") + "  " +
 		mu("has-external   at least one tuple has a TOAST pointer (a large value lives out-of-line)") + "\n")
 	b.WriteString("    " + styleBloat.Render("!") + "  " +
-		mu("more-dead-than-live  the page is mostly bloat — a candidate for VACUUM/VACUUM FULL/repack") + "\n\n")
+		mu("more-dead-than-live  the page is mostly bloat — a candidate for VACUUM/VACUUM FULL/repack") + "\n")
+	b.WriteString("    " + styleMuted.Render("N") + "  " +
+		mu("new            extended but never initialised (all-zero); VACUUM initialises it.") + "\n")
+	b.WriteString("       " +
+		mu("Holds no tuples, so it raises none of the other three and takes the first slot.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" lp_flags ") + "  " +
 		mu("on the per-tuple drill, the coloured dot at the start of each row decodes lp_flags") + "\n")
@@ -60,6 +64,9 @@ func (m *Model) renderHeapPagesInfo(height int) string {
 	b.WriteString("    " + mu("   the column only appears when pg_buffercache is installed; ←/→ cycles the sort onto it") + "\n\n")
 
 	b.WriteString("  " + mu("PgUp/PgDn slides the load window ("+strconv.Itoa(int(heapWindowDefault))+" pages per step).") + "\n")
+	b.WriteString("  " + styleBadge.Render("s") + "  " +
+		mu("go to block: type a block number and press ↵. A block in the loaded window only moves") + "\n")
+	b.WriteString("     " + mu("the cursor; anything else slides the window to it — the only way across a big relation.") + "\n")
 	b.WriteString("  " + mu("Within a window, j/k or arrows move the cursor; ↵ drills into one page.") + "\n")
 
 	return padInfo(&b, height)
@@ -85,7 +92,8 @@ func (m *Model) renderHeapTuplesInfo(height int) string {
 		styleLPUnused.Render("UNUSED") + mu(" reclaimed, reusable") + "\n")
 	b.WriteString("    " + padRight("len", 12) + mu("lp_len — tuple length in bytes (header + nulls bitmap + data)") + "\n")
 	b.WriteString("    " + padRight("xmin", 12) + mu("inserting transaction id (visible only to xacts after xmin commits)") + "\n")
-	b.WriteString("    " + padRight("xmax", 12) + mu("deleting / locking xid; 0 means \"no xmax set\" — the tuple is still live") + "\n")
+	b.WriteString("    " + padRight("xmax", 12) + mu("deleting / locking xid; 0 means \"no xmax set\" — the tuple is still live.") + "\n")
+	b.WriteString("    " + padRight("", 12) + mu("A set xmax is not a delete on its own: HEAP_XMAX_LOCK_ONLY makes it a row lock.") + "\n")
 	b.WriteString("    " + padRight("ctid", 12) + mu("forward pointer: own (block,offset) for NORMAL · → #NNNN target lp for REDIRECT") + "\n")
 	b.WriteString("    " + padRight("<column>", 12) + mu("a table column picked with C (default: the primary key) — the logical row behind the ctid.") + "\n")
 	b.WriteString("    " + padRight("", 12) + mu("Plain text is the row as this session sees it; a ") + styleMuted.Render("muted") + mu(" value was decoded from") + "\n")
@@ -103,8 +111,8 @@ func (m *Model) renderHeapTuplesInfo(height int) string {
 		mu("deleted by a committed xmax (or a DEAD line pointer) — reclaimable by VACUUM") + "\n")
 	b.WriteString("    " + styleBarAlt.Render(padRight("deleting", 10)) +
 		mu("xmax set but not yet committed — an in-flight DELETE/UPDATE") + "\n")
-	b.WriteString("    " + styleBarAlt.Render(padRight("locked", 10)) +
-		mu("xmax is a MultiXactId — row is locked/updated by several transactions") + "\n")
+	b.WriteString("    " + styleLPNormal.Render(padRight("locked", 10)) +
+		mu("xmax is a locker, not a deleter (FOR UPDATE/SHARE, or an FK check) — the row is live") + "\n")
 	b.WriteString("    " + styleMuted.Render(padRight("aborted", 10)) +
 		mu("inserting transaction aborted — the tuple was never visible to anyone") + "\n")
 	b.WriteString("    " + styleMuted.Render(padRight("unused", 10)) +
@@ -129,6 +137,14 @@ func (m *Model) renderHeapTuplesInfo(height int) string {
 	b.WriteString("  " + styleHeader.Render(" keys ") + "\n")
 	b.WriteString("    " + styleBadge.Render(padRight("↵", 10)) +
 		mu("byte-layout overlay — header fields, per-column bytes and decoded values (own ? help inside)") + "\n")
+	b.WriteString("    " + styleBadge.Render(padRight("↵", 10)) +
+		mu("on a ") + styleLPRedirect.Render("REDIRECT") + mu(" slot: hop to the HOT-chain target on this page") + "\n")
+	b.WriteString("    " + styleBadge.Render(padRight("n", 10)) +
+		mu("follow t_ctid to the row version that replaced this one — the hop a non-HOT update") + "\n")
+	b.WriteString("    " + padRight("", 10) +
+		mu("makes when the new version didn't fit on this page. Only on a superseded tuple:") + "\n")
+	b.WriteString("    " + padRight("", 10) +
+		mu("a current row's forward pointer is its own ctid. Press it again to walk the chain.") + "\n")
 
 	return padInfo(&b, height)
 }
@@ -136,15 +152,36 @@ func (m *Model) renderHeapTuplesInfo(height int) string {
 // heapPageWindowLabel reports the currently-loaded page window for the
 // status line, e.g. "pages 0–1999 / 12345". Returns "" off-level or with no
 // page data so the status row stays terse when there's nothing to show.
+//
+// The bounds come from the rows themselves, not from heapWindowStart plus the
+// row count: the B-tree and GIN summaries clamp their lower bound to block 1
+// (block 0 is the metapage, which neither can summarise), so a window asked
+// for at 0 returns blocks 1…N and the arithmetic would name a range off by one
+// at both ends. Scanning also survives any display sort, since itemBlkno reads
+// each row's own block number.
 func heapPageWindowLabel(s *screen) string {
-	if s.pages.heapPageCount == 0 {
+	if s.pages.heapPageCount == 0 || len(s.items) == 0 {
 		return ""
 	}
 	if s.level != levelHeapPages && s.level != levelIndexPages {
 		return ""
 	}
-	end := max(s.pages.heapWindowStart+int32(len(s.items))-1, s.pages.heapWindowStart)
-	label := fmt.Sprintf("pages %d–%d / %d", s.pages.heapWindowStart, end, s.pages.heapPageCount)
+	first, last, found := int64(0), int64(0), false
+	for _, it := range s.items {
+		blk, ok := itemBlkno(it)
+		if !ok {
+			continue
+		}
+		if !found {
+			first, last, found = blk, blk, true
+			continue
+		}
+		first, last = min(first, blk), max(last, blk)
+	}
+	if !found {
+		return ""
+	}
+	label := fmt.Sprintf("pages %d–%d / %d", first, last, s.pages.heapPageCount)
 	if s.pages.ginSeeking {
 		label += "  ·  searching for the next data-leaf page…"
 	}
@@ -170,7 +207,7 @@ func renderHeapPagesHeader(sort sortMode, sortDesc bool, barW int, showTemp bool
 	// Header indent matches the row: cursor (2) + bar slot (barW+2) + "  "
 	// before the flag column starts.
 	line := headerIndent(barW) +
-		padRight("!", heapPageFlagColW) + "  " +
+		padRight("!HT", heapPageFlagColW) + "  " +
 		padRight(sortMark("used", sort == sortBySize, sortDesc), heapPageUsedColW) + "  " +
 		padRight(sortMark("live", sort == sortByLiveLP, sortDesc), heapPageLiveColW) + "  " +
 		padRight(sortMark("Red", sort == sortByRedirectLP, sortDesc), heapPageRedirColW) + "  " +
@@ -185,15 +222,7 @@ func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool, show
 	cursor := selectedCursor(selected)
 	bar := renderHeapPageBar(p.LiveBytes, p.DeadBytes, barW)
 
-	flag := " "
-	switch {
-	case p.DeadLP > p.LiveLP && p.LiveLP+p.DeadLP > 0:
-		flag = styleBloat.Render("!")
-	case p.HotUpdated > 0:
-		flag = styleHeapHot.Render("H")
-	case p.HasExternal > 0:
-		flag = styleHeapToastTag.Render("T")
-	}
+	flag := heapPageFlags(p)
 
 	used := humanize.Bytes(it.size)
 	// Each count echoes its colour from the page bar / flag glyphs: live in the
@@ -222,6 +251,30 @@ func renderHeapPageRow(it item, p pg.HeapPageStat, barW int, selected bool, show
 		padRight(deadPct, heapPageDeadColW) + "  " +
 		pageTempRowCol(it, showTemp) +
 		drillMark(it.hasChildren) + name
+}
+
+// heapPageFlags paints the page's flag column. The three states are
+// independent — a bloated page can also carry HOT chains and TOAST pointers —
+// so each gets its own slot rather than one winning a switch; a page with none
+// stays blank.
+func heapPageFlags(p pg.HeapPageStat) string {
+	bloat, hot, toast := " ", " ", " "
+	if p.IsNew() {
+		// An uninitialised page holds no tuples, so none of the other three
+		// can be set — it borrows the first slot rather than widening the
+		// column for a state that is rare and mutually exclusive with them.
+		return styleMuted.Render("N") + "  "
+	}
+	if p.DeadLP > p.LiveLP && p.LiveLP+p.DeadLP > 0 {
+		bloat = styleBloat.Render("!")
+	}
+	if p.HotUpdated > 0 {
+		hot = styleHeapHot.Render("H")
+	}
+	if p.HasExternal > 0 {
+		toast = styleHeapToastTag.Render("T")
+	}
+	return bloat + hot + toast
 }
 
 // renderHeapTuplesList draws one row per line-pointer. The selected row
@@ -468,15 +521,22 @@ func heapTupleState(t pg.HeapTuple) (string, lipgloss.Style) {
 	if xminInvalid && !xminCommitted {
 		return "aborted", styleMuted
 	}
-	// xmax names a deleter/locker; HEAP_XMAX_INVALID (or a zero xmax) means the
-	// row was never deleted.
-	deleted := t.Xmax != nil && *t.Xmax != 0 && im&pg.HeapXmaxInvalid == 0
-	if deleted {
+	// xmax names a deleter *or* a locker; HEAP_XMAX_INVALID (or a zero xmax)
+	// means neither ever ran.
+	if xmaxSet := t.Xmax != nil && *t.Xmax != 0 && im&pg.HeapXmaxInvalid == 0; xmaxSet {
 		switch {
+		case im&pg.HeapXmaxLockOnly != 0:
+			// HEAP_XMAX_LOCK_ONLY: SELECT … FOR UPDATE/SHARE or a foreign-key
+			// check. The row is live whatever the commit bits say — testing
+			// them first would paint every FK-referenced row as bloat.
+			return "locked", styleLPNormal
+		case im&pg.HeapXmaxCommitted != 0:
+			// Reached by a plain delete/update and by a multixact that carries
+			// a committed updater: both leave a genuinely dead row, so the
+			// multi check must not short-circuit ahead of this.
+			return "dead", styleBloat
 		case im&pg.HeapXmaxIsMulti != 0:
 			return "locked", styleBarAlt
-		case im&pg.HeapXmaxCommitted != 0:
-			return "dead", styleBloat
 		default:
 			return "deleting", styleBarAlt
 		}
@@ -598,18 +658,24 @@ func tupleLifecycleLine(t pg.HeapTuple, indent string) string {
 	switch {
 	case t.Xmax == nil || *t.Xmax == 0 || im&pg.HeapXmaxInvalid != 0:
 		parts = append(parts, "not deleted")
-	case im&pg.HeapXmaxIsMulti != 0:
-		parts = append(parts, "locked (multixact "+xidLabel(t.Xmax)+")")
+	case im&pg.HeapXmaxLockOnly != 0:
+		// A locker, not a deleter — the row is live. Name the strongest mode
+		// the bits carry, since that is what a blocked session is waiting on.
+		parts = append(parts, "not deleted · "+xmaxLockMode(im, im2)+" by "+xidLabel(t.Xmax))
 	case im&pg.HeapXmaxCommitted != 0:
 		parts = append(parts, "deleted "+xidLabel(t.Xmax)+" (committed)")
+	case im&pg.HeapXmaxIsMulti != 0:
+		parts = append(parts, "locked (multixact "+xidLabel(t.Xmax)+")")
 	default:
 		parts = append(parts, "deleting "+xidLabel(t.Xmax))
 	}
 
-	// HEAP_KEYS_UPDATED qualifies the delete/lock above: the update touched a
-	// key column (or the row was deleted), which is what forces FOR-UPDATE-style
-	// locking over the cheaper FOR-KEY-SHARE path.
-	if im2&pg.HeapKeysUpdated2 != 0 {
+	// HEAP_KEYS_UPDATED qualifies the delete above: the update touched a key
+	// column (or the row was deleted), which is what forces FOR-UPDATE-style
+	// locking over the cheaper FOR-KEY-SHARE path. On a lock-only xmax
+	// xmaxLockMode already spent the bit naming the mode, so saying it twice
+	// would read as two separate facts.
+	if im2&pg.HeapKeysUpdated2 != 0 && im&pg.HeapXmaxLockOnly == 0 {
 		parts = append(parts, "key cols updated")
 	}
 
@@ -678,6 +744,31 @@ func renderTupleAnatomyBar(header, total, width int) string {
 		barSegment{cells: h, style: styleHeapToastTag},
 		barSegment{cells: width - h, style: styleHeapSeg},
 	)
+}
+
+// xmaxLockMode names the row lock t_xmax holds when HEAP_XMAX_LOCK_ONLY is
+// set, decoding the mode the way htup_details.h's HEAP_XMAX_IS_*_LOCKED macros
+// do: both mode bits together are FOR SHARE, KEYSHR alone the weak FOR KEY
+// SHARE an FK check takes, EXCL alone FOR NO KEY UPDATE — promoted to FOR
+// UPDATE by HEAP_KEYS_UPDATED in t_infomask2, the only bit that separates the
+// two. A multixact xmax means several sessions hold the row at once.
+func xmaxLockMode(im, im2 uint16) string {
+	mode := "locked"
+	switch {
+	case im&pg.HeapXmaxExclLock != 0 && im&pg.HeapXmaxKeyshrLock != 0:
+		mode = "locked for share"
+	case im&pg.HeapXmaxExclLock != 0:
+		mode = "locked for no key update"
+		if im2&pg.HeapKeysUpdated2 != 0 {
+			mode = "locked for update"
+		}
+	case im&pg.HeapXmaxKeyshrLock != 0:
+		mode = "locked for key share"
+	}
+	if im&pg.HeapXmaxIsMulti != 0 {
+		mode += " (multixact)"
+	}
+	return mode
 }
 
 // xidLabel formats a transaction id as "t<NNN>" for the lifecycle sentence,

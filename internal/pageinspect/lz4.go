@@ -16,7 +16,7 @@ func lz4BlockDecompress(src []byte, rawSize int) ([]byte, bool) {
 	if rawSize < 0 || rawSize > toastMaxRawSize {
 		return nil, false
 	}
-	dst := make([]byte, 0, rawSize)
+	dst := make([]byte, 0, min(rawSize, decodeInitialCap))
 	sp := 0
 	// extend accumulates a saturated nibble's continuation bytes.
 	extend := func(n int) (int, bool) {

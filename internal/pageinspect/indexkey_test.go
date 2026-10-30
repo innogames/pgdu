@@ -114,7 +114,7 @@ func TestDecodeIndexKey(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := DecodeIndexKey(tc.hex, tc.cols)
+			got, ok := DecodeIndexKey(tc.hex, tc.cols, nil)
 			if got != tc.want || ok != tc.ok {
 				t.Errorf("DecodeIndexKey(%q) = (%q, %v), want (%q, %v)",
 					tc.hex, got, ok, tc.want, tc.ok)
@@ -147,7 +147,7 @@ func TestDecodeIndexKeyPivot(t *testing.T) {
 		{"minus-infinity downlink", "", 0, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := DecodeIndexKeyPivot(tc.hex, cols, tc.natts)
+			got, ok := DecodeIndexKeyPivot(tc.hex, cols, tc.natts, nil)
 			if got != tc.want || ok != tc.ok {
 				t.Errorf("DecodeIndexKeyPivot(%q, natts=%d) = (%q, %v), want (%q, %v)",
 					tc.hex, tc.natts, got, ok, tc.want, tc.ok)
@@ -196,7 +196,7 @@ func TestFormatPGTemporal(t *testing.T) {
 // decoder: 8 zero bytes of a timestamp column render as the PG epoch.
 func TestDecodeIndexKeyTimestamp(t *testing.T) {
 	tsCol := col("timestamp", "d", 8, "D")
-	got, ok := DecodeIndexKey("00 00 00 00 00 00 00 00", []pg.IndexKeyColumn{tsCol})
+	got, ok := DecodeIndexKey("00 00 00 00 00 00 00 00", []pg.IndexKeyColumn{tsCol}, nil)
 	if !ok || got != "2000-01-01 00:00:00" {
 		t.Errorf("DecodeIndexKey(timestamp 0) = (%q, %v), want (%q, true)",
 			got, ok, "2000-01-01 00:00:00")
@@ -207,7 +207,7 @@ func TestDecodeIndexKeyTimestamp(t *testing.T) {
 // them (time µs, then day, then month — little-endian).
 func TestDecodeIndexKeyInterval(t *testing.T) {
 	ivCol := col("interval", "d", 16, "T")
-	got, ok := DecodeIndexKey("00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00", []pg.IndexKeyColumn{ivCol})
+	got, ok := DecodeIndexKey("00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00", []pg.IndexKeyColumn{ivCol}, nil)
 	if !ok || got != "1 day" {
 		t.Errorf("DecodeIndexKey(interval 1 day) = (%q, %v), want (%q, true)", got, ok, "1 day")
 	}
@@ -245,5 +245,48 @@ func TestLeadingKeyValue(t *testing.T) {
 	// Minus-infinity downlink: no data, no key.
 	if _, ok := LeadingKeyValue(pg.IndexTuple{}, []pg.IndexKeyColumn{int4Col}); ok {
 		t.Errorf("LeadingKeyValue(no data) ok = true, want false")
+	}
+}
+
+// bt_page_items strips the null bitmap from `data`, so the bytes present
+// belong only to the non-null attributes — and nothing in them says which
+// those are. A positional walk would hand column 1 the bytes of whichever
+// column is actually first, so a tuple flagged as having nulls must refuse to
+// decode and let the caller fall back to hex.
+func TestDecodeIndexKeyRefusesNulls(t *testing.T) {
+	cols := []pg.IndexKeyColumn{int4Col, textCol}
+	// Bytes for the text column alone — what the page holds when the int4 is
+	// NULL. Decoded positionally they would read as a plausible int4.
+	data := "09 61 62 63"
+	hasNulls, noNulls := true, false
+
+	if got, ok := DecodeIndexKey(data, cols, &hasNulls); ok {
+		t.Errorf("decoded a null-bearing key as %q, want a refusal", got)
+	}
+	if got, ok := DecodeIndexKeyPivot(data, cols, 1, &hasNulls); ok {
+		t.Errorf("pivot: decoded a null-bearing key as %q, want a refusal", got)
+	}
+	// The same bytes without the flag decode as before — the guard must not
+	// change the ordinary path.
+	if _, ok := DecodeIndexKey(data, cols, &noNulls); !ok {
+		t.Error("a tuple with no nulls must still decode")
+	}
+	if _, ok := DecodeIndexKey(data, cols, nil); !ok {
+		t.Error("a nil flag (server reported none) must still decode")
+	}
+}
+
+// LeadingKeyValue feeds the B-tree key seek, so a mis-attributed leading value
+// would send a descent down the wrong subtree. It reads the tuple's own Nulls.
+func TestLeadingKeyValueRefusesNulls(t *testing.T) {
+	cols := []pg.IndexKeyColumn{int4Col, textCol}
+	data := "09 61 62 63"
+	hasNulls := true
+
+	if got, ok := LeadingKeyValue(pg.IndexTuple{Data: &data, Nulls: &hasNulls}, cols); ok {
+		t.Errorf("seek key from a null-bearing tuple = %q, want no key", got)
+	}
+	if _, ok := LeadingKeyValue(pg.IndexTuple{Data: &data}, cols); !ok {
+		t.Error("a tuple with no null flag must still yield a leading key")
 	}
 }

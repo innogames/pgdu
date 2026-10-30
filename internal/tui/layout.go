@@ -190,7 +190,9 @@ func barReserve(s *screen) int {
 // Column widths shared by the heap-pages header and rows. Centralised here
 // so the header columns and the row body never drift.
 const (
-	heapPageFlagColW = 1
+	// Three slots: !, H and T are independent facts about a page and a bloated
+	// page that also HOT-updates and TOASTs has all three to tell.
+	heapPageFlagColW = 3
 	heapPageUsedColW = 10
 	// live / R / dead line-pointer counts, each its own sortable column.
 	heapPageLiveColW   = 5 // up to ~291 tuples/page + sort arrow
