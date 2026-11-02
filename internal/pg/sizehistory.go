@@ -3,10 +3,7 @@ package pg
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"sort"
 	"time"
 
@@ -309,96 +306,31 @@ func (s *SizeSample) fold(min int64) {
 	s.OtherBytes, s.OtherCount = otherBytes, otherCount
 }
 
-// RetentionPolicy is the tiered keep rule for size samples: every sample
-// younger than All, then the newest per UTC calendar day back to Daily, then
-// the newest per ISO week back to Weekly, then nothing.
-//
-// It drops WHOLE samples, never rows, so every retained file stays complete and
-// self-describing and any two of them diff against each other.
-type RetentionPolicy struct {
-	All    time.Duration
-	Daily  time.Duration
-	Weekly time.Duration
+// sizeID projects a listing entry down to the identity the kind-blind sweeps
+// work on. See sampleID for why this is a function rather than a method.
+func sizeID(m SizeSampleMeta) sampleID {
+	return sampleID{path: m.Path, target: m.Target, database: m.Database, at: m.CapturedAt}
 }
 
-// RetentionFor builds a policy from the single operator-facing knob: the hard
-// horizon. The 7-day and 90-day tiers below it are an implementation detail of
-// "keep history cheap", not a question anybody asks.
-func RetentionFor(horizon time.Duration) RetentionPolicy {
-	return RetentionPolicy{
-		All:    7 * 24 * time.Hour,
-		Daily:  90 * 24 * time.Hour,
-		Weekly: horizon,
-	}
-}
-
-// DefaultRetention keeps roughly two years of history at ~140 files per
-// database.
-var DefaultRetention = RetentionFor(2 * 365 * 24 * time.Hour)
-
-// keep reports whether a sample captured at t survives the policy, given the
-// newest sample already kept in its day and week bucket.
-func (p RetentionPolicy) keep(age time.Duration, firstInDay, firstInWeek bool) bool {
-	switch {
-	case age <= p.All:
-		return true
-	case age <= p.Daily:
-		return firstInDay
-	case age <= p.Weekly:
-		return firstInWeek
-	}
-	return false
-}
-
-// PruneSizeSamples deletes the size samples in dir for one (target, database)
-// that the policy no longer keeps, and returns how many it removed.
+// PruneSizeSamples keeps the newest keep size samples in dir for one
+// (target, database) and deletes the rest, returning how many it removed.
+// keep < 1 prunes nothing.
 //
-// It is scoped three ways on purpose, because the directory is shared and
-// world-writable: it lists through ListSizeSamples, so a query snapshot is
-// unreachable from here whatever the extension rules become, and it matches
-// Target and Database so a cron sampling one database on one host never prunes
-// another's history. Deleting another *user's* samples of the same database is
-// deliberate, and matches how snapshots are already shared.
-//
-// Because ListSizeSamples returns newest first, the most recent sample is
-// always in the All tier and no policy can delete it.
-func PruneSizeSamples(dir, target, database string, now time.Time, p RetentionPolicy) (int, error) {
+// It lists through ListSizeSamples, which is both why the query snapshots
+// sharing the directory are unreachable from here and why metas arrive newest
+// first — the order pruneKeepNewest needs to treat keep as a prefix count.
+func PruneSizeSamples(dir, target, database string, keep int) (int, error) {
 	metas, err := ListSizeSamples(dir)
 	if err != nil {
 		return 0, err
 	}
+	return pruneKeepNewest(metas, sizeID, target, database, keep)
+}
 
-	seenDay := map[string]bool{}
-	seenWeek := map[string]bool{}
-	removed := 0
-	var firstErr error
-	for _, m := range metas {
-		if m.Target != target || m.Database != database {
-			continue
-		}
-		at := m.CapturedAt.UTC()
-		day := at.Format("2006-01-02")
-		year, week := at.ISOWeek()
-		wk := fmt.Sprintf("%04d-W%02d", year, week)
-
-		firstInDay, firstInWeek := !seenDay[day], !seenWeek[wk]
-		seenDay[day], seenWeek[wk] = true, true
-
-		if p.keep(now.Sub(m.CapturedAt), firstInDay, firstInWeek) {
-			continue
-		}
-		if err := DeleteSnapshot(m.Path); err != nil {
-			// A concurrent sampler may have pruned it already; that is not a
-			// failure. Any other error is reported but never stops the sweep.
-			if os.IsNotExist(err) || errors.Is(err, fs.ErrNotExist) {
-				continue
-			}
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		removed++
-	}
-	return removed, firstErr
+// SizeSampleCapturedToday reports whether metas already holds a sample of
+// (target, database) taken on now's UTC calendar day. It takes the listing
+// rather than a directory because its one caller — the auto-capture decision
+// on tool open — has just listed it. See capturedToday for why UTC.
+func SizeSampleCapturedToday(metas []SizeSampleMeta, target, database string, now time.Time) bool {
+	return capturedToday(metas, sizeID, target, database, now)
 }

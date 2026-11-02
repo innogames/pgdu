@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -317,4 +319,103 @@ func DeleteSnapshot(path string) error {
 		return fmt.Errorf("delete snapshot %q: %w", path, err)
 	}
 	return nil
+}
+
+// dayLayout is the UTC calendar day the once-a-day predicate keys on. It is the
+// same day key the retention sweep used to bucket on before it became a count.
+const dayLayout = "2006-01-02"
+
+// sampleID is everything a kind-agnostic sweep needs from one listing entry:
+// which file, whose it is, and when it was taken.
+//
+// SnapshotMeta and SizeSampleMeta carry these four under identical names but
+// share no type, so each kind hands over a projection rather than implementing
+// an interface. That keeps the metas plain JSON shapes with no behaviour, and
+// keeps a []SizeSampleMeta from having to be copied element by element into a
+// slice of some interface before it can be swept.
+type sampleID struct {
+	path     string
+	target   string
+	database string
+	at       time.Time
+}
+
+// DefaultRetention is how many samples of ONE kind pgdu keeps per
+// (target, database): 30 size samples and 30 query snapshots per database per
+// host, roughly a month of once-a-day history.
+//
+// A count rather than a horizon, because the thing an operator wants bounded is
+// the directory, and a count bounds it whether samples arrive four times an
+// hour from cron or once a day from opening the tool.
+const DefaultRetention = 30
+
+// pruneKeepNewest deletes every entry of one kind belonging to
+// (target, database) past the newest keep, and reports how many it removed.
+//
+// metas must be newest first — both listers sort that way — which is what makes
+// keep a prefix count and nothing more.
+//
+// keep < 1 prunes nothing. That is both the documented "0 = never prune" escape
+// hatch and what re-establishes the invariant the tiered policy used to get for
+// free from its 7-day floor: under a count, the newest sample is only safe if
+// at least one is kept. The clamp lives here rather than at each call site,
+// where one caller forgetting it would wipe a database's whole history.
+//
+// Scoping is three-deep on purpose, because the directory is shared and
+// world-writable: the caller lists through its own kind's lister, so another
+// kind's file is unreachable from here whatever the extension rules become, and
+// target and database are matched so sampling one database on one host never
+// prunes another's. Deleting another *user's* samples of the same database is
+// deliberate, and matches how the directory is already shared.
+func pruneKeepNewest[T any](metas []T, id func(T) sampleID, target, database string, keep int) (int, error) {
+	if keep < 1 {
+		return 0, nil
+	}
+	seen, removed := 0, 0
+	var firstErr error
+	for _, m := range metas {
+		s := id(m)
+		if s.target != target || s.database != database {
+			continue
+		}
+		seen++
+		if seen <= keep {
+			continue
+		}
+		if err := DeleteSnapshot(s.path); err != nil {
+			// A concurrent sampler may have pruned it already; that is not a
+			// failure. Any other error is reported but never stops the sweep.
+			if os.IsNotExist(err) || errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed++
+	}
+	return removed, firstErr
+}
+
+// capturedToday reports whether metas already holds a capture of
+// (target, database) on now's UTC calendar day.
+//
+// UTC and a calendar day, not local time and not a rolling 24 hours: the
+// filenames, the browser labels and every scoped sweep in this package are
+// already UTC, so one timezone governs the feature and two pgdu processes on
+// one host under different TZs agree without comparing clocks. A rolling window
+// would instead mean "at most once per 24h", which drifts the capture later
+// every day until a day is skipped outright — 23:00 then 08:00 is nine hours
+// apart and would not capture — and "30 kept samples" would stop meaning
+// "about a month".
+func capturedToday[T any](metas []T, id func(T) sampleID, target, database string, now time.Time) bool {
+	day := now.UTC().Format(dayLayout)
+	for _, m := range metas {
+		s := id(m)
+		if s.target == target && s.database == database && s.at.UTC().Format(dayLayout) == day {
+			return true
+		}
+	}
+	return false
 }

@@ -202,11 +202,24 @@ func (m *Model) onStatementsTick() tea.Cmd {
 
 // onSnapshotSaved reports the dump's path (or error) in the transient notice.
 func (m *Model) onSnapshotSaved(msg snapshotSavedMsg) tea.Cmd {
+	m.setCapturingSnapshot(false)
 	if msg.err != nil {
-		m.notice = "snapshot failed: " + msg.err.Error()
+		// Quiet when nobody asked — see onSizeSampleCaptured.
+		if !msg.auto {
+			m.notice = "snapshot failed: " + msg.err.Error()
+		}
 		return nil
 	}
-	m.notice = "snapshot saved → " + msg.path
+	if !msg.auto {
+		m.notice = "snapshot saved → " + msg.path
+		return nil
+	}
+	m.notice = "auto-snapshot: today's counters captured"
+	// Re-list so the fresh snapshot joins the browser the user is looking at.
+	// firstLoad is false by then, so this cannot re-trigger the capture.
+	if s := m.findLevel(levelSnapshots); s != nil {
+		return m.listSnapshotsCmd(m.snapshotDir, s.db)
+	}
 	return nil
 }
 
@@ -289,6 +302,14 @@ func (m *Model) onSnapshotsListed(msg snapshotsListedMsg) tea.Cmd {
 	// Clamp the cursor: a delete (or filter) can shrink the list out from under it.
 	if s.cursor >= len(s.items) {
 		s.cursor = max(len(s.items)-1, 0)
+	}
+	// Opening the tool takes the day's snapshot if nothing has — see
+	// onSizeSamplesListed for why the decision lives on the listing. It reads
+	// msg.metas, the RAW listing, not the reset-filtered metas above: a stats
+	// reset since this morning's capture would otherwise make today look empty
+	// and re-capture on every open.
+	if firstLoad && s.stat.entry && msg.err == nil {
+		return m.autoSnapshotCmd(s.db, msg.metas)
 	}
 	return nil
 }

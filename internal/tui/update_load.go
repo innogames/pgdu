@@ -247,8 +247,12 @@ func (m *Model) loadCurrent() tea.Cmd {
 			return nil
 		}
 		if s.growth.endPath == growthNow {
-			s.growth.capturing = true
-			return m.captureSizesCmd(s.db, false)
+			// Deliberately not gated on capturingSizes: this capture IS the
+			// screen's load, so declining it would leave the table spinning on
+			// a message that never comes. Racing the daily auto capture costs
+			// one extra read-only scan, which is cheaper than that.
+			m.setCapturingSizes(true)
+			return m.captureSizesCmd(s.db, captureLive)
 		}
 		m.rebuildGrowthItems(s)
 		s.loading, s.loaded = false, true

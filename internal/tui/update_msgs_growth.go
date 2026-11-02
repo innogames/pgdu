@@ -62,29 +62,47 @@ func (m *Model) onSizeSamplesListed(msg sizeSamplesListedMsg) tea.Cmd {
 	if s.cursor >= len(items) {
 		s.cursor = max(len(items)-1, 0)
 	}
+	// Opening the tool takes the day's sample if nothing has. This hangs off the
+	// listing rather than loadCurrent because only here are both halves of "the
+	// tool just opened for this db" visible: entry marks the browser the tool
+	// pushes first, first marks its first load, and the listing that just landed
+	// is the free answer to whether today already has one. first is what keeps
+	// the re-list a capture triggers from firing a second one.
+	if first && s.growth.entry && msg.err == nil {
+		return m.autoCaptureSizesCmd(s.db, msg.metas)
+	}
 	return nil
 }
 
-// onSizeSampleCaptured handles both an S capture (written to disk, so the
+// onSizeSampleCaptured handles an S or auto capture (written to disk, so the
 // browser re-lists to show it) and the live end of an applied window.
 func (m *Model) onSizeSampleCaptured(msg sizeSampleCapturedMsg) tea.Cmd {
-	for _, l := range []level{levelGrowth, levelGrowthWindow} {
-		if s := m.findLevel(l); s != nil {
-			s.growth.capturing = false
-		}
-	}
+	m.setCapturingSizes(false)
 	if msg.err != nil {
-		m.notice = "capture sizes: " + msg.err.Error()
-		if s := m.findLevel(levelGrowth); s != nil {
+		// A failed auto capture says nothing: the user never asked for it, and
+		// a cluster this role cannot scan would otherwise greet them with an
+		// error banner on every tool open. S still reports in full.
+		if msg.mode != captureAuto {
+			m.notice = "capture sizes: " + msg.err.Error()
+		}
+		// Unstick the table only if this capture was its load (the @now end of
+		// a window). An auto capture fired from the browser must not mark the
+		// still-unpicked table loaded.
+		if s := m.findLevel(levelGrowth); s != nil && s.loading {
 			s.loading = false
 			s.loaded = true
 		}
 		return nil
 	}
 
-	if msg.save {
-		m.notice = "captured " + formatRows(int64(msg.sample.RowCount)) + " relations · " +
-			humanize.Bytes(msg.sample.TotalBytes) + " · " + msg.path
+	if msg.mode != captureLive {
+		if msg.mode == captureAuto {
+			// No path: that is S's receipt for something the user asked for.
+			m.notice = "auto-sample: today's size sample captured"
+		} else {
+			m.notice = "captured " + formatRows(int64(msg.sample.RowCount)) + " relations · " +
+				humanize.Bytes(msg.sample.TotalBytes) + " · " + msg.path
+		}
 		// Re-list so the new sample joins the browser immediately.
 		if s := m.findLevel(levelGrowthWindow); s != nil {
 			return m.listSizeSamplesCmd(m.snapshotDir, s.db)

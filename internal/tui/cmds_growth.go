@@ -21,6 +21,18 @@ const growthNow = "@now"
 // still bounded so a wedged server cannot hang the key forever.
 const growthCaptureTimeout = 10 * time.Minute
 
+// sizeCaptureMode says what a capture does beyond reading the sizes. The three
+// rules are named rather than passed as a pair of bools because "written" and
+// "prunes" are not independent, and the one combination that must never exist
+// is a key press that deletes history.
+type sizeCaptureMode int
+
+const (
+	captureLive   sizeCaptureMode = iota // the live end of an applied window; never written
+	captureManual                        // S: written, never pruned
+	captureAuto                          // once a day on tool open: written, then pruned
+)
+
 // --- messages ---
 
 type sizeSamplesListedMsg struct {
@@ -33,10 +45,10 @@ type sizeSamplesListedMsg struct {
 	err          error
 }
 
-// sizeSampleCapturedMsg carries an S capture (save = true, written to disk) or
-// the live end of an applied window (save = false, never written).
+// sizeSampleCapturedMsg carries a capture back; mode says which of the three
+// kinds it was, and so what the handler may say about it.
 type sizeSampleCapturedMsg struct {
-	save   bool
+	mode   sizeCaptureMode
 	db     string
 	path   string
 	sample *pg.SizeSample
@@ -64,30 +76,60 @@ func (m *Model) listSizeSamplesCmd(dir, db string) tea.Cmd {
 	})
 }
 
-// captureSizesCmd captures the current sizes. With save it writes the sample
-// to the snapshot directory so it joins the browser; without, it is the live
-// end of an applied window and stays in memory.
-func (m *Model) captureSizesCmd(db string, save bool) tea.Cmd {
-	dir := m.snapshotDir
+// captureSizesCmd captures the current sizes under one of the three modes:
+// written and swept (auto), written and left alone (S), or kept in memory as
+// the live end of a window.
+//
+// Every mode keeps every relation (minBytes 0). The size floor is cron's knob;
+// an interactive-origin capture that silently dropped relations would make the
+// growth table's row set depend on invisible config, and a window that spans
+// one floored file and one unfloored one is already explained by
+// GrowthResult.FloorChanged.
+func (m *Model) captureSizesCmd(db string, mode sizeCaptureMode) tea.Cmd {
+	dir, keep := m.snapshotDir, m.sampleRetention
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), growthCaptureTimeout)
 		defer cancel()
 
-		msg := sizeSampleCapturedMsg{save: save, db: db}
+		msg := sizeSampleCapturedMsg{mode: mode, db: db}
 		sample, err := m.client.CaptureSizes(ctx, db, 0)
 		if err != nil {
 			msg.err = err
 			return msg
 		}
 		msg.sample = sample
-		if save {
-			// Interactive captures keep every relation and never prune: the
-			// size floor and the retention horizon are cron's concerns, and a
-			// key press should not silently delete history.
-			msg.path, msg.err = pg.SaveSizeSample(dir, sample)
+		if mode == captureLive {
+			return msg
 		}
+		if msg.path, msg.err = pg.SaveSizeSample(dir, sample); msg.err != nil || mode != captureAuto {
+			// S never prunes: a key press should not silently delete history.
+			return msg
+		}
+		// The auto capture does, because it is pgdu's own doing — pgdu owns
+		// bounding what it created. A prune failure is not worth reporting: the
+		// sample is already safely written and the next capture retries.
+		_, _ = pg.PruneSizeSamples(dir, sample.Target, sample.Database, keep)
 		return msg
 	}
+}
+
+// autoCaptureSizesCmd takes the day's size sample when the growth tool opens on
+// a database that has none yet. It is the growth half of the rule that pgdu's
+// history has to accrue from use, since the server keeps none and nothing here
+// is a daemon.
+//
+// The listing it is handed is the one the entry browser just loaded, so asking
+// "already today?" costs nothing. An empty snapshotDir bails rather than
+// failing MkdirAll("") on every tool open.
+func (m *Model) autoCaptureSizesCmd(db string, metas []pg.SizeSampleMeta) tea.Cmd {
+	if !m.autoSample || m.snapshotDir == "" || m.capturingSizes() {
+		return nil
+	}
+	if pg.SizeSampleCapturedToday(metas, m.target, db, time.Now()) {
+		return nil
+	}
+	m.setCapturingSizes(true)
+	return m.captureSizesCmd(db, captureAuto)
 }
 
 // deleteSizeSampleCmd removes one sample and re-lists, so a delete error rides
@@ -151,5 +193,28 @@ func (m *Model) loadGrowthWindowCmd(db, basePath, endPath string, stay bool) tea
 
 		msg.result, msg.err = pg.DiffSizes(msg.base, msg.end)
 		return msg
+	}
+}
+
+// capturingSizes / setCapturingSizes span both growth screens, because a
+// capture started from the picker is still running when the user has entered a
+// window and is standing on the table — the "already running" guard and the
+// banner have to agree wherever the cursor is. The clear in
+// onSizeSampleCaptured has always swept both levels; these make the set and the
+// read match it.
+func (m *Model) capturingSizes() bool {
+	for _, l := range []level{levelGrowth, levelGrowthWindow} {
+		if s := m.findLevel(l); s != nil && s.growth.capturing {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) setCapturingSizes(v bool) {
+	for _, l := range []level{levelGrowth, levelGrowthWindow} {
+		if s := m.findLevel(l); s != nil {
+			s.growth.capturing = v
+		}
 	}
 }

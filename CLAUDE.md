@@ -18,9 +18,10 @@ internal/pg/         # pgx wrapper: one *pgxpool.Pool per database, lazy
   diag_defs_{cat}.go #   Diagnostics registry entries per category; diagnostic_defs.go concatenates them
   types.go, types_{domain}.go   # row structs
   {entity}.go        #   one file per entity's List*/Fill*/Probe* operations
-  sizehistory.go     #   size samples: capture, save/list/load, retention (growth tool)
+  sizehistory.go     #   size samples: capture, save/list/load, prune (growth tool)
   growth.go          #   DiffSizes + the scope roll-ups over two samples
-  snapfile.go        #   the gzip-JSON file layer both sample kinds share
+  snapfile.go        #   the gzip-JSON file layer both sample kinds share, plus the
+                     #   keep-newest-N sweep and the once-a-day predicate over it
   pgbouncer.go       #   DiscoverPgBouncers: pgbouncer.Client.Discover + the behind-a-pooler check
   logdiscover.go     #   log file discovery (pg_current_logfile / pg_ls_logdir) + server-side LogSource
 internal/diagres/    # generic column/row result table (kinds, cells, pgx row scan) shared by pg and pgbouncer
@@ -87,8 +88,12 @@ Defaults match `psql`: no `-h` → Unix socket + peer auth. `PGPASSWORD` is read
 Snapshots (`--snapshot-dir`, default `/tmp/pgdu-snapshots`, `PGDU_SNAPSHOT_DIR`) are
 deliberately world-writable (dir 0o777, files 0o666) so any host user can manage anyone's.
 The directory holds two kinds: query snapshots (`*.json.gz`) and size samples
-(`*.sizes.gz`, written by `pgdu --sample`). On most distros that path is tmpfs or
-cleaned at boot, so point it somewhere persistent for real size history.
+(`*.sizes.gz`). Both accrue by themselves: opening the top-queries or growth tool
+captures one for that database when none was captured on today's **UTC** calendar
+day, and that capture prunes to the newest `--sample-retention` (default 30) per
+`(target, database, kind)`. `PGDU_AUTO_SAMPLE=0` / `--no-auto-sample` turns it off.
+On most distros that path is tmpfs or cleaned at boot, so point it somewhere
+persistent for real history.
 Prefs (`~/.config/pgdu/prefs.json`, `PGDU_CONFIG_DIR`) are per-user; `prefs.Load` never
 fails (missing/corrupt → empty).
 
@@ -252,10 +257,15 @@ fails (missing/corrupt → empty).
   measured and rows are counted. The partition roll-up walks `ParentOID` client-side
   (`RollUpGrowth`), *not* `sqlDiagTableShowSize`'s recursive CTE, because the tree
   differs between the two samples and only the client holds both files.
-  `pgdu --sample` is the cron one-shot (`runSample` in `main.go`, its own 10-minute
-  budget, path to stdout) and the only thing that prunes; the TUI's `S` captures with
-  no size floor and never prunes. The four scopes are Tab-cycled in-place views over
-  one row set, and because a roll-up row is a `pg.GrowthRow` too they share **one**
+  Three capture modes, and `sizeCaptureMode` names them rather than passing a pair
+  of bools, because the one combination that must never exist is a key press that
+  deletes history: `pgdu --sample` is the cron one-shot (`runSample` in `main.go`,
+  its own 10-minute budget, path to stdout) and prunes; the daily auto capture on
+  tool open prunes too, because it is pgdu's own doing and pgdu owns bounding what
+  it created; `S` is written and never pruned. All three keep every relation — the
+  size floor is cron's knob alone, and a window spanning a floored file and an
+  unfloored one is already explained by `GrowthResult.FloorChanged`.
+  The four scopes are Tab-cycled in-place views over one row set, and because a roll-up row is a `pg.GrowthRow` too they share **one**
   column registry — unlike the top-queries roll-ups, whose group rows are a different
   type and need a second. The picker duplicates the snapshot browser's idiom rather
   than its code (that one is welded to `stmtState`); what differs is a bytes bar,
@@ -279,7 +289,11 @@ fails (missing/corrupt → empty).
   skip live re-sampling in `loadCurrent`/`onStatementsTick`. The same browser is the
   tool's entry screen (`stat.entry`, pushed by `databaseChildScreens` over a
   not-yet-loaded `levelStatements`): no `@now` row, the pick is always the window's
-  start, and Back pops the unloaded table too. The session anchor is captured on the
+  start, and Back pops the unloaded table too. That first listing is also where the
+  daily auto capture is decided (`first && entry`, so the re-list it triggers cannot
+  fire a second), and the predicate reads the **raw** listing, never the
+  reset-filtered one — a reset since this morning's capture would otherwise make
+  today look empty and re-capture on every open. The session anchor is captured on the
   first live sample whatever base was picked, so `@session` exists after a snapshot or
   cumulative entry as well.
 - **Top-queries roll-ups are in-place views, not levels**: `Tab` cycles `stat.view`

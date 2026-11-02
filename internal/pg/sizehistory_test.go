@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -309,76 +308,72 @@ func TestSizeSampleCompatibleWith(t *testing.T) {
 	}
 }
 
-func TestPruneRetention(t *testing.T) {
+// Retention keeps a prefix of the newest-first listing and nothing else.
+func TestPruneKeepsNewestN(t *testing.T) {
 	dir := t.TempDir()
-	now := time.Date(2026, 10, 30, 23, 0, 0, 0, time.UTC)
-	p := RetentionFor(365 * 24 * time.Hour)
+	base := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 
-	// Four samples a day for 400 days back, all strictly before now.
-	var want, all int
 	var newest time.Time
-	for day := range 400 {
-		for _, hour := range []int{0, 6, 12, 18} {
-			at := time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, time.UTC).
-				AddDate(0, 0, -day)
-			if at.After(newest) {
-				newest = at
-			}
-			if _, err := SaveSizeSample(dir, testSample("app", at)); err != nil {
-				t.Fatalf("SaveSizeSample: %v", err)
-			}
-			all++
+	for i := range 100 {
+		at := base.Add(-time.Duration(i) * 6 * time.Hour)
+		if _, err := SaveSizeSample(dir, testSample("app", at)); err != nil {
+			t.Fatalf("SaveSizeSample: %v", err)
+		}
+		if at.After(newest) {
+			newest = at
 		}
 	}
 
-	removed, err := PruneSizeSamples(dir, "db:5432", "app", now, p)
+	removed, err := PruneSizeSamples(dir, "db:5432", "app", 30)
 	if err != nil {
 		t.Fatalf("PruneSizeSamples: %v", err)
+	}
+	if removed != 70 {
+		t.Errorf("removed %d, want 70", removed)
 	}
 	left, err := ListSizeSamples(dir)
 	if err != nil {
 		t.Fatalf("ListSizeSamples: %v", err)
 	}
-	if removed+len(left) != all {
-		t.Errorf("removed %d + left %d != %d written", removed, len(left), all)
+	if len(left) != 30 {
+		t.Fatalf("kept %d, want 30", len(left))
 	}
+	if !left[0].CapturedAt.Equal(newest) {
+		t.Errorf("newest kept = %v, want the newest written %v", left[0].CapturedAt, newest)
+	}
+	// Newest-first means the survivors are the 30 most recent, contiguously.
+	for i := 1; i < len(left); i++ {
+		if !left[i].CapturedAt.Before(left[i-1].CapturedAt) {
+			t.Fatalf("listing not newest-first at %d", i)
+		}
+	}
+	if oldest, want := left[29].CapturedAt, base.Add(-29*6*time.Hour); !oldest.Equal(want) {
+		t.Errorf("oldest kept = %v, want %v — a non-contiguous prefix survived", oldest, want)
+	}
+}
 
-	// Recompute the expectation the same way a reader would reason about it:
-	// everything inside 7d, one per day from 7d to 90d, one per ISO week out
-	// to the horizon.
-	days := map[string]int{}
-	weeks := map[string]int{}
-	for _, m := range left {
-		age := now.Sub(m.CapturedAt)
-		at := m.CapturedAt.UTC()
-		y, w := at.ISOWeek()
-		switch {
-		case age <= p.All:
-			want++
-		case age <= p.Daily:
-			days[at.Format("2006-01-02")]++
-		case age <= p.Weekly:
-			weeks[fmt.Sprintf("%04d-W%02d", y, w)]++
-		default:
-			t.Errorf("kept a sample past the horizon: %v (age %v)", at, age)
+// keep < 1 is the "never prune" escape hatch AND what guarantees the newest
+// sample survives every policy. Misreading it wipes a database's history, so
+// both spellings are pinned.
+func TestPruneZeroKeepsNothingDeleted(t *testing.T) {
+	for _, keep := range []int{0, -1} {
+		dir := t.TempDir()
+		now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+		for i := range 5 {
+			if _, err := SaveSizeSample(dir, testSample("app", now.Add(-time.Duration(i)*time.Hour))); err != nil {
+				t.Fatalf("SaveSizeSample: %v", err)
+			}
 		}
-	}
-	for d, n := range days {
-		if n != 1 {
-			t.Errorf("day %s kept %d samples, want 1", d, n)
+		removed, err := PruneSizeSamples(dir, "db:5432", "app", keep)
+		if err != nil {
+			t.Fatalf("PruneSizeSamples(keep=%d): %v", keep, err)
 		}
-	}
-	for w, n := range weeks {
-		if n != 1 {
-			t.Errorf("week %s kept %d samples, want 1", w, n)
+		if removed != 0 {
+			t.Errorf("keep=%d removed %d, want 0", keep, removed)
 		}
-	}
-	// The newest capture must always survive, whatever the policy.
-	if len(left) == 0 || !left[0].CapturedAt.Equal(newest) {
-		t.Errorf("newest sample not kept: got %v, want %v", left[0].CapturedAt, newest)
-	}
-	if len(left) > 200 {
-		t.Errorf("kept %d files, want the policy to bound it near ~140", len(left))
+		if left, _ := ListSizeSamples(dir); len(left) != 5 {
+			t.Errorf("keep=%d left %d files, want all 5", keep, len(left))
+		}
 	}
 }
 
@@ -404,19 +399,23 @@ func TestPruneScoped(t *testing.T) {
 	if _, err := SaveSizeSample(dir, remote); err != nil {
 		t.Fatalf("SaveSizeSample: %v", err)
 	}
-	// And one of ours that must go.
+	// Two of ours: under keep-N the newest in scope is always safe, so the
+	// older one is what must go.
 	doomed := testSample("app", old.Add(2*time.Hour))
 	doomedPath, err := SaveSizeSample(dir, doomed)
 	if err != nil {
 		t.Fatalf("SaveSizeSample: %v", err)
 	}
+	if _, err := SaveSizeSample(dir, testSample("app", old.Add(3*time.Hour))); err != nil {
+		t.Fatalf("SaveSizeSample: %v", err)
+	}
 
-	removed, err := PruneSizeSamples(dir, "db:5432", "app", now, RetentionFor(365*24*time.Hour))
+	removed, err := PruneSizeSamples(dir, "db:5432", "app", 1)
 	if err != nil {
 		t.Fatalf("PruneSizeSamples: %v", err)
 	}
 	if removed != 1 {
-		t.Errorf("removed %d, want exactly the one in-scope sample", removed)
+		t.Errorf("removed %d, want exactly the one in-scope sample past keep", removed)
 	}
 	if _, err := os.Stat(doomedPath); !os.IsNotExist(err) {
 		t.Error("the in-scope sample was not deleted")
@@ -426,8 +425,8 @@ func TestPruneScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSizeSamples: %v", err)
 	}
-	if len(sizes) != 2 {
-		t.Errorf("want the other database's and the other host's samples kept, got %d", len(sizes))
+	if len(sizes) != 3 {
+		t.Errorf("want ours plus the other database's and host's kept, got %d", len(sizes))
 	}
 	snaps, err := ListSnapshots(dir)
 	if err != nil {
@@ -438,7 +437,7 @@ func TestPruneScoped(t *testing.T) {
 	}
 }
 
-func TestPruneKeepsEverythingWithinAll(t *testing.T) {
+func TestPruneKeepsAllBelowN(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	for h := range 20 {
@@ -446,19 +445,49 @@ func TestPruneKeepsEverythingWithinAll(t *testing.T) {
 			t.Fatalf("SaveSizeSample: %v", err)
 		}
 	}
-	removed, err := PruneSizeSamples(dir, "db:5432", "app", now, RetentionFor(365*24*time.Hour))
+	removed, err := PruneSizeSamples(dir, "db:5432", "app", DefaultRetention)
 	if err != nil {
 		t.Fatalf("PruneSizeSamples: %v", err)
 	}
-	// 20 samples at 6h apart spans ~5 days, all inside the 7-day All tier.
 	if removed != 0 {
-		t.Errorf("removed %d, want 0 — everything is inside the All tier", removed)
+		t.Errorf("removed %d, want 0 — 20 samples is under the keep of %d", removed, DefaultRetention)
 	}
 }
 
 func TestPruneEmptyDir(t *testing.T) {
-	n, err := PruneSizeSamples(filepath.Join(t.TempDir(), "nope"), "db:5432", "app", time.Now(), DefaultRetention)
+	n, err := PruneSizeSamples(filepath.Join(t.TempDir(), "nope"), "db:5432", "app", DefaultRetention)
 	if err != nil || n != 0 {
 		t.Errorf("want (0, nil) for a missing dir, got (%d, %v)", n, err)
+	}
+}
+
+// The once-a-day predicate is a UTC calendar date, not a rolling 24 hours.
+func TestSizeSampleCapturedToday(t *testing.T) {
+	now := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	meta := func(target, db string, at time.Time) SizeSampleMeta {
+		return SizeSampleMeta{Target: target, Database: db, CapturedAt: at}
+	}
+	cases := []struct {
+		name  string
+		metas []SizeSampleMeta
+		want  bool
+	}{
+		{"nothing at all", nil, false},
+		{"just after midnight today", []SizeSampleMeta{meta("db:5432", "app", now.Add(-8*time.Hour-59*time.Minute))}, true},
+		{"last thing yesterday", []SizeSampleMeta{meta("db:5432", "app", now.Add(-9*time.Hour-1*time.Minute))}, false},
+		{"another host", []SizeSampleMeta{meta("other:5432", "app", now)}, false},
+		{"another database", []SizeSampleMeta{meta("db:5432", "billing", now)}, false},
+		{"clock skew into tomorrow", []SizeSampleMeta{meta("db:5432", "app", now.Add(24*time.Hour))}, false},
+		{"one of several matches", []SizeSampleMeta{
+			meta("db:5432", "billing", now),
+			meta("db:5432", "app", now.Add(-time.Hour)),
+		}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := SizeSampleCapturedToday(c.metas, "db:5432", "app", now); got != c.want {
+				t.Errorf("= %v, want %v", got, c.want)
+			}
+		})
 	}
 }

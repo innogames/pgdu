@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"pgdu/internal/cli"
 	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
 	"pgdu/internal/pgbouncer"
@@ -410,6 +411,11 @@ type stmtState struct {
 	// so the end is always "now", the "now" row is omitted and Back leaves the
 	// tool instead of exposing the still-empty table underneath.
 	entry bool
+	// capturing is a snapshot capture in flight, so S and the daily auto
+	// capture cannot stack. Read and written through Model.capturingSnapshot,
+	// which spans both of the tool's screens: a capture started on the browser
+	// is still running when the user is standing on the table.
+	capturing bool
 
 	// Query-detail state (levelStatementDetail). detail is the window-delta
 	// QueryStat for the drilled-into query. sampleCall is a complete example
@@ -1193,6 +1199,14 @@ type Model struct {
 	// snapshotDir is where top-queries snapshots are saved (S) and listed (L).
 	snapshotDir string
 
+	// autoSample and sampleRetention are the daily auto-capture policy, flattened
+	// out of cli.Config the way snapshotDir and logFile are. sampleRetention is
+	// the operator's knob rather than a constant so an auto-capture prunes to the
+	// same depth the cron --sample does — hard-coding it here would have the first
+	// tool open silently delete whatever a wider --sample-retention had kept.
+	autoSample      bool
+	sampleRetention int
+
 	// colPrefs persists per-user column-picker selections across sessions. It is
 	// always non-nil (prefs.Load never fails); a save error is best-effort.
 	colPrefs *prefs.Prefs
@@ -1262,7 +1276,10 @@ func toolByName(name string) (tool, bool) {
 	return 0, false
 }
 
-func NewModel(client *pg.Client, snapshotDir string, colPrefs *prefs.Prefs, initialTool, logFile string) *Model {
+// NewModel takes the whole cli.Config rather than the handful of fields it
+// needs: pg.New already does, and threading each new knob through as another
+// positional parameter is how a constructor ends up with seven of them.
+func NewModel(client *pg.Client, cfg cli.Config, colPrefs *prefs.Prefs) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	m := &Model{
@@ -1273,11 +1290,13 @@ func NewModel(client *pg.Client, snapshotDir string, colPrefs *prefs.Prefs, init
 		statRefresh:     defaultStatRefresh,
 		activityRefresh: 2 * time.Second,
 		pgbRefresh:      2 * time.Second,
-		snapshotDir:     snapshotDir,
+		snapshotDir:     cfg.SnapshotDir,
+		autoSample:      cfg.AutoSample,
+		sampleRetention: cfg.SampleRetention,
 		colPrefs:        colPrefs,
 		target:          client.Target(),
 		hostLabel:       client.HostLabel(),
-		logFile:         logFile,
+		logFile:         cfg.LogFile,
 	}
 	// Seed in-memory column visibility from persisted selections. A partial map
 	// is fine: actColEnabled/stmtColEnabled fall back to registry defaults for any
@@ -1315,7 +1334,7 @@ func NewModel(client *pg.Client, snapshotDir string, colPrefs *prefs.Prefs, init
 	// --<tool> shortcut: open the requested tool directly, but keep the picker as
 	// the stack root so Back/Esc still returns to it. The root is pre-populated
 	// synchronously (toolItems is pure) since Init only loads the top screen.
-	if t, ok := toolByName(initialTool); ok {
+	if t, ok := toolByName(cfg.Tool); ok {
 		root.items = toolItems(m.pgbAvailable)
 		root.loaded = true
 		m.stack = append(m.stack, m.toolEntryScreen(t))

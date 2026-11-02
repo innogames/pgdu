@@ -585,17 +585,23 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Dump the current pg_stat_statements counters to disk. Available from the
 		// table and the detail view (both carry s.db).
 		if s.level == levelStatements || s.level == levelStatementDetail {
-			return m, m.saveSnapshotCmd(s.db)
+			if m.capturingSnapshot() {
+				m.notice = "a snapshot capture is already running"
+				return m, nil
+			}
+			m.setCapturingSnapshot(true)
+			return m, m.saveSnapshotCmd(s.db, false)
 		}
 		// In the growth tool S captures a size sample. It scans every relation
-		// and can run for minutes, so it must not stack.
+		// and can run for minutes, so it must not stack — with the daily auto
+		// capture it can now be one the user never started.
 		if s.level == levelGrowth || s.level == levelGrowthWindow {
-			if s.growth.capturing {
+			if m.capturingSizes() {
 				m.notice = "a size capture is already running"
 				return m, nil
 			}
-			s.growth.capturing = true
-			return m, m.captureSizesCmd(s.db, true)
+			m.setCapturingSizes(true)
+			return m, m.captureSizesCmd(s.db, captureManual)
 		}
 	case key.Matches(msg, m.keys.Snapshots):
 		// Open the on-disk snapshots browser over the top-queries table.

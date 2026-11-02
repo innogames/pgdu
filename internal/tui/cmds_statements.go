@@ -24,8 +24,12 @@ type statementsLoadedMsg struct {
 	err     error
 }
 
-// Snapshot persistence messages (levelStatements / levelSnapshots).
+// Snapshot persistence messages (levelStatements / levelSnapshots). auto marks
+// the daily capture taken on tool open, which the user did not ask for and so
+// reports differently from S.
 type snapshotSavedMsg struct {
+	auto bool
+	db   string
 	path string
 	err  error
 }
@@ -126,16 +130,45 @@ func (m *Model) loadStatementsCmd(db string) tea.Cmd {
 }
 
 // saveSnapshotCmd captures the current pg_stat_statements counters for db and
-// writes them to the snapshot directory, reporting the resulting path.
-func (m *Model) saveSnapshotCmd(db string) tea.Cmd {
+// writes them to the snapshot directory, reporting the resulting path. Unlike
+// a size capture this is one catalog read, so it stays inside query()'s budget.
+//
+// The auto capture prunes and S does not, for the reason on captureSizesCmd.
+func (m *Model) saveSnapshotCmd(db string, auto bool) tea.Cmd {
+	dir, keep := m.snapshotDir, m.sampleRetention
 	return query(func(ctx context.Context) tea.Msg {
+		msg := snapshotSavedMsg{auto: auto, db: db}
 		snap, err := m.client.CaptureSnapshot(ctx, db)
 		if err != nil {
-			return snapshotSavedMsg{err: err}
+			msg.err = err
+			return msg
 		}
-		path, err := pg.SaveSnapshot(m.snapshotDir, snap)
-		return snapshotSavedMsg{path: path, err: err}
+		if msg.path, msg.err = pg.SaveSnapshot(dir, snap); msg.err != nil || !auto {
+			return msg
+		}
+		// A prune failure is not worth reporting: the snapshot is already
+		// safely written and the next capture retries.
+		_, _ = pg.PruneSnapshots(dir, snap.Target, snap.Database, keep)
+		return msg
 	})
+}
+
+// autoSnapshotCmd takes the day's query snapshot when the top-queries tool
+// opens on a database that has none yet — the counters half of the rule that
+// pgdu's history accrues from use.
+//
+// metas must be the RAW listing, not the one the browser filtered by the live
+// stats_reset: a reset since this morning's capture would otherwise make today
+// look empty, and a cluster that resets regularly would capture on every open.
+func (m *Model) autoSnapshotCmd(db string, metas []pg.SnapshotMeta) tea.Cmd {
+	if !m.autoSample || m.snapshotDir == "" || m.capturingSnapshot() {
+		return nil
+	}
+	if pg.SnapshotCapturedToday(metas, m.target, db, time.Now()) {
+		return nil
+	}
+	m.setCapturingSnapshot(true)
+	return m.saveSnapshotCmd(db, true)
 }
 
 // listSnapshotsCmd reads the snapshot directory for the browser, along with the
@@ -363,4 +396,25 @@ func (m *Model) loadStatementResultCmd(db, matchQuery, sampleCall string) tea.Cm
 		result, truncated, err := m.client.RunReadOnlyQuery(ctx, db, sampleCall, statementResultMaxRows)
 		return statementResultLoadedMsg{query: matchQuery, result: result, truncated: truncated, err: err}
 	})
+}
+
+// capturingSnapshot / setCapturingSnapshot span both top-queries screens, for
+// the reason given on capturingSizes. A snapshot capture is far cheaper than a
+// size one, but S could stack them before the daily auto capture existed, and
+// two writers racing to the same directory is not something to leave open.
+func (m *Model) capturingSnapshot() bool {
+	for _, l := range []level{levelStatements, levelSnapshots} {
+		if s := m.findLevel(l); s != nil && s.stat.capturing {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) setCapturingSnapshot(v bool) {
+	for _, l := range []level{levelStatements, levelSnapshots} {
+		if s := m.findLevel(l); s != nil {
+			s.stat.capturing = v
+		}
+	}
 }

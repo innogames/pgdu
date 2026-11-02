@@ -117,3 +117,105 @@ func TestDiffStatementsClamped(t *testing.T) {
 		t.Errorf("SharedBlksHit: want 7, got %d", q.SharedBlksHit)
 	}
 }
+
+// Query snapshots had no retention at all before the daily auto capture; this
+// is the mirror of TestPruneKeepsNewestN.
+func TestPruneSnapshotsKeepsNewestN(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	for i := range 40 {
+		if _, err := SaveSnapshot(dir, &Snapshot{
+			Target: "db:5432", Database: "app", CapturedAt: base.Add(-time.Duration(i) * time.Hour),
+		}); err != nil {
+			t.Fatalf("SaveSnapshot: %v", err)
+		}
+	}
+	removed, err := PruneSnapshots(dir, "db:5432", "app", 30)
+	if err != nil {
+		t.Fatalf("PruneSnapshots: %v", err)
+	}
+	if removed != 10 {
+		t.Errorf("removed %d, want 10", removed)
+	}
+	left, err := ListSnapshots(dir)
+	if err != nil {
+		t.Fatalf("ListSnapshots: %v", err)
+	}
+	if len(left) != 30 {
+		t.Fatalf("kept %d, want 30", len(left))
+	}
+	if !left[0].CapturedAt.Equal(base) {
+		t.Errorf("newest kept = %v, want %v", left[0].CapturedAt, base)
+	}
+}
+
+// The snapshot pruner must leave the size samples sharing the directory alone.
+func TestPruneSnapshotsScoped(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	for i := range 3 {
+		if _, err := SaveSnapshot(dir, &Snapshot{
+			Target: "db:5432", Database: "app", CapturedAt: base.Add(-time.Duration(i) * time.Hour),
+		}); err != nil {
+			t.Fatalf("SaveSnapshot: %v", err)
+		}
+	}
+	if _, err := SaveSnapshot(dir, &Snapshot{
+		Target: "other:5432", Database: "app", CapturedAt: base.Add(-9 * time.Hour),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	for i := range 3 {
+		s := &SizeSample{Target: "db:5432", Database: "app", CapturedAt: base.Add(-time.Duration(i) * time.Hour)}
+		if _, err := SaveSizeSample(dir, s); err != nil {
+			t.Fatalf("SaveSizeSample: %v", err)
+		}
+	}
+
+	removed, err := PruneSnapshots(dir, "db:5432", "app", 1)
+	if err != nil {
+		t.Fatalf("PruneSnapshots: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed %d, want the 2 in-scope snapshots past keep", removed)
+	}
+	snaps, _ := ListSnapshots(dir)
+	if len(snaps) != 2 {
+		t.Errorf("want ours plus the other host's kept, got %d", len(snaps))
+	}
+	sizes, _ := ListSizeSamples(dir)
+	if len(sizes) != 3 {
+		t.Errorf("the size samples were touched: %d left, want 3", len(sizes))
+	}
+}
+
+func TestSnapshotCapturedToday(t *testing.T) {
+	now := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	metas := []SnapshotMeta{{Target: "db:5432", Database: "app", CapturedAt: now.Add(-time.Hour)}}
+	if !SnapshotCapturedToday(metas, "db:5432", "app", now) {
+		t.Error("a snapshot from an hour ago is today's")
+	}
+	if SnapshotCapturedToday(metas, "db:5432", "billing", now) {
+		t.Error("another database's snapshot must not count")
+	}
+	if SnapshotCapturedToday(nil, "db:5432", "app", now) {
+		t.Error("an empty listing is never today")
+	}
+}
+
+// SaveSnapshot is the only writer, so it stamps the header regardless of how
+// the caller built the Snapshot — CaptureSnapshot is not the only constructor.
+func TestSaveSnapshotStampsVersion(t *testing.T) {
+	dir := t.TempDir()
+	path, err := SaveSnapshot(dir, &Snapshot{Target: "db:5432", Database: "app", CapturedAt: time.Now()})
+	if err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	snap, err := LoadSnapshot(path)
+	if err != nil {
+		t.Fatalf("LoadSnapshot: %v", err)
+	}
+	if snap.Version != snapshotVersion {
+		t.Errorf("Version = %d, want %d", snap.Version, snapshotVersion)
+	}
+}

@@ -98,9 +98,12 @@ func (c *Client) CaptureSnapshot(ctx context.Context, db string) (*Snapshot, err
 // handling that makes the directory usable by every user on the host.
 func SaveSnapshot(dir string, s *Snapshot) (string, error) {
 	// Stamp the row count so ListSnapshots can read it from the header (it is
-	// serialized before Stats) without decompressing the array. SaveSnapshot is
-	// the only writer, so this keeps the on-disk count authoritative regardless
-	// of how the caller built the Snapshot.
+	// serialized before Stats) without decompressing the array, and the version
+	// so a Snapshot the caller built itself is still labelled — only
+	// CaptureSnapshot sets it, so every other construction would land on disk as
+	// version 0. SaveSnapshot is the only writer, so this keeps the on-disk
+	// values authoritative regardless of how the caller built the Snapshot.
+	s.Version = snapshotVersion
 	s.QueryCount = len(s.Stats)
 	return writeGzipJSON(dir, s.Database, s.CapturedAt, kindSnapshot, s)
 }
@@ -188,4 +191,38 @@ func LoadSnapshot(path string) (*Snapshot, error) {
 		return nil, fmt.Errorf("decode snapshot %q: %w", path, err)
 	}
 	return &s, nil
+}
+
+// snapID projects a listing entry down to the identity the kind-blind sweeps
+// work on. See sampleID for why this is a function rather than a method.
+func snapID(m SnapshotMeta) sampleID {
+	return sampleID{path: m.Path, target: m.Target, database: m.Database, at: m.CapturedAt}
+}
+
+// PruneSnapshots keeps the newest keep query snapshots in dir for one
+// (target, database) and deletes the rest, returning how many it removed.
+// keep < 1 prunes nothing.
+//
+// It lists through ListSnapshots, which is both why the size samples sharing
+// the directory are unreachable from here and why metas arrive newest first —
+// the order pruneKeepNewest needs to treat keep as a prefix count.
+func PruneSnapshots(dir, target, database string, keep int) (int, error) {
+	metas, err := ListSnapshots(dir)
+	if err != nil {
+		return 0, err
+	}
+	return pruneKeepNewest(metas, snapID, target, database, keep)
+}
+
+// SnapshotCapturedToday reports whether metas already holds a snapshot of
+// (target, database) taken on now's UTC calendar day.
+//
+// It takes the listing rather than a directory because its one caller — the
+// auto-capture decision on tool open — has just listed it, and because that
+// caller must pass the RAW listing: the browser drops snapshots older than the
+// live stats_reset, and a reset since this morning's capture would otherwise
+// make today look empty and re-capture on every tool open. See capturedToday
+// for why UTC.
+func SnapshotCapturedToday(metas []SnapshotMeta, target, database string, now time.Time) bool {
+	return capturedToday(metas, snapID, target, database, now)
 }

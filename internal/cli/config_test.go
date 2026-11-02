@@ -5,7 +5,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 )
 
 func parseKV(s string) map[string]string {
@@ -213,48 +212,14 @@ func TestParseBytes(t *testing.T) {
 	}
 }
 
-func TestParseAge(t *testing.T) {
-	day := 24 * time.Hour
-	cases := []struct {
-		in      string
-		want    time.Duration
-		wantErr bool
-	}{
-		{"", 0, false},
-		{"0", 0, false},
-		{"90d", 90 * day, false},
-		{"2y", 2 * 365 * day, false},
-		{"6w", 6 * 7 * day, false},
-		{"36h", 36 * time.Hour, false},
-		{"-5d", 0, true},
-		{"", 0, false},
-		{"soon", 0, true},
-	}
-	for _, c := range cases {
-		got, err := parseAge(c.in)
-		if (err != nil) != c.wantErr {
-			t.Errorf("parseAge(%q) err = %v, wantErr %v", c.in, err, c.wantErr)
-			continue
-		}
-		if err == nil && got != c.want {
-			t.Errorf("parseAge(%q) = %v, want %v", c.in, got, c.want)
-		}
-	}
-}
-
-// The printed flag defaults must round-trip through their own parser, or
-// --help advertises a value the flag would reject.
+// The printed --sample-min-bytes default must round-trip through its own
+// parser, or --help advertises a value the flag would reject. (--sample-retention
+// is a plain int, so pflag prints and parses it without a hand-written pair.)
 func TestSampleFlagDefaultsRoundTrip(t *testing.T) {
 	for _, n := range []int64{0, 1 << 20, 1536} {
 		got, err := parseBytes(formatBytes(n))
 		if err != nil || got != n {
 			t.Errorf("bytes %d -> %q -> %d (%v)", n, formatBytes(n), got, err)
-		}
-	}
-	for _, d := range []time.Duration{0, defaultRetention, 90 * 24 * time.Hour, 36 * time.Hour} {
-		got, err := parseAge(formatAge(d))
-		if err != nil || got != d {
-			t.Errorf("age %v -> %q -> %v (%v)", d, formatAge(d), got, err)
 		}
 	}
 }
@@ -281,7 +246,7 @@ func TestParseRejectsTwoTools(t *testing.T) {
 }
 
 func TestParseSampleFlags(t *testing.T) {
-	cfg, err := Parse([]string{"-U", "u", "--sample", "--sample-min-bytes", "1MB", "--sample-retention", "90d"})
+	cfg, err := Parse([]string{"-U", "u", "--sample", "--sample-min-bytes", "1MB", "--sample-retention", "10"})
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -291,8 +256,8 @@ func TestParseSampleFlags(t *testing.T) {
 	if cfg.SampleMinBytes != 1<<20 {
 		t.Errorf("SampleMinBytes = %d, want 1MiB", cfg.SampleMinBytes)
 	}
-	if cfg.SampleRetention != 90*24*time.Hour {
-		t.Errorf("SampleRetention = %v, want 90d", cfg.SampleRetention)
+	if cfg.SampleRetention != 10 {
+		t.Errorf("SampleRetention = %d, want 10", cfg.SampleRetention)
 	}
 }
 
@@ -307,7 +272,10 @@ func TestParseSampleBadValues(t *testing.T) {
 		t.Error("want an error for an unparseable size")
 	}
 	if _, err := Parse([]string{"-U", "u", "--sample-retention", "forever"}); err == nil {
-		t.Error("want an error for an unparseable duration")
+		t.Error("want an error for an unparseable count")
+	}
+	if _, err := Parse([]string{"-U", "u", "--sample-retention", "-1"}); err == nil {
+		t.Error("want an error for a negative count")
 	}
 }
 
@@ -323,6 +291,45 @@ func TestParseSampleDefaults(t *testing.T) {
 		t.Errorf("SampleMinBytes = %d, want 0 (keep every relation)", cfg.SampleMinBytes)
 	}
 	if cfg.SampleRetention != defaultRetention {
-		t.Errorf("SampleRetention = %v, want %v", cfg.SampleRetention, defaultRetention)
+		t.Errorf("SampleRetention = %d, want %d", cfg.SampleRetention, defaultRetention)
+	}
+	if !cfg.AutoSample {
+		t.Error("AutoSample must default on — the history only accrues if it does")
+	}
+}
+
+func TestParseNoAutoSample(t *testing.T) {
+	cfg, err := Parse([]string{"-U", "u", "--no-auto-sample"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.AutoSample {
+		t.Error("--no-auto-sample must turn it off")
+	}
+}
+
+// The flag is applied after Parse so it beats an env-set default, and an
+// unparseable env value falls back rather than silently flipping the default.
+func TestAutoSampleEnv(t *testing.T) {
+	cases := []struct {
+		env  string
+		args []string
+		want bool
+	}{
+		{"0", nil, false},
+		{"false", nil, false},
+		{"1", nil, true},
+		{"maybe", nil, true},
+		{"1", []string{"--no-auto-sample"}, false},
+	}
+	for _, c := range cases {
+		t.Setenv("PGDU_AUTO_SAMPLE", c.env)
+		cfg, err := Parse(append([]string{"-U", "u"}, c.args...))
+		if err != nil {
+			t.Fatalf("Parse(%q, %v): %v", c.env, c.args, err)
+		}
+		if cfg.AutoSample != c.want {
+			t.Errorf("PGDU_AUTO_SAMPLE=%q %v -> AutoSample %v, want %v", c.env, c.args, cfg.AutoSample, c.want)
+		}
 	}
 }

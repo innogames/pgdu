@@ -16,7 +16,7 @@ import (
 // newTestModel builds a Model with the default key map and no live connection,
 // enough to drive the pure Update paths (message handlers, key dispatch).
 func newTestModel(stack ...*screen) *Model {
-	m := NewModel(pg.New(cli.Config{}), "", nil, "", "")
+	m := NewModel(pg.New(cli.Config{}), cli.Config{}, nil)
 	m.target = "db:5432"
 	m.hostLabel = "db:5432"
 	if len(stack) > 0 {
@@ -188,7 +188,7 @@ func TestRenderEntryPicker(t *testing.T) {
 		liveCount: 42,
 	})
 	out := ansi.Strip(m.View().Content)
-	for _, want := range []string{"pick the window's base", "window: session start → now", "session start", "default", "since last reset", "a.json.gz", "new snapshots: press S"} {
+	for _, want := range []string{"pick the window's base", "window: session start → now", "session start", "default", "since last reset", "a.json.gz", "new snapshots: one a day on open; press S"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("entry picker missing %q in output:\n%s", want, out)
 		}

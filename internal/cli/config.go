@@ -8,15 +8,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/pflag"
 )
 
-// defaultRetention keeps roughly two years of size samples. It is the horizon
-// only; the tiers below it (everything inside a week, then one per day, then
-// one per ISO week) live in pg.RetentionFor.
-const defaultRetention = 2 * 365 * 24 * time.Hour
+// defaultRetention keeps 30 captures of each kind per database per host —
+// about a month of once-a-day history. It mirrors pg.DefaultRetention, which
+// this package cannot import because pg imports it.
+const defaultRetention = 30
 
 // ErrHelp is returned by Parse when the user asked for --help so callers can
 // exit cleanly without printing a redundant error.
@@ -62,9 +61,19 @@ type Config struct {
 	// counters. 0 (the default) keeps every relation.
 	SampleMinBytes int64
 
-	// SampleRetention is the horizon --sample prunes size samples back to.
-	// 0 disables pruning entirely.
-	SampleRetention time.Duration
+	// SampleRetention is how many captures of each kind to keep per
+	// (host, database): the newest N survive a prune, the rest are deleted.
+	// 0 disables pruning entirely. One knob governs both pruners, so an
+	// operator who widens it for cron does not have the TUI's auto-capture
+	// sweep the extra files away the next time they open a tool.
+	SampleRetention int
+
+	// AutoSample makes opening the growth or top-queries tool capture a sample
+	// for that database when none was captured today. PGDU_AUTO_SAMPLE=0 or
+	// --no-auto-sample turns it off; there is deliberately no prefs entry,
+	// because it is a host policy (who may scan, what /tmp costs), not a
+	// per-user UI preference.
+	AutoSample bool
 
 	// LogFile is an explicit server log to analyze (--log-file / PGDU_LOG_FILE).
 	// Empty means auto-detect: pg_current_logfile(), then /var/log/postgresql.
@@ -89,7 +98,8 @@ func Parse(args []string) (Config, error) {
 		LogFile:     os.Getenv("PGDU_LOG_FILE"),
 
 		SampleMinBytes:  envBytesOr("PGDU_SAMPLE_MIN_BYTES", 0),
-		SampleRetention: envAgeOr("PGDU_SAMPLE_RETENTION", defaultRetention),
+		SampleRetention: envIntOr("PGDU_SAMPLE_RETENTION", defaultRetention),
+		AutoSample:      envBoolOr("PGDU_AUTO_SAMPLE", true),
 	}
 
 	fs.StringVarP(&cfg.Host, "host", "h", cfg.Host, "database server host or socket path (empty = libpq default)")
@@ -107,7 +117,15 @@ func Parse(args []string) (Config, error) {
 	// Size sampling: the non-interactive half of the growth tool.
 	fs.BoolVar(&cfg.Sample, "sample", false, "capture a size sample into --snapshot-dir, prune old ones, print the path and exit (no TUI)")
 	minBytes := fs.String("sample-min-bytes", formatBytes(cfg.SampleMinBytes), "fold relations below this size into the sample's \"other\" total (e.g. 1MB; 0 = keep all)")
-	retention := fs.String("sample-retention", formatAge(cfg.SampleRetention), "how far back --sample keeps size samples (e.g. 90d, 2y; 0 = never prune)")
+	fs.IntVar(&cfg.SampleRetention, "sample-retention", cfg.SampleRetention,
+		"how many captures of each kind to keep per database (0 = never prune)")
+
+	// A --no- flag defaulting false rather than --auto-sample=true: the env var
+	// already carries the default, and --help printing "--auto-sample (default
+	// true)" next to an env override would state a default that may not hold.
+	var noAutoSample bool
+	fs.BoolVar(&noAutoSample, "no-auto-sample", false,
+		"do not capture a daily sample when the growth or top-queries tool opens")
 
 	// Tool shortcuts: each opens a top-level tool directly, skipping the picker.
 	// They are mutually exclusive — pick at most one.
@@ -140,8 +158,14 @@ func Parse(args []string) (Config, error) {
 	if cfg.SampleMinBytes, err = parseBytes(*minBytes); err != nil {
 		return Config{}, fmt.Errorf("--sample-min-bytes: %w", err)
 	}
-	if cfg.SampleRetention, err = parseAge(*retention); err != nil {
-		return Config{}, fmt.Errorf("--sample-retention: %w", err)
+	if cfg.SampleRetention < 0 {
+		return Config{}, errors.New("--sample-retention: must not be negative")
+	}
+	// Applied after Parse so the flag beats an env-set default, never the other
+	// way round. It is deliberately NOT rejected alongside --sample: there it is
+	// simply irrelevant, the way --snapshot-dir is to a tool flag.
+	if noAutoSample {
+		cfg.AutoSample = false
 	}
 
 	// Map the tool shortcut flags onto cfg.Tool, rejecting more than one. The
@@ -401,57 +425,6 @@ func formatBytes(n int64) string {
 	return strconv.FormatInt(n, 10)
 }
 
-// parseAge extends time.ParseDuration with the d/w/y suffixes an operator
-// actually types for a retention horizon; Go's own parser tops out at hours.
-func parseAge(s string) (time.Duration, error) {
-	s = strings.TrimSpace(s)
-	if s == "" || s == "0" {
-		return 0, nil
-	}
-	unit := time.Duration(0)
-	switch s[len(s)-1] {
-	case 'd', 'D':
-		unit = 24 * time.Hour
-	case 'w', 'W':
-		unit = 7 * 24 * time.Hour
-	case 'y', 'Y':
-		unit = 365 * 24 * time.Hour
-	}
-	if unit != 0 {
-		n, err := strconv.Atoi(strings.TrimSpace(s[:len(s)-1]))
-		if err != nil {
-			return 0, fmt.Errorf("invalid duration %q", s)
-		}
-		if n < 0 {
-			return 0, fmt.Errorf("duration %q must not be negative", s)
-		}
-		return time.Duration(n) * unit, nil
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return 0, fmt.Errorf("invalid duration %q (try 90d, 2y or 36h)", s)
-	}
-	if d < 0 {
-		return 0, fmt.Errorf("duration %q must not be negative", s)
-	}
-	return d, nil
-}
-
-// formatAge renders a duration the way parseAge reads it.
-func formatAge(d time.Duration) string {
-	switch {
-	case d == 0:
-		return "0"
-	case d%(365*24*time.Hour) == 0:
-		return strconv.FormatInt(int64(d/(365*24*time.Hour)), 10) + "y"
-	case d%(7*24*time.Hour) == 0:
-		return strconv.FormatInt(int64(d/(7*24*time.Hour)), 10) + "w"
-	case d%(24*time.Hour) == 0:
-		return strconv.FormatInt(int64(d/(24*time.Hour)), 10) + "d"
-	}
-	return d.String()
-}
-
 func envBytesOr(key string, def int64) int64 {
 	if v := os.Getenv(key); v != "" {
 		if n, err := parseBytes(v); err == nil {
@@ -461,10 +434,13 @@ func envBytesOr(key string, def int64) int64 {
 	return def
 }
 
-func envAgeOr(key string, def time.Duration) time.Duration {
+// envBoolOr reads an on/off env knob through strconv.ParseBool (1/0, t/f,
+// true/false), falling back to def on anything unparseable — an operator typo
+// must not silently flip a default-on behaviour.
+func envBoolOr(key string, def bool) bool {
 	if v := os.Getenv(key); v != "" {
-		if d, err := parseAge(v); err == nil {
-			return d
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return def

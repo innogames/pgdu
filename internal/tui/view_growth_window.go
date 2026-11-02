@@ -48,10 +48,11 @@ func (m *Model) renderGrowthWindow(s *screen, height int) string {
 		b.WriteString("  " + mu("↵ picks an endpoint (older=start, newer=end) · ") +
 			styleBadge.Render("D") + mu(" delete · ") + styleBadge.Render("esc") + mu(" back") + "\n")
 	}
-	// Where new rows come from. Nothing samples automatically, and a first-time
-	// user reaches this screen before ever seeing the S key.
-	b.WriteString("  " + mu("new samples: ") + styleBadge.Render("S") + mu(" captures one now; ") +
-		mu("`pgdu --sample` from cron is how a real history accumulates") + "\n\n")
+	// Where new rows come from. Opening the tool takes the day's sample, but a
+	// first-time user reaches this screen before ever seeing the S key, and
+	// cron is still what fills the history in while nobody is looking.
+	b.WriteString("  " + mu("new samples: one a day on open; ") + styleBadge.Render("S") +
+		mu(" captures one now; `pgdu --sample` from cron fills the rest") + "\n\n")
 	used++
 
 	if s.growth.capturing {
@@ -66,10 +67,16 @@ func (m *Model) renderGrowthWindow(s *screen, height int) string {
 	}
 
 	if len(s.items) == 0 {
-		// The normal first run, not an error: say what to do about it.
-		b.WriteString("  " + mu("no size samples yet — press ") + styleBadge.Render("S") +
-			mu(" to capture one now, or run ") + styleBadge.Render("pgdu --sample") +
-			mu(" from cron for a real history") + "\n")
+		// The normal first run, not an error: say what to do about it. On a
+		// first-ever open the daily capture is usually already running by now,
+		// so the S nudge would contradict the banner just above.
+		if s.growth.capturing {
+			b.WriteString("  " + mu("no size samples yet — the first one is being captured now") + "\n")
+		} else {
+			b.WriteString("  " + mu("no size samples yet — press ") + styleBadge.Render("S") +
+				mu(" to capture one now, or run ") + styleBadge.Render("pgdu --sample") +
+				mu(" from cron for a real history") + "\n")
+		}
 		b.WriteString("\n  " + mu("two samples at least a minute apart make a window; the tool diffs them") + "\n")
 		return fitInfo(&b, height)
 	}

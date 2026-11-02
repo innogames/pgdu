@@ -16,7 +16,7 @@ func TestNewModelSeedsColumnVisibility(t *testing.T) {
 	p.SetColumns(colPrefsQueries, map[string]bool{string(colWAL): false, string(colDirtied): true})
 	p.SetColumns(colPrefsActivity, map[string]bool{string(actColCPU): true})
 
-	m := NewModel(pg.New(cli.Config{}), "", p, "", "")
+	m := NewModel(pg.New(cli.Config{}), cli.Config{}, p)
 
 	if m.stmtTable.enabled(colWAL, true) {
 		t.Errorf("colWAL should be hidden per persisted prefs")
@@ -36,7 +36,7 @@ func TestNewModelSeedsColumnVisibility(t *testing.T) {
 // TestNewModelNilPrefsIsSafe ensures a nil prefs object leaves visibility unseeded
 // and saveColPrefs is a no-op.
 func TestNewModelNilPrefsIsSafe(t *testing.T) {
-	m := NewModel(pg.New(cli.Config{}), "", nil, "", "")
+	m := NewModel(pg.New(cli.Config{}), cli.Config{}, nil)
 	if m.actTable.visible != nil || m.stmtTable.visible != nil {
 		t.Errorf("expected nil visibility maps with nil prefs")
 	}

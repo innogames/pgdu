@@ -68,8 +68,9 @@ func (m *Model) renderGrowthInfo(height int) string {
 		styleBadge.Render("L") + mu(" reopens the") + "\n")
 	b.WriteString("  " + mu("      sample browser · ") + styleBadge.Render("D") + mu(" deletes a sample · ") +
 		styleBadge.Render("C") + mu(" picks columns.") + "\n")
-	b.WriteString("  " + styleSelected.Render("pgdu --sample") + mu(" from cron is how a real history accumulates — pgdu has no") + "\n")
-	b.WriteString("  " + mu("      daemon, so nothing is captured while nobody is looking.") + "\n\n")
+	b.WriteString("  " + mu("      opening this tool takes one sample a day by itself; ") +
+		styleSelected.Render("pgdu --sample") + mu(" from") + "\n")
+	b.WriteString("  " + mu("      cron is how history keeps accruing while nobody is looking.") + "\n\n")
 
 	reg := growthColumnRegistry()
 	nameW := 0

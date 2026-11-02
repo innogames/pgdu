@@ -56,7 +56,7 @@ func run() int {
 		return runSample(cfg, client)
 	}
 
-	model := tui.NewModel(client, cfg.SnapshotDir, prefs.Load(), cfg.Tool, cfg.LogFile)
+	model := tui.NewModel(client, cfg, prefs.Load())
 	p := tea.NewProgram(model)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "pgdu:", err)
@@ -96,8 +96,7 @@ func runSample(cfg cli.Config, client *pg.Client) int {
 	fmt.Println(path)
 
 	if cfg.SampleRetention > 0 {
-		n, err := pg.PruneSizeSamples(cfg.SnapshotDir, sample.Target, sample.Database,
-			time.Now(), pg.RetentionFor(cfg.SampleRetention))
+		n, err := pg.PruneSizeSamples(cfg.SnapshotDir, sample.Target, sample.Database, cfg.SampleRetention)
 		switch {
 		case err != nil:
 			fmt.Fprintln(os.Stderr, "pgdu: warning: prune:", err)
