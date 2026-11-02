@@ -193,6 +193,50 @@ func bloatPercentStyle(pct int) lipgloss.Style {
 	}
 }
 
+// deltaStyle colours a signed change by direction, not by value: a change of
+// zero is muted, a shrink is green (disk handed back), and growth is graded
+// against the largest absolute change in its column — sage for a small share,
+// yellow for a middling one, red for whatever is driving the table.
+//
+// Direction rather than judgement: growth is not inherently bad, so the colour
+// says "this is what moved", and the grading is relative to the window on
+// screen rather than any absolute threshold.
+func deltaStyle(num, maxAbs float64) lipgloss.Style {
+	switch {
+	case num == 0:
+		return lipgloss.NewStyle().Foreground(colorMuted)
+	case num < 0:
+		return lipgloss.NewStyle().Foreground(colorOK)
+	}
+	share := 1.0
+	if maxAbs > 0 {
+		share = num / maxAbs
+	}
+	switch {
+	case share >= 0.66:
+		return lipgloss.NewStyle().Foreground(colorBloat)
+	case share >= 0.33:
+		return lipgloss.NewStyle().Foreground(colorAccent)
+	default:
+		return lipgloss.NewStyle().Foreground(colorCostLow)
+	}
+}
+
+// growthTagStyle colours a size-history row tag: a relation that appeared is
+// cyan (notable), one that was rewritten yellow (something ran), one that is
+// gone muted (it is history, and hidden by default anyway).
+func growthTagStyle(tag string) (lipgloss.Style, bool) {
+	switch {
+	case strings.HasPrefix(tag, "new"):
+		return lipgloss.NewStyle().Foreground(colorBar), true
+	case strings.HasPrefix(tag, "rewritten"):
+		return lipgloss.NewStyle().Foreground(colorAccent), true
+	case strings.HasPrefix(tag, "gone"):
+		return lipgloss.NewStyle().Foreground(colorMuted), true
+	}
+	return lipgloss.Style{}, false
+}
+
 // costStyleRelative grades a "lower is better" cost value (miss/io_ms/wal/…)
 // against the largest value in its column for the current window. Bright green
 // is reserved for a genuine zero (the only "free" row); any nonzero value — even

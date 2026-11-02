@@ -33,6 +33,7 @@ type keyMap struct {
 	Columns          key.Binding
 	ResetCols        key.Binding // r: reset column visibility to defaults (inside the C picker)
 	StmtView         key.Binding // tab (top queries): queries → by table → by type
+	GrowthScope      key.Binding // tab (size history): relations → schema → database → partition trees
 	BufSplit         key.Binding // tab (buffers list): per table ↔ per relation (heap/toast/index)
 	Filter           key.Binding
 	Seek             key.Binding
@@ -64,6 +65,7 @@ type keyMap struct {
 	// one key away from its definition. The physical key is ToggleRefresh on the
 	// live/queries levels, which are all off on levelDescribe.
 	TopQueries key.Binding // t: → top queries, filtered to the described table
+	Growth     key.Binding // h: → size history, for the database being browsed
 	// topQueriesInFooter advertises t on the describe panel, its only home.
 	topQueriesInFooter bool
 
@@ -121,6 +123,10 @@ type keyMap struct {
 	// advertisement for the picker, whereas the top-queries table already shows
 	// "C columns" in its header, so it stays out of the footer there.
 	columnsInFooter bool
+
+	// growthInFooter adds the h (→ size history) hint to the footer's short
+	// help on the disk levels it is enabled for.
+	growthInFooter bool
 
 	// showQueryInFooter adds the s (show SQL) hint to the footer on the
 	// diagnostics list and a diagnostic result — the only advertisement for the
@@ -187,6 +193,7 @@ func defaultKeys() keyMap {
 		DeleteSnapshot:  key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete snapshot")),
 		Columns:         key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "configure columns")),
 		StmtView:        key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "queries/by table/by type")),
+		GrowthScope:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "scope")),
 		BufSplit:        key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "by relation")),
 		ResetCols:       key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reset to defaults")),
 		Filter:          key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
@@ -204,6 +211,7 @@ func defaultKeys() keyMap {
 		ShmemMap:    key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "→ memory map")),
 		PageInspect: key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "→ pages")),
 		TopQueries:  key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "→ top queries")),
+		Growth:      key.NewBinding(key.WithKeys("h"), key.WithHelp("h", "→ size history")),
 
 		JumpActivity:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "→ activity")),
 		JumpWAL:         key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "→ wal")),
@@ -235,6 +243,8 @@ func (k *keyMap) applyContext(s *screen) {
 	stmtTable := s.level == levelStatements
 	stmtDetail := s.level == levelStatementDetail
 	snapshots := s.level == levelSnapshots
+	growthTable := s.level == levelGrowth
+	growthWindow := s.level == levelGrowthWindow
 	diagResult := s.level == levelDiagnosticResult
 	activity := s.level == levelActivity
 	tableStats := s.level == levelTableStats
@@ -264,7 +274,10 @@ func (k *keyMap) applyContext(s *screen) {
 	// Eviction needs a loaded buffers list to name a relation from; the detail
 	// screen already knows its own.
 	k.EvictBuffers.SetEnabled(s.level == levelBufferTables || s.level == levelBufferDetail)
-	k.Snapshots.SetEnabled(stmtTable)
+	k.Snapshots.SetEnabled(stmtTable || growthTable)
+	if growthTable {
+		k.Snapshots.SetHelp("L", "→ samples")
+	}
 	// tab cycles the top-queries table through its roll-ups (by table / by
 	// type) and back; the physical key is the log analyzer's pane cycle
 	// elsewhere, gated to its own levels. Named for where it leads next so the
@@ -272,6 +285,13 @@ func (k *keyMap) applyContext(s *screen) {
 	k.StmtView.SetEnabled(stmtTable)
 	if stmtTable {
 		k.StmtView.SetHelp("tab", s.stat.view.next().label())
+	}
+	// tab cycles the growth table's scope. Same physical key as the top-queries
+	// roll-up and the log pane cycle, each gated to its own levels, so the
+	// footer only ever advertises the one that applies.
+	k.GrowthScope.SetEnabled(growthTable)
+	if growthTable {
+		k.GrowthScope.SetHelp("tab", s.growth.view.next().label())
 	}
 	// tab splits the buffers list into heap/toast/index rows and back, named
 	// for the view it leads to like StmtView.
@@ -291,8 +311,8 @@ func (k *keyMap) applyContext(s *screen) {
 	// hint, so surface it in the footer everywhere but the top-queries table,
 	// whose header already advertises it.
 	heapTuples := s.level == levelHeapTuples && s.table.Schema != "pg_toast"
-	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult || (logs && s.log.view.table()) || pgbShow || heapTuples)
-	k.columnsInFooter = activity || tableStats || diagResult || (logs && s.log.view.table()) || pgbShow || heapTuples
+	k.Columns.SetEnabled(stmtTable || activity || tableStats || diagResult || (logs && s.log.view.table()) || pgbShow || heapTuples || growthTable)
+	k.columnsInFooter = activity || tableStats || diagResult || (logs && s.log.view.table()) || pgbShow || heapTuples || growthTable
 	// t (ToggleRefresh) cycles the auto-refresh cadence on top-queries levels and
 	// on the live activity/progress levels. Surface it in the footer on the pure
 	// live monitors, whose header shows the cadence but not the key that changes
@@ -313,15 +333,28 @@ func (k *keyMap) applyContext(s *screen) {
 	} else {
 		k.OpenLog.SetHelp("l", "→ log analyzer")
 	}
-	k.SaveSnapshot.SetEnabled(stmtTable || stmtDetail)
+	// S saves a query snapshot in the top-queries tool and captures a size
+	// sample in the growth tool. Enabled on the growth *picker* too, which is
+	// what rescues the empty first run: the picker is where a user with no
+	// samples lands.
+	k.SaveSnapshot.SetEnabled(stmtTable || stmtDetail || growthTable || growthWindow)
+	if growthTable || growthWindow {
+		k.SaveSnapshot.SetHelp("S", "capture sizes")
+	}
 	k.DiskUsage.SetEnabled(stmtTable || stmtDetail)
 	k.Params.SetEnabled(stmtDetail && s.stat.qualSamples)
 	k.Execute.SetEnabled(stmtDetail)
 	// v is the parameter-source toggle on statement detail, the VACUUM trigger on parts,
 	// the auxiliary-backend visibility toggle on the activity table and the
 	// every-row toggle on the system overview.
-	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity || s.level == levelMaintenance)
-	k.DeleteSnapshot.SetEnabled(snapshots)
+	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity || s.level == levelMaintenance || growthTable)
+	if growthTable {
+		k.Verbose.SetHelp("v", "show dropped")
+	}
+	k.DeleteSnapshot.SetEnabled(snapshots || growthWindow)
+	if growthWindow {
+		k.DeleteSnapshot.SetHelp("D", "delete sample")
+	}
 	// Install is only actionable when the screen offers an installable extension
 	// (the prompt renders its own `i` hint); keep it out of the footer otherwise.
 	k.Install.SetEnabled(s.extPrompt != nil && s.extPrompt.installable)
@@ -366,6 +399,15 @@ func (k *keyMap) applyContext(s *screen) {
 	topQueries := describeHasHeap(s)
 	k.TopQueries.SetEnabled(topQueries)
 	k.topQueriesInFooter = topQueries
+
+	// h opens the size-history tool for the database being browsed: the disk
+	// browser answers "what is big", growth answers "what is getting bigger",
+	// and the two are the same question a day apart. Gated to the disk tool's
+	// db-scoped levels, so h stays free elsewhere.
+	growthJump := s.tool == toolDisk && s.db != "" &&
+		(s.level == levelSchemas || s.level == levelTables || s.level == levelParts)
+	k.Growth.SetEnabled(growthJump)
+	k.growthInFooter = growthJump
 
 	// System-overview cross-links only exist on the maintenance dashboard; gating
 	// them here keeps r/w free for reverse-sort and the log window everywhere else.
@@ -452,6 +494,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	if k.logInFooter {
 		b = append(b, k.LogPane, k.LogGroupMode, k.LogWindow)
 	}
+	if k.GrowthScope.Enabled() {
+		b = append(b, k.GrowthScope)
+	}
 	if k.StmtView.Enabled() {
 		b = append(b, k.StmtView)
 	}
@@ -482,6 +527,9 @@ func (k keyMap) ShortHelp() []key.Binding {
 	if k.topQueriesInFooter {
 		b = append(b, k.TopQueries)
 	}
+	if k.growthInFooter {
+		b = append(b, k.Growth)
+	}
 	if k.lockTreeInFooter {
 		b = append(b, k.LockTree)
 	}
@@ -511,10 +559,10 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Top, k.Bottom},
 		{k.Enter, k.Back},
 		{k.Filter, k.Seek, k.GinNextLeaf, k.CtidNext, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
-		{k.Refresh, k.Install, k.Describe, k.DiskUsage},
+		{k.Refresh, k.Install, k.Describe, k.DiskUsage, k.Growth},
 		{k.Rebaseline, k.ResetStatements, k.ResetMinMax, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
-		{k.EvictBuffers, k.StmtView, k.BufSplit, k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
+		{k.EvictBuffers, k.StmtView, k.GrowthScope, k.BufSplit, k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
 		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.JumpIO, k.Progress, k.Settings},
 		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump, k.LogParams, k.OpenLog},
 		{k.Help, k.Quit},

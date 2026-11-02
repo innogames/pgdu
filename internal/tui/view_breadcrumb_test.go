@@ -321,6 +321,8 @@ func TestViewFitsTerminal(t *testing.T) {
 		"wal":         {{level: levelWAL, tool: toolWAL, db: "postgres", loaded: true}},
 		"pgbouncers":  {{level: levelPgBouncers, tool: toolPgBouncer, db: "postgres", loaded: true}},
 		"snapshots":   {{level: levelSnapshots, tool: toolQueries, db: "shop", loaded: true}},
+		"growthwin":   {{level: levelGrowthWindow, tool: toolGrowth, db: "shop", loaded: true}},
+		"growth":      {{level: levelGrowth, tool: toolGrowth, db: "shop", loaded: true}},
 	}
 	for name, st := range cases {
 		for _, h := range []int{12, 30, 61} {

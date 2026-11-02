@@ -1,17 +1,10 @@
 package pg
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"sort"
-	"strings"
-	"sync"
 	"time"
 )
 
@@ -99,134 +92,45 @@ func (c *Client) CaptureSnapshot(ctx context.Context, db string) (*Snapshot, err
 	}, nil
 }
 
-// SaveSnapshot writes s to dir as gzip-compressed pretty JSON and returns the
-// file path. The filename is <sanitized-db>-<UTC timestamp>.json.gz so
-// snapshots sort and read chronologically. The directory is created if missing.
-//
-// The directory and file are made world readable/writable so snapshots are
-// shared across users on the same host: any user can list, load and delete any
-// other user's snapshots. The directory is created mode 0o777 *without* the
-// sticky bit (which a shared /tmp normally carries) so non-owners can unlink
-// files in it; the explicit Chmod defeats a restrictive umask. Both Chmods are
-// best-effort — they only succeed for whoever owns the path, but the first
-// writer sets the permissions correctly for everyone that follows.
+// SaveSnapshot writes s to dir as gzip-compressed JSON and returns the file
+// path. The filename is <sanitized-db>-<UTC timestamp>.json.gz so snapshots
+// sort and read chronologically. See writeGzipJSON for the shared permission
+// handling that makes the directory usable by every user on the host.
 func SaveSnapshot(dir string, s *Snapshot) (string, error) {
-	if err := os.MkdirAll(dir, 0o777); err != nil {
-		return "", fmt.Errorf("create snapshot dir %q: %w", dir, err)
-	}
-	_ = os.Chmod(dir, 0o777)
-	name := fmt.Sprintf("%s-%s%s", sanitizeDB(s.Database), s.CapturedAt.UTC().Format("20060102T150405Z"), snapshotExt)
-	path := filepath.Join(dir, name)
 	// Stamp the row count so ListSnapshots can read it from the header (it is
-	// serialized before Stats) without decompressing the array. SaveSnapshot is
-	// the only writer, so this keeps the on-disk count authoritative regardless
-	// of how the caller built the Snapshot.
+	// serialized before Stats) without decompressing the array, and the version
+	// so a Snapshot the caller built itself is still labelled — only
+	// CaptureSnapshot sets it, so every other construction would land on disk as
+	// version 0. SaveSnapshot is the only writer, so this keeps the on-disk
+	// values authoritative regardless of how the caller built the Snapshot.
+	s.Version = snapshotVersion
 	s.QueryCount = len(s.Stats)
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("encode snapshot: %w", err)
-	}
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write(data); err != nil {
-		return "", fmt.Errorf("compress snapshot: %w", err)
-	}
-	if err := gz.Close(); err != nil {
-		return "", fmt.Errorf("compress snapshot: %w", err)
-	}
-	if err := os.WriteFile(path, buf.Bytes(), 0o666); err != nil {
-		return "", fmt.Errorf("write snapshot %q: %w", path, err)
-	}
-	_ = os.Chmod(path, 0o666)
-	return path, nil
+	return writeGzipJSON(dir, s.Database, s.CapturedAt, kindSnapshot, s)
 }
 
-// readSnapshotFile reads a gzip-compressed snapshot file and returns the
-// decompressed JSON bytes.
-func readSnapshotFile(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = gz.Close() }()
-	return io.ReadAll(gz)
-}
-
-// metaCache memoizes parsed SnapshotMeta keyed by path. Snapshot files are
-// immutable once written (SaveSnapshot uses a unique timestamped name and never
-// rewrites), so a (modTime,size) match means the cached metadata is still valid.
-// This makes re-opening the browser or re-listing after a delete ~free: only
-// new/changed files are read from disk.
-var (
-	metaCacheMu sync.Mutex
-	metaCache   = map[string]cachedMeta{}
-)
-
-type cachedMeta struct {
-	modTime time.Time
-	size    int64
-	meta    SnapshotMeta
-}
+// snapMetaCache memoizes snapshot listing metadata. It is per-kind, so listing
+// the size samples that share the directory never evicts these entries.
+var snapMetaCache = newMetaStore[SnapshotMeta]()
 
 // ListSnapshots returns the metadata of every readable *.json.gz snapshot in
 // dir, newest capture first. A missing directory is not an error (no snapshots
 // yet); unreadable or undecodable files are skipped so one bad file doesn't hide
-// the rest. Pre-compression plain *.json files are ignored.
+// the rest. Pre-compression plain *.json files are ignored, as are the size
+// samples that share the directory.
 //
 // Metadata is read by streaming only the leading header fields and stopping at
 // the Stats array, so listing never decompresses the bulk of a file. Results are
 // cached per path (validated by mod time + size), so repeat listings cost a stat
 // per file rather than a full read.
 func ListSnapshots(dir string) ([]SnapshotMeta, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read snapshot dir %q: %w", dir, err)
-	}
-
-	metaCacheMu.Lock()
-	defer metaCacheMu.Unlock()
-
-	var out []SnapshotMeta
-	seen := make(map[string]struct{}, len(entries))
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), snapshotExt) {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		seen[path] = struct{}{}
-		if c, ok := metaCache[path]; ok && c.modTime.Equal(info.ModTime()) && c.size == info.Size() {
-			out = append(out, c.meta)
-			continue
-		}
+	out, err := snapMetaCache.list(dir, kindSnapshot, func(path string, size int64) (SnapshotMeta, error) {
 		meta, err := readSnapshotMeta(path)
-		if err != nil {
-			continue
-		}
-		meta.FileSize = info.Size()
-		metaCache[path] = cachedMeta{modTime: info.ModTime(), size: info.Size(), meta: meta}
-		out = append(out, meta)
+		meta.FileSize = size
+		return meta, err
+	})
+	if err != nil {
+		return nil, err
 	}
-	// Drop cache entries for files in this dir that disappeared (deleted
-	// snapshots) so the cache tracks the directory rather than growing without
-	// bound. Entries from other directories are left untouched.
-	for path := range metaCache {
-		if _, ok := seen[path]; !ok && filepath.Dir(path) == filepath.Clean(dir) {
-			delete(metaCache, path)
-		}
-	}
-
 	sort.Slice(out, func(i, j int) bool { return out[i].CapturedAt.After(out[j].CapturedAt) })
 	return out, nil
 }
@@ -238,132 +142,47 @@ func ListSnapshots(dir string) ([]SnapshotMeta, error) {
 // QueryCount fall back to counting array elements via the token stream, which
 // still avoids unmarshalling each row into a struct.
 func readSnapshotMeta(path string) (SnapshotMeta, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return SnapshotMeta{}, err
-	}
-	defer func() { _ = f.Close() }()
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		return SnapshotMeta{}, err
-	}
-	defer func() { _ = gz.Close() }()
-
-	dec := json.NewDecoder(gz)
-	if tok, err := dec.Token(); err != nil {
-		return SnapshotMeta{}, err
-	} else if d, ok := tok.(json.Delim); !ok || d != '{' {
-		return SnapshotMeta{}, fmt.Errorf("snapshot %q: expected JSON object", path)
-	}
-
 	meta := SnapshotMeta{Path: path}
 	haveCount := false
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			return SnapshotMeta{}, err
-		}
-		key, _ := keyTok.(string)
-		var dst any
+	err := readHeader(path, "Stats", func(key string) any {
 		switch key {
 		case "Version":
-			dst = &meta.Version
+			return &meta.Version
 		case "Target":
-			dst = &meta.Target
+			return &meta.Target
 		case "Database":
-			dst = &meta.Database
+			return &meta.Database
 		case "CapturedAt":
-			dst = &meta.CapturedAt
+			return &meta.CapturedAt
 		case "StatsReset":
-			dst = &meta.StatsReset
+			return &meta.StatsReset
 		case "TrackPlanning":
-			dst = &meta.TrackPlanning
+			return &meta.TrackPlanning
 		case "QueryCount":
-			dst = &meta.QueryCount
 			haveCount = true
-		case "Stats":
-			if haveCount {
-				return meta, nil // header carried the count; skip the array entirely
-			}
-			n, err := countArrayElements(dec)
-			if err != nil {
-				return SnapshotMeta{}, err
-			}
-			meta.QueryCount = n
-			return meta, nil
-		default:
-			if err := skipValue(dec); err != nil { // tolerate unknown fields
-				return SnapshotMeta{}, err
-			}
-			continue
+			return &meta.QueryCount
 		}
-		if err := dec.Decode(dst); err != nil {
-			return SnapshotMeta{}, err
+		return nil // tolerate unknown fields
+	}, func(dec *json.Decoder) error {
+		if haveCount {
+			return nil // header carried the count; skip the array entirely
 		}
+		n, err := countArrayElements(dec)
+		if err != nil {
+			return err
+		}
+		meta.QueryCount = n
+		return nil
+	})
+	if err != nil {
+		return SnapshotMeta{}, err
 	}
 	return meta, nil
 }
 
-// countArrayElements consumes a JSON array from dec (positioned just before the
-// opening '[') and returns its element count without materialising the values.
-func countArrayElements(dec *json.Decoder) (int, error) {
-	tok, err := dec.Token()
-	if err != nil {
-		return 0, err
-	}
-	if d, ok := tok.(json.Delim); !ok || d != '[' {
-		return 0, nil // null or non-array: treat as empty
-	}
-	n := 0
-	for dec.More() {
-		if err := skipValue(dec); err != nil {
-			return 0, err
-		}
-		n++
-	}
-	if _, err := dec.Token(); err != nil { // closing ']'
-		return 0, err
-	}
-	return n, nil
-}
-
-// skipValue consumes exactly one JSON value from dec — scalar, object or array,
-// recursing through nested containers — without allocating a destination for it.
-func skipValue(dec *json.Decoder) error {
-	tok, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	d, ok := tok.(json.Delim)
-	if !ok {
-		return nil // scalar already consumed
-	}
-	switch d {
-	case '{':
-		for dec.More() {
-			if _, err := dec.Token(); err != nil { // key
-				return err
-			}
-			if err := skipValue(dec); err != nil { // value
-				return err
-			}
-		}
-	case '[':
-		for dec.More() {
-			if err := skipValue(dec); err != nil {
-				return err
-			}
-		}
-	}
-	if _, err := dec.Token(); err != nil { // closing '}' or ']'
-		return err
-	}
-	return nil
-}
-
 // LoadSnapshot reads and decodes a single gzip-compressed snapshot file.
 func LoadSnapshot(path string) (*Snapshot, error) {
-	data, err := readSnapshotFile(path)
+	data, err := readGzipFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read snapshot %q: %w", path, err)
 	}
@@ -374,29 +193,36 @@ func LoadSnapshot(path string) (*Snapshot, error) {
 	return &s, nil
 }
 
-// DeleteSnapshot removes a snapshot file.
-func DeleteSnapshot(path string) error {
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("delete snapshot %q: %w", path, err)
-	}
-	return nil
+// snapID projects a listing entry down to the identity the kind-blind sweeps
+// work on. See sampleID for why this is a function rather than a method.
+func snapID(m SnapshotMeta) sampleID {
+	return sampleID{path: m.Path, target: m.Target, database: m.Database, at: m.CapturedAt}
 }
 
-// sanitizeDB makes a database name safe for a filename: anything that isn't a
-// letter, digit, dash or underscore becomes an underscore. Empty names (the
-// libpq "same as user" default) become "db" so the file still has a stem.
-func sanitizeDB(db string) string {
-	if db == "" {
-		return "db"
+// PruneSnapshots keeps the newest keep query snapshots in dir for one
+// (target, database) and deletes the rest, returning how many it removed.
+// keep < 1 prunes nothing.
+//
+// It lists through ListSnapshots, which is both why the size samples sharing
+// the directory are unreachable from here and why metas arrive newest first —
+// the order pruneKeepNewest needs to treat keep as a prefix count.
+func PruneSnapshots(dir, target, database string, keep int) (int, error) {
+	metas, err := ListSnapshots(dir)
+	if err != nil {
+		return 0, err
 	}
-	var b strings.Builder
-	for _, r := range db {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('_')
-		}
-	}
-	return b.String()
+	return pruneKeepNewest(metas, snapID, target, database, keep)
+}
+
+// SnapshotCapturedToday reports whether metas already holds a snapshot of
+// (target, database) taken on now's UTC calendar day.
+//
+// It takes the listing rather than a directory because its one caller — the
+// auto-capture decision on tool open — has just listed it, and because that
+// caller must pass the RAW listing: the browser drops snapshots older than the
+// live stats_reset, and a reset since this morning's capture would otherwise
+// make today look empty and re-capture on every tool open. See capturedToday
+// for why UTC.
+func SnapshotCapturedToday(metas []SnapshotMeta, target, database string, now time.Time) bool {
+	return capturedToday(metas, snapID, target, database, now)
 }

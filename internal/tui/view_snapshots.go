@@ -47,9 +47,10 @@ func (m *Model) renderStatementSnapshots(s *screen, height int) string {
 		b.WriteString("  " + m.renderSnapshotEntrySummary(s) + "\n")
 		b.WriteString("  " + styleBadge.Render("↵") + mu(" opens the queries table with everything since the highlighted point · ") +
 			styleBadge.Render("D") + mu(" delete · ") + styleBadge.Render("esc") + mu(" back") + "\n")
-		// Point at where new rows come from: the list only grows through S in the
-		// table, and a first-time user sees this picker before ever seeing that key.
-		b.WriteString("  " + mu("new snapshots: press ") + styleBadge.Render("S") + mu(" (shift-s) in the queries table to save the current counters here; ") +
+		// Point at where new rows come from: opening the tool takes the day's
+		// snapshot, and a first-time user sees this picker before ever seeing
+		// the key that takes one on demand.
+		b.WriteString("  " + mu("new snapshots: one a day on open; press ") + styleBadge.Render("S") + mu(" (shift-s) in the queries table to save the current counters here; ") +
 			styleBadge.Render("L") + mu(" reopens this browser") + "\n\n")
 		used++
 	} else {

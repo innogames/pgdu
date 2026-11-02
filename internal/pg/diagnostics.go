@@ -31,6 +31,10 @@ const (
 	DiagPercentBad    = diagres.KindPercentBad
 	DiagCount         = diagres.KindCount
 	DiagLogSeverity   = diagres.KindLogSeverity
+	DiagDeltaBytes    = diagres.KindDeltaBytes
+	DiagDeltaCount    = diagres.KindDeltaCount
+	DiagDeltaPct      = diagres.KindDeltaPct
+	DiagGrowthTag     = diagres.KindGrowthTag
 )
 
 // diagSQL returns the statement to run for d on this server. Almost every

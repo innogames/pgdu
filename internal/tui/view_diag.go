@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -1009,13 +1010,7 @@ func (s *screen) diagMetrics(cols []pg.DiagColumn, barCol int) (colW, naturalW [
 		}
 		for i := 0; i < nCols && i < len(row); i++ {
 			cell := row[i]
-			display := cell.Display
-			if cell.HasNum && cols[i].Kind == pg.DiagBytes {
-				display = humanize.Bytes(int64(cell.Num))
-			}
-			if cell.HasNum && cols[i].Kind == pg.DiagCount {
-				display = formatRows(int64(cell.Num))
-			}
+			display := diagCellText(cols[i].Kind, cell)
 			w := displayWidth(display)
 			if w > naturalW[i] {
 				naturalW[i] = w
@@ -1033,6 +1028,12 @@ func (s *screen) diagMetrics(cols []pg.DiagColumn, barCol int) (colW, naturalW [
 				if cols[i].Kind == pg.DiagCostGraded && cell.Num > costMax[i] {
 					costMax[i] = cell.Num
 				}
+				// Delta columns grade against the largest change in the column,
+				// taken as an absolute value so a shrink-heavy window scales
+				// the same way a growth-heavy one does.
+				if cols[i].Kind.IsDelta() && math.Abs(cell.Num) > costMax[i] {
+					costMax[i] = math.Abs(cell.Num)
+				}
 			}
 		}
 	}
@@ -1043,14 +1044,7 @@ func (s *screen) diagMetrics(cols []pg.DiagColumn, barCol int) (colW, naturalW [
 	// would re-scale every data cell's bar/grade against the grand total.
 	for i := 0; i < nCols && i < len(s.diagTotalRow); i++ {
 		cell := s.diagTotalRow[i]
-		display := cell.Display
-		if cell.HasNum && cols[i].Kind == pg.DiagBytes {
-			display = humanize.Bytes(int64(cell.Num))
-		}
-		if cell.HasNum && cols[i].Kind == pg.DiagCount {
-			display = formatRows(int64(cell.Num))
-		}
-		w := displayWidth(display)
+		w := displayWidth(diagCellText(cols[i].Kind, cell))
 		if w > naturalW[i] {
 			naturalW[i] = w
 		}
@@ -1104,7 +1098,6 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 		barKind = cols[barCol].Kind
 	}
 	barIsPercent := barKind == pg.DiagPercent || barKind == pg.DiagPercentGraded || barKind == pg.DiagPercentBad
-	barIsBytes := barKind == pg.DiagBytes
 
 	// Per-column display widths (capped at diagColWidth), uncapped natural widths,
 	// the bar column's numeric max, and the per-column cost-grade maxima. These
@@ -1271,17 +1264,16 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 					barStr = paintBar(barW) // empty bar for null cells
 				}
 
-				numStr := cell.Display
-				if barIsBytes && cell.HasNum {
-					numStr = humanize.Bytes(int64(cell.Num))
-				}
-				if barIsPercent && cell.HasNum {
-					numStr = formatDiagPercent(cell)
-				}
+				numStr := diagCellText(barKind, cell)
 				// Colour the percentage next to its bar the same way the bar is
 				// graded, so the digits read at a glance too.
 				if barIsPercent && cell.HasNum && !selected {
 					numStr = diagPercentBarStyle(barKind, cell.Num).Render(numStr)
+				}
+				// Same for a signed change: the bar shows magnitude, the colour
+				// shows direction.
+				if barKind.IsDelta() && cell.HasNum && !selected {
+					numStr = deltaStyle(cell.Num, costMax[i]).Render(numStr)
 				}
 				if selected {
 					numStr = styleSelected.Render(numStr)
@@ -1294,14 +1286,8 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			}
 
 			raw := cell.Display
-			if cell.HasNum && i < nCols && cols[i].Kind == pg.DiagBytes {
-				raw = humanize.Bytes(int64(cell.Num))
-			}
-			if cell.HasNum && i < nCols && cols[i].Kind == pg.DiagCount {
-				raw = formatRows(int64(cell.Num))
-			}
-			if cell.HasNum && i < nCols && isDiagPercentKind(cols[i].Kind) {
-				raw = formatDiagPercent(cell)
+			if i < nCols {
+				raw = diagCellText(cols[i].Kind, cell)
 			}
 			display := truncateDiagCell(raw, colW[i])
 			graded := i < nCols && cols[i].Kind == pg.DiagPercentGraded
@@ -1310,7 +1296,8 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			duration := i < nCols && cols[i].Kind == pg.DiagDuration
 			isNumeric := cell.HasNum || (i < nCols && (cols[i].Kind == pg.DiagInt ||
 				cols[i].Kind == pg.DiagFloat || cols[i].Kind == pg.DiagPercent ||
-				cols[i].Kind == pg.DiagBytes || graded || percentBad || costGraded || duration))
+				cols[i].Kind == pg.DiagBytes || cols[i].Kind.IsDelta() ||
+				graded || percentBad || costGraded || duration))
 
 			// Grade "higher is better" percent cells green→red so the eye can
 			// triage hit ratios without reading digits. Skipped on the selected
@@ -1353,6 +1340,17 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			// Log severity: red for errors, yellow for warnings, muted for LOG.
 			if i < nCols && cols[i].Kind == pg.DiagLogSeverity && !selected {
 				if st, ok := logSevStyleByName(cell.Display); ok {
+					display = st.Render(display)
+				}
+			}
+			// Signed change: green for a shrink, graded sage→red for growth
+			// relative to the column's largest absolute change.
+			if i < nCols && cols[i].Kind.IsDelta() && cell.HasNum && !selected {
+				display = deltaStyle(cell.Num, costMax[i]).Render(display)
+			}
+			// Size-history row tag: new cyan, rewritten yellow, gone muted.
+			if i < nCols && cols[i].Kind == pg.DiagGrowthTag && !selected {
+				if st, ok := growthTagStyle(cell.Display); ok {
 					display = st.Render(display)
 				}
 			}
@@ -1504,4 +1502,31 @@ func padLeft(s string, n int) string {
 		return s
 	}
 	return strings.Repeat(" ", n-w) + s
+}
+
+// diagCellText renders a cell's text for its column kind. It is the single
+// place the numeric kinds are turned back into text from Num, so the width
+// pass, the data rows, the headline-bar number and the Σ footer can never
+// disagree about how a value is spelled — which is exactly what a signed
+// delta column would otherwise get wrong the moment it became the bar.
+func diagCellText(kind pg.DiagColumnKind, cell pg.DiagCell) string {
+	if !cell.HasNum {
+		return cell.Display
+	}
+	switch kind {
+	case pg.DiagBytes:
+		return humanize.Bytes(int64(cell.Num))
+	case pg.DiagCount:
+		return formatRows(int64(cell.Num))
+	case pg.DiagDeltaBytes:
+		return signedBytes(int64(cell.Num))
+	case pg.DiagDeltaCount:
+		return signedCount(int64(cell.Num))
+	case pg.DiagDeltaPct:
+		return signedPct(cell.Num)
+	}
+	if isDiagPercentKind(kind) {
+		return formatDiagPercent(cell)
+	}
+	return cell.Display
 }

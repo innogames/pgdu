@@ -52,11 +52,57 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "pgdu: warning: postgres unreachable, continuing with the pgbouncer tool only:", err)
 	}
 
-	model := tui.NewModel(client, cfg.SnapshotDir, prefs.Load(), cfg.Tool, cfg.LogFile)
+	if cfg.Sample {
+		return runSample(cfg, client)
+	}
+
+	model := tui.NewModel(client, cfg, prefs.Load())
 	p := tea.NewProgram(model)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "pgdu:", err)
 		return 1
+	}
+	return 0
+}
+
+// sampleTimeout bounds one --sample capture. The connect context above is a
+// hard 10 s and CaptureSizes stats every fork of every relation, so a cluster
+// with tens of thousands of relations and a cold page cache needs its own, much
+// larger budget — the same exemption REINDEX, VACUUM and log loading take from
+// the TUI's 30 s query() wrapper.
+const sampleTimeout = 10 * time.Minute
+
+// runSample is the cron path of the growth tool: one capture, one file, a
+// best-effort prune, no TUI. It returns run's exit code rather than exiting, so
+// run's deferred Close still releases the pool.
+//
+// Only the sample's path goes to stdout, so `path=$(pgdu --sample)` works;
+// warnings and the prune count go to stderr. A failed prune does not fail the
+// run: the sample is already safely written, and the next invocation retries.
+func runSample(cfg cli.Config, client *pg.Client) int {
+	ctx, cancel := context.WithTimeout(context.Background(), sampleTimeout)
+	defer cancel()
+
+	sample, err := client.CaptureSizes(ctx, cfg.Database, cfg.SampleMinBytes)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pgdu: sample:", err)
+		return 1
+	}
+	path, err := pg.SaveSizeSample(cfg.SnapshotDir, sample)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pgdu: sample:", err)
+		return 1
+	}
+	fmt.Println(path)
+
+	if cfg.SampleRetention > 0 {
+		n, err := pg.PruneSizeSamples(cfg.SnapshotDir, sample.Target, sample.Database, cfg.SampleRetention)
+		switch {
+		case err != nil:
+			fmt.Fprintln(os.Stderr, "pgdu: warning: prune:", err)
+		case n > 0:
+			fmt.Fprintf(os.Stderr, "pgdu: pruned %d old size sample(s)\n", n)
+		}
 	}
 	return 0
 }

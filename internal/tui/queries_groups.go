@@ -283,5 +283,7 @@ func numericDiagKind(k pg.DiagColumnKind) bool {
 		pg.DiagCostGraded, pg.DiagDuration, pg.DiagPercentBad, pg.DiagCount:
 		return true
 	}
-	return false
+	// The signed change columns carry a magnitude too, so a bar over them is
+	// meaningful — it just reads as "how much moved".
+	return k.IsDelta()
 }

@@ -69,6 +69,13 @@ func (m *Model) render() string {
 		contentHeight -= strings.Count(hdr, "\n") + 1
 	}
 
+	if s.level == levelGrowth && s.loaded && s.growth.base != nil {
+		hdr := m.growthHeaderLine(s)
+		b.WriteString(hdr)
+		b.WriteString("\n")
+		contentHeight -= strings.Count(hdr, "\n") + 1
+	}
+
 	if s.level == levelActivity && s.loaded && s.act.err == nil {
 		hdr := m.renderActivityHeader(s)
 		b.WriteString(hdr)
@@ -185,6 +192,8 @@ func (m *Model) render() string {
 		b.WriteString(m.renderColumnConfig(s, contentHeight))
 	case m.tblTable.showCfg && s.level == levelTableStats:
 		b.WriteString(m.renderTblColumnConfig(s, contentHeight))
+	case m.growthTable.showCfg && s.level == levelGrowth:
+		b.WriteString(m.renderGrowthColumnConfig(s, contentHeight))
 	case m.showDiagColumnConfig && (s.level == levelDiagnosticResult || s.level == levelPgBouncerShow):
 		b.WriteString(m.renderDiagColumnConfig(s, contentHeight))
 	case m.showTupleColumnConfig && s.level == levelHeapTuples:
@@ -219,7 +228,8 @@ func (m *Model) render() string {
 		s.level != levelActivity && s.level != levelLockTree && s.level != levelTableStats &&
 		s.level != levelProgress && s.level != levelWaitProfile &&
 		s.level != levelLogs && s.level != levelLogFiles && s.level != levelLogGroup && s.level != levelLogEntry &&
-		s.level != levelPgBouncers && s.level != levelPgBouncer && s.level != levelPgBouncerShow:
+		s.level != levelPgBouncers && s.level != levelPgBouncer && s.level != levelPgBouncerShow &&
+		s.level != levelGrowth && s.level != levelGrowthWindow:
 		// levelDescribe never populates items — it renders from s.describe.
 		// levelDiagnosticResult and levelStatementResult with 0 items mean the
 		// query returned no rows, which is valid; fall through to the renderer
@@ -302,6 +312,11 @@ func (m *Model) render() string {
 			b.WriteString(m.renderDiagResult(s, contentHeight))
 		case levelSnapshots:
 			b.WriteString(m.renderStatementSnapshots(s, contentHeight))
+		case levelGrowthWindow:
+			b.WriteString(m.renderGrowthWindow(s, contentHeight))
+		case levelGrowth:
+			// The growth table is a generic column-registry table.
+			b.WriteString(m.renderDiagResult(s, contentHeight))
 		case levelParts:
 			b.WriteString(m.renderPartsLevel(s, contentHeight))
 		case levelMaintenance:
@@ -649,6 +664,12 @@ func crumbText(sc, prev *screen, named crumbScope) (text string, names crumbScop
 		}
 	case levelPgBouncerShow:
 		return sc.pgb.show.spec().title, names
+	case levelGrowth:
+		// The growth table names its own database, like the queries table, so
+		// dbScopedLevel deliberately leaves both out.
+		return sc.db, crumbScope{db: sc.db}
+	case levelGrowthWindow:
+		return "samples", names
 	}
 	return "", names
 }

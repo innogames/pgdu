@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"pgdu/internal/cli"
 	"pgdu/internal/pageinspect"
 	"pgdu/internal/pg"
 	"pgdu/internal/pgbouncer"
@@ -61,10 +62,12 @@ const (
 	levelPgBouncers       // pgbouncer instance list (toolPgBouncer)
 	levelPgBouncer        // one instance: version/state/lists header + SHOW menu
 	levelPgBouncerShow    // one SHOW table of an instance, parameterized by screen.pgbShow
+	levelGrowth           // size-history growth table: what grew between two samples (toolGrowth)
+	levelGrowthWindow     // size-sample/window picker — also toolGrowth's entry screen
 )
 
 // levelLast is the highest level value; tests iterate levelTools..levelLast.
-const levelLast = levelPgBouncerShow
+const levelLast = levelGrowthWindow
 
 // tool identifies which top-level statistic the user is exploring.
 // Propagated down the stack so each level knows which leaf to render.
@@ -82,6 +85,7 @@ const (
 	toolTableStats  // per-table statistics overview (pg_stat_all_tables + sizes)
 	toolLogs        // server-log analyzer (levelLogFiles → levelLogs)
 	toolPgBouncer   // pgbouncer console browser (levelPgBouncers → levelPgBouncer → levelPgBouncerShow)
+	toolGrowth      // size history: disk growth between two captured size samples
 )
 
 func (t tool) Name() string {
@@ -108,6 +112,8 @@ func (t tool) Name() string {
 		return "logs"
 	case toolPgBouncer:
 		return "pgbouncer"
+	case toolGrowth:
+		return "growth"
 	}
 	return "?"
 }
@@ -173,6 +179,14 @@ type item struct {
 	// QueryKind tag. item.name carries the display form (public. stripped) so
 	// the / filter matches what the user sees; Enter/d/u resolve by this key.
 	stmtGroupKey string
+
+	// growthKey is the growth row's aggregation key at the table's current
+	// scope (pg.ScopeKey), so Enter can narrow the leaf list to one roll-up
+	// row and the parts jump can resolve the relation by name — never by the
+	// sample's stored OID, which is stale on a dropped relation and ambiguous
+	// after a restore. The row itself rides in item.data as []pg.DiagCell like
+	// every other generic table.
+	growthKey string
 
 	// diagRow is 1 + the row's index into screen.diagResult.Rows on
 	// levelDiagnosticResult (0 = not a diagnostic row). It survives sorting
@@ -315,6 +329,7 @@ type screen struct {
 	lock        lockState
 	parts       partsState
 	pages       pageState
+	growth      growthState
 }
 
 // stmtState: Top-queries state: the live/diffed statement window, snapshot anchors and the detail/sample/explain pane.
@@ -396,6 +411,11 @@ type stmtState struct {
 	// so the end is always "now", the "now" row is omitted and Back leaves the
 	// tool instead of exposing the still-empty table underneath.
 	entry bool
+	// capturing is a snapshot capture in flight, so S and the daily auto
+	// capture cannot stack. Read and written through Model.capturingSnapshot,
+	// which spans both of the tool's screens: a capture started on the browser
+	// is still running when the user is standing on the table.
+	capturing bool
 
 	// Query-detail state (levelStatementDetail). detail is the window-delta
 	// QueryStat for the drilled-into query. sampleCall is a complete example
@@ -1056,6 +1076,9 @@ type Model struct {
 	stmtGroupTable colTable[stmtColID] // the by-table / by-type roll-ups (Tab on levelStatements)
 	actTable       colTable[actColID]
 	tblTable       colTable[tblColID]
+	// One colTable serves every growth scope: a roll-up row is a pg.GrowthRow
+	// too, so the scopes share one registry rather than needing a second.
+	growthTable colTable[growthColID]
 
 	// Tuple byte-layout overlay (Enter on levelHeapTuples). The cursor walks the
 	// legend rows; the offset is the legend's scroll window start. The loaded
@@ -1176,6 +1199,14 @@ type Model struct {
 	// snapshotDir is where top-queries snapshots are saved (S) and listed (L).
 	snapshotDir string
 
+	// autoSample and sampleRetention are the daily auto-capture policy, flattened
+	// out of cli.Config the way snapshotDir and logFile are. sampleRetention is
+	// the operator's knob rather than a constant so an auto-capture prunes to the
+	// same depth the cron --sample does — hard-coding it here would have the first
+	// tool open silently delete whatever a wider --sample-retention had kept.
+	autoSample      bool
+	sampleRetention int
+
 	// colPrefs persists per-user column-picker selections across sessions. It is
 	// always non-nil (prefs.Load never fails); a save error is best-effort.
 	colPrefs *prefs.Prefs
@@ -1237,7 +1268,7 @@ func (m *Model) vacuumPaneVisible(s *screen) bool {
 // by the --<tool> CLI flags) back to the tool enum. The bool is false for an
 // unknown/empty name so the caller can fall back to the tool picker.
 func toolByName(name string) (tool, bool) {
-	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity, toolTableStats, toolLogs, toolPgBouncer} {
+	for _, t := range []tool{toolDisk, toolBuffers, toolPageInspect, toolTools, toolWAL, toolQueries, toolMaintenance, toolActivity, toolTableStats, toolLogs, toolPgBouncer, toolGrowth} {
 		if t.Name() == name {
 			return t, true
 		}
@@ -1245,7 +1276,10 @@ func toolByName(name string) (tool, bool) {
 	return 0, false
 }
 
-func NewModel(client *pg.Client, snapshotDir string, colPrefs *prefs.Prefs, initialTool, logFile string) *Model {
+// NewModel takes the whole cli.Config rather than the handful of fields it
+// needs: pg.New already does, and threading each new knob through as another
+// positional parameter is how a constructor ends up with seven of them.
+func NewModel(client *pg.Client, cfg cli.Config, colPrefs *prefs.Prefs) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	m := &Model{
@@ -1256,11 +1290,13 @@ func NewModel(client *pg.Client, snapshotDir string, colPrefs *prefs.Prefs, init
 		statRefresh:     defaultStatRefresh,
 		activityRefresh: 2 * time.Second,
 		pgbRefresh:      2 * time.Second,
-		snapshotDir:     snapshotDir,
+		snapshotDir:     cfg.SnapshotDir,
+		autoSample:      cfg.AutoSample,
+		sampleRetention: cfg.SampleRetention,
 		colPrefs:        colPrefs,
 		target:          client.Target(),
 		hostLabel:       client.HostLabel(),
-		logFile:         logFile,
+		logFile:         cfg.LogFile,
 	}
 	// Seed in-memory column visibility from persisted selections. A partial map
 	// is fine: actColEnabled/stmtColEnabled fall back to registry defaults for any
@@ -1279,6 +1315,9 @@ func NewModel(client *pg.Client, snapshotDir string, colPrefs *prefs.Prefs, init
 		if v := colPrefs.Columns(colPrefsTableStats); len(v) > 0 {
 			m.tblTable.visible = colVisFromStrings[tblColID](v)
 		}
+		if v := colPrefs.Columns(colPrefsGrowth); len(v) > 0 {
+			m.growthTable.visible = colVisFromStrings[growthColID](v)
+		}
 		if v := colPrefs.Columns(colPrefsLogs); len(v) > 0 {
 			m.logTable.visible = colVisFromStrings[logColID](v)
 		}
@@ -1295,7 +1334,7 @@ func NewModel(client *pg.Client, snapshotDir string, colPrefs *prefs.Prefs, init
 	// --<tool> shortcut: open the requested tool directly, but keep the picker as
 	// the stack root so Back/Esc still returns to it. The root is pre-populated
 	// synchronously (toolItems is pure) since Init only loads the top screen.
-	if t, ok := toolByName(initialTool); ok {
+	if t, ok := toolByName(cfg.Tool); ok {
 		root.items = toolItems(m.pgbAvailable)
 		root.loaded = true
 		m.stack = append(m.stack, m.toolEntryScreen(t))
@@ -1309,6 +1348,7 @@ func toolItems(pgBouncer bool) []item {
 	items := []item{
 		{name: "System overview", detail: "server health on one screen: recommendations that open the finding behind them, connections, transactions, I/O, replication, autovacuum, WAL, schema health", hasChildren: true, data: toolMaintenance},
 		{name: "Disk usage", detail: "browse tables by total relation size on disk", hasChildren: true, data: toolDisk},
+		{name: "Size history", detail: "disk growth between two captured size samples: Δ bytes, Δ%, bytes/day per table, schema, database or partition tree — capture with S or `pgdu --sample` from cron", hasChildren: true, data: toolGrowth},
 		{name: "Top queries", detail: "powa-style top queries from pg_stat_statements — calls, time, I/O; EXPLAIN and sample params on Enter", hasChildren: true, data: toolQueries},
 		{name: "Current Activity", detail: "live server activity (pg_stat_activity): active queries, waits, client IPs; cancel / terminate backends", hasChildren: true, data: toolActivity},
 		{name: "Table overview", detail: "per-table stats for a schema: size, write/scan activity, cache hit ratios, bloat, vacuum age, storage options — sortable, customizable columns", hasChildren: true, data: toolTableStats},

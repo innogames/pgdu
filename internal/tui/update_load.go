@@ -235,6 +235,28 @@ func (m *Model) loadCurrent() tea.Cmd {
 		return tea.Batch(cmds...)
 	case levelSnapshots:
 		return m.listSnapshotsCmd(m.snapshotDir, s.db)
+	case levelGrowthWindow:
+		return m.listSizeSamplesCmd(m.snapshotDir, s.db)
+	case levelGrowth:
+		// A live end re-captures on every refresh; a frozen window rebuilds
+		// from the two samples already in memory. With no window applied the
+		// table sits unloaded under the entry picker, exactly as the queries
+		// table does.
+		if s.growth.base == nil {
+			s.loading, s.loaded = false, false
+			return nil
+		}
+		if s.growth.endPath == growthNow {
+			// Deliberately not gated on capturingSizes: this capture IS the
+			// screen's load, so declining it would leave the table spinning on
+			// a message that never comes. Racing the daily auto capture costs
+			// one extra read-only scan, which is cheaper than that.
+			m.setCapturingSizes(true)
+			return m.captureSizesCmd(s.db, captureLive)
+		}
+		m.rebuildGrowthItems(s)
+		s.loading, s.loaded = false, true
+		return nil
 	case levelMaintenance:
 		// The catalog sweep is expensive, so it rides only on the explicit
 		// loads (open, space, after a reset); the auto-refresh tick re-samples

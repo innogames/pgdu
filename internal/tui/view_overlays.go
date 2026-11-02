@@ -23,7 +23,8 @@ func (m *Model) hasInfoOverlay(s *screen) bool {
 		levelDiagnostics, levelDiagnosticResult,
 		levelDescribe,
 		levelLogFiles, levelLogs, levelLogGroup, levelLogEntry,
-		levelPgBouncers, levelPgBouncer, levelPgBouncerShow:
+		levelPgBouncers, levelPgBouncer, levelPgBouncerShow,
+		levelGrowth, levelGrowthWindow:
 		return true
 	}
 	return false
@@ -92,6 +93,8 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 		return m.renderLogsInfo(height)
 	case levelPgBouncers, levelPgBouncer, levelPgBouncerShow:
 		return m.renderPgBouncerInfo(height)
+	case levelGrowth, levelGrowthWindow:
+		return m.renderGrowthInfo(height)
 	}
 	return ""
 }
