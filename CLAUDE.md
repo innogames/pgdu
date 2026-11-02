@@ -252,9 +252,19 @@ fails (missing/corrupt → empty).
   never a silent correction: `new` carries its whole size as the delta, `gone` a
   negative one, `rewritten` (relfilenode changed) leaves the delta alone because the
   shrink is real disk, and a rename reads as one `gone` plus one `new`. A window
-  under 60 s is refused; a reversed pair is ordered by time and flagged; a straddled
+  under 60 s is flagged `ShortWindow`, not refused — the byte deltas are measured
+  at any spacing and only the per-day extrapolation suffers; a reversed pair is
+  ordered by time and flagged; a straddled
   stats reset clears `RowsKnown` but never touches the byte deltas, because sizes are
-  measured and rows are counted. The partition roll-up walks `ParentOID` client-side
+  measured and rows are counted. `RowsKnown` folds by **AND**, and `accumulate` can
+  only ever clear it, so `foldBy` seeds it true for every scope: a fold that starts
+  from a bare `GrowthRow` can never recover it, which is what blanked the rows
+  columns on the schema and database scopes while the relation and partition
+  scopes showed them. *Straddled* means the two samples disagree about
+  `pg_stat_database.stats_reset`, not that it is NULL: NULL is a database nobody has
+  ever reset, which is the normal case and settles that no reset happened between
+  them. Reading two NULLs as two unknowns blanked the rows columns on every such
+  cluster. The partition roll-up walks `ParentOID` client-side
   (`RollUpGrowth`), *not* `sqlDiagTableShowSize`'s recursive CTE, because the tree
   differs between the two samples and only the client holds both files.
   Three capture modes, and `sizeCaptureMode` names them rather than passing a pair

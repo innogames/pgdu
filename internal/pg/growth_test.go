@@ -132,18 +132,49 @@ func TestDiffSizesTags(t *testing.T) {
 	}
 }
 
+// A pair captured close together is flagged, not refused: the byte deltas are
+// measured whatever the spacing, and only the per-day extrapolation suffers.
+// A zero-length window must still not divide by it.
 func TestDiffSizesShortWindow(t *testing.T) {
+	rows := func(total int64) []SizeRow {
+		return []SizeRow{{OID: 1, Schema: "public", Name: "orders", RelKind: "r",
+			RelFilenode: 1, HeapBytes: total, TotalBytes: total, NLive: 100}}
+	}
 	for _, d := range []time.Duration{0, 30 * time.Second, 59 * time.Second} {
-		base, end := pair(nil, nil)
+		base, end := pair(rows(1000), rows(3000))
 		end.CapturedAt = base.CapturedAt.Add(d)
-		if _, err := DiffSizes(base, end); !errors.Is(err, ErrWindowTooShort) {
-			t.Errorf("%v apart: err = %v, want ErrWindowTooShort", d, err)
+		res, err := DiffSizes(base, end)
+		if err != nil {
+			t.Fatalf("%v apart: %v, want the diff anyway", d, err)
+		}
+		if !res.Window.ShortWindow {
+			t.Errorf("%v apart: not flagged as a short window", d)
+		}
+		// The measured delta is the point: it is as real here as over a day.
+		if r := rowByName(t, res.Rows, "orders"); r.DeltaBytes != 2000 {
+			t.Errorf("%v apart: DeltaBytes = %d, want 2000", d, r.DeltaBytes)
 		}
 	}
-	base, end := pair(nil, nil)
+	// Zero duration: no rate can be derived, and none is invented.
+	base, end := pair(rows(1000), rows(3000))
+	end.CapturedAt = base.CapturedAt
+	res, err := DiffSizes(base, end)
+	if err != nil {
+		t.Fatalf("DiffSizes: %v", err)
+	}
+	for _, r := range res.Rows {
+		if r.BytesPerDay != 0 || r.RowsPerDay != 0 {
+			t.Errorf("%s: rates %v/%v over a zero-length window", r.Name, r.BytesPerDay, r.RowsPerDay)
+		}
+	}
+
+	base, end = pair(nil, nil)
 	end.CapturedAt = base.CapturedAt.Add(61 * time.Second)
-	if _, err := DiffSizes(base, end); err != nil {
+	res, err = DiffSizes(base, end)
+	if err != nil {
 		t.Errorf("61s apart: %v, want accepted", err)
+	} else if res.Window.ShortWindow {
+		t.Error("61s apart was flagged short")
 	}
 }
 
@@ -505,5 +536,93 @@ func TestScopeKeyMatchesFold(t *testing.T) {
 func TestDiffSizesNilSamples(t *testing.T) {
 	if _, err := DiffSizes(nil, nil); err == nil {
 		t.Error("want an error for nil samples")
+	}
+}
+
+// pg_stat_database.stats_reset is NULL on a database nobody has ever reset, so
+// the common case arrives as two zeros. Treating that as "unknown" cost the
+// whole rows column on every such cluster; it is evidence of no reset, not an
+// absence of evidence. The one-sided case stays flagged (above).
+func TestDiffSizesNeverResetIsTrusted(t *testing.T) {
+	base, end := pair(nil, nil)
+	base.StatsReset, end.StatsReset = time.Time{}, time.Time{}
+	res, err := DiffSizes(base, end)
+	if err != nil {
+		t.Fatalf("DiffSizes: %v", err)
+	}
+	if res.Window.StatsReset {
+		t.Error("a database that was never reset must not read as a straddled reset")
+	}
+	for _, r := range res.Rows {
+		if !r.RowsKnown {
+			t.Fatalf("row %q lost its row counters to a reset that never happened", r.Name)
+		}
+	}
+}
+
+// Every scope must carry the row counters the leaf rows had. RowsKnown folds
+// by AND, and accumulate can only ever clear it, so a fold that seeds a bare
+// GrowthRow starts from false and can never recover — which is exactly what
+// the schema and database scopes did, blanking rows and rows/day on every
+// roll-up while the relation and partition scopes showed them.
+func TestRollUpKeepsRowsKnown(t *testing.T) {
+	rows := []SizeRow{
+		{OID: 1, Schema: "public", Name: "orders", RelKind: "r", RelFilenode: 1, TotalBytes: 100, NLive: 10},
+		{OID: 2, Schema: "public", Name: "items", RelKind: "r", RelFilenode: 2, TotalBytes: 100, NLive: 20},
+		{OID: 3, Schema: "app", Name: "sessions", RelKind: "r", RelFilenode: 3, TotalBytes: 100, NLive: 30},
+	}
+	end := make([]SizeRow, len(rows))
+	copy(end, rows)
+	for i := range end {
+		end[i].NLive *= 2
+	}
+	base, endSample := pair(rows, end)
+	res, err := DiffSizes(base, endSample)
+	if err != nil {
+		t.Fatalf("DiffSizes: %v", err)
+	}
+
+	for _, sc := range []struct {
+		name string
+		by   GrowthScope
+	}{
+		{"relations", GrowthByTable}, {"schema", GrowthBySchema},
+		{"database", GrowthByDatabase}, {"partition", GrowthByPartition},
+	} {
+		t.Run(sc.name, func(t *testing.T) {
+			var sum int64
+			for _, r := range FinishRollUp(RollUpGrowth(res.Rows, sc.by), res.Window.Duration) {
+				if !r.RowsKnown {
+					t.Errorf("%q lost RowsKnown", r.Name)
+				}
+				sum += r.DeltaRows
+			}
+			if sum != 60 { // 10+20+30 doubled
+				t.Errorf("row delta = %d, want 60 at every scope", sum)
+			}
+		})
+	}
+}
+
+// The AND still has to work: one member whose counters the window cannot
+// compare makes its whole roll-up untrustworthy.
+func TestRollUpRowsKnownFoldsByAnd(t *testing.T) {
+	rows := []GrowthRow{
+		{Database: "app", Schema: "public", Name: "orders", RowsKnown: true, EndRows: 10},
+		{Database: "app", Schema: "public", Name: "items", RowsKnown: false, EndRows: 20},
+		{Database: "app", Schema: "other", Name: "sessions", RowsKnown: true, EndRows: 30},
+	}
+	bySchema := map[string]GrowthRow{}
+	for _, r := range RollUpGrowth(rows, GrowthBySchema) {
+		bySchema[r.Name] = r
+	}
+	if bySchema["public"].RowsKnown {
+		t.Error("a schema with one unknown member must not claim known row counts")
+	}
+	if !bySchema["other"].RowsKnown {
+		t.Error("a schema whose members are all known lost RowsKnown")
+	}
+	if db := RollUpGrowth(rows, GrowthByDatabase); len(db) != 1 || db[0].RowsKnown {
+		t.Errorf("database roll-up = %+v, want one row with RowsKnown false", db)
 	}
 }

@@ -6,15 +6,17 @@ import (
 	"time"
 )
 
-// minGrowthWindow is the shortest pair of samples worth diffing. Below a
-// minute the signal is autovacuum jitter and a single checkpoint, and
-// BytesPerDay multiplies whatever it sees by 1440.
-const minGrowthWindow = 60 * time.Second
+// shortGrowthWindow is where a pair stops being long enough for its per-day
+// rates to mean much: below a minute the signal is autovacuum jitter and a
+// single checkpoint, and BytesPerDay multiplies whatever it sees by 1440.
+//
+// It flags the window rather than refusing it. The measured byte deltas are
+// real at any spacing — "did this table just grow by 2 GB" is a fair question
+// to ask of two captures a few seconds apart — and only the extrapolated rates
+// are suspect, which is what the flag says.
+const shortGrowthWindow = 60 * time.Second
 
 var (
-	// ErrWindowTooShort refuses a pair captured too close together, rather
-	// than reporting noise as growth.
-	ErrWindowTooShort = errors.New("size window shorter than 60s")
 	// ErrSampleMismatch refuses a pair that does not describe the same
 	// database on the same server. A recreated database or a restored cluster
 	// is NOT this error — see GrowthIdentity.
@@ -86,6 +88,10 @@ type GrowthWindow struct {
 	// ClockSkew means the arguments' capture order disagreed and DiffSizes
 	// ordered them by time — a sample copied from a host with a skewed clock.
 	ClockSkew bool
+	// ShortWindow means the pair is under shortGrowthWindow apart, so the
+	// per-day rates extrapolate from very little. The byte deltas themselves
+	// are as measured as any other window's.
+	ShortWindow bool
 	// StatsReset means the two samples straddle a statistics reset, so the row
 	// counters cannot be diffed. Byte deltas are unaffected: sizes are
 	// measured, rows are counted.
@@ -215,24 +221,28 @@ func DiffSizes(base, end *SizeSample) (*GrowthResult, error) {
 	}
 
 	dur := end.CapturedAt.Sub(base.CapturedAt)
-	if dur < minGrowthWindow {
-		return nil, fmt.Errorf("%w: %s apart", ErrWindowTooShort, dur.Round(time.Second))
-	}
 
 	w := GrowthWindow{
 		BaseAt: base.CapturedAt, EndAt: end.CapturedAt, Duration: dur,
 		BaseRows: base.RowCount, EndRows: end.RowCount,
 		ClockSkew:    skew,
+		ShortWindow:  dur < shortGrowthWindow,
 		FloorChanged: base.MinBytes != end.MinBytes,
 	}
-	// Both resets must be known to tell whether one happened; an unknown reset
-	// means trusting nothing, since a reset we cannot see is the dangerous case.
-	switch {
-	case base.StatsReset.IsZero() || end.StatsReset.IsZero():
-		w.StatsReset = true
-	case !base.StatsReset.Equal(end.StatsReset):
-		w.StatsReset = true
-	}
+	// pg_stat_database.stats_reset is NULL until a database's statistics are
+	// reset for the first time, so two zeros are not two unknowns: they are
+	// both samples reporting that no reset had ever happened by the time they
+	// were taken, which settles that none happened between them. Reading that
+	// as ignorance — as this once did — blanked the rows and rows/day columns
+	// on every cluster whose statistics have simply never been reset, which is
+	// most of them, and left no way to tell that from a real reset.
+	//
+	// One zero against one timestamp stays flagged, and is the case that
+	// matters: a reset inside the window is exactly what turns the NULL side
+	// into a time. A failed meta read also lands on zero and so reads as
+	// never-reset, the same permissive way a zero DatabaseOID reads as
+	// compatible — and it costs only counted rows, never the measured bytes.
+	w.StatsReset = !base.StatsReset.Equal(end.StatsReset)
 	// Checked in this order: the cluster changing is the stronger statement.
 	switch {
 	case base.SystemID != 0 && end.SystemID != 0 && base.SystemID != end.SystemID:
@@ -407,6 +417,13 @@ func RollUpGrowth(rows []GrowthRow, by GrowthScope) []GrowthRow {
 
 // foldBy sums rows sharing a key into one row seeded by seed, preserving
 // first-seen order (applySort orders the items afterwards anyway).
+//
+// The seed only has to carry the group's identity: foldBy itself establishes
+// the identity element of every field accumulate narrows. RowsKnown is the one
+// that matters, because it folds by AND and accumulate can only ever clear it
+// — a seed that forgot to set it true (as the schema and database seeds did)
+// produced roll-ups whose row counts read "unknown" however trustworthy every
+// member was, which is why the rule lives here and not in each caller.
 func foldBy(rows []GrowthRow, by GrowthScope, seed func(GrowthRow) GrowthRow) []GrowthRow {
 	idx := make(map[string]int, len(rows))
 	out := make([]GrowthRow, 0, len(rows))
@@ -416,7 +433,9 @@ func foldBy(rows []GrowthRow, by GrowthScope, seed func(GrowthRow) GrowthRow) []
 		if !ok {
 			i = len(out)
 			idx[k] = i
-			out = append(out, seed(r))
+			s := seed(r)
+			s.RowsKnown = true
+			out = append(out, s)
 		}
 		accumulate(&out[i], r)
 	}

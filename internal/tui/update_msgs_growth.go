@@ -167,13 +167,11 @@ func (m *Model) applyGrowthResult(s *screen, res *pg.GrowthResult) {
 	s.resetCursor()
 }
 
-// growthWindowError phrases a refused window for the status line. The two
+// growthWindowError phrases a refused window for the status line. The
 // refusals are deliberate and each has a concrete remedy, so neither should
 // surface as a raw error string.
 func growthWindowError(err error) string {
 	switch {
-	case errors.Is(err, pg.ErrWindowTooShort):
-		return "those samples are less than a minute apart — too short to tell growth from noise"
 	case errors.Is(err, pg.ErrSampleMismatch):
 		return "those samples describe different databases — can't diff this window"
 	case errors.Is(err, pg.ErrSampleVersion):

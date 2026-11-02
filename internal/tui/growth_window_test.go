@@ -185,11 +185,11 @@ func TestGrowthWindowOrdersByTime(t *testing.T) {
 
 // A refused window must not become the applied one, and in entry mode the
 // picker must stay open rather than dropping the user onto an empty table.
-func TestGrowthShortWindowRefused(t *testing.T) {
+func TestGrowthWindowRefusalKeepsPicker(t *testing.T) {
 	m, gt, pick := windowStack(true, []pg.SizeSampleMeta{sizeMeta("/s/a.sizes.gz", winT0, 1)})
 	depth := len(m.stack)
 
-	m.onGrowthWindowLoaded(growthWindowLoadedMsg{db: "app", err: pg.ErrWindowTooShort})
+	m.onGrowthWindowLoaded(growthWindowLoadedMsg{db: "app", err: pg.ErrSampleMismatch})
 
 	if gt.growth.base != nil || gt.growth.rows != nil {
 		t.Error("a refused window must not be applied")
@@ -200,7 +200,7 @@ func TestGrowthShortWindowRefused(t *testing.T) {
 	if m.top() != pick {
 		t.Error("entry mode left the picker after a refusal")
 	}
-	if !strings.Contains(m.notice, "minute") {
+	if !strings.Contains(m.notice, "different databases") {
 		t.Errorf("notice = %q, want it to explain the refusal", m.notice)
 	}
 }
@@ -211,7 +211,6 @@ func TestGrowthWindowErrorMessages(t *testing.T) {
 		err  error
 		want string
 	}{
-		{pg.ErrWindowTooShort, "minute"},
 		{pg.ErrSampleMismatch, "different databases"},
 		{pg.ErrSampleVersion, "newer pgdu"},
 	} {

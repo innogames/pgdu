@@ -2,7 +2,6 @@ package pg
 
 import (
 	"context"
-	"errors"
 	"net/url"
 	"os"
 	"strconv"
@@ -116,14 +115,17 @@ func TestIntegration_CaptureSizes(t *testing.T) {
 		t.Errorf("round trip lost rows: %d != %d", len(back.Rows), len(s.Rows))
 	}
 
-	// Two captures back to back are far too close to diff, which is also the
-	// cheapest real test of the refusal.
+	// Two captures back to back still diff — they are only flagged as a short
+	// window — which is the cheapest real test of that path.
 	s2, err := c.CaptureSizes(ctx, "", 0)
 	if err != nil {
 		t.Fatalf("CaptureSizes (second): %v", err)
 	}
-	if _, err := DiffSizes(s, s2); !errors.Is(err, ErrWindowTooShort) {
-		t.Errorf("DiffSizes of two immediate captures: %v, want ErrWindowTooShort", err)
+	switch immediate, err := DiffSizes(s, s2); {
+	case err != nil:
+		t.Errorf("DiffSizes of two immediate captures: %v, want the diff anyway", err)
+	case !immediate.Window.ShortWindow:
+		t.Error("two immediate captures were not flagged as a short window")
 	}
 
 	// A synthetic window over the same two captures must diff cleanly, which

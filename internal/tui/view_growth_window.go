@@ -232,6 +232,12 @@ func growthWindowNote(w pg.GrowthWindow) string {
 	if w.ClockSkew {
 		notes = append(notes, "samples were out of order — ordered by capture time")
 	}
+	// Not a refusal: the byte deltas are measured whatever the spacing, and a
+	// pair of captures seconds apart answers "what just grew". Only the
+	// per-day extrapolation is worth a warning.
+	if w.ShortWindow {
+		notes = append(notes, "short window — per-day rates extrapolate from very little")
+	}
 	if w.StatsReset {
 		notes = append(notes, "statistics were reset: row counts not comparable")
 	}
