@@ -62,6 +62,15 @@ func (m *Model) loadSelectedSnapshot(s *screen, cur item) tea.Cmd {
 		return nil
 	}
 
+	// Refuse a window with a counter reset inside it. The deltas would be
+	// clamped fiction, and the reset is the one thing the browser knows about
+	// that the diff itself cannot recover.
+	if reset, straddled := m.snapStraddledReset(s, startPath, endPath); straddled {
+		m.notice = "counters were reset " + reset.Local().Format("2006-01-02 15:04:05") +
+			", inside this window — pick two snapshots from the same side of it"
+		return nil
+	}
+
 	// Dispatch by end. snapNow → live window; snapshot → frozen diff.
 	switch endPath {
 	case snapNow:
@@ -164,6 +173,68 @@ func (m *Model) snapTime(s *screen, path string) time.Time {
 		}
 		return meta.CapturedAt
 	}
+}
+
+// preResetSnaps collects the snapshots of (target, db) whose counters a
+// pg_stat_statements reset has since zeroed, with their total on-disk size.
+//
+// A zero liveReset means the server never reported one (pre-PG14, or the
+// best-effort read failed), which reads as "no reset known" and leaves every
+// snapshot usable — the same way a zero StatsReset does in snapStraddledReset.
+// Being permissive on an unknown is the only safe direction here: this set is
+// what P deletes.
+func preResetSnaps(metas []pg.SnapshotMeta, target, db string, liveReset time.Time) (map[string]bool, int64) {
+	if liveReset.IsZero() {
+		return nil, 0
+	}
+	var paths map[string]bool
+	var bytes int64
+	for _, meta := range metas {
+		if meta.Target != target || meta.Database != db {
+			continue // another server/db: its own reset is none of our business
+		}
+		if !meta.CapturedAt.Before(liveReset) {
+			continue
+		}
+		if paths == nil {
+			paths = make(map[string]bool)
+		}
+		paths[meta.Path] = true
+		bytes += meta.FileSize
+	}
+	return paths, bytes
+}
+
+// snapStraddledReset reports the pg_stat_statements reset that falls inside the
+// window startPath→endPath, if any: the counters went to zero in between, so
+// every delta the window would show is fiction.
+//
+// It is the pairing rule that replaced the browser's old habit of hiding
+// pre-reset snapshots outright. The filter guaranteed no window could straddle
+// a reset by making the invalid endpoints unreachable; this earns the same
+// guarantee per pair, which is strictly narrower — a pair that predates the
+// reset is fine, and the filter refused it anyway.
+//
+// The reset to compare against comes from the END of the window: a live end
+// (@now) uses the server's current stats_reset, a snapshot end the one it
+// recorded at capture. That is what makes a chain of old resets tractable with
+// only the last one in hand — each snapshot carries the reset that was current
+// when it was taken. A zero on either side is "unknown", which stays permissive
+// (DiffStatementsClamped floors the negative deltas a missed reset would
+// produce, so being wrong here is a dubious window, not a broken one).
+func (m *Model) snapStraddledReset(s *screen, startPath, endPath string) (time.Time, bool) {
+	start, ok := metaByPath(s.stat.snapMetas, startPath)
+	if !ok {
+		return time.Time{}, false // @reset / @session carry their own rules
+	}
+	reset := s.stat.liveReset
+	if end, ok := metaByPath(s.stat.snapMetas, endPath); ok {
+		reset = end.StatsReset
+	}
+	if reset.IsZero() || !reset.After(start.CapturedAt) {
+		return time.Time{}, false
+	}
+	return reset, true
 }
 
 // metaByPath finds the snapshot meta with the given file path.

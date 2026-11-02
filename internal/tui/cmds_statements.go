@@ -3,6 +3,8 @@ package tui
 import (
 	"cmp"
 	"context"
+	"maps"
+	"slices"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -36,7 +38,7 @@ type snapshotSavedMsg struct {
 type snapshotsListedMsg struct {
 	dir       string
 	metas     []pg.SnapshotMeta
-	liveReset time.Time // current pg_stat_statements stats_reset — drops invalidated snapshots
+	liveReset time.Time // current pg_stat_statements stats_reset — marks the pre-reset snapshots
 	liveCount int       // distinct statements tracked right now — bars the live anchors (0 = unknown)
 	err       error
 }
@@ -157,9 +159,9 @@ func (m *Model) saveSnapshotCmd(db string, auto bool) tea.Cmd {
 // opens on a database that has none yet — the counters half of the rule that
 // pgdu's history accrues from use.
 //
-// metas must be the RAW listing, not the one the browser filtered by the live
-// stats_reset: a reset since this morning's capture would otherwise make today
-// look empty, and a cluster that resets regularly would capture on every open.
+// metas must be every file the directory holds, pre-reset ones included: a
+// reset since this morning's capture would otherwise make today look empty,
+// and a cluster that resets regularly would capture on every open.
 func (m *Model) autoSnapshotCmd(db string, metas []pg.SnapshotMeta) tea.Cmd {
 	if !m.autoSample || m.snapshotDir == "" || m.capturingSnapshot() {
 		return nil
@@ -172,8 +174,8 @@ func (m *Model) autoSnapshotCmd(db string, metas []pg.SnapshotMeta) tea.Cmd {
 }
 
 // listSnapshotsCmd reads the snapshot directory for the browser, along with the
-// current pg_stat_statements stats_reset for db so the handler can drop snapshots
-// the live counters have since outgrown (a reset between capture and now).
+// current pg_stat_statements stats_reset for db so the handler can mark the
+// snapshots the live counters have outgrown (a reset between capture and now).
 func (m *Model) listSnapshotsCmd(dir, db string) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		return m.listSnapshots(ctx, dir, db)
@@ -225,6 +227,29 @@ func (m *Model) deleteSnapshotCmd(path, dir, db string) tea.Cmd {
 			return snapshotsListedMsg{dir: dir, err: err}
 		}
 		return m.listSnapshots(ctx, dir, db)
+	})
+}
+
+// purgeSnapshotsCmd removes every snapshot in the pre-reset set, then re-lists
+// the directory so the browser refreshes; the listing carries the first error.
+//
+// A failed unlink does not stop the sweep, for the same reason pruneKeepNewest
+// doesn't: the directory is shared and world-writable, so one file owned by a
+// user we can't delete for must not strand the rest.
+func (m *Model) purgeSnapshotsCmd(paths map[string]bool, dir, db string) tea.Cmd {
+	doomed := slices.Sorted(maps.Keys(paths))
+	return query(func(ctx context.Context) tea.Msg {
+		var firstErr error
+		for _, path := range doomed {
+			if err := pg.DeleteSnapshot(path); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		msg := m.listSnapshots(ctx, dir, db)
+		if firstErr != nil {
+			msg.err = firstErr
+		}
+		return msg
 	})
 }
 

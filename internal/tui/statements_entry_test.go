@@ -280,3 +280,32 @@ func TestFrozenWindowHeader(t *testing.T) {
 		}
 	}
 }
+
+// The browser accounts for the pre-reset set rather than hiding it: the rows
+// stay listed and tagged, a header line counts them with their bytes, and P is
+// advertised as what removes them.
+func TestRenderPreResetSnapshots(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-72 * time.Hour)
+	st := &screen{level: levelStatements, tool: toolQueries, db: "app"}
+	browser := &screen{level: levelSnapshots, tool: toolQueries, db: "app", loading: true}
+	m := newTestModel(st, browser)
+	m.width, m.height = 200, 40
+	m.onSnapshotsListed(snapshotsListedMsg{
+		metas: []pg.SnapshotMeta{
+			{Path: "/snaps/new.json.gz", Target: "db:5432", Database: "app", CapturedAt: now, QueryCount: 20, FileSize: 2048},
+			{Path: "/snaps/old.json.gz", Target: "db:5432", Database: "app", CapturedAt: old, QueryCount: 9, FileSize: 1024},
+		},
+		liveReset: now.Add(-24 * time.Hour),
+	})
+	out := ansi.Strip(m.View().Content)
+	for _, want := range []string{"old.json.gz", "pre-reset", "1 snapshot predate", "1.00 KB", "P deletes them"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("browser missing %q in output:\n%s", want, out)
+		}
+	}
+	// The newer one is on this side of the reset and carries no tag.
+	if strings.Count(out, "pre-reset") != 1 {
+		t.Errorf("want exactly one tagged row:\n%s", out)
+	}
+}

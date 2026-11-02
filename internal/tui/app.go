@@ -405,6 +405,13 @@ type stmtState struct {
 	// with items (one meta per row).
 	snapMetas []pg.SnapshotMeta
 	liveReset time.Time // live pg_stat_statements stats_reset — dates the "since last reset" anchor
+	// preReset is the set of snapMetas paths the live counters have outgrown
+	// (captured before liveReset), with their total on-disk size. They stay in
+	// the list — two of them still diff against each other — but they cannot
+	// baseline a window ending at the live "now", and they are what P offers to
+	// delete. Recomputed by every listing, so it can never go stale.
+	preReset      map[string]bool
+	preResetBytes int64
 	// entry marks the browser pushed when the tool opens, before the table has
 	// ever loaded: the user picks the window's base there (session start by
 	// default, a saved snapshot, or since last reset). No window is applied yet,
@@ -1214,6 +1221,11 @@ type Model struct {
 	// pendingDeleteSnap holds the path of the snapshot the user pressed D on in
 	// the browser; the next key confirms (y/Y) or cancels — mirrors pendingReindex.
 	pendingDeleteSnap string
+	// pendingPurgeSnaps arms the same y/n confirm for the whole pre-reset set
+	// on the snapshots browser (P). It is a flag rather than a path list
+	// because the set is rebuilt by every listing: the confirm resolves against
+	// what the screen shows now, never against a set captured one keypress ago.
+	pendingPurgeSnaps bool
 
 	target    string // host:port; keys snapshot compatibility, so it never changes shape
 	hostLabel string // root crumb of the breadcrumb (cli.Config.HostLabel)

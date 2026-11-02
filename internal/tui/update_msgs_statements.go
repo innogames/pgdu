@@ -73,8 +73,9 @@ func (m *Model) onStatementsLoaded(msg statementsLoadedMsg) tea.Cmd {
 	}
 
 	// A disk baseline can produce negative deltas if the counters were reset
-	// between capture and now; clamp them. (Snapshots invalidated this way are
-	// already filtered out of the L browser, so this is just defence in depth.)
+	// between capture and now; clamp them. (The L browser refuses to pick such
+	// a window in the first place — snapStraddledReset — so this catches only
+	// a reset that lands while the window is already live.)
 	if s.stat.baseSnap != nil {
 		s.stat.rows = pg.DiffStatementsClamped(s.stat.baseline, msg.stats)
 	} else {
@@ -224,11 +225,16 @@ func (m *Model) onSnapshotSaved(msg snapshotSavedMsg) tea.Cmd {
 }
 
 // onSnapshotsListed fills the snapshots browser with the directory listing.
-// Snapshots from the current server/database whose counters have since been
-// reset (CapturedAt predates the live stats_reset) are dropped silently — they
-// can't serve as a baseline, so there's nothing to load. Snapshots from a
-// different server/database are kept but flagged incompatible (dimmed, not
-// loadable), since we can't judge their validity.
+//
+// Every readable file gets a row. Snapshots from a different server/database
+// are flagged incompatible (dimmed, not loadable), since we can't judge their
+// validity. Snapshots the live counters have outgrown (CapturedAt predates the
+// live stats_reset) are flagged pre-reset and collected into stat.preReset:
+// they can't baseline a window that ends at the live "now", but they diff
+// against each other perfectly well — the reset says nothing about the
+// counters between two captures that both predate it. Dropping them from the
+// list, as this once did, hid that history behind a UI rule and made a
+// directory holding a month of snapshots look nearly empty.
 func (m *Model) onSnapshotsListed(msg snapshotsListedMsg) tea.Cmd {
 	s := m.findLevel(levelSnapshots)
 	if s == nil {
@@ -247,16 +253,9 @@ func (m *Model) onSnapshotsListed(msg snapshotsListedMsg) tea.Cmd {
 		curDB = st.db
 	}
 
-	metas := make([]pg.SnapshotMeta, 0, len(msg.metas))
-	for _, meta := range msg.metas {
-		compatible := meta.Target == m.target && meta.Database == curDB
-		if compatible && !msg.liveReset.IsZero() && meta.CapturedAt.Before(msg.liveReset) {
-			continue // invalidated by a stats reset since capture
-		}
-		metas = append(metas, meta)
-	}
-
+	metas := msg.metas
 	s.stat.snapMetas = metas
+	s.stat.preReset, s.stat.preResetBytes = preResetSnaps(metas, m.target, curDB, msg.liveReset)
 	// Synthetic timeline anchors bracket the real snapshots, newest→oldest: "now"
 	// (live end) at the top, then "session start" (the in-memory baseline from when
 	// the tool opened) when we have one, the saved snapshots, and "since last reset"
@@ -304,10 +303,11 @@ func (m *Model) onSnapshotsListed(msg snapshotsListedMsg) tea.Cmd {
 		s.cursor = max(len(s.items)-1, 0)
 	}
 	// Opening the tool takes the day's snapshot if nothing has — see
-	// onSizeSamplesListed for why the decision lives on the listing. It reads
-	// msg.metas, the RAW listing, not the reset-filtered metas above: a stats
-	// reset since this morning's capture would otherwise make today look empty
-	// and re-capture on every open.
+	// onSizeSamplesListed for why the decision lives on the listing. It counts
+	// every file on disk, pre-reset ones included: the day's quota is about
+	// what was written, not what is pairable, and a reset since this morning's
+	// capture would otherwise make today look empty and re-capture on every
+	// open.
 	if firstLoad && s.stat.entry && msg.err == nil {
 		return m.autoSnapshotCmd(s.db, msg.metas)
 	}

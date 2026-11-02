@@ -30,13 +30,17 @@ type keyMap struct {
 	SaveSnapshot     key.Binding
 	Snapshots        key.Binding
 	DeleteSnapshot   key.Binding
-	Columns          key.Binding
-	ResetCols        key.Binding // r: reset column visibility to defaults (inside the C picker)
-	StmtView         key.Binding // tab (top queries): queries → by table → by type
-	GrowthScope      key.Binding // tab (size history): relations → schema → database → partition trees
-	BufSplit         key.Binding // tab (buffers list): per table ↔ per relation (heap/toast/index)
-	Filter           key.Binding
-	Seek             key.Binding
+	// PurgeSnapshots deletes the whole pre-reset set at once (P, y-confirmed).
+	// Enabled only when that set is non-empty, so the key appears exactly when
+	// there is something it would remove.
+	PurgeSnapshots key.Binding
+	Columns        key.Binding
+	ResetCols      key.Binding // r: reset column visibility to defaults (inside the C picker)
+	StmtView       key.Binding // tab (top queries): queries → by table → by type
+	GrowthScope    key.Binding // tab (size history): relations → schema → database → partition trees
+	BufSplit       key.Binding // tab (buffers list): per table ↔ per relation (heap/toast/index)
+	Filter         key.Binding
+	Seek           key.Binding
 	// GinNextLeaf jumps the GIN page list to the next posting-tree leaf page,
 	// found server-side across the whole index (only those pages itemize).
 	GinNextLeaf key.Binding
@@ -191,6 +195,7 @@ func defaultKeys() keyMap {
 		SaveSnapshot:    key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "save snapshot")),
 		Snapshots:       key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "→ snapshots")),
 		DeleteSnapshot:  key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete snapshot")),
+		PurgeSnapshots:  key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "delete pre-reset")),
 		Columns:         key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "configure columns")),
 		StmtView:        key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "queries/by table/by type")),
 		GrowthScope:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "scope")),
@@ -355,6 +360,7 @@ func (k *keyMap) applyContext(s *screen) {
 	if growthWindow {
 		k.DeleteSnapshot.SetHelp("D", "delete sample")
 	}
+	k.PurgeSnapshots.SetEnabled(snapshots && len(s.stat.preReset) > 0)
 	// Install is only actionable when the screen offers an installable extension
 	// (the prompt renders its own `i` hint); keep it out of the footer otherwise.
 	k.Install.SetEnabled(s.extPrompt != nil && s.extPrompt.installable)
@@ -562,7 +568,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Refresh, k.Install, k.Describe, k.DiskUsage, k.Growth},
 		{k.Rebaseline, k.ResetStatements, k.ResetMinMax, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
-		{k.EvictBuffers, k.StmtView, k.GrowthScope, k.BufSplit, k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
+		{k.EvictBuffers, k.StmtView, k.GrowthScope, k.BufSplit, k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.PurgeSnapshots, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
 		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.JumpIO, k.Progress, k.Settings},
 		{k.LogPane, k.LogGroupMode, k.LogWindow, k.LogJump, k.LogParams, k.OpenLog},
 		{k.Help, k.Quit},

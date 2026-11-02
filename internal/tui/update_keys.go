@@ -184,6 +184,15 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// Whole-set delete of the snapshots a counter reset has invalidated (P).
+	// Same arming as D, resolved against the screen's current set.
+	if m.pendingPurgeSnaps {
+		m.pendingPurgeSnaps = false
+		if confirmGate(msg) && len(s.stat.preReset) > 0 {
+			return m, m.purgeSnapshotsCmd(s.stat.preReset, m.snapshotDir, s.db)
+		}
+		return m, nil
+	}
 	// Backend cancel/terminate confirmation — same y/n pattern as reindex.
 	if s.act.pendingAction != "" {
 		action := s.act.pendingAction
@@ -629,6 +638,13 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if cur, ok := s.currentItem(); ok && cur.snapPath != "" && cur.snapPath != growthNow {
 				m.pendingDeleteSnap = cur.snapPath
 			}
+		}
+	case key.Matches(msg, m.keys.PurgeSnapshots):
+		// Arm the y/n confirmation for every pre-reset snapshot at once. The
+		// binding is only enabled when that set is non-empty (applyContext), so
+		// reaching here with nothing to delete takes a stale key event.
+		if s.level == levelSnapshots && len(s.stat.preReset) > 0 {
+			m.pendingPurgeSnaps = true
 		}
 	case key.Matches(msg, m.keys.ActivityFilter):
 		if s.level == levelActivity {

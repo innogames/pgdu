@@ -2,6 +2,7 @@ package tui
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +13,15 @@ import (
 )
 
 // --- snapshots browser (levelSnapshots) ---
+
+// countNoun is "1 snapshot" / "3 snapshots": the only pluralisation this screen
+// needs, and regular enough not to want a table.
+func countNoun(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return strconv.Itoa(n) + " " + noun + "s"
+}
 
 // snapshotLabel is the row text for a snapshot, also the fuzzy-filter key. It
 // leads with the capture time (newest-first list) and the database it covers.
@@ -28,6 +38,11 @@ func snapshotLabel(meta pg.SnapshotMeta) string {
 // pick spans pick → now (live); with a start already applied, picking another
 // row spans the time-ordered range between the two — frozen unless an endpoint
 // is "now". Snapshots from another server/database are flagged, not loadable.
+//
+// A snapshot the live counters have outgrown is tagged pre-reset rather than
+// hidden: it still pairs with another snapshot from its own side of the reset,
+// and a header line counts the set and offers P to delete it, so a directory
+// full of them says so instead of looking empty.
 func (m *Model) renderStatementSnapshots(s *screen, height int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
@@ -61,8 +76,26 @@ func (m *Model) renderStatementSnapshots(s *screen, height int) string {
 	}
 	used += 5
 
+	// Account for the pre-reset set out loud. These rows are listed and still
+	// pairable, but they are also why the directory can hold far more than the
+	// windows on offer, so the line names the count, the bytes and the one key
+	// that removes them.
+	if n := len(s.stat.preReset); n > 0 {
+		b.WriteString("  " + mu(countNoun(n, "snapshot")+" predate the last counter reset ("+
+			humanize.Bytes(s.stat.preResetBytes)+") — they diff against each other, not against now · ") +
+			styleBadge.Render("P") + mu(" deletes them") + "\n")
+		used++
+	}
+
 	if m.pendingDeleteSnap != "" {
 		b.WriteString("  " + styleErr.Render("delete this snapshot? ") + mu("press ") +
+			styleBadge.Render("y") + mu(" to confirm, any other key cancels") + "\n")
+		used++
+	}
+
+	if m.pendingPurgeSnaps {
+		b.WriteString("  " + styleErr.Render("delete "+countNoun(len(s.stat.preReset), "pre-reset snapshot")+
+			" ("+humanize.Bytes(s.stat.preResetBytes)+")? ") + mu("press ") +
 			styleBadge.Render("y") + mu(" to confirm, any other key cancels") + "\n")
 		used++
 	}
@@ -124,6 +157,9 @@ func (m *Model) renderStatementSnapshots(s *screen, height int) string {
 		if !compatible {
 			tags = append(tags, styleErr.Render("other server/db"))
 		}
+		if s.stat.preReset[it.snapPath] {
+			tags = append(tags, mu("pre-reset"))
+		}
 		// Only real snapshots have a backing file to show; anchors are virtual.
 		row := cursor + bar + "  " + mu(count) + "  " + mu(age) + "  " + name
 		if !anchor {
@@ -181,8 +217,17 @@ func (m *Model) renderSnapshotEntrySummary(s *screen) string {
 			}
 		}
 	}
-	return mu("window: ") + styleSelected.Render(start) + mu(" → ") +
+	line := mu("window: ") + styleSelected.Render(start) + mu(" → ") +
 		styleSelected.Render("now") + mu("  ·  live · refresh "+m.refreshLabel())
+	// The entry picker's end is always the live "now", so a pre-reset row has
+	// no valid window here at all and Enter will refuse it. Say so under the
+	// cursor rather than letting the preview promise a window that won't open;
+	// pairing two pre-reset snapshots is for the full browser, where both ends
+	// can be picked.
+	if cur, ok := s.currentItem(); ok && s.stat.preReset[cur.snapPath] {
+		line += mu("  ·  ") + styleErr.Render("counters were reset since — pick a newer base")
+	}
+	return line
 }
 
 // renderSnapshotWindowSummary is the browser header's one-line description of

@@ -295,15 +295,25 @@ fails (missing/corrupt → empty).
 - **Top-queries snapshots**: the `L` browser carries virtual anchors (`@now`,
   `@session`, `@reset` in `cmds.go`) that are never backed by a file — every path that
   loads or diffs a snapshot must special-case them. Snapshots older than the live
-  `stats_reset` are filtered out, not warned about. Frozen windows (`stat.endSnap` set)
+  `stats_reset` are listed and tagged `pre-reset`, not hidden: the reset says nothing
+  about the counters between two captures that both predate it, so they still pair
+  with each other. What the old filter guaranteed is now earned per pair by
+  `snapStraddledReset` (`update_drill_snapshots.go`), which refuses a window with a
+  reset inside it — the reset to compare against comes from the window's **end** (the
+  live `stats_reset` for `@now`, the snapshot's own recorded one otherwise), which is
+  what makes a chain of resets tractable with only the last one in hand. A zero on
+  either side is unknown and stays permissive. The set is collected into
+  `stat.preReset` by every listing, counted in the browser's header, and `P` deletes
+  it behind the shared two-step confirm. Frozen windows (`stat.endSnap` set)
   skip live re-sampling in `loadCurrent`/`onStatementsTick`. The same browser is the
   tool's entry screen (`stat.entry`, pushed by `databaseChildScreens` over a
   not-yet-loaded `levelStatements`): no `@now` row, the pick is always the window's
   start, and Back pops the unloaded table too. That first listing is also where the
   daily auto capture is decided (`first && entry`, so the re-list it triggers cannot
-  fire a second), and the predicate reads the **raw** listing, never the
-  reset-filtered one — a reset since this morning's capture would otherwise make
-  today look empty and re-capture on every open. The session anchor is captured on the
+  fire a second), and the predicate counts **every file on disk**, pre-reset ones
+  included — the day's quota is about what was written, not what is pairable, and a
+  reset since this morning's capture would otherwise make today look empty and
+  re-capture on every open. The session anchor is captured on the
   first live sample whatever base was picked, so `@session` exists after a snapshot or
   cumulative entry as well.
 - **Top-queries roll-ups are in-place views, not levels**: `Tab` cycles `stat.view`

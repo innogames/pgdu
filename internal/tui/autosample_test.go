@@ -2,8 +2,12 @@ package tui
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
 
 	"pgdu/internal/pg"
 )
@@ -137,23 +141,54 @@ func TestAutoSnapshotSkipsOnReopenAndWhenOff(t *testing.T) {
 	}
 }
 
-// The browser hides snapshots the live stats_reset has outgrown, but the
-// predicate must not: a reset since this morning's capture would otherwise make
-// today look empty, and a cluster that resets regularly would capture on every
-// single tool open.
-func TestAutoSnapshotPredicateIgnoresResetFilter(t *testing.T) {
+// A snapshot the live counters have outgrown still counts as today's capture:
+// it is on disk, and the day's quota is about files written, not windows on
+// offer. A reset since this morning's capture would otherwise make today look
+// empty, and a cluster that resets regularly would capture on every tool open.
+func TestAutoSnapshotPredicateCountsPreResetSnapshots(t *testing.T) {
 	now := time.Now()
 	m := autoModel(t, queriesStack()...)
 	msg := snapshotsListedMsg{
-		metas:     []pg.SnapshotMeta{{Target: "db:5432", Database: "app", CapturedAt: now.Add(-3 * time.Hour)}},
-		liveReset: now.Add(-time.Hour), // filters that snapshot out of the list
+		metas: []pg.SnapshotMeta{{
+			Path: "/snaps/app.json.gz", Target: "db:5432", Database: "app",
+			CapturedAt: now.Add(-3 * time.Hour), FileSize: 4096,
+		}},
+		liveReset: now.Add(-time.Hour), // a reset since that capture
 	}
 	cmd := m.onSnapshotsListed(msg)
-	if s := m.findLevel(levelSnapshots); s != nil && len(s.stat.snapMetas) != 0 {
-		t.Fatal("setup: the browser was expected to filter the pre-reset snapshot out")
+	s := m.findLevel(levelSnapshots)
+	if s == nil || len(s.stat.snapMetas) != 1 {
+		t.Fatal("a pre-reset snapshot must stay in the browser, not vanish from it")
+	}
+	if !s.stat.preReset["/snaps/app.json.gz"] || s.stat.preResetBytes != 4096 {
+		t.Errorf("pre-reset set = %v (%d bytes), want the one snapshot and its size",
+			s.stat.preReset, s.stat.preResetBytes)
 	}
 	if cmd != nil {
-		t.Error("today's snapshot still exists on disk; the filter must not cause a re-capture")
+		t.Error("today's snapshot still exists on disk; a reset must not cause a re-capture")
+	}
+}
+
+// The set is scoped to the current server and database, because a snapshot of
+// another one says nothing about this database's counters — and the set is
+// what P deletes.
+func TestPreResetSetIsScoped(t *testing.T) {
+	now := time.Now()
+	before := now.Add(-3 * time.Hour)
+	metas := []pg.SnapshotMeta{
+		{Path: "mine", Target: "db:5432", Database: "app", CapturedAt: before, FileSize: 10},
+		{Path: "other-db", Target: "db:5432", Database: "other", CapturedAt: before, FileSize: 10},
+		{Path: "other-host", Target: "elsewhere:5432", Database: "app", CapturedAt: before, FileSize: 10},
+		{Path: "after", Target: "db:5432", Database: "app", CapturedAt: now, FileSize: 10},
+	}
+	got, bytes := preResetSnaps(metas, "db:5432", "app", now.Add(-time.Hour))
+	if len(got) != 1 || !got["mine"] || bytes != 10 {
+		t.Errorf("pre-reset set = %v (%d bytes), want only the current db's older snapshot", got, bytes)
+	}
+	// No reset known at all: nothing has been outgrown, so nothing is offered
+	// for deletion.
+	if got, bytes := preResetSnaps(metas, "db:5432", "app", time.Time{}); got != nil || bytes != 0 {
+		t.Errorf("unknown reset yielded %v (%d bytes), want an empty set", got, bytes)
 	}
 }
 
@@ -205,5 +240,79 @@ func TestCaptureGuardSpansBothScreens(t *testing.T) {
 	// A listing landing mid-capture must not start a second one.
 	if cmd := m.onSizeSamplesListed(sizeSamplesListedMsg{db: "app"}); cmd != nil {
 		t.Error("a capture is already running")
+	}
+}
+
+// snapshotBrowser is a loaded browser over dir with a pre-reset set armed —
+// the state P acts on.
+func snapshotBrowser(t *testing.T, paths map[string]bool, bytes int64) (*Model, *screen) {
+	t.Helper()
+	st := &screen{level: levelStatements, tool: toolQueries, db: "app"}
+	s := &screen{level: levelSnapshots, tool: toolQueries, db: "app", loaded: true,
+		stat: stmtState{preReset: paths, preResetBytes: bytes}}
+	m := newTestModel(st, s)
+	m.snapshotDir = t.TempDir()
+	return m, s
+}
+
+// P arms the shared two-step confirm; only y executes, and the key is inert
+// when there is nothing it would remove.
+func TestPurgeSnapshotsArming(t *testing.T) {
+	press := func(m *Model, r rune) tea.Cmd {
+		_, cmd := m.handleKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+		return cmd
+	}
+
+	m, _ := snapshotBrowser(t, map[string]bool{"/snaps/a.json.gz": true}, 4096)
+	press(m, 'P')
+	if !m.pendingPurgeSnaps {
+		t.Fatal("P must arm the confirm")
+	}
+	if cmd := press(m, 'n'); cmd != nil || m.pendingPurgeSnaps {
+		t.Error("any other key must cancel without deleting")
+	}
+	press(m, 'P')
+	if cmd := press(m, 'y'); cmd == nil {
+		t.Error("y must execute the purge")
+	}
+	if m.pendingPurgeSnaps {
+		t.Error("the confirm must disarm once resolved")
+	}
+
+	// Nothing invalidated, nothing to offer: the binding is disabled and the
+	// key cannot arm a delete of an empty set.
+	m, _ = snapshotBrowser(t, nil, 0)
+	press(m, 'P')
+	if m.pendingPurgeSnaps {
+		t.Error("P must be inert with no pre-reset snapshots")
+	}
+}
+
+// The sweep removes exactly the set and no more, and a file another user
+// already took away does not strand the rest.
+func TestPurgeSnapshotsDeletesTheSet(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("x"), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	doomed, alsoDoomed, keep := write("old1.json.gz"), write("old2.json.gz"), write("current.json.gz")
+	gone := filepath.Join(dir, "vanished.json.gz") // deleted by someone else first
+
+	m, _ := snapshotBrowser(t, nil, 0)
+	cmd := m.purgeSnapshotsCmd(map[string]bool{doomed: true, alsoDoomed: true, gone: true}, dir, "app")
+	cmd() // the listing it ends with needs no server: an unreachable one is fine
+
+	for _, path := range []string{doomed, alsoDoomed} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s survived the purge (%v)", filepath.Base(path), err)
+		}
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("a snapshot outside the set was deleted: %v", err)
 	}
 }
