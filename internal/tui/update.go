@@ -145,6 +145,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onSizeSampleCaptured(msg)
 	case growthWindowLoadedMsg:
 		return m, m.onGrowthWindowLoaded(msg)
+	case growthSeriesLoadedMsg:
+		return m, m.onGrowthSeriesLoaded(msg)
 
 	case exportDoneMsg:
 		return m, m.onExportDone(msg)

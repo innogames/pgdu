@@ -266,7 +266,7 @@ func (m *Model) buildStatementGroupItems(v stmtView, rows []pg.QueryStat, ctx st
 func (m *Model) syncStmtBar(s *screen) {
 	bar := -1
 	if s.stat.view.grouped() && s.diagSortCol >= 0 && s.diagSortCol < len(s.diagCols) &&
-		numericDiagKind(s.diagCols[s.diagSortCol].Kind) {
+		barableDiagKind(s.diagCols[s.diagSortCol].Kind) {
 		bar = s.diagSortCol
 	}
 	if bar != s.diagBarCol {
@@ -275,8 +275,10 @@ func (m *Model) syncStmtBar(s *screen) {
 	}
 }
 
-// numericDiagKind reports the column kinds that carry a magnitude (the ones
-// cycleSort defaults to descending).
+// numericDiagKind reports the column kinds that carry a magnitude — the ones
+// cycleSort defaults to descending, because "most" is what a reader wants
+// first from a number. Whether that magnitude can also be DRAWN as the
+// headline bar is a separate question: see barableDiagKind.
 func numericDiagKind(k pg.DiagColumnKind) bool {
 	switch k {
 	case pg.DiagInt, pg.DiagFloat, pg.DiagPercent, pg.DiagBytes, pg.DiagPercentGraded,
@@ -285,5 +287,13 @@ func numericDiagKind(k pg.DiagColumnKind) bool {
 	}
 	// The signed change columns carry a magnitude too, so a bar over them is
 	// meaningful — it just reads as "how much moved".
-	return k.IsDelta()
+	return k.IsDelta() || k == pg.DiagSparkline
+}
+
+// barableDiagKind reports the kinds that can be DRAWN as the headline bar,
+// which is a narrower question than carrying a magnitude. A sparkline already
+// is a drawing of its own numbers: painting a bar over the column would put
+// two pictures of the same figure in one cell and cost the trace its width.
+func barableDiagKind(k pg.DiagColumnKind) bool {
+	return numericDiagKind(k) && k != pg.DiagSparkline
 }

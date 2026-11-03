@@ -260,6 +260,56 @@ func sizeMetaByPath(metas []pg.SizeSampleMeta, path string) (pg.SizeSampleMeta, 
 	return pg.SizeSampleMeta{}, false
 }
 
+// growthTrendNote names the trend column's axis, so the traces beside it can be
+// read as a measurement rather than a decoration: a glyph is a span of time,
+// and the reader has to be told which. It is empty when the column is absent.
+//
+// The span comes from the samples that actually landed on the axis, not from
+// the retention setting — a history with a week missing out of its middle still
+// spans the week, and the gaps say so glyph by glyph.
+func growthTrendNote(t *growthTrend) string {
+	switch t.state {
+	case trendLoading:
+		return "trend loading…"
+	case trendReady:
+		if t.hist == nil {
+			return ""
+		}
+		first, last := t.hist.Span()
+		if first.IsZero() {
+			return ""
+		}
+		// Say what is on the axis, not what was read: under the uniform layout
+		// samples sharing a cell fold together, and a header promising six
+		// points over a trace showing three is the kind of small lie that
+		// makes the rest of the screen harder to trust.
+		samples := fmt.Sprintf("%d samples", t.hist.Samples)
+		if t.hist.Plotted < t.hist.Samples {
+			samples = fmt.Sprintf("%d of %d samples", t.hist.Plotted, t.hist.Samples)
+		}
+		// Only the uniform layout has a single span per cell to quote.
+		axis := "gaps to scale"
+		if t.hist.Bucket > 0 {
+			axis = fmtDuration(t.hist.Bucket) + " per cell"
+		}
+		note := fmt.Sprintf("trend %s → %s · %s · %s",
+			first.Local().Format("01-02"), last.Local().Format("01-02"),
+			samples, axis)
+		if t.hist.Skipped > 0 {
+			// Samples from a restored cluster or a recreated database are left
+			// off the axis; saying so is the difference between a short history
+			// and a history that was censored.
+			note += fmt.Sprintf(" (%d skipped)", t.hist.Skipped)
+		}
+		return note
+	case trendNone:
+		if t.note != "" {
+			return "trend: " + t.note
+		}
+	}
+	return ""
+}
+
 // growthHeaderLine is the one-line banner above the growth table: the window,
 // the scope and any narrowing.
 func (m *Model) growthHeaderLine(s *screen) string {
@@ -280,6 +330,9 @@ func (m *Model) growthHeaderLine(s *screen) string {
 	}
 	if o := s.growth.other; o.Parts > 0 {
 		parts = append(parts, mu(fmt.Sprintf("+%d under the size floor", o.Parts)))
+	}
+	if t := growthTrendNote(&s.growth.trend); t != "" {
+		parts = append(parts, mu(t))
 	}
 	line := "  " + strings.Join(parts, mu("  ·  "))
 	if note := growthWindowNote(w); note != "" {

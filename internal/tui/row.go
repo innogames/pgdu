@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -223,6 +224,55 @@ func paintBar(width int, segs ...barSegment) string {
 	}
 	if used < width {
 		b.WriteString(styleMuted.Render(strings.Repeat("░", width-used)))
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+// renderDeltaBar paints a signed change against a centre line: a shrink runs
+// left of it, growth runs right, both scaled to the column's largest absolute
+// change. Zero is an empty bar.
+//
+// A one-sided bar cannot show a signed column at all. Scaled on the value it
+// leaves every negative row empty, which is every row in a window where the
+// database shrank; scaled on the magnitude it draws a 19 GB reclaim and a
+// 19 GB blowout identically. Splitting the width puts the direction in the
+// geometry, where it can be read without going to the digits.
+//
+// The two halves are sized independently of each other so an odd width has no
+// off-by-one: the centre sits where the two meet.
+func renderDeltaBar(num, maxAbs float64, width int) string {
+	if maxAbs <= 0 {
+		maxAbs = 1
+	}
+	left := width / 2
+	right := width - left
+	cells := func(half int) int {
+		n := min(int(math.Abs(num)/maxAbs*float64(half)), half)
+		// A change too small to earn a cell still gets one: the column exists
+		// to say which way a row moved, and rounding it to an empty bar says
+		// it did not move. Guarded on the half having a cell to give — at a
+		// width of one there is no left half at all.
+		if n == 0 && num != 0 && half > 0 {
+			n = 1
+		}
+		return max(n, 0)
+	}
+	// The same style the Δ digits take, so a row's bar and its number cannot
+	// disagree about which way it went or how hard.
+	style := deltaStyle(num, maxAbs)
+	var b strings.Builder
+	b.WriteString("[")
+	if num < 0 {
+		n := cells(left)
+		b.WriteString(styleMuted.Render(strings.Repeat("░", left-n)))
+		b.WriteString(style.Render(strings.Repeat("▇", n)))
+		b.WriteString(styleMuted.Render(strings.Repeat("░", right)))
+	} else {
+		n := cells(right)
+		b.WriteString(styleMuted.Render(strings.Repeat("░", left)))
+		b.WriteString(style.Render(strings.Repeat("▇", n)))
+		b.WriteString(styleMuted.Render(strings.Repeat("░", right-n)))
 	}
 	b.WriteString("]")
 	return b.String()

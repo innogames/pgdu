@@ -40,6 +40,7 @@ const (
 	KindDeltaCount                // signed counter change: humanized with an explicit sign, coloured like KindDeltaBytes
 	KindDeltaPct                  // signed percentage change: rendered with an explicit sign, coloured like KindDeltaBytes
 	KindGrowthTag                 // size-history row tag: new cyan, rewritten yellow, gone muted
+	KindSparkline                 // pre-rendered fixed-width glyph trace in Display; Num carries the magnitude it was built from, so the column sorts and grades without the renderer re-deriving anything from the glyphs
 )
 
 // IsDelta reports whether a kind is one of the signed change columns, which

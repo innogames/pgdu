@@ -36,7 +36,7 @@ func (m *Model) handleTblColumnConfigKey(s *screen, msg tea.KeyPressMsg) tea.Cmd
 // handleGrowthColumnConfigKey drives the C picker on the growth table. One
 // picker serves every scope, so the checkbox list stays stable across Tab.
 func (m *Model) handleGrowthColumnConfigKey(s *screen, msg tea.KeyPressMsg) tea.Cmd {
-	ctx := growthCtx{view: s.growth.view, window: s.growth.duration()}
+	ctx := m.growthCtx(s)
 	return growthSpec.handleKey(m, &m.growthTable, msg, ctx, func() { m.rebuildGrowthItems(s) })
 }
 

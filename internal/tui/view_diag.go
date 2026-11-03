@@ -1022,8 +1022,16 @@ func (s *screen) diagMetrics(cols []pg.DiagColumn, barCol int) (colW, naturalW [
 				colW[i] = diagColWidth
 			}
 			if cell.HasNum {
-				if barCol == i && cell.Num > barMax {
-					barMax = cell.Num
+				// A signed column's bar scales on magnitude, not on value: a
+				// window where everything shrank has no positive maximum at
+				// all, and taking one left barMax at zero and every bar on
+				// screen empty.
+				v := cell.Num
+				if cols[i].Kind.IsDelta() {
+					v = math.Abs(v)
+				}
+				if barCol == i && v > barMax {
+					barMax = v
 				}
 				if cols[i].Kind == pg.DiagCostGraded && cell.Num > costMax[i] {
 					costMax[i] = cell.Num
@@ -1032,6 +1040,12 @@ func (s *screen) diagMetrics(cols []pg.DiagColumn, barCol int) (colW, naturalW [
 				// taken as an absolute value so a shrink-heavy window scales
 				// the same way a growth-heavy one does.
 				if cols[i].Kind.IsDelta() && math.Abs(cell.Num) > costMax[i] {
+					costMax[i] = math.Abs(cell.Num)
+				}
+				// A sparkline's Num is the rate its glyphs describe, and it is
+				// coloured by that rate, so it grades against its column's
+				// largest just as a delta column does.
+				if cols[i].Kind == pg.DiagSparkline && math.Abs(cell.Num) > costMax[i] {
 					costMax[i] = math.Abs(cell.Num)
 				}
 			}
@@ -1254,12 +1268,18 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 					if scaleMax <= 0 {
 						scaleMax = 1
 					}
-					filled := max(min(int(float64(barW)*cell.Num/scaleMax), barW), 0)
-					style := styleBar
-					if barIsPercent {
-						style = diagPercentBarStyle(barKind, cell.Num)
+					if barKind.IsDelta() {
+						// Signed: a centre line with shrink left and growth
+						// right, so direction is in the geometry.
+						barStr = renderDeltaBar(cell.Num, scaleMax, barW)
+					} else {
+						filled := max(min(int(float64(barW)*cell.Num/scaleMax), barW), 0)
+						style := styleBar
+						if barIsPercent {
+							style = diagPercentBarStyle(barKind, cell.Num)
+						}
+						barStr = paintBar(barW, barSegment{cells: filled, style: style})
 					}
-					barStr = paintBar(barW, barSegment{cells: filled, style: style})
 				} else {
 					barStr = paintBar(barW) // empty bar for null cells
 				}
@@ -1294,10 +1314,14 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			percentBad := i < nCols && cols[i].Kind == pg.DiagPercentBad
 			costGraded := i < nCols && cols[i].Kind == pg.DiagCostGraded
 			duration := i < nCols && cols[i].Kind == pg.DiagDuration
-			isNumeric := cell.HasNum || (i < nCols && (cols[i].Kind == pg.DiagInt ||
+			// A trace reads left to right from oldest to newest, so it is left
+			// aligned however its Num would otherwise classify the cell — the
+			// one place HasNum does not decide the alignment.
+			trace := i < nCols && cols[i].Kind == pg.DiagSparkline
+			isNumeric := !trace && (cell.HasNum || (i < nCols && (cols[i].Kind == pg.DiagInt ||
 				cols[i].Kind == pg.DiagFloat || cols[i].Kind == pg.DiagPercent ||
 				cols[i].Kind == pg.DiagBytes || cols[i].Kind.IsDelta() ||
-				graded || percentBad || costGraded || duration))
+				graded || percentBad || costGraded || duration)))
 
 			// Grade "higher is better" percent cells green→red so the eye can
 			// triage hit ratios without reading digits. Skipped on the selected
@@ -1346,6 +1370,12 @@ func (m *Model) renderDiagResult(s *screen, height int) string {
 			// Signed change: green for a shrink, graded sage→red for growth
 			// relative to the column's largest absolute change.
 			if i < nCols && cols[i].Kind.IsDelta() && cell.HasNum && !selected {
+				display = deltaStyle(cell.Num, costMax[i]).Render(display)
+			}
+			// A trace is coloured by the long-run direction its Num records,
+			// on the same scale the signed change columns use — the glyphs
+			// carry the shape, the colour carries which way and how hard.
+			if trace && cell.HasNum && !selected {
 				display = deltaStyle(cell.Num, costMax[i]).Render(display)
 			}
 			// Size-history row tag: new cyan, rewritten yellow, gone muted.

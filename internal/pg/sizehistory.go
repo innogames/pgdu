@@ -208,6 +208,20 @@ func ListSizeSamples(dir string) ([]SizeSampleMeta, error) {
 // cannot read is an error rather than a half-filled row, so ListSizeSamples
 // skips it instead of offering a window that would diff garbage.
 func readSizeMeta(path string) (SizeSampleMeta, error) {
+	meta, err := readSizeHeader(path, func(_ *json.Decoder) error { return nil })
+	if err != nil {
+		return SizeSampleMeta{}, err
+	}
+	return meta, nil
+}
+
+// readSizeHeader streams a sample's header into a SizeSampleMeta and hands the
+// decoder — parked just before the Rows array — to atRows. Splitting it out of
+// readSizeMeta is what lets the trend's projected reader get the header's
+// MinBytes and CapturedAt from the same pass that reads the rows: the floor
+// decides whether an absent relation reads as zero or as unknown, so a reader
+// that saw the rows without the header could not tell those apart.
+func readSizeHeader(path string, atRows func(*json.Decoder) error) (SizeSampleMeta, error) {
 	var meta SizeSampleMeta
 	err := readHeader(path, "Rows", func(key string) any {
 		switch key {
@@ -241,10 +255,19 @@ func readSizeMeta(path string) (SizeSampleMeta, error) {
 			return &meta.RowCount
 		}
 		return nil // tolerate fields a newer build added
-	}, func(_ *json.Decoder) error { return nil })
+	}, func(dec *json.Decoder) error {
+		// Kind and Version are header fields, so they are known by the time
+		// the decoder reaches Rows: check before handing the array over
+		// rather than after reading rows this build may not understand.
+		if err := checkSizeHeader(path, meta.Kind, meta.Version); err != nil {
+			return err
+		}
+		return atRows(dec)
+	})
 	if err != nil {
 		return SizeSampleMeta{}, err
 	}
+	// A file whose header ends before "Rows" never reached the check above.
 	if err := checkSizeHeader(path, meta.Kind, meta.Version); err != nil {
 		return SizeSampleMeta{}, err
 	}
@@ -278,6 +301,51 @@ func LoadSizeSample(path string) (*SizeSample, error) {
 		return nil, err
 	}
 	return &s, nil
+}
+
+// sizeRowBrief is the trend's projection of SizeRow: the logical identity and
+// the one figure a size trace plots. The JSON tags match SizeRow's, so the
+// decoder fills it from the same objects; the fourteen fields left out are
+// skipped by encoding/json rather than allocated per row, which is what makes
+// reading twenty samples to build a history affordable where twenty
+// LoadSizeSample calls would not be.
+type sizeRowBrief struct {
+	Schema string `json:"s"`
+	Name   string `json:"n"`
+	Bytes  int64  `json:"b"`
+}
+
+// Key is the row's logical identity, spelled exactly as SizeRow.Key does — the
+// two must agree or a trace would not line up with the diff it annotates.
+func (r sizeRowBrief) Key() string { return r.Schema + "." + r.Name }
+
+// readSizeRowsProjected streams a sample's rows through fn without ever
+// materialising the whole file, and returns the header alongside. It is the
+// read path for size history, where LoadSizeSample's "gunzip it all, unmarshal
+// every field" is the wrong shape: a thirty-sample history of a ten-thousand
+// relation database is tens of megabytes of JSON, of which the trend reads
+// three fields per row.
+func readSizeRowsProjected(path string, fn func(sizeRowBrief)) (SizeSampleMeta, error) {
+	return readSizeHeader(path, func(dec *json.Decoder) error {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		// A null or absent Rows array is an empty sample, not an error: the
+		// same tolerance countArrayElements shows.
+		if d, ok := tok.(json.Delim); !ok || d != '[' {
+			return nil
+		}
+		for dec.More() {
+			var r sizeRowBrief
+			if err := dec.Decode(&r); err != nil {
+				return err
+			}
+			fn(r)
+		}
+		_, err = dec.Token() // closing ']'
+		return err
+	})
 }
 
 // fold moves every relation under min into the Other counters, so the bytes

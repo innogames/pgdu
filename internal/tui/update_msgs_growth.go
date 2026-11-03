@@ -123,8 +123,7 @@ func (m *Model) onSizeSampleCaptured(msg sizeSampleCapturedMsg) tea.Cmd {
 	}
 	s.err = nil
 	s.growth.end = msg.sample
-	m.applyGrowthResult(s, res)
-	return nil
+	return m.applyGrowthResult(s, res)
 }
 
 // onGrowthWindowLoaded installs a picked window, or reports why it could not
@@ -150,21 +149,89 @@ func (m *Model) onGrowthWindowLoaded(msg growthWindowLoadedMsg) tea.Cmd {
 	// A fresh window starts at the leaf scope with no narrowing: the previous
 	// window's groups may not exist in this one.
 	s.growth.group = nil
-	m.applyGrowthResult(s, msg.result)
+	cmd := m.applyGrowthResult(s, msg.result)
 
 	if !msg.stay {
 		m.popToGrowth()
 	}
-	return nil
+	return cmd
 }
 
-// applyGrowthResult installs a diff and rebuilds the table.
-func (m *Model) applyGrowthResult(s *screen, res *pg.GrowthResult) {
+// applyGrowthResult installs a diff and rebuilds the table, and returns the
+// command that fills in the trend column behind it — nil when the history it
+// already holds is still current.
+func (m *Model) applyGrowthResult(s *screen, res *pg.GrowthResult) tea.Cmd {
 	s.growth.window = res.Window
 	s.growth.rows = res.Rows
 	s.growth.other = res.Other
+	cmd := m.growthSeriesCmd(s)
 	m.rebuildGrowthItems(s)
 	s.resetCursor()
+	return cmd
+}
+
+// growthSeriesCmd asks for the trend column's history when what is on hand no
+// longer matches what is on disk.
+//
+// The guard is the point. levelGrowth re-captures on every refresh tick when
+// the window ends @now, and re-reading a bucket's worth of sample files each
+// time would turn a cheap refresh into a disk sweep. The sample set only
+// changes when a capture writes a file, so comparing it is what lets the
+// history be loaded once and kept.
+func (m *Model) growthSeriesCmd(s *screen) tea.Cmd {
+	if m.snapshotDir == "" {
+		s.growth.trend.state = trendNone
+		s.growth.trend.note = "no snapshot directory"
+		return nil
+	}
+	paths := growthSeriesPaths(m.snapshotDir, s.db, m.target)
+	if s.growth.trend.state != trendIdle && samePaths(s.growth.trend.paths, paths) {
+		return nil
+	}
+	s.growth.trend.state = trendLoading
+	return m.loadGrowthSeriesCmd(m.snapshotDir, s.db, m.target, s.growth.end, s.growth.endPath)
+}
+
+// samePaths compares two sample listings. ListSizeSamples orders by capture
+// time, so equal length and equal order means the same set.
+func samePaths(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// onGrowthSeriesLoaded installs the trend column's history.
+//
+// A failure is not fatal and never reaches s.err: the trend is an enrichment
+// over a window that is already drawn, so the column withdraws and the header
+// says why rather than replacing the table with an error.
+func (m *Model) onGrowthSeriesLoaded(msg growthSeriesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelGrowth)
+	if s == nil || s.db != msg.db {
+		return nil
+	}
+	t := &s.growth.trend
+	t.paths = msg.paths
+	switch {
+	case msg.err != nil:
+		t.state, t.hist, t.note = trendNone, nil, "history unreadable"
+	case msg.series == nil:
+		t.state, t.hist = trendNone, nil
+		t.note = "one sample so far — capture another to see a trend"
+	default:
+		t.state, t.hist, t.note = trendReady, msg.series, ""
+	}
+	// Re-project the whole table rather than patching the trend cells: the
+	// rows are re-read from s.growth.rows, so there is no row to match by
+	// name and no way for the cells to drift out of step with diagCols.
+	m.rebuildGrowthItems(s)
+	return nil
 }
 
 // growthWindowError phrases a refused window for the status line. The

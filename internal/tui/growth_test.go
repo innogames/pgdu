@@ -34,6 +34,13 @@ func gRow(schema, name string, base, end int64, tag pg.GrowthTag) pg.GrowthRow {
 	return r
 }
 
+// showCol switches on a column that is off by default, for tests that are
+// about the column itself rather than about the default layout.
+func showCol(m *Model, id growthColID) {
+	growthSpec.ensureInit(&m.growthTable)
+	m.growthTable.visible[id] = true
+}
+
 func cellByCol(t *testing.T, m *Model, s *screen, row int, id growthColID) pg.DiagCell {
 	t.Helper()
 	idx := -1
@@ -383,6 +390,7 @@ func TestGrowthNoWindowRatesAreUnknown(t *testing.T) {
 	rows := []pg.GrowthRow{gRow("public", "a", 100, 200, pg.GrowthSteady)}
 	s := growthScreen(rows, 0)
 	m := newTestModel(s)
+	showCol(m, growthColPerDay)
 	m.rebuildGrowthItems(s)
 	c := cellByCol(t, m, s, 0, growthColPerDay)
 	if c.Display != "—" || c.HasNum {
@@ -600,10 +608,15 @@ func TestDeltaStyleDirection(t *testing.T) {
 func TestGrowthDefaultColumns(t *testing.T) {
 	want := []growthColID{
 		growthColName, growthColSize, growthColBase, growthColDelta,
-		growthColDeltaPct, growthColPerDay, growthColTag,
+		growthColDeltaPct, growthColTrend, growthColTag,
 		growthColDeltaHeap, growthColDeltaIdx, growthColDeltaToast,
-		growthColRows, growthColRowsDay,
+		growthColRows,
 	}
+	// The per-day rates are opt-in: over a short window they multiply a few
+	// minutes of noise by 1440, and the trend column answers the same
+	// question from the whole history instead of from two points.
+	off := []growthColID{growthColPerDay, growthColRowsDay}
+
 	on := map[growthColID]bool{}
 	for _, d := range growthColumnRegistry() {
 		if d.defaultOn {
@@ -615,6 +628,26 @@ func TestGrowthDefaultColumns(t *testing.T) {
 			t.Errorf("column %q should be on by default", id)
 		}
 	}
+	for _, id := range off {
+		if on[id] {
+			t.Errorf("column %q should be off by default", id)
+		}
+	}
+}
+
+// The default sort has to name a column that is actually on screen: syncSort
+// falls through its fallback to the first column, which would silently sort a
+// growth table by name.
+func TestGrowthDefaultSortIsVisibleByDefault(t *testing.T) {
+	for _, d := range growthColumnRegistry() {
+		if d.id == growthSpec.defaultSort {
+			if !d.defaultOn && !d.mandatory {
+				t.Errorf("default sort column %q is off by default", d.id)
+			}
+			return
+		}
+	}
+	t.Errorf("default sort column %q is not in the registry", growthSpec.defaultSort)
 }
 
 // Every change column must be a delta kind, or it loses its sign and its
@@ -680,7 +713,9 @@ func TestGrowthSortDirectionFavoursGrowth(t *testing.T) {
 // The direction rule and the bar rule must agree on what counts as numeric,
 // or a column can carry a bar while sorting alphabetically.
 func TestNumericDiagKindCoversDeltas(t *testing.T) {
-	for _, k := range []pg.DiagColumnKind{pg.DiagDeltaBytes, pg.DiagDeltaCount, pg.DiagDeltaPct} {
+	for _, k := range []pg.DiagColumnKind{
+		pg.DiagDeltaBytes, pg.DiagDeltaCount, pg.DiagDeltaPct, pg.DiagSparkline,
+	} {
 		if !numericDiagKind(k) {
 			t.Errorf("kind %v is numeric but numericDiagKind says otherwise", k)
 		}
@@ -688,6 +723,24 @@ func TestNumericDiagKindCoversDeltas(t *testing.T) {
 	for _, k := range []pg.DiagColumnKind{pg.DiagText, pg.DiagGrowthTag} {
 		if numericDiagKind(k) {
 			t.Errorf("kind %v is text but numericDiagKind says numeric", k)
+		}
+	}
+}
+
+// Carrying a magnitude and being drawable as the headline bar are different
+// questions, and a sparkline is the kind that separates them: it sorts like a
+// number but already draws its own, so a bar over it would be a second picture
+// of the same figure in the same cell.
+func TestSparklineSortsButNeverBars(t *testing.T) {
+	if !numericDiagKind(pg.DiagSparkline) {
+		t.Error("a trace carries a magnitude and must sort descending first")
+	}
+	if barableDiagKind(pg.DiagSparkline) {
+		t.Error("a trace must never become the headline bar")
+	}
+	for _, k := range []pg.DiagColumnKind{pg.DiagBytes, pg.DiagDeltaBytes, pg.DiagCount} {
+		if !barableDiagKind(k) {
+			t.Errorf("kind %v must still be barable", k)
 		}
 	}
 }

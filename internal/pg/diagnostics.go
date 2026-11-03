@@ -35,6 +35,7 @@ const (
 	DiagDeltaCount    = diagres.KindDeltaCount
 	DiagDeltaPct      = diagres.KindDeltaPct
 	DiagGrowthTag     = diagres.KindGrowthTag
+	DiagSparkline     = diagres.KindSparkline
 )
 
 // diagSQL returns the statement to run for d on this server. Almost every

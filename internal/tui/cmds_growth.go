@@ -196,6 +196,50 @@ func (m *Model) loadGrowthWindowCmd(db, basePath, endPath string, stay bool) tea
 	}
 }
 
+// growthSeriesLoadedMsg carries the sample history behind the trend column.
+// paths is the sample set it was built from, so a refresh can tell an unchanged
+// history from one a new capture has extended without re-reading a file.
+type growthSeriesLoadedMsg struct {
+	db     string
+	paths  []string
+	series *pg.SizeSeries
+	err    error
+}
+
+// loadGrowthSeriesCmd reads the sample history behind the trend column.
+//
+// Deliberately not wrapped in query(): that budget is for server reads, and
+// this touches no server at all — it is up to growthTrendCells gzip files off
+// local disk, in the same class as log loading. It also runs AFTER the window
+// is on screen, so however long it takes, the table it annotates is already
+// usable and the column simply fills in.
+func (m *Model) loadGrowthSeriesCmd(dir, db, target string, end *pg.SizeSample, endPath string) tea.Cmd {
+	paths := growthSeriesPaths(dir, db, target)
+	return func() tea.Msg {
+		msg := growthSeriesLoadedMsg{db: db, paths: paths}
+		msg.series, msg.err = pg.LoadSizeSeries(dir, target, db, growthTrendCells, end, endPath)
+		return msg
+	}
+}
+
+// growthSeriesPaths is the sample set a history would be built from right now.
+// It is captured before the read rather than after, so a capture that lands
+// while the read is in flight leaves the recorded set stale and the next
+// rebuild picks the new sample up instead of trusting a history without it.
+func growthSeriesPaths(dir, db, target string) []string {
+	metas, err := pg.ListSizeSamples(dir)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(metas))
+	for _, meta := range metas {
+		if meta.Target == target && meta.Database == db {
+			out = append(out, meta.Path)
+		}
+	}
+	return out
+}
+
 // capturingSizes / setCapturingSizes span both growth screens, because a
 // capture started from the picker is still running when the user has entered a
 // window and is standing on the table — the "already running" guard and the

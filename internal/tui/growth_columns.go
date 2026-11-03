@@ -20,6 +20,7 @@ const (
 	growthColDelta    growthColID = "delta"
 	growthColDeltaPct growthColID = "delta_pct"
 	growthColPerDay   growthColID = "per_day"
+	growthColTrend    growthColID = "trend"
 	growthColTag      growthColID = "tag"
 	growthColRels     growthColID = "relations"
 
@@ -32,6 +33,13 @@ const (
 	growthColBound      growthColID = "bound"
 )
 
+// growthTrendCells is the trace's width in glyphs, and so the number of time
+// buckets the history is laid on. It is a constant rather than derived from
+// the terminal so a resize can never invalidate a loaded series — and because
+// it is what bounds the read: one sample file per bucket, however many were
+// captured.
+const growthTrendCells = 20
+
 // growthCtx is what a cell needs beyond its own row: the scope being rendered
 // (which gates the scope-specific columns) and the window length (which turns
 // a delta into a rate). A zero window means no window is applied, and the rate
@@ -40,14 +48,22 @@ type (
 	growthCtx struct {
 		view   growthView
 		window time.Duration
+		// trend is the sample history folded to view's scope. Nil until the
+		// background read lands; the column reads its state to tell "still
+		// loading" from "no history".
+		trend *growthTrend
 	}
 	growthColDesc = colDesc[growthColID, pg.GrowthRow, growthCtx]
 )
 
 var growthSpec = colSpec[growthColID, pg.GrowthRow, growthCtx]{
-	registry:    growthColumnRegistry,
-	prefsKey:    colPrefsGrowth,
-	defaultSort: growthColPerDay,
+	registry: growthColumnRegistry,
+	prefsKey: colPrefsGrowth,
+	// Δ, not per_day: the rate columns are off by default now, and syncSort
+	// falls all the way through to the name column when its fallback is not
+	// on screen. Δ is the same ranking over the window the table already says
+	// it covers, without the per-day extrapolation.
+	defaultSort: growthColDelta,
 	title:       "choose which columns the growth table shows",
 }
 
@@ -93,6 +109,48 @@ func growthRows(n int64, known bool) pg.DiagCell {
 	return diagNum(formatRows(n), float64(n))
 }
 
+// growthTrendCell renders one row's long-term trace. Display is the glyphs and
+// Num the long-run rate behind them, so the column sorts and grades on a real
+// magnitude the renderer never has to re-derive from the characters.
+//
+// The two placeholders are distinct on purpose: "…" is history still being
+// read, "—" is a relation this history has nothing to say about (one created
+// inside the window, or a scope the fold found no members for).
+func growthTrendCell(r pg.GrowthRow, c growthCtx) pg.DiagCell {
+	if c.trend == nil || c.trend.state == trendLoading {
+		return pg.DiagCell{Display: trendLoadingCell}
+	}
+	vals := c.trend.series[pg.ScopeKey(r, c.view.scope())]
+	if len(vals) == 0 {
+		// Other rows' traces have already sized the column, so the renderer's
+		// own padding places this one.
+		return pg.DiagCell{Display: "—"}
+	}
+	trace := trendline(vals)
+	perDay, ok := pg.TrendPerDay(vals, c.trend.hist.At)
+	if !ok {
+		// One known point is a trace worth drawing but not a rate worth
+		// quoting; leaving Num unset sinks it under the unknown-sorts-last
+		// rule rather than ranking it as zero growth.
+		return pg.DiagCell{Display: trace}
+	}
+	return diagNum(trace, perDay)
+}
+
+// trendLoadingCell is what the column shows while the history is being read.
+//
+// It is exactly growthTrendCells wide so the column claims its final width
+// immediately and the table does not jump sideways when the traces arrive, and
+// it is deliberately pure ASCII: truncateDiagCell only preserves a cell's
+// spacing on its ASCII fast path, and folds whitespace runs on the path any
+// cell containing block glyphs would take. "..." rather than "…" for exactly
+// that reason.
+var trendLoadingCell = func() string {
+	const dots = "..."
+	left := (growthTrendCells - len(dots)) / 2
+	return strings.Repeat(" ", left) + dots + strings.Repeat(" ", growthTrendCells-len(dots)-left)
+}()
+
 // growthColumnRegistry is the single source of truth for the growth table's
 // columns in display order: identity, then the window's size figures, then the
 // scope-specific annotations, then the opt-in breakdowns.
@@ -117,13 +175,24 @@ func growthColumnRegistry() []growthColDesc {
 		{id: growthColDeltaPct, name: "Δ%", kind: pg.DiagDeltaPct, defaultOn: true,
 			desc: "size change as a share of the baseline; undefined (\"new\") against a zero baseline",
 			cell: func(r pg.GrowthRow, _ growthCtx) pg.DiagCell { return growthPct(r) }},
-		{id: growthColPerDay, name: "per_day", kind: pg.DiagDeltaBytes, defaultOn: true,
-			desc: "bytes per day: Δ normalised by the window's length, so windows of different lengths compare directly",
+		{id: growthColPerDay, name: "per_day", kind: pg.DiagDeltaBytes,
+			desc: "bytes per day: Δ normalised by the window's length, so windows of different lengths compare directly. " +
+				"Off by default — over a short window it multiplies a few minutes of noise by 1440, and the trend column " +
+				"answers the same question from the whole history",
 			cell: func(r pg.GrowthRow, c growthCtx) pg.DiagCell {
 				return growthRate(r.BytesPerDay, c.window, true)
 			}},
 
 		// Scope-specific annotations.
+		{id: growthColTrend, name: "trend", kind: pg.DiagSparkline, defaultOn: true,
+			desc: "size across the whole sample history on a time axis, scaled between this " +
+				"row's own min and max — shape only, since the byte columns carry magnitude. " +
+				"Cells between two captures are drawn through; · is history that does not " +
+				"exist yet, never a measured zero. Sorts by long-run bytes per day, which is " +
+				"the window's per_day asked of every sample rather than of two.",
+			available: func(c growthCtx) bool { return c.trend.shown() },
+			cell:      growthTrendCell},
+
 		{id: growthColTag, name: "tag", kind: pg.DiagGrowthTag, defaultOn: true,
 			desc:      "new (absent from the baseline) · gone (dropped) · rewritten (relfilenode changed: VACUUM FULL / CLUSTER / REINDEX)",
 			available: func(c growthCtx) bool { return c.view == growthByTable },
@@ -156,8 +225,9 @@ func growthColumnRegistry() []growthColDesc {
 		{id: growthColRows, name: "rows", kind: pg.DiagCount, defaultOn: true,
 			desc: "live rows at the window's end (n_live_tup); \"—\" when the window straddles a statistics reset",
 			cell: func(r pg.GrowthRow, _ growthCtx) pg.DiagCell { return growthRows(r.EndRows, r.RowsKnown) }},
-		{id: growthColRowsDay, name: "rows_day", kind: pg.DiagDeltaCount, defaultOn: true,
-			desc: "live rows added per day; bytes-per-row against per_day tells row growth from bloat",
+		{id: growthColRowsDay, name: "rows_day", kind: pg.DiagDeltaCount,
+			desc: "live rows added per day; bytes-per-row against per_day tells row growth from bloat. " +
+				"Off by default for the same reason as per_day",
 			cell: func(r pg.GrowthRow, c growthCtx) pg.DiagCell {
 				if !r.RowsKnown {
 					return pg.DiagCell{Display: "—"}
@@ -271,7 +341,7 @@ func growthFooterCells(descs []growthColDesc, rows []pg.GrowthRow, ctx growthCtx
 		switch d.id {
 		case growthColName:
 			total[i] = pg.DiagCell{Display: "Σ " + formatRows(int64(len(rows))) + " " + ctx.view.plural()}
-		case growthColTag, growthColKind, growthColBound:
+		case growthColTag, growthColKind, growthColBound, growthColTrend:
 			total[i] = pg.DiagCell{Display: ""}
 		case growthColRels:
 			total[i] = diagNum(formatRows(int64(len(rows))), float64(len(rows)))
@@ -285,10 +355,14 @@ func growthFooterCells(descs []growthColDesc, rows []pg.GrowthRow, ctx growthCtx
 // scope switch, narrowing and column toggle funnels through here so projection
 // and sort stay in step.
 func (m *Model) rebuildGrowthItems(s *screen) {
-	ctx := growthCtx{view: s.growth.view, window: s.growth.duration()}
+	ctx := m.growthCtx(s)
 	// Filter first, then fold, so the Σ footer reconciles with what is on
 	// screen at every scope.
 	rows := s.growth.visibleRows()
+	// The trend folds over the SAME filtered leaf rows the table does, before
+	// the roll-up, so a group's trace is the sum of exactly the members its
+	// numbers come from.
+	s.growth.trend.fold(rows, ctx.view.scope())
 	if ctx.view.grouped() {
 		rows = pg.FinishRollUp(pg.RollUpGrowth(rows, ctx.view.scope()), ctx.window)
 	}
@@ -304,6 +378,18 @@ func (m *Model) rebuildGrowthItems(s *screen) {
 	m.applySort(s)
 }
 
+// growthCtx is the one place the cell context is built. The column picker and
+// the table must agree on it exactly: `available` is evaluated against it in
+// both, so a picker built from a different context would offer a column the
+// table drops, or hide one it shows.
+func (m *Model) growthCtx(s *screen) growthCtx {
+	return growthCtx{
+		view:   s.growth.view,
+		window: s.growth.duration(),
+		trend:  &s.growth.trend,
+	}
+}
+
 // syncGrowthBar points the headline bar at the sort column when that column is
 // numeric, and turns it off otherwise so the width goes back to the data
 // columns. The table's question changes with the sort — "what grew most" vs
@@ -313,7 +399,7 @@ func (m *Model) rebuildGrowthItems(s *screen) {
 func (m *Model) syncGrowthBar(s *screen) {
 	want := -1
 	if s.diagSortCol >= 0 && s.diagSortCol < len(s.diagCols) &&
-		numericDiagKind(s.diagCols[s.diagSortCol].Kind) {
+		barableDiagKind(s.diagCols[s.diagSortCol].Kind) {
 		want = s.diagSortCol
 	}
 	if s.diagBarCol != want {

@@ -157,6 +157,58 @@ type growthState struct {
 	// capturing is an S capture in flight. A size capture stats every relation
 	// and can run for minutes, so it must not stack.
 	capturing bool
+
+	// --- the long-term trend (the trend column) ---
+
+	// trend is the sample history behind the trend column. It is loaded after
+	// the window is already on screen, because reading up to a bucket's worth
+	// of sample files is far slower than the two the window itself needs, and
+	// the table is useful without it.
+	trend growthTrend
+}
+
+// trendState is how far the trend column's history has got.
+type trendState uint8
+
+const (
+	trendIdle    trendState = iota // not asked for yet
+	trendLoading                   // a read is in flight
+	trendReady                     // series loaded (possibly empty)
+	trendNone                      // too little history, or the read failed
+)
+
+// growthTrend is the sample history projected onto the current scope.
+//
+// series is keyed by pg.ScopeKey for the scope it was folded at, so it is
+// rebuilt whenever the scope changes; scope records which, so a stale fold is
+// never handed to a cell. paths is the sample set it was built from, which is
+// what keeps the @now refresh — which re-captures on every tick — from
+// re-reading the whole history each time.
+type growthTrend struct {
+	state  trendState
+	hist   *pg.SizeSeries
+	series map[string][]float64
+	scope  pg.GrowthScope
+	paths  []string
+	note   string // why there is no trace, when there is none
+}
+
+// shown reports whether the trend column should appear at all. It is present
+// while loading so the column does not jump into the layout when the history
+// lands, and absent when there is no history to draw.
+func (t *growthTrend) shown() bool {
+	return t.state == trendLoading || (t.state == trendReady && t.hist != nil)
+}
+
+// fold re-projects the history onto a scope, memoised: a Tab between scopes
+// re-folds in memory and never re-reads a file.
+func (t *growthTrend) fold(rows []pg.GrowthRow, by pg.GrowthScope) {
+	if t.hist == nil {
+		t.series, t.scope = nil, by
+		return
+	}
+	t.series = pg.FoldSizeSeries(t.hist, rows, by)
+	t.scope = by
 }
 
 // visibleRows applies the gone-row and narrowing filters. It runs BEFORE any

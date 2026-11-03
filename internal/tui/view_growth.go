@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"math"
 	"strings"
 )
 
@@ -8,7 +9,7 @@ import (
 // table (C on levelGrowth). One picker serves every scope, so the checkbox
 // list stays stable as Tab cycles.
 func (m *Model) renderGrowthColumnConfig(s *screen, height int) string {
-	ctx := growthCtx{view: s.growth.view, window: s.growth.duration()}
+	ctx := m.growthCtx(s)
 	return growthSpec.renderConfig(m, &m.growthTable, ctx, height)
 }
 
@@ -59,6 +60,32 @@ func (m *Model) renderGrowthInfo(height int) string {
 	b.WriteString("  " + styleSelected.Render("Δheap") + mu(" / ") + styleSelected.Render("Δidx") + mu(" / ") +
 		styleSelected.Render("Δtoast") + mu(" split the change by fork: growth that is all index on an") + "\n")
 	b.WriteString("  " + mu("unchanged heap is index bloat, not data, and wants a REINDEX rather than a plan.") + "\n\n")
+
+	b.WriteString("  " + styleSelected.Render("trend") + mu(" reaches past the window to every sample in the directory, so the") + "\n")
+	b.WriteString("  " + mu("window's numbers can be read against the long run. The axis is elapsed time,") + "\n")
+	b.WriteString("  " + mu("not capture count, so a week nobody ran pgdu takes a week's width. While the") + "\n")
+	b.WriteString("  " + mu("samples fit, each one keeps its own glyph and the gaps between them carry the") + "\n")
+	b.WriteString("  " + mu("time; past that they share cells and the newest of each wins. The header says") + "\n")
+	b.WriteString("  " + mu("which, and how many of the samples it read actually reached the axis:") + "\n")
+	b.WriteString("    " + trendline([]float64{1, 2, 3, 4, 5, 6, 7, 8}) +
+		mu("   a steady climb — each glyph is this row's own min→max,") + "\n")
+	b.WriteString("    " + mu("           so the shape is the message and the bytes are in Δ") + "\n")
+	b.WriteString("    " + trendline([]float64{5, 6, 7, 8, 1, 2, 3, 4}) +
+		mu("   grew, then a rewrite handed the disk back, then regrew") + "\n")
+	b.WriteString("    " + trendline([]float64{1, 1, 1, 1, 1, 1, 1, 1}) +
+		mu("   level: the range is under a percent, which is not a trend —") + "\n")
+	b.WriteString("    " + mu("           drawn along the floor so the rows with nothing to") + "\n")
+	b.WriteString("    " + mu("           say stay out of the way of the rows that do") + "\n")
+	b.WriteString("    " + trendline([]float64{math.NaN(), math.NaN(), 3, 4, 6, 7, 8, 8}) +
+		mu("   ") + styleSelected.Render(string(trendGap)) + mu(" is history that does not exist yet — a cell") + "\n")
+	b.WriteString("    " + mu("           before the first capture, never a measured zero. A gap") + "\n")
+	b.WriteString("    " + mu("           BETWEEN two captures is drawn through instead, since") + "\n")
+	b.WriteString("    " + mu("           a straight line between two measurements says more") + "\n")
+	b.WriteString("    " + mu("           about the table than a row of dots says about pgdu") + "\n")
+	b.WriteString("  " + mu("It sorts by bytes per day across the whole history, which is ") +
+		styleSelected.Render("per_day") + mu(" asked of") + "\n")
+	b.WriteString("  " + mu("every sample rather than of two — a table that is quiet today and has doubled") + "\n")
+	b.WriteString("  " + mu("since September ranks where it belongs.") + "\n\n")
 
 	b.WriteString("  " + styleBadge.Render("tab") + mu(" cycles the scope — relations → by schema → by database → partition") + "\n")
 	b.WriteString("  " + mu("      trees — over the same rows; ") + styleBadge.Render("↵") +

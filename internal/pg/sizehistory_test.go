@@ -491,3 +491,72 @@ func TestSizeSampleCapturedToday(t *testing.T) {
 		})
 	}
 }
+
+// The trend reads samples through a projection that decodes three fields per
+// row instead of seventeen. It must see exactly what the full loader sees, or
+// a trace would disagree with the window drawn beside it.
+func TestReadSizeRowsProjectedMatchesFullLoad(t *testing.T) {
+	dir := t.TempDir()
+	at := time.Now().Add(-time.Hour).Truncate(time.Second)
+	s := testSample("app", at,
+		SizeRow{OID: 1, Schema: "public", Name: "orders", RelKind: "r", RelFilenode: 7,
+			HeapBytes: 100, IndexBytes: 20, ToastBytes: 5, TotalBytes: 125, NLive: 10},
+		SizeRow{OID: 2, Schema: "billing", Name: "invoice", RelKind: "r", RelFilenode: 8,
+			HeapBytes: 1, TotalBytes: 1},
+	)
+	s.MinBytes = 4096
+	path, err := SaveSizeSample(dir, s)
+	if err != nil {
+		t.Fatalf("SaveSizeSample: %v", err)
+	}
+
+	full, err := LoadSizeSample(path)
+	if err != nil {
+		t.Fatalf("LoadSizeSample: %v", err)
+	}
+	want := map[string]int64{}
+	for _, r := range full.Rows {
+		want[r.Key()] = r.TotalBytes
+	}
+
+	got := map[string]int64{}
+	meta, err := readSizeRowsProjected(path, func(r sizeRowBrief) { got[r.Key()] = r.Bytes })
+	if err != nil {
+		t.Fatalf("readSizeRowsProjected: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("projected %d rows, full load has %d", len(got), len(want))
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s: projected %d, full load %d", k, got[k], v)
+		}
+	}
+	// The header comes back from the same pass — the floor decides whether an
+	// absent relation reads as zero or unknown, so a reader without it is no use.
+	if meta.MinBytes != 4096 {
+		t.Errorf("MinBytes = %d, want 4096", meta.MinBytes)
+	}
+	if !meta.CapturedAt.Equal(at) {
+		t.Errorf("CapturedAt = %v, want %v", meta.CapturedAt, at)
+	}
+}
+
+// A file this build cannot read must be refused by the projected reader
+// exactly as LoadSizeSample refuses it, rather than yielding partial rows.
+func TestReadSizeRowsProjectedRefusesNewerVersion(t *testing.T) {
+	dir := t.TempDir()
+	// Rows present and readable, but a version this build does not know: the
+	// check must happen before the array is handed over, not after.
+	path := writeRawSizeFile(t, dir, "app-20261030T120000Z",
+		`{"Kind":"sizes","Version":99,"Database":"app","RowCount":1,`+
+			`"Rows":[{"s":"public","n":"t","b":10}]}`)
+
+	seen := 0
+	if _, err := readSizeRowsProjected(path, func(sizeRowBrief) { seen++ }); !errors.Is(err, ErrSampleVersion) {
+		t.Errorf("err = %v, want ErrSampleVersion", err)
+	}
+	if seen != 0 {
+		t.Errorf("decoded %d rows from a too-new file, want 0", seen)
+	}
+}
