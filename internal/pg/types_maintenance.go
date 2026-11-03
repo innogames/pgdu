@@ -23,6 +23,11 @@ type ExtCapacity struct {
 	// least-used ~5 % since the last reset (pg_stat_statements_info.dealloc);
 	// 0 for pg_qualstats, which drops new entries instead.
 	Dealloc int64
+	// Preloaded is only read when Installed is false: the library is in
+	// shared_preload_libraries, so it is already collecting cluster-wide and a
+	// plain CREATE EXTENSION in this database exposes those counters. Without
+	// it, "not installed here" really does mean nothing is being collected.
+	Preloaded bool
 }
 
 // FillRatio is Used/Max as a fraction in [0,1]. Returns 0 when Max ≤ 0 (GUC

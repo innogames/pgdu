@@ -39,6 +39,12 @@ func (c *Client) EnsureQualstats(ctx context.Context, db string) error {
 // true (a plain CREATE EXTENSION is then enough); otherwise it stays in
 // detect-only mode and shows no sample call.
 func (c *Client) QualstatsPreloaded(ctx context.Context, db string) (bool, error) {
+	return c.libPreloaded(ctx, db, "pg_qualstats")
+}
+
+// libPreloaded reports whether lib is listed in shared_preload_libraries. The
+// setting is cluster-wide, so db only picks the pool to ask through.
+func (c *Client) libPreloaded(ctx context.Context, db, lib string) (bool, error) {
 	pool, err := c.PoolFor(ctx, db)
 	if err != nil {
 		return false, err
@@ -49,8 +55,8 @@ func (c *Client) QualstatsPreloaded(ctx context.Context, db string) (bool, error
 	).Scan(&spl); err != nil {
 		return false, fmt.Errorf("read shared_preload_libraries in %q: %w", db, err)
 	}
-	for lib := range strings.SplitSeq(spl, ",") {
-		if strings.TrimSpace(lib) == "pg_qualstats" {
+	for name := range strings.SplitSeq(spl, ",") {
+		if strings.TrimSpace(name) == lib {
 			return true, nil
 		}
 	}

@@ -384,6 +384,14 @@ func (c *Client) extCapacity(ctx context.Context, db, name, sqlCount, sqlReset, 
 	cap := ExtCapacity{Name: name}
 	st, err := c.ProbeExtension(ctx, db, name)
 	if err != nil || !st.Installed {
+		// "Not installed here" is not "not collecting": both extensions keep
+		// cluster-wide counters in shared memory and only their SQL wrappers
+		// are per-database. Record whether the library is preloaded, so the
+		// row can say that a CREATE EXTENSION would surface what is already
+		// being collected. Best-effort; a failure leaves it false.
+		if err == nil {
+			cap.Preloaded, _ = c.libPreloaded(ctx, db, name)
+		}
 		return cap
 	}
 	cap.Installed = true

@@ -237,8 +237,13 @@ fails (missing/corrupt → empty).
   nothing grades; a check that passed appends its label to the section's `ok` list and
   `v.section()` folds it into the title as `✓ a · b`. `v` (`Model.maintVerbose`, persisted as
   `prefs.OverviewVerbose`) shows every row, including the verbose-only observability section.
-  Adding a row means deciding which of the three it is. Action rows are the recommendations
-  first, then the four stats-reset rows of the closing statistics block (`actionRows`); the fix
+  Adding a row means deciding which of the three it is. The statistics block's
+  extension rows distinguish *absent* from *absent here*: both extensions keep
+  cluster-wide counters in shared memory, so when the library is preloaded
+  (`ExtCapacity.Preloaded`, probed only when the extension is missing) the row
+  says it is collecting and the overview arms the shared non-blocking
+  `extPrompt`, which is what makes the global `i` run the CREATE EXTENSION.
+  Action rows are the recommendations first, then the four stats-reset rows of the closing statistics block (`actionRows`); the fix
   line renders under the cursor row only.
 - **Growth / size history** (`toolGrowth`, `--growth`): pgdu accrues its own history,
   since the server keeps none. A *sample* (`internal/pg/sizehistory.go`) is one

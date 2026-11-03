@@ -1024,6 +1024,10 @@ const (
 	extPromptReasonWALInspect     = "WAL inspector requires the pg_walinspect extension (and a superuser / pg_read_server_files role to read WAL)"
 	extPromptReasonStatStatements = "Top queries requires the pg_stat_statements extension (also needs it in shared_preload_libraries + a restart to collect)"
 	extPromptReasonQualstats      = "real EXPLAIN values are available with pg_qualstats (already in shared_preload_libraries here)"
+	// Used by the system overview's statistics rows: the extension is missing
+	// from this database only, while its preloaded library already collects
+	// for the whole cluster.
+	extPromptReasonPreloadedExt = "the library is loaded and already collecting cluster-wide — only the extension's SQL wrappers are missing from this database"
 )
 
 // extPrompt is the per-screen "install this extension?" affordance. It doubles

@@ -453,7 +453,37 @@ func (m *Model) onMaintLoaded(msg maintLoadedMsg) tea.Cmd {
 		s.maintenance.first = msg.info
 	}
 	s.maintenance.refreshAdvice()
+	m.syncMaintExtPrompt(s)
 	return nil
+}
+
+// syncMaintExtPrompt arms the shared install affordance (the `i` key) for a
+// statistics extension the overview's database lacks while its library is
+// preloaded: a plain CREATE EXTENSION then exposes counters the cluster is
+// already collecting. Non-blocking — the overview keeps its body and the
+// capacity row carries the hint. An install in flight keeps its prompt so the
+// refresh tick cannot drop the spinner or the error it is about to show.
+func (m *Model) syncMaintExtPrompt(s *screen) {
+	if s.installing {
+		return
+	}
+	s.extPrompt = nil
+	info := s.maintenance.info
+	if info == nil {
+		return
+	}
+	for _, cap := range []pg.ExtCapacity{info.Statements, info.Qualstats} {
+		if cap.Installed || !cap.Preloaded {
+			continue
+		}
+		s.extPrompt = &extPrompt{
+			name:        cap.Name,
+			db:          s.db,
+			installable: true,
+			reason:      extPromptReasonPreloadedExt,
+		}
+		return
+	}
 }
 
 // onMaintSchemaLoaded lands the catalog sweep; the recommendations are

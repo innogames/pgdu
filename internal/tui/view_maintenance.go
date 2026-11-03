@@ -211,7 +211,15 @@ func (m *Model) renderCapacityRow(s *screen, db string, idx int, name string, ca
 		cursor = styleSelected.Render("▶ ")
 	}
 	if !cap.Installed {
-		return cursor + padRight(mu(name), overviewLabelW) + mu("not installed"+inDB(db))
+		text := mu("not installed" + inDB(db))
+		// The counters live in shared memory and cover the whole cluster: with
+		// the library preloaded the row would otherwise read as "nobody is
+		// collecting this", when all that is missing here are the SQL wrappers.
+		if cap.Preloaded {
+			text += mu(" · collecting cluster-wide, press ") + styleBadge.Render("i") +
+				mu(" to create it here")
+		}
+		return cursor + padRight(mu(name), overviewLabelW) + text
 	}
 
 	ratio := cap.FillRatio()
@@ -321,6 +329,11 @@ func maintResetTarget(which string) string {
 // armed, or "" otherwise. Mirrors renderReindexBanner.
 func (m *Model) renderMaintHint(s *screen) string {
 	if s.maintenance.pendingReset == "" {
+		// The install affordance itself sits on the capacity row; the banner
+		// carries only the two transient states that row has no room for.
+		if s.extPrompt != nil && (s.installing || s.extPrompt.err != nil) {
+			return m.renderExtHint(s)
+		}
 		return ""
 	}
 	return confirmBanner("reset " + maintResetTarget(s.maintenance.pendingReset))

@@ -577,3 +577,51 @@ func TestRenderMaintenanceRestrictedHorizonIsQualified(t *testing.T) {
 		t.Errorf("unrestricted horizon row should not be qualified:\n%s", out)
 	}
 }
+
+// A statistics extension missing from the overview's database is not a
+// cluster-wide "nobody is collecting this": when the library is preloaded the
+// counters exist in shared memory and only the SQL wrappers are missing, so
+// the row says so and offers the one-key CREATE EXTENSION.
+func TestRenderMaintenanceCapacityRowPreloaded(t *testing.T) {
+	info := overviewInfo()
+	info.Qualstats = pg.ExtCapacity{Name: "pg_qualstats"}
+	m := &Model{width: 200}
+
+	s := overviewScreen(info)
+	out := stripANSI(m.renderMaintenance(s, 200))
+	if !strings.Contains(out, "not installed in postgres") || strings.Contains(out, "collecting cluster-wide") {
+		t.Errorf("a non-preloaded extension must not claim it is collecting\n%s", out)
+	}
+
+	info.Qualstats.Preloaded = true
+	s = overviewScreen(info)
+	m.stack = []*screen{s}
+	out = stripANSI(m.renderMaintenance(s, 200))
+	if !strings.Contains(out, "not installed in postgres · collecting cluster-wide, press i to create it here") {
+		t.Errorf("preloaded-but-missing row missing the install hint\n%s", out)
+	}
+
+	// The hint is only an affordance if `i` is armed: onMaintLoaded puts the
+	// shared extPrompt on the screen that the global Install key acts on.
+	m.onMaintLoaded(maintLoadedMsg{db: "postgres", info: info})
+	if s.extPrompt == nil || s.extPrompt.name != "pg_qualstats" || !s.extPrompt.installable {
+		t.Fatalf("expected an installable pg_qualstats prompt, got %+v", s.extPrompt)
+	}
+	// An install in flight survives the refresh tick, spinner and all.
+	s.installing = true
+	m.onMaintLoaded(maintLoadedMsg{db: "postgres", info: info})
+	if s.extPrompt == nil {
+		t.Error("a refresh during an install must not drop the prompt")
+	}
+	if hint := stripANSI(m.renderMaintHint(s)); !strings.Contains(hint, "installing pg_qualstats") {
+		t.Errorf("install spinner missing from the overview banner: %q", hint)
+	}
+
+	// Installed again → no prompt, no hint.
+	s.installing = false
+	info.Qualstats.Installed = true
+	m.onMaintLoaded(maintLoadedMsg{db: "postgres", info: info})
+	if s.extPrompt != nil {
+		t.Errorf("prompt left behind after the extension appeared: %+v", s.extPrompt)
+	}
+}
