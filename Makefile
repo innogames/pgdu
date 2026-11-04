@@ -9,8 +9,10 @@ DEB     := $(NAME)_$(VERSION)_$(ARCH).deb
 # Override for debugging/delve: make build LDFLAGS=
 LDFLAGS ?= -s -w
 
+# main.version is what `pgdu --version` prints; stamp it with the same VERSION
+# the .deb carries so a package and its binary can never disagree.
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o $(NAME) .
+	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS) -X main.version=$(VERSION)" -o $(NAME) .
 
 run:
 	go run . $(ARGS)

@@ -15,8 +15,9 @@ import (
 	"pgdu/internal/tui"
 )
 
-// version is overwritten at release time via -ldflags "-X main.version=…"
-// (see .goreleaser.yaml). It stays "dev" for plain `go build` / `make build`.
+// version is stamped at build time via -ldflags "-X main.version=…" by the
+// Makefile (make build/deb) and .goreleaser.yaml. It stays "dev" only for a
+// plain `go build`.
 var version = "dev"
 
 func main() { os.Exit(run()) }
