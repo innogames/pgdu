@@ -857,18 +857,18 @@ func (m *Model) renderListWithFooter(s *screen, height int, footer string) strin
 		b.WriteString("\n")
 	}
 
-	// The parts bloat columns appear once any sibling has been measured (the
-	// same gate as the header); rows still unmeasured render blank cells so
-	// the columns after them stay aligned.
-	bloatCols := false
-	if s.level == levelParts {
-		for _, it := range s.items {
-			if it.hasBloat {
-				bloatCols = true
-				break
-			}
+	// The bloat column appears once any sibling has been measured — the same
+	// gate as the header, on both levels that carry one. Rows still unmeasured
+	// render blank cells so the columns after them stay aligned.
+	anyBloat := false
+	for _, it := range s.items {
+		if it.hasBloat {
+			anyBloat = true
+			break
 		}
 	}
+	bloatCols := anyBloat && s.level == levelParts
+	bloatSlot := anyBloat && s.level == levelTables && s.tool != toolPageInspect
 
 	if rowsH > 0 {
 		s.offset, _ = viewportRange(s.cursor, s.offset, rowsH, len(vis))
@@ -879,7 +879,7 @@ func (m *Model) renderListWithFooter(s *screen, height int, footer string) strin
 		b.WriteString(renderRow(row{
 			size: it.size, bloat: it.bloat, hasBloat: it.hasBloat, bloatEstimated: it.bloatEstimated,
 			hasChildren: it.hasChildren, maxSize: maxSz,
-			barW: barW, bloatCols: bloatCols,
+			barW: barW, bloatCols: bloatCols, bloatSlot: bloatSlot,
 			heap: it.heap, idx: it.idx, toast: it.toast, hasBreakdown: breakdown,
 			rows: it.rows, hasRows: it.hasRows,
 			pages: it.pages, hasPages: it.hasPages,

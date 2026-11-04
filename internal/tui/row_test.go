@@ -122,3 +122,17 @@ func TestProportionalCells(t *testing.T) {
 		})
 	}
 }
+
+// A table whose reltuples is -1 has no bloat estimate, but the list still
+// draws the column for its measured siblings: the unmeasured row must pad the
+// cell, or every column after it slides left by the column's width.
+func TestRenderRowUnmeasuredBloatKeepsNameAligned(t *testing.T) {
+	base := row{size: 1 << 20, maxSize: 1 << 20, barW: 20, hasBreakdown: true, hasRows: true, bloatSlot: true, name: "t"}
+	measured := base
+	measured.bloat, measured.hasBloat = 1<<18, true
+
+	want := lipgloss.Width(renderRow(measured))
+	if got := lipgloss.Width(renderRow(base)); got != want {
+		t.Errorf("unmeasured row width = %d, measured = %d", got, want)
+	}
+}

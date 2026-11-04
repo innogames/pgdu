@@ -40,6 +40,12 @@ type row struct {
 	// Set on the parts level, whose Σ footer sums the bytes column.
 	bloatCols bool
 
+	// bloatSlot says the list draws a bloat column (the header gates on a
+	// measured sibling, so it can be present while this row has no figure).
+	// An unmeasured row then renders blank cells instead of no cells at all,
+	// which would slide every column after it left by the column's width.
+	bloatSlot bool
+
 	// Optional heap/index/toast breakdown — when any are non-zero, the bar is
 	// drawn as three coloured segments instead of one solid block. Used by the
 	// tables level so the composition of each table is visible at a glance.
@@ -93,12 +99,17 @@ func renderRow(r row) string {
 	}
 	cursor := selectedCursor(r.selected)
 	bloatStr := ""
-	if r.bloatCols && !r.hasBloat {
+	switch {
+	case !r.hasBloat && r.bloatCols:
 		// The bloat columns exist (a sibling was measured) but this row wasn't
 		// — toast has no estimator, and rows are still pending mid-scan. Blank
 		// cells keep the type/name columns aligned with the measured rows.
 		bloatStr = strings.Repeat(" ", bloatByteColW+colGutter+bloatPctColW+colGutter)
-	} else if r.hasBloat {
+	case !r.hasBloat && r.bloatSlot:
+		// Same, for the tables level's single-cell bloat column: a table whose
+		// reltuples is -1 (never analysed) has no estimate to show.
+		bloatStr = strings.Repeat(" ", bloatCellW+colGutter)
+	case r.hasBloat:
 		pct := 0
 		if r.size > 0 {
 			pct = int(float64(r.bloat) * 100.0 / float64(r.size))
@@ -116,13 +127,13 @@ func renderRow(r row) string {
 			bloatStr = styleMuted.Render(padRight("-", bloatByteColW)) + "  " +
 				styleMuted.Render(padRight("-", bloatPctColW)) + "  "
 		case pct <= 0:
-			bloatStr = styleMuted.Render(padRight("-", 12)) + "  "
+			bloatStr = styleMuted.Render(padRight("-", bloatCellW)) + "  "
 		case r.bloatCols:
 			st := bloatPercentStyle(pct)
 			bloatStr = st.Render(padRight(approx+humanize.Bytes(r.bloat), bloatByteColW)) + "  " +
 				st.Render(padRight(fmt.Sprintf("%s%d%%", approx, pct), bloatPctColW)) + "  "
 		default:
-			bloatStr = bloatPercentStyle(pct).Render(padRight(fmt.Sprintf("%s%d%% bloat", approx, pct), 12)) + "  "
+			bloatStr = bloatPercentStyle(pct).Render(padRight(fmt.Sprintf("%s%d%% bloat", approx, pct), bloatCellW)) + "  "
 		}
 	}
 	breakdownStr := ""
@@ -194,6 +205,10 @@ const (
 	bloatByteColW = 10
 	bloatPctColW  = 7
 )
+
+// bloatCellW is the width of the tables level's single bloat cell, sized for
+// its widest value ("~100% bloat").
+const bloatCellW = 12
 
 // tableCountColW is the width of the schemas level's "tables" column; wide
 // enough for the "tables↓" header label and any realistic formatRows count.
@@ -935,7 +950,7 @@ func renderTablesHeader(s *screen, barW int) string {
 			padRight(sortMark("toast", s.sort == sortByToast, s.sortDesc), breakdownColW) + "  " +
 			padRight(sortMark("rows", s.sort == sortByRows, s.sortDesc), rowsColW) + "  "
 		if anyBloat {
-			line += padRight(sortMark("bloat", s.sort == sortByBloat, s.sortDesc), 12) + "  "
+			line += padRight(sortMark("bloat", s.sort == sortByBloat, s.sortDesc), bloatCellW) + "  "
 		}
 	}
 	// 2-cell placeholder for the drillMark ("↵ " / "  ") before the name.
