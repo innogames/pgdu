@@ -6,12 +6,25 @@ package pg
 // catalog metadata DescribeTable needs. to_regclass honours search_path for an
 // unqualified name and returns NULL — rather than erroring — when the name
 // doesn't resolve, so a stray label can't blow up the describe path. $1 = name.
+//
+// It returns the same size breakdown as sqlTables, not just the total: the
+// Table this yields is also what the by-name jumps (growth, top-queries `u`,
+// a diagnostic row) hand to TableParts, which takes the heap and TOAST sizes
+// straight off it. A total-only row showed those tables a 0 B heap and no
+// TOAST part at all.
 const sqlResolveTable = `
 SELECT c.oid,
        n.nspname,
        c.relname,
        pg_total_relation_size(c.oid),
-       c.reltuples::bigint
+       c.reltuples::bigint,
+       pg_relation_size(c.oid)                                AS heap_bytes,
+       pg_indexes_size(c.oid)                                 AS indexes_bytes,
+       COALESCE(pg_total_relation_size(c.reltoastrelid), 0)   AS toast_bytes,
+       COALESCE(c.reltoastrelid, 0)::oid                      AS toast_oid,
+       COALESCE((SELECT 'pg_toast.' || tc.relname
+                 FROM pg_class tc
+                 WHERE tc.oid = c.reltoastrelid), '')         AS toast_name
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 WHERE  c.oid = to_regclass($1)

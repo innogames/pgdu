@@ -107,7 +107,7 @@ func (m *Model) renderPartsTotals(s *screen) string {
 	if s.level != levelParts || len(s.items) == 0 {
 		return ""
 	}
-	var heap, idx, toast, bloat int64
+	var heap, idx, toast, bloat, measured int64
 	n := 0
 	anyBloat := false
 	for _, it := range s.items {
@@ -127,6 +127,7 @@ func (m *Model) renderPartsTotals(s *screen) string {
 		// patches item.bloat/hasBloat in place and leaves item.data untouched.
 		if it.hasBloat {
 			bloat += it.bloat
+			measured += p.SizeBytes
 			anyBloat = true
 		}
 		n++
@@ -137,7 +138,13 @@ func (m *Model) renderPartsTotals(s *screen) string {
 	}
 	bloatCols := ""
 	if anyBloat {
-		pct := int(float64(bloat) / float64(total) * 100)
+		// Over the measured parts, not the total: TOAST has no estimator, and a
+		// table whose TOAST dwarfs everything else would otherwise divide real
+		// waste by a size nobody measured and print 0% under a column of 30s.
+		pct := 0
+		if measured > 0 {
+			pct = int(float64(bloat) / float64(measured) * 100)
+		}
 		byteStr, pctStr := "-", "-"
 		if bloat > 0 {
 			byteStr = humanize.Bytes(bloat)

@@ -25,7 +25,8 @@ func (c *Client) ResolveTable(ctx context.Context, db, name string) (Table, erro
 	}
 	t := Table{DB: db}
 	err = pool.QueryRow(ctx, sqlResolveTable, name).
-		Scan(&t.OID, &t.Schema, &t.Name, &t.TotalBytes, &t.EstRows)
+		Scan(&t.OID, &t.Schema, &t.Name, &t.TotalBytes, &t.EstRows,
+			&t.HeapBytes, &t.IndexesBytes, &t.ToastBytes, &t.ToastOID, &t.ToastName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Table{}, &MissingRelationError{Name: name}
 	}
