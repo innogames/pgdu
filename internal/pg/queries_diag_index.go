@@ -258,7 +258,22 @@ WHERE schemaname NOT IN ('pg_catalog','information_schema')
 ORDER BY schemaname, tablename, indexname
 `
 
-const sqlDiagBloatIndex = `
+// bloatIndexEstimateHead and bloatIndexEstimateRest are the shared front of
+// the ioguix btree bloat estimator: everything up to index_aligned_est, which
+// is where the estimate is made (expected pages from pg_stats widths, against
+// the index's real relpages). The two halves sandwich the predicate that
+// narrows btree_index_atts — every user index for the diagnostic below, one
+// index for the Disk tool's sqlBloatIndexEstimate (queries_bloat.go). The
+// predicate goes *there* rather than into a filter at the end so the pg_stats
+// join only runs for the indexes asked about; a one-index call then costs a
+// catalog lookup instead of a database-wide sweep.
+//
+// One estimator, two callers, for the reason sqlBloatTablesEstimate gives: a
+// second implementation would have the diagnostic and the parts screen quote
+// different bloat for the same index. They are split as strings rather than
+// concatenated rather than formatted because the estimator spells modulo as
+// %, which a format string would eat.
+const bloatIndexEstimateHead = `
 WITH btree_index_atts AS (
     SELECT nspname,
         indexclass.relname AS index_name,
@@ -274,7 +289,9 @@ WITH btree_index_atts AS (
     JOIN pg_namespace ON pg_namespace.oid = indexclass.relnamespace
     JOIN pg_am ON indexclass.relam = pg_am.oid
     WHERE pg_am.amname = 'btree' AND indexclass.relpages > 0
-      AND nspname NOT IN ('pg_catalog', 'information_schema')
+`
+
+const bloatIndexEstimateRest = `
 ),
 -- One row per index column, resolved to the (relation, column) pair whose
 -- pg_stats row describes it: a plain key column is described by the table
@@ -320,8 +337,11 @@ index_aligned_est AS (
             - CASE WHEN nulldatawidth::integer % maxalign = 0 THEN maxalign ELSE nulldatawidth::integer % maxalign END
         )::numeric / (bs - pagehdr::NUMERIC) + 1), 0) AS expected
     FROM index_item_sizes
-),
-raw_bloat AS (
+)`
+
+var sqlDiagBloatIndex = bloatIndexEstimateHead +
+	"      AND nspname NOT IN ('pg_catalog', 'information_schema')\n" +
+	bloatIndexEstimateRest[1:] + ",\n" + `raw_bloat AS (
     SELECT current_database() AS dbname, nspname, pg_class.relname AS table_name, index_name,
         bs * (index_aligned_est.relpages)::bigint AS totalbytes, expected,
         CASE WHEN index_aligned_est.relpages <= expected THEN 0
@@ -349,8 +369,7 @@ format_bloat AS (
 SELECT *
 FROM format_bloat
 WHERE bloat_pct > 50 AND bloat_bytes > 10 * 1024^2
-ORDER BY bloat_bytes DESC
-`
+ORDER BY bloat_bytes DESC`
 
 // sqlDiagFKMissingIndex finds foreign keys on the referencing side that have no
 // supporting index: no valid index whose leading columns contain the FK columns

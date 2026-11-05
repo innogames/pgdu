@@ -16,10 +16,33 @@ SELECT COALESCE(has_function_privilege(current_user,
 
 // pgstattuple_approx returns approx_free_percent, approx_free_space,
 // dead_tuple_count, dead_tuple_len, etc. We treat dead_tuple_len + approx_free_space
-// as "wasted" — same definition used by pg_repack et al.
+// as "wasted" — same definition used by pg_repack et al. It takes a heap,
+// which a toast table is too.
+//
+// $2 bounds what the call is allowed to read. pgstattuple_approx does not scan
+// the whole relation: it skips pages the visibility map marks all-visible and
+// takes their free space from the FSM, so what it costs is the *not*
+// all-visible part — which pg_class already records, for free. Gating on that
+// rather than on the relation's size is what lets a 70 GB toast table vacuum
+// has just been through be measured as cheaply as a small one, while a
+// smaller but entirely dirty relation is still refused.
+//
+// relpages = 0 is a relation nobody has vacuumed or analyzed: there is no
+// visibility map worth trusting, so it counts as dirty in full. The guard sits
+// in WHERE, which is evaluated before the target list, so a refused relation
+// never calls the function at all — it returns no row, which the caller reads
+// as "unmeasured", exactly as it reads an error.
 const sqlBloatHeapApprox = `
-SELECT (dead_tuple_len + approx_free_space)::bigint AS wasted_bytes
-FROM   pgstattuple_approx($1::regclass)
+SELECT (SELECT (dead_tuple_len + approx_free_space)::bigint
+        FROM   pgstattuple_approx(t.oid)) AS wasted_bytes
+FROM   (SELECT c.oid,
+               CASE WHEN c.relpages > 0
+                    THEN GREATEST(c.relpages - c.relallvisible, 0)::bigint
+                         * current_setting('block_size')::bigint
+                    ELSE pg_relation_size(c.oid) END AS dirty_bytes
+        FROM   pg_class c
+        WHERE  c.oid = $1::regclass) t
+WHERE  t.dirty_bytes <= $2::bigint
 `
 
 // sqlBloatIndexFull measures an index that has no cheap density to read.
@@ -49,6 +72,26 @@ SELECT (CASE
           ELSE ((100.0 - avg_leaf_density) / 100.0) * pg_relation_size($1::regclass)
         END)::bigint AS wasted_bytes
 FROM   pgstatindex($1::regclass)
+`
+
+// sqlBloatIndexEstimate is the index sibling of sqlBloatHeapEstimate: the
+// statistics estimate a btree falls back to when the page walk is too
+// expensive to run (or pgstattuple is not there at all). It is the bloat_index
+// diagnostic's estimator narrowed to one index — see bloatIndexEstimateHead
+// (queries_diag_index.go) — so the two screens agree.
+//
+// $1 is the index, as a qualified name cast to regclass. No row comes back for
+// an index the estimator cannot speak about — not btree, relpages 0, no
+// pg_stats row for an indexed column — and reltuples < 0 (never analyzed)
+// is excluded here rather than estimated from a tuple count of -1, since the
+// caller renders "no number" as a blank cell and that is the honest answer.
+var sqlBloatIndexEstimate = bloatIndexEstimateHead +
+	"      AND indexclass.oid = $1::regclass\n" +
+	bloatIndexEstimateRest[1:] + `
+SELECT (CASE WHEN relpages <= expected THEN 0
+             ELSE bs * (relpages - expected)::bigint END)::bigint AS wasted_bytes
+FROM   index_aligned_est
+WHERE  reltuples >= 0
 `
 
 // Heap bloat estimation fallback. Uses pg_class.reltuples and per-column
