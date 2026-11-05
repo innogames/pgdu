@@ -425,6 +425,14 @@ func (m *Model) renderStatus(s *screen) string {
 	if tr := tblStatsResetLabel(s); tr != "" {
 		parts = append(parts, tr)
 	}
+	// The disk tool's own figures are all relation sizes; the filesystem they
+	// sit on is state the screens cannot derive, and on levelParts it is what
+	// the REINDEX gate judges against.
+	if s.tool == toolDisk {
+		if d := m.diskSpaceLabel(); d != "" {
+			parts = append(parts, d)
+		}
+	}
 	if m.notice != "" {
 		parts = append(parts, styleSelected.Render(m.notice))
 	}

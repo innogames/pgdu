@@ -333,3 +333,27 @@ func TestAutoSampleEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalServer(t *testing.T) {
+	cases := []struct {
+		cfg  Config
+		want bool
+	}{
+		{Config{}, true},
+		{Config{Host: "/var/run/postgresql"}, true},
+		{Config{Host: "localhost"}, true},
+		{Config{Host: "127.0.0.1"}, true},
+		{Config{Host: "::1"}, true},
+		{Config{Host: "db"}, false},
+		{Config{Host: "10.0.0.5"}, false},
+		{Config{DSN: "postgres://u@127.0.0.1:5432/db"}, true},
+		{Config{DSN: "postgres://u@h/db"}, false},
+		{Config{DSN: "host=/run/pg dbname=db"}, true},
+		{Config{DSN: "host=h dbname=db"}, false},
+	}
+	for _, c := range cases {
+		if got := c.cfg.LocalServer(); got != c.want {
+			t.Errorf("LocalServer(%+v) = %v, want %v", c.cfg, got, c.want)
+		}
+	}
+}

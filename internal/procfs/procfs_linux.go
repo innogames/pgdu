@@ -142,3 +142,25 @@ func Inode(fi os.FileInfo) uint64 {
 	}
 	return 0
 }
+
+// Statfs reports the capacity of the filesystem holding path. ok is false when
+// the path is not readable from here — which, for a server path, is the normal
+// answer on every host but the server's own.
+func Statfs(path string) (FS, bool) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return FS{}, false
+	}
+	// f_bsize is the transfer block size the counters are expressed in; on
+	// Linux it is the fragment size for every filesystem that distinguishes
+	// the two, so the three products are bytes.
+	bs := st.Bsize
+	if bs <= 0 {
+		return FS{}, false
+	}
+	return FS{
+		Total: int64(st.Blocks) * bs,
+		Free:  int64(st.Bfree) * bs,
+		Avail: int64(st.Bavail) * bs,
+	}, true
+}

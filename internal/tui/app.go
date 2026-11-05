@@ -767,6 +767,11 @@ type reindexState struct {
 	pctMax float64
 	// err is the last REINDEX failure, shown until the next attempt.
 	err error
+	// blocked is why the last Enter or R refused to arm a rebuild at all: the
+	// second copy of the indexes it would build does not fit in the free space
+	// pgdu can see on the server (see reindexRefusal). Cleared by the next
+	// keypress, like Model.notice.
+	blocked string
 }
 
 // tblState: Table overview (levelTableStats) state.
@@ -1234,6 +1239,16 @@ type Model struct {
 	target    string // host:port; keys snapshot compatibility, so it never changes shape
 	hostLabel string // root crumb of the breadcrumb (cli.Config.HostLabel)
 
+	// disk is the last probe of the filesystem holding the server's data
+	// directory, or nil when pgdu cannot read it (a remote host, an
+	// unprivileged connection, a non-Linux machine — see pg.Client.DiskSpace).
+	// It is Model-level because it is one cluster-wide figure, and because the
+	// REINDEX gate needs it on a screen that never asked for it.
+	// diskProbed dates the last attempt, successful or not, so a failing probe
+	// is not retried on every screen load.
+	disk       *pg.DiskSpace
+	diskProbed time.Time
+
 	// vacuum holds the state for the streaming VACUUM output pane on levelParts.
 	// It is a value type so the pane's scrollWindow can update its offset in
 	// place; vacuumPaneVisible(s) gates whether the pane is rendered at all.
@@ -1443,7 +1458,7 @@ func diagCategories() []string {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, m.loadCurrent(), m.pgbAvailableCmd())
+	return tea.Batch(m.spinner.Tick, m.loadCurrent(), m.pgbAvailableCmd(), m.refreshDiskSpaceCmd())
 }
 
 // --- screen-stack helpers ---

@@ -77,6 +77,9 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Any keypress clears the transient notice (e.g. the last export's path) so
 	// it reads as a one-shot confirmation rather than lingering state.
 	m.notice = ""
+	// Same for a refused REINDEX: the explanation belongs to the keypress that
+	// earned it, not to the screen.
+	s.reindex.blocked = ""
 	// While the filter input has focus, route keys into the filter editor
 	// instead of the list. Bypasses every other binding (so e.g. typing "s"
 	// extends the query rather than cycling the sort).
@@ -568,7 +571,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case key.Matches(msg, m.keys.ReindexTable):
 		if s.level == levelParts {
-			armReindexTable(s)
+			m.armReindexTable(s)
 		}
 	case key.Matches(msg, m.keys.ResetMinMax):
 		// min/max/stddev are cumulative since the last full reset and cannot be

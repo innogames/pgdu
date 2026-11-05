@@ -1,8 +1,11 @@
 package tui
 
 import (
+	"fmt"
+
 	tea "charm.land/bubbletea/v2"
 
+	"pgdu/internal/humanize"
 	"pgdu/internal/pg"
 )
 
@@ -49,6 +52,13 @@ func (m *Model) handleReindexEnter(s *screen) tea.Cmd {
 	if cand == "" {
 		return nil
 	}
+	if why := m.reindexRefusal(reindexNeedBytes(s, false)); why != "" {
+		s.reindex.blocked = why
+		// The press is still absorbed: handleKey's own reindexCandidate guard
+		// stops the fall-through to a drill-in, exactly as it does for the
+		// arm-the-confirm path.
+		return nil
+	}
 	s.reindex.pending = cand
 	s.reindex.whole = false
 	s.reindex.err = nil
@@ -59,11 +69,67 @@ func (m *Model) handleReindexEnter(s *screen) tea.Cmd {
 // the single-index form it is not gated on a measured bloat figure: the point
 // of rebuilding every index at once is usually that you don't want to judge
 // them one by one, and the non-btree ones may have no figure to judge.
-func armReindexTable(s *screen) {
+func (m *Model) armReindexTable(s *screen) {
 	if s.level != levelParts || s.table.OID == 0 || s.reindex.running != "" {
+		return
+	}
+	if why := m.reindexRefusal(reindexNeedBytes(s, true)); why != "" {
+		s.reindex.blocked = why
 		return
 	}
 	s.reindex.pending = s.table.Qualified()
 	s.reindex.whole = true
 	s.reindex.err = nil
+}
+
+// reindexNeedBytes is the extra disk a CONCURRENTLY rebuild occupies at its
+// peak: a second copy of every index it touches, on top of the originals,
+// until the swap at the end. For the whole-table form that is the sum of the
+// table's indexes rather than the largest of them — REINDEX TABLE
+// CONCURRENTLY creates the new index relations for the whole table up front
+// and drops the old ones only once all of them have been swapped in.
+//
+// It is a floor, not a budget: the sort that builds each index spills to the
+// same filesystem, and the WAL the rebuild writes has to be retained until a
+// checkpoint. That is why the gate refuses at "needs as much as is free"
+// rather than at some fraction of it.
+func reindexNeedBytes(s *screen, whole bool) int64 {
+	if whole {
+		var sum int64
+		for _, it := range s.items {
+			if p, ok := it.data.(pg.Part); ok && p.Kind == pg.PartIndex {
+				sum += p.SizeBytes
+			}
+		}
+		return sum
+	}
+	vis := s.visibleIndexes()
+	if s.cursor < 0 || s.cursor >= len(vis) {
+		return 0
+	}
+	return s.items[vis[s.cursor]].size
+}
+
+// reindexRefusal returns the reason a rebuild needing need bytes must not be
+// armed, or "" to let it through. A rebuild that runs the filesystem out of
+// space does not just fail: every other session writing to that disk fails
+// with it, and the cluster can stop accepting writes altogether — which is a
+// far worse outcome than a bloated index left standing for another day.
+//
+// Best effort in both directions. With no reading of the server's disk (a
+// remote host, an unprivileged connection) nothing is refused, because
+// refusing on an unknown would make the key dead wherever pgdu cannot see the
+// filesystem. And the figure it does have covers the data directory only: an
+// index in another tablespace is sized against the wrong disk, which is why
+// the refusal names the path it measured.
+func (m *Model) reindexRefusal(need int64) string {
+	d := m.disk
+	if d == nil || need <= 0 || d.Avail <= 0 {
+		return ""
+	}
+	if need < d.Avail {
+		return ""
+	}
+	return fmt.Sprintf("needs ~%s of free space (a second copy of the indexes); %s has %s left",
+		humanize.Bytes(need), d.Path, humanize.Bytes(d.Avail))
 }

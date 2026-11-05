@@ -29,6 +29,23 @@ func relativeAge(d time.Duration) string {
 	return fmt.Sprintf("%dmo ago", int(d.Hours()/(24*30)))
 }
 
+// maintAgeStr renders a "3d ago" age graded by how stale it is: under a week
+// stays muted (routine), over a week yellow, over a month red — the instinct a
+// DBA applies reading last_autovacuum by hand. It grades only where recency is
+// the whole story (the describe screen's vacuum/analyze rows); the parts
+// panel deliberately does not grade a clock, because a static table nobody has
+// vacuumed in a year is not a fault.
+func maintAgeStr(age time.Duration) string {
+	s := relativeAge(age)
+	switch {
+	case age >= 30*24*time.Hour:
+		return styleBloat.Render(s)
+	case age >= 7*24*time.Hour:
+		return styleBarAlt.Render(s)
+	}
+	return styleMuted.Render(s)
+}
+
 // tblStatsResetLabel is the table overview's "since when" status-line part:
 // the stats_reset timestamp the cumulative counters count from. Empty until
 // loaded; "never reset" when the server has no reset recorded (counters date

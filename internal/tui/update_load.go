@@ -22,7 +22,21 @@ func (m *Model) armActivityTick(cmds []tea.Cmd) []tea.Cmd {
 // loadCurrent issues the right load command for the top screen and resets any
 // transient affordances (extPrompt, install spinner, buffer-summary cache)
 // so a refresh shows a clean state.
+//
+// The disk tool additionally re-probes the server's free space: its status row
+// shows it, and the REINDEX gate on levelParts refuses against it, so a figure
+// read once at startup would be the wrong one by the time it decides anything.
 func (m *Model) loadCurrent() tea.Cmd {
+	cmd := m.loadCurrentScreen()
+	if m.top().tool == toolDisk {
+		if probe := m.refreshDiskSpaceCmd(); probe != nil {
+			return tea.Batch(cmd, probe)
+		}
+	}
+	return cmd
+}
+
+func (m *Model) loadCurrentScreen() tea.Cmd {
 	s := m.top()
 	// A frozen A→B window rebuilds from its two loaded snapshots — no DB read,
 	// so it's handled before the generic loading path sets the spinner.

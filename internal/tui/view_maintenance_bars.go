@@ -24,7 +24,13 @@ const (
 // maintBarWidth fits the shared bar width to a pane: the label column, the
 // bar and a short figure must fit, but never below 8 cells.
 func maintBarWidth(paneW int) int {
-	return min(maintBarW, max(paneW-overviewLabelW-14, 8))
+	return barWidthFor(paneW, overviewLabelW)
+}
+
+// barWidthFor is maintBarWidth for a row shape with a different label column
+// (the parts panel's narrow one).
+func barWidthFor(paneW, labelW int) int {
+	return min(maintBarW, max(paneW-labelW-14, 8))
 }
 
 // gaugeBar paints one fill of ratio (clamped to [0,1]) in st. A non-zero

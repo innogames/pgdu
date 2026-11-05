@@ -670,7 +670,9 @@ FROM   pg_prepared_xacts`
 	// reads the cluster-wide autovacuum GUCs; per-table overrides live in
 	// RelOptions and are applied by the TableMaintStats methods in Go.
 	// last_seq_scan / last_idx_scan are PG16+; they are NULL on older clusters
-	// (PG15 and below), which is fine — the Scan uses *time.Time.
+	// (PG15 and below), which is fine — the Scan uses *time.Time. The failsafe
+	// age is read missing_ok so a server without the GUC yields 0, which is
+	// the "unknown failsafe" input freezeLevel already falls back from.
 	sqlTableMaintStats = `
 SELECT
     COALESCE(s.n_live_tup, 0),
@@ -700,7 +702,8 @@ SELECT
     current_setting('autovacuum_vacuum_insert_scale_factor')::float8,
     current_setting('autovacuum_analyze_threshold')::bigint,
     current_setting('autovacuum_analyze_scale_factor')::float8,
-    current_setting('autovacuum_freeze_max_age')::bigint
+    current_setting('autovacuum_freeze_max_age')::bigint,
+    COALESCE(current_setting('vacuum_failsafe_age', true)::bigint, 0)
 FROM   pg_class c
 LEFT   JOIN pg_stat_all_tables s ON s.relid = c.oid
 WHERE  c.oid = $1`

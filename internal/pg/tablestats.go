@@ -30,7 +30,7 @@ func (c *Client) TableMaintStats(ctx context.Context, t Table) (*TableMaintStats
 		&s.AvacVacuumThreshold, &s.AvacVacuumScale,
 		&s.AvacInsertThreshold, &s.AvacInsertScale,
 		&s.AvacAnalyzeThreshold, &s.AvacAnalyzeScale,
-		&s.FreezeMaxAge,
+		&s.FreezeMaxAge, &s.FailsafeAge,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil

@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"pgdu/internal/humanize"
 )
 
 // hasInfoOverlay reports whether the current level has a ? reference overlay.
@@ -325,11 +327,19 @@ func (m *Model) renderReindexBanner(s *screen) string {
 		}
 		return line
 	case s.reindex.pending != "":
+		// A rebuild that fits, but only just, is still worth saying out loud:
+		// the gate refuses on the index copies alone, and the sort spill and
+		// the WAL the rebuild retains come out of the same filesystem.
+		tight := m.reindexTightNote(s)
 		if s.reindex.whole {
-			return confirmBanner("REINDEX TABLE CONCURRENTLY " + s.reindex.pending +
-				" — every index on the table, one at a time")
+			return confirmBanner("REINDEX TABLE CONCURRENTLY "+s.reindex.pending+
+				" — every index on the table, one at a time") + tight
 		}
-		return confirmBanner("REINDEX INDEX CONCURRENTLY " + s.reindex.pending)
+		return confirmBanner("REINDEX INDEX CONCURRENTLY "+s.reindex.pending) + tight
+	case s.reindex.blocked != "":
+		// Refused before anything ran, so it is not a failure: the rebuild is
+		// the thing that would have failed, and taken the filesystem with it.
+		return "  " + styleErr.Render("reindex blocked: ") + styleMuted.Render(s.reindex.blocked)
 	case s.reindex.err != nil:
 		return "  " + styleErr.Render("reindex failed: "+s.reindex.err.Error())
 	}
@@ -420,4 +430,21 @@ func (m *Model) renderUpgradePrompt(s *screen, height int) string {
 			") is older than pgdu needs — upgrade PostgreSQL / the extension package") + "\n")
 	}
 	return padInfo(&b, height)
+}
+
+// reindexTightNote warns, inline with the confirm, when the rebuild the user
+// is about to run would take more than half the free space it can see. It is
+// the band between "fits comfortably" and the refusal in reindexRefusal;
+// returns "" when there is no disk reading, or room to spare.
+func (m *Model) reindexTightNote(s *screen) string {
+	d := m.disk
+	if d == nil || d.Avail <= 0 {
+		return ""
+	}
+	need := reindexNeedBytes(s, s.reindex.whole)
+	if need <= 0 || need <= d.Avail/2 {
+		return ""
+	}
+	return "  " + styleSelected.Render("⚠ ") +
+		styleMuted.Render("~"+humanize.Bytes(need)+" of the "+humanize.Bytes(d.Avail)+" free on "+d.Path)
 }

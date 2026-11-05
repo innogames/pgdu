@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -305,31 +306,7 @@ func (c Config) Target() string {
 // hostname is the honest answer. Target stays as it is because snapshots and
 // pgbouncer instance names are keyed on it.
 func (c Config) HostLabel() string {
-	host, port := c.Host, c.Port
-	if c.DSN != "" {
-		if u, err := url.Parse(c.DSN); err == nil && u.Host != "" {
-			if u.Port() == "" {
-				return u.Host + ":5432"
-			}
-			return u.Host
-		}
-		// Keyword DSN: pick host=/port= out of it; a DSN naming neither is a
-		// socket connection like an empty --host.
-		host, port = "", 0
-		for tok := range strings.FieldsSeq(c.DSN) {
-			k, v, ok := strings.Cut(tok, "=")
-			if !ok {
-				continue
-			}
-			v = strings.Trim(v, "'")
-			switch k {
-			case "host":
-				host = v
-			case "port":
-				port, _ = strconv.Atoi(v)
-			}
-		}
-	}
+	host, port := c.hostPort()
 	if host == "" || strings.HasPrefix(host, "/") {
 		name, err := os.Hostname()
 		if err != nil || name == "" {
@@ -344,6 +321,51 @@ func (c Config) HostLabel() string {
 		port = 5432
 	}
 	return host + ":" + strconv.Itoa(port)
+}
+
+// hostPort resolves the host and port actually connected to out of whichever
+// of the flags and the DSN carries them. An empty host, or one that is a
+// directory path, means a Unix socket — i.e. this very machine.
+func (c Config) hostPort() (string, int) {
+	if c.DSN == "" {
+		return c.Host, c.Port
+	}
+	if u, err := url.Parse(c.DSN); err == nil && u.Host != "" {
+		port, _ := strconv.Atoi(u.Port())
+		return u.Hostname(), port
+	}
+	// Keyword DSN: pick host=/port= out of it; a DSN naming neither is a
+	// socket connection like an empty --host.
+	var host string
+	var port int
+	for tok := range strings.FieldsSeq(c.DSN) {
+		k, v, ok := strings.Cut(tok, "=")
+		if !ok {
+			continue
+		}
+		v = strings.Trim(v, "'")
+		switch k {
+		case "host":
+			host = v
+		case "port":
+			port, _ = strconv.Atoi(v)
+		}
+	}
+	return host, port
+}
+
+// LocalServer reports whether the connection targets this very machine: a Unix
+// socket, or a loopback address. It is the weaker of the two tests behind the
+// disk-space figures (see Client.DiskSpace) — a server reached by its own
+// routable hostname reads false here — and never the only one relied on for
+// anything but suppressing a figure.
+func (c Config) LocalServer() bool {
+	host, _ := c.hostPort()
+	if host == "" || strings.HasPrefix(host, "/") || host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // defaultSnapshotDir is a single shared directory under the system temp dir

@@ -717,6 +717,11 @@ type TableMaintStats struct {
 	AvacAnalyzeThreshold int64
 	AvacAnalyzeScale     float64
 	FreezeMaxAge         int64
+	// FailsafeAge is vacuum_failsafe_age, the age at which VACUUM drops its
+	// cost delay and index cleanup to catch up. TableAdvice grades
+	// relfrozenxid against it rather than against FreezeMaxAge, which only
+	// marks when a routine anti-wraparound vacuum is due.
+	FailsafeAge int64
 }
 
 // ParseRelOptions converts a raw reloptions string slice (from pg_class) into a
@@ -808,15 +813,37 @@ func (s *TableMaintStats) AutovacuumEnabled() bool {
 	return optBool(opts, "autovacuum_enabled", s.AvacEnabled)
 }
 
-// FreezeFrac returns FrozenXIDAge / FreezeMaxAge as a fraction in [0,1], or 0
-// when either value is unknown.
-func (s *TableMaintStats) FreezeFrac() float64 {
+// FreezeFactor is FrozenXIDAge / FreezeMaxAge, *unclamped*: 2.2 means the age
+// is 2.2 anti-wraparound cycles old. It replaced a clamped fraction, which
+// pegged at 100 % for every table past its first forced cycle and so could not
+// tell "a routine vacuum is due" from "freezing has stopped happening". 0 when
+// the limit is unknown.
+func (s *TableMaintStats) FreezeFactor() float64 {
 	if s.FreezeMaxAge <= 0 {
 		return 0
 	}
-	f := float64(s.FrozenXIDAge) / float64(s.FreezeMaxAge)
-	if f > 1 {
-		return 1
+	return float64(s.FrozenXIDAge) / float64(s.FreezeMaxAge)
+}
+
+// FreezeDangerFrac is how far the age has come towards real danger rather than
+// towards routine maintenance: the share of the age at which VACUUM drops into
+// failsafe mode (half of vacuum_failsafe_age, the same point the advice turns
+// critical). This is what a meter should show — it stays short through the
+// whole normal band instead of sitting full.
+func (s *TableMaintStats) FreezeDangerFrac() float64 {
+	danger := float64(s.FailsafeAge) * failsafeCritFrac
+	if danger <= 0 {
+		danger = failsafeAgeFallback
 	}
-	return f
+	return min(float64(s.FrozenXIDAge)/danger, 1)
+}
+
+// DeadShare is the dead tuples as a fraction of the rows the table holds at
+// all; 0 when it holds none.
+func (s *TableMaintStats) DeadShare() float64 {
+	total := s.NLive + s.NDead
+	if total <= 0 {
+		return 0
+	}
+	return float64(s.NDead) / float64(total)
 }

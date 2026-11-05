@@ -24,11 +24,12 @@ internal/pg/         # pgx wrapper: one *pgxpool.Pool per database, lazy
                      #   keep-newest-N sweep and the once-a-day predicate over it
   pgbouncer.go       #   DiscoverPgBouncers: pgbouncer.Client.Discover + the behind-a-pooler check
   logdiscover.go     #   log file discovery (pg_current_logfile / pg_ls_logdir) + server-side LogSource
+  diskspace.go       #   free space under data_directory: same-host proof + procfs.Statfs
 internal/diagres/    # generic column/row result table (kinds, cells, pgx row scan) shared by pg and pgbouncer
 internal/pgbouncer/  # pgbouncer console: ini parser, discovery, simple-protocol conns (own Client, no pool)
 internal/pageinspect/# byte decoders over pg row types: tuple layout, index keys, jsonb, TOAST
                      #   pointers, compressed blobs (gzip/zlib/zstd inside a bytea)
-internal/procfs/     # Linux-only host reads (/proc process list + per-PID stats, stat inode) with no-op fallbacks
+internal/procfs/     # Linux-only host reads (/proc process list + per-PID stats, stat inode, statfs) with no-op fallbacks
 internal/pglog/      # log analyzer engine (pure Go, no pgx): parse, classify, aggregate, local/gz sources
 internal/tui/        # Bubble Tea Model/Update/View
   app.go             #   Model, screen, item, level/tool enums
@@ -245,6 +246,43 @@ fails (missing/corrupt → empty).
   `extPrompt`, which is what makes the global `i` run the CREATE EXTENSION.
   Action rows are the recommendations first, then the four stats-reset rows of the closing statistics block (`actionRows`); the fix
   line renders under the cursor row only.
+- **The parts panel follows the overview's rule, with its own bands**: the
+  maintenance section under the parts list (`view_parts_maint.go`) prints a
+  `gaugeBar` row only for a metric a finding fired on and folds every healthy
+  one into the header as `✓ vacuum 3d · dead 0%` — the figure survives, the
+  line does not — so a healthy table is two lines. There is no verbose toggle:
+  `v` is VACUUM here. The judgement is `pg.TableAdvice` (`advice_table.go`),
+  the table-scoped sibling of `MaintAdvice`, deliberately kept out of its set so
+  a per-table finding can never reach the overview's recommendations panel.
+  Its bands grade **work pending, not the clock** — a static table nobody has
+  vacuumed in a year is not a fault — and a counter *at* its autovacuum
+  threshold is a worker being due, so rows start at twice it
+  (`tableBehindFactor`), or at a fifth of the table for dead rows, below
+  `tableMinRows` never. Only `AdviceWarn`+ earns a row; the one Info rule
+  (freeze) folds with its note. Freezing is graded by the cluster's own
+  `freezeLevel`, which is why an age at `autovacuum_freeze_max_age` is routine
+  here too — the panel used to paint it red — and the freeze bar measures the
+  way to the failsafe (`FreezeDangerFrac`), not to the next routine cycle,
+  while the figure shows the unclamped `FreezeFactor`. The four statements the
+  panel's hint lines used to advertise now live in the footer
+  (`maintKeysInFooter`), which is their only home.
+- **Free space is a host read, and a gate**: Postgres exposes no free-space
+  function, so `pg.Client.DiskSpace` reads `data_directory` out of `pg_settings`
+  (absent, not an error, for an unprivileged role), proves the path is the
+  *server's* by stat'ing `PG_VERSION` on both sides — `pg_stat_file` vs the local
+  file, falling back to `cli.Config.LocalServer` where that function is not
+  granted — and then `procfs.Statfs`es it. Anything else wraps
+  `ErrDiskSpaceUnknown`, which is a normal answer (remote host, no privilege,
+  non-Linux) and renders as nothing at all. The figure covers that one
+  filesystem: a tablespace or a relocated `pg_wal` is on another, so every
+  caller names the path. `Model.disk` holds it cluster-wide, re-probed by
+  `loadCurrent` on `toolDisk` screens at most every `diskSpaceMaxAge`. Two
+  consumers: the status row (`diskSpaceLabel`, graded) and the REINDEX gate —
+  `reindexNeedBytes` is a second copy of every index the rebuild touches (the
+  **sum** for the table form: REINDEX TABLE CONCURRENTLY swaps them all in at
+  the end), `reindexRefusal` refuses to arm at need ≥ free and
+  `reindexTightNote` warns past half. An unknown never refuses: a key that dies
+  wherever pgdu cannot see the disk is worse than no gate.
 - **Growth / size history** (`toolGrowth`, `--growth`): pgdu accrues its own history,
   since the server keeps none. A *sample* (`internal/pg/sizehistory.go`) is one
   per-relation size capture of one database; a *window* is two samples, diffed by

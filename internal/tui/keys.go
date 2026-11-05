@@ -155,6 +155,11 @@ type keyMap struct {
 	// monitor, where describing the operation's target relation is the only
 	// drill action (Enter is a no-op there) and nothing else advertises it.
 	describeInFooter bool
+
+	// maintKeysInFooter advertises the parts level's v/F/a/R maintenance
+	// cluster. It is their only home: the panel below the list used to spell
+	// them out in a hint line, and that line is gone.
+	maintKeysInFooter bool
 }
 
 // Help wording: a binding that opens another screen or tool reads "→ <where>"
@@ -276,6 +281,7 @@ func (k *keyMap) applyContext(s *screen) {
 	k.Analyze.SetEnabled(parts)
 	k.VacuumFreeze.SetEnabled(parts)
 	k.ReindexTable.SetEnabled(parts)
+	k.maintKeysInFooter = parts
 	// Eviction needs a loaded buffers list to name a relation from; the detail
 	// screen already knows its own.
 	k.EvictBuffers.SetEnabled(s.level == levelBufferTables || s.level == levelBufferDetail)
@@ -355,6 +361,12 @@ func (k *keyMap) applyContext(s *screen) {
 	k.Verbose.SetEnabled(stmtDetail || s.level == levelParts || activity || s.level == levelMaintenance || growthTable)
 	if growthTable {
 		k.Verbose.SetHelp("v", "show dropped")
+	}
+	if parts {
+		// There is no separate Vacuum binding — v *is* Verbose here — so the
+		// label has to be level-scoped or the footer offers "verbose" for a
+		// key that rewrites the table.
+		k.Verbose.SetHelp("v", "VACUUM")
 	}
 	k.DeleteSnapshot.SetEnabled(snapshots || growthWindow)
 	if growthWindow {
@@ -496,7 +508,14 @@ func (k *keyMap) applyContext(s *screen) {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	b := []key.Binding{k.Up, k.Down, k.Enter, k.Back, k.Filter, k.SortPrev, k.SortNext, k.ReverseSort, k.Refresh}
+	b := []key.Binding{k.Up, k.Down, k.Enter, k.Back}
+	// Early, ahead of sort and filter: the footer is truncated to the terminal
+	// width from the tail, and on the parts level four keys that rewrite a
+	// table outrank the ones that reorder a six-row list.
+	if k.maintKeysInFooter {
+		b = append(b, k.Verbose, k.VacuumFreeze, k.Analyze, k.ReindexTable)
+	}
+	b = append(b, k.Filter, k.SortPrev, k.SortNext, k.ReverseSort, k.Refresh)
 	if k.logInFooter {
 		b = append(b, k.LogPane, k.LogGroupMode, k.LogWindow)
 	}
@@ -566,7 +585,8 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Enter, k.Back},
 		{k.Filter, k.Seek, k.GinNextLeaf, k.CtidNext, k.SortPrev, k.SortNext, k.ShowQuery, k.ReverseSort},
 		{k.Refresh, k.Install, k.Describe, k.DiskUsage, k.Growth},
-		{k.Rebaseline, k.ResetStatements, k.ResetMinMax, k.ToggleRefresh, k.Params, k.Execute, k.Verbose, k.Export},
+		{k.Rebaseline, k.ResetStatements, k.ResetMinMax, k.ToggleRefresh, k.Params, k.Execute, k.Export},
+		{k.Verbose, k.VacuumFreeze, k.Analyze, k.ReindexTable},
 		{k.ActivityFilter, k.CancelBackend, k.TerminateBackend, k.LockTree, k.WaitProfile},
 		{k.EvictBuffers, k.StmtView, k.GrowthScope, k.BufSplit, k.SaveSnapshot, k.Snapshots, k.DeleteSnapshot, k.PurgeSnapshots, k.Columns, k.ShmemMap, k.PageInspect, k.TopQueries},
 		{k.JumpActivity, k.JumpWAL, k.JumpReplication, k.JumpIO, k.Progress, k.Settings},

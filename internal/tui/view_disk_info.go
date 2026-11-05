@@ -38,7 +38,10 @@ func (m *Model) diskDatabasesInfo(b *strings.Builder) {
 	b.WriteString("    " + mu("including the tables, indexes, TOAST and free space inside it. Template databases are left out.") + "\n")
 	b.WriteString("    " + mu("A database you cannot connect to is not listed at all, so the bars do not add up to the") + "\n")
 	b.WriteString("    " + mu("cluster's size on disk. Nor would they anyway: pg_wal, the log directory and any temp-file") + "\n")
-	b.WriteString("    " + mu("spill live outside every database.") + "\n\n")
+	b.WriteString("    " + mu("spill live outside every database.") + "\n")
+	b.WriteString("    " + mu("The ") + styleBadge.Render("disk") + mu(" figure on the status row is the other side of that: how full the filesystem under") + "\n")
+	b.WriteString("    " + mu("the data directory actually is. It appears only when pgdu runs on the server (see the parts") + "\n")
+	b.WriteString("    " + mu("reference), and it covers that one filesystem — not a tablespace elsewhere.") + "\n\n")
 	diskBarSection(b)
 	b.WriteString("  " + styleHeader.Render(" keys ") + "\n")
 	b.WriteString("    " + styleBadge.Render("↵") + mu("  open the database's schemas. A cluster with exactly one connectable database") + "\n")
@@ -124,8 +127,18 @@ func (m *Model) diskPartsInfo(b *strings.Builder) {
 	b.WriteString("    " + mu("keeps growing means inserts are outrunning the merge and every lookup is paying for it.") + "\n\n")
 
 	b.WriteString("  " + styleHeader.Render(" maintenance ") + "\n")
-	b.WriteString("    " + mu("The panel below the list carries the table's vacuum and analyze recency, its dead-row ratio") + "\n")
-	b.WriteString("    " + mu("against the autovacuum threshold, its freeze age and any per-table reloptions.") + "\n")
+	b.WriteString("    " + mu("The panel below the list is quiet by default. A metric gets a bar row only once it is past") + "\n")
+	b.WriteString("    " + mu("its own band; everything healthy folds into the header after a ") + styleBadge.Render("✓") +
+		mu(", keeping its figure. A panel of two") + "\n")
+	b.WriteString("    " + mu("lines is the good outcome, not a missing one, and the row that is coloured is the one to read.") + "\n")
+	b.WriteString("    " + mu("Vacuum and analyze recency never earn a row: a static table nobody has vacuumed in a year is") + "\n")
+	b.WriteString("    " + mu("not a fault, and the dead-row count says anything the clock could. A counter earns one at twice") + "\n")
+	b.WriteString("    " + mu("this table's own autovacuum threshold — at the threshold a worker is simply due — or, for dead") + "\n")
+	b.WriteString("    " + mu("rows, once they are a fifth of the table however the reloptions moved that threshold.") + "\n")
+	b.WriteString("    " + mu("A transaction age at ") + styleBadge.Render("autovacuum_freeze_max_age") +
+		mu(" is a routine anti-wraparound vacuum, not an emergency;") + "\n")
+	b.WriteString("    " + mu("the freeze row appears at twice it, and its bar measures the way to the VACUUM failsafe, which") + "\n")
+	b.WriteString("    " + mu("is where the danger actually is. The four statements below are in the footer on this screen.") + "\n")
 	b.WriteString("    " + styleBadge.Render("v") + mu("  VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED), with the server's notices streamed into a pane") + "\n")
 	b.WriteString("    " + mu("   below. SKIP_LOCKED means a table someone else holds is passed over, not waited for.") + "\n")
 	b.WriteString("    " + styleBadge.Render("F") + mu("  the same with FREEZE: freezes every tuple old enough rather than only those past") + "\n")
@@ -139,11 +152,22 @@ func (m *Model) diskPartsInfo(b *strings.Builder) {
 	b.WriteString("    " + mu("   the threshold — which is why it can look like it vanished.") + "\n")
 	b.WriteString("    " + styleBadge.Render("p") + mu("  open the part in the page inspector") + "\n\n")
 	b.WriteString("  " + styleHeader.Render(" reclaim ") + "\n")
-	b.WriteString("    " + mu("The panel's reclaim line splits the measured waste by what would hand it back. Index waste a") + "\n")
+	b.WriteString("    " + mu("The panel's reclaim row bars the measured waste against the table's total size and splits it") + "\n")
+	b.WriteString("    " + mu("by what would hand it back. Index waste a") + "\n")
 	b.WriteString("    " + mu("REINDEX returns to the filesystem. Heap waste VACUUM only makes reusable by the table — the") + "\n")
 	b.WriteString("    " + mu("file does not shrink; that needs a rewrite (VACUUM FULL takes an exclusive lock, pg_repack") + "\n")
 	b.WriteString("    " + mu("does not). pgdu runs neither, and the diagnostics only ever emit them as comments.") + "\n")
-	b.WriteString("    " + styleBadge.Render("↵") + mu("  on the heap row, its columns") + "\n")
+	b.WriteString("    " + styleBadge.Render("↵") + mu("  on the heap row, its columns") + "\n\n")
+	b.WriteString("  " + styleHeader.Render(" free space ") + "\n")
+	b.WriteString("    " + mu("Postgres has no free-space function, so the ") + styleBadge.Render("disk") +
+		mu(" figure on the status row is a host read: it is") + "\n")
+	b.WriteString("    " + mu("there only when pgdu runs on the database server itself and may read data_directory. It") + "\n")
+	b.WriteString("    " + mu("measures that one filesystem — a tablespace or a relocated pg_wal sits on another.") + "\n")
+	b.WriteString("    " + mu("A CONCURRENTLY rebuild builds a second copy of every index it touches and drops the old ones") + "\n")
+	b.WriteString("    " + mu("only at the end, so when that copy would not fit in what is free, both ") + styleBadge.Render("R") +
+		mu(" and ") + styleBadge.Render("↵") + mu(" refuse and say") + "\n")
+	b.WriteString("    " + mu("so. Over half of it and they warn but still run. Where the disk cannot be read nothing is") + "\n")
+	b.WriteString("    " + mu("refused: the figure is best-effort, and a key that dies on an unknown is worse than no gate.") + "\n")
 }
 
 func (m *Model) diskColumnsInfo(b *strings.Builder) {

@@ -15,3 +15,19 @@ func TestParseStatTicks(t *testing.T) {
 		t.Errorf("garbage must not parse")
 	}
 }
+
+// Statfs answers for a path that exists and declines for one that does not —
+// the second case is the one that matters, since a data directory read off a
+// remote server usually isn't here at all.
+func TestStatfs(t *testing.T) {
+	fs, ok := Statfs(t.TempDir())
+	if !ok {
+		t.Fatal("Statfs on a temp dir failed")
+	}
+	if fs.Total <= 0 || fs.Avail > fs.Total || fs.Used() > fs.Total {
+		t.Errorf("implausible capacity: %+v", fs)
+	}
+	if _, ok := Statfs("/nonexistent-pgdu-path/PGDATA"); ok {
+		t.Error("Statfs on a missing path reported a filesystem")
+	}
+}

@@ -196,6 +196,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tableOverviewLoadedMsg:
 		return m, m.onTableOverviewLoaded(msg)
 
+	case diskSpaceMsg:
+		// A nil space is the answer "not readable from here", which is as
+		// durable as the host pgdu runs on: it stays nil until the next probe.
+		m.disk = msg.space
+		return m, nil
+
 	case pgbAvailableMsg:
 		if msg.found {
 			m.setPgbAvailable()

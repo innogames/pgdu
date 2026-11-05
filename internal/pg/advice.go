@@ -824,11 +824,15 @@ func (g freezeGrade) worthSaying() bool {
 	return g.Ok && (g.Level >= AdviceWarn || g.Factor >= freezeRoutineNoticeFrac)
 }
 
-// freezeLevel grades a transaction-ID (or multixact) age. Deliberately *not*
-// against the distance to the next routine anti-wraparound autovacuum: that
-// event is normal maintenance, not a fault. Warn once the age is a multiple of
-// autovacuum_freeze_max_age (a forced cycle passed without advancing
-// relfrozenxid), go critical only near the vacuum failsafe and the 2^31 stop.
+// freezeLevel grades a transaction-ID (or multixact) age. Both the cluster
+// view and the per-table panel (adviseTableFreeze) grade through it, so a
+// table can never read "freeze needed!" on a screen the cluster calls routine.
+//
+// Deliberately *not* graded against the distance to the next routine
+// anti-wraparound autovacuum: that event is normal maintenance, not a fault.
+// Warn once the age is a multiple of autovacuum_freeze_max_age (a forced cycle
+// passed without advancing relfrozenxid), go critical only near the vacuum
+// failsafe and the 2^31 stop.
 // failsafeAge is 0 when vacuum_failsafe_age is unavailable (PG < 14).
 func freezeLevel(age, maxAge, failsafeAge int64) freezeGrade {
 	if maxAge <= 0 || age <= 0 {

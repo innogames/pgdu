@@ -103,7 +103,15 @@ func adviceStyle(l pg.AdviceLevel) lipgloss.Style {
 // maintRow is the one row shape of the overview: muted label column, value,
 // optional trailing note already styled by the caller.
 func maintRow(label, value string) string {
-	return "  " + padRight(styleMuted.Render(label), overviewLabelW) + value + "\n"
+	return maintRowW(label, value, overviewLabelW)
+}
+
+// maintRowW is maintRow with the label column widened or narrowed. The parts
+// level's panel reuses the row shape with a much shorter column: its labels
+// are one word and it is two or three rows tall, so the overview's 24 cells
+// would be a gutter.
+func maintRowW(label, value string, w int) string {
+	return "  " + padRight(styleMuted.Render(label), w) + value + "\n"
 }
 
 // gucRow renders a setting row straight from the Settings map.

@@ -24,3 +24,17 @@ type PIDStats struct {
 	WriteBytes int64  // cumulative storage write_bytes; -1 = unreadable
 	At         time.Time
 }
+
+// FS is a filesystem's capacity as statfs(2) reports it, in bytes. Avail is
+// what an unprivileged process may still write (f_bavail), which is what a
+// CREATE INDEX actually has to work with — it excludes the root-reserved
+// blocks Free (f_bfree) counts.
+type FS struct {
+	Total int64
+	Free  int64
+	Avail int64
+}
+
+// Used is the part of the filesystem already occupied, including the
+// root-reserved blocks (which nobody but root can hand back).
+func (f FS) Used() int64 { return max(f.Total-f.Free, 0) }

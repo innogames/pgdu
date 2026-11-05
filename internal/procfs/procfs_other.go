@@ -14,3 +14,7 @@ func Sample([]int32) []PIDStats { return nil }
 // Inode is unavailable here; rotation detection falls back to "the file
 // shrank", which catches the common copytruncate case.
 func Inode(os.FileInfo) uint64 { return 0 }
+
+// Statfs cannot read a filesystem's capacity without the syscall; callers
+// suppress their disk figures.
+func Statfs(string) (FS, bool) { return FS{}, false }
