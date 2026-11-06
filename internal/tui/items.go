@@ -105,6 +105,8 @@ func itemBlkno(it item) (int64, bool) {
 		return int64(p.Blkno), true
 	case pg.GinPageStat:
 		return int64(p.Blkno), true
+	case pg.HashPageStat:
+		return int64(p.Blkno), true
 	}
 	return 0, false
 }
@@ -142,6 +144,17 @@ func itemDeadRatio(it item) (float64, bool) {
 		r = p.DeadFrac()
 	case pg.IndexPageStat:
 		r = p.DeadFrac()
+	case pg.HashPageStat:
+		// Only bucket/overflow pages have counts at all; a page type that has
+		// none must not read as 0% dead alongside a genuinely clean bucket.
+		if p.LiveItems == nil || p.DeadItems == nil {
+			return 0, false
+		}
+		total := *p.LiveItems + *p.DeadItems
+		if total == 0 {
+			return 0, false
+		}
+		r = float64(*p.DeadItems) / float64(total)
 	default:
 		return 0, false
 	}
@@ -164,6 +177,8 @@ func itemFreeSpace(it item) (int64, bool) {
 	case pg.BrinPageStat:
 		return int64(p.FreeSize), true
 	case pg.GinPageStat:
+		return int64(p.FreeSize), true
+	case pg.HashPageStat:
 		return int64(p.FreeSize), true
 	}
 	return 0, false
@@ -240,6 +255,8 @@ func itemPageType(it item) (int64, bool) {
 		return int64(brinPageTypeRank(p.PageType)), true
 	case pg.GinPageStat:
 		return int64(ginPageTypeRank(p.Flags)), true
+	case pg.HashPageStat:
+		return int64(hashPageTypeRank(p.PageType)), true
 	case pg.Relation:
 		// Relations level: rank by kind so the "type" sort groups heap, toast,
 		// then the index access methods together.
@@ -281,7 +298,7 @@ func partTypeRank(p pg.Part) int {
 }
 
 // relationTypeRank orders the relations "type" column: heap first, then toast,
-// then the index access methods alphabetically (btree, brin, gin, gist).
+// then the index access methods alphabetically (btree, brin, gin, gist, hash).
 func relationTypeRank(r pg.Relation) int {
 	switch r.Kind {
 	case pg.RelToast:
@@ -294,6 +311,8 @@ func relationTypeRank(r pg.Relation) int {
 		return 4
 	case pg.RelGist:
 		return 5
+	case pg.RelHash:
+		return 6
 	default: // RelTable / heap
 		return 0
 	}
@@ -449,6 +468,73 @@ func ginItemToItem(it pg.GinItem) item {
 	}
 }
 
+func hashPageToItem(p pg.HashPageStat) item {
+	used := max(heapPageBlockSize-int64(p.FreeSize), 0)
+	return item{
+		name: fmt.Sprintf("page #%07d", p.Blkno),
+		size: used,
+		// Only bucket and overflow pages hold entries hash_page_items can read.
+		hasChildren: hashPageHasItems(p.PageType),
+		data:        p,
+	}
+}
+
+func hashItemToItem(it pg.HashItem) item {
+	// name carries the hash code in both spellings, the heap pointer, and the
+	// projected key — all four are what the `/` filter can match on, and the key
+	// is the one a user actually knows (searching for a player_id only works
+	// because it's here).
+	name := fmt.Sprintf("0x%08x %d %s", uint32(it.Hash), it.Hash, it.Ctid)
+	if key := hashItemKey(it); key != nil {
+		name += " " + *key
+	}
+	return item{
+		name: name,
+		size: it.Hash,
+		// Enter opens the heap tuple the pointer names, which drillHeapTupleAt
+		// can only do if the ctid parses. It always does from hash_page_items,
+		// but the flag must promise exactly what the drill will deliver.
+		hasChildren: func() bool { _, ok := parseCtidBlock(&it.Ctid); return ok }(),
+		data:        it,
+	}
+}
+
+// hashItemKey is the key to show for an entry: the direct heap projection, or the
+// one reached through its HOT redirect, which is the same live row's key. nil
+// when neither resolved — the row simply isn't visible from here.
+func hashItemKey(it pg.HashItem) *string {
+	if it.Key != nil {
+		return it.Key
+	}
+	return it.HotKey
+}
+
+// hashPageHasItems reports whether a hash page type is one hash_page_items can
+// read. Every other type (metapage, bitmap, unused) raises server-side, so this
+// gates both the drill and the row's drill mark.
+func hashPageHasItems(pageType string) bool {
+	return pageType == "bucket" || pageType == "overflow"
+}
+
+// hashPageTypeRank ranks hash pages for the "type" sort: the metapage first
+// (block 0, the index's header), then the buckets and their overflow pages,
+// then the bookkeeping pages nothing drills.
+func hashPageTypeRank(t string) int {
+	switch t {
+	case "metapage":
+		return 0
+	case "bucket":
+		return 1
+	case "overflow":
+		return 2
+	case "bitmap":
+		return 3
+	case "unused":
+		return 4
+	}
+	return 5
+}
+
 // gistPageRole maps gist_page_opaque_info flags to the short role tag carried in
 // screen.indexPageType and shown in the page column: del / leaf / intr.
 func gistPageRole(isLeaf, isDeleted bool) string {
@@ -462,8 +548,8 @@ func gistPageRole(isLeaf, isDeleted bool) string {
 	}
 }
 
-// gistPageTypeRank / brinPageTypeRank / ginPageTypeRank order the per-AM page
-// lists under the "type" sort (sortByType).
+// gistPageTypeRank / brinPageTypeRank / ginPageTypeRank / hashPageTypeRank order
+// the per-AM page lists under the "type" sort (sortByType).
 func gistPageTypeRank(role string) int {
 	switch role {
 	case "leaf":

@@ -78,7 +78,7 @@ func enterLabel(s *screen) (label string, ok bool) {
 				switch r.Kind {
 				case pg.RelTable, pg.RelToast:
 					return "heap pages", true
-				case pg.RelBTreeIndex, pg.RelGist, pg.RelBrin, pg.RelGin:
+				case pg.RelBTreeIndex, pg.RelGist, pg.RelBrin, pg.RelGin, pg.RelHash:
 					return "index pages", true
 				}
 				return "", false
@@ -91,6 +91,8 @@ func enterLabel(s *screen) (label string, ok bool) {
 			return "brin ranges", true
 		case "gin":
 			return "posting lists", true
+		case "hash":
+			return "hash entries", true
 		}
 		return "index tuples", true
 	case levelIndexTuples:
@@ -203,6 +205,8 @@ func indexTupleEnterLabel(s *screen, cur item, hasCur bool) (string, bool) {
 		return "", false // posting-list segments are terminal
 	case "brin":
 		return "heap pages", true
+	case "hash":
+		return "heap tuple", true
 	case "gist":
 		if s.pages.indexPageType == "intr" {
 			return "child page", true

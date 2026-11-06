@@ -201,6 +201,24 @@ type brinItemsLoadedMsg struct {
 	items    []pg.BrinItem
 	err      error
 }
+type hashPagesLoadedMsg struct {
+	indexOID   uint32
+	start      int32
+	count      int32
+	pages      []pg.HashPageStat
+	totalPages int32
+	keyCols    []pg.IndexKeyColumn
+	meta       *pg.HashMeta
+	bufs       map[int64]pg.PageBuffer
+	bufsErr    error
+	err        error
+}
+type hashItemsLoadedMsg struct {
+	indexOID uint32
+	blkno    int32
+	items    []pg.HashItem
+	err      error
+}
 type ginPagesLoadedMsg struct {
 	indexOID   uint32
 	start      int32
@@ -513,6 +531,31 @@ func (m *Model) loadBrinItemsCmd(r pg.Relation, blkno int32) tea.Cmd {
 	return query(func(ctx context.Context) tea.Msg {
 		items, err := m.client.ListBrinItems(ctx, r, blkno)
 		return brinItemsLoadedMsg{indexOID: r.OID, blkno: blkno, items: items, err: err}
+	})
+}
+
+func (m *Model) loadHashPagesCmd(r pg.Relation, start, count int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		// Sampled before the page walk for the same reason as loadHeapPagesCmd:
+		// get_raw_page pulls every window page into shared buffers.
+		bufs, bufsErr := m.client.PageBuffers(ctx, r.DB, r.OID, start, count)
+		pages, rp, err := m.client.ListHashPages(ctx, r, start, count)
+		if err != nil {
+			return hashPagesLoadedMsg{indexOID: r.OID, start: start, count: count, err: err}
+		}
+		keyCols, _ := m.client.IndexKeyColumns(ctx, r)
+		var meta *pg.HashMeta
+		if hm, err := m.client.HashMeta(ctx, r); err == nil {
+			meta = &hm
+		}
+		return hashPagesLoadedMsg{indexOID: r.OID, start: start, count: count, pages: pages, totalPages: rp, keyCols: keyCols, meta: meta, bufs: bufs, bufsErr: bufsErr}
+	})
+}
+
+func (m *Model) loadHashItemsCmd(r pg.Relation, blkno int32) tea.Cmd {
+	return query(func(ctx context.Context) tea.Msg {
+		items, err := m.client.ListHashItems(ctx, r, blkno)
+		return hashItemsLoadedMsg{indexOID: r.OID, blkno: blkno, items: items, err: err}
 	})
 }
 

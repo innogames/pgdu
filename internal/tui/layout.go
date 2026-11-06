@@ -130,6 +130,10 @@ func barReserve(s *screen) int {
 			// type(flags tag) + maxoff(items) + used + free% + [temp] + page name
 			return base + ginPageTypeColW + colGutter + idxPageItemsColW + colGutter +
 				idxPageUsedColW + colGutter + idxPageFreeColW + colGutter + idxPageNameColW
+		case "hash":
+			// type(metapage/bucket/…) + items(live/dead) + used + free% + [temp] + name
+			return base + hashPageTypeColW + colGutter + idxPageItemsColW + colGutter +
+				idxPageUsedColW + colGutter + idxPageFreeColW + colGutter + idxPageNameColW
 		default:
 			// btree: cursor + bar(brackets) + flag + type + level + used + avg +
 			// items + free% + links + [temp] + name
@@ -251,6 +255,7 @@ const (
 	// Per-AM page-type column widths (GiST reuses idxPageTypeColW).
 	brinPageTypeColW = 7 // "regular" / "revmap" / "meta"
 	ginPageTypeColW  = 9 // "data-leaf" / "entry" / "data" / "meta"
+	hashPageTypeColW = 8 // "metapage" / "overflow" / "bucket" / "bitmap" / "unused"
 )
 
 // Column widths shared by the index-tuples header and rows.
@@ -267,7 +272,7 @@ const (
 const relParentColW = 24
 
 // Type column on levelRelations: holds the kind tag ("heap"/"toast"/"btree"/
-// "gist"/"brin"/"gin") — 5 chars plus a sort-arrow allowance.
+// "gist"/"brin"/"gin"/"hash") — 5 chars plus a sort-arrow allowance.
 const relTypeColW = 6
 
 // truncateToWidth clips a rendered (ANSI-styled) line to at most width

@@ -308,7 +308,7 @@ func validSorts(l level) []sortMode {
 		return []sortMode{sortBySize, sortByRows, sortByType, sortByName}
 	case levelIndexPages:
 		// Level leads so a freshly opened B-tree page view (the dominant index
-		// AM) defaults to root-first and ←/→ cycles from there. GiST/BRIN/GIN
+		// AM) defaults to root-first and ←/→ cycles from there. GiST/BRIN/GIN/hash
 		// override the default to sortByBlkno at screen construction (level is
 		// inert for them), but share this cycle list.
 		return []sortMode{sortByLevel, sortByType, sortBySize, sortByDeadRatio, sortByFreeSpace, sortByTemp, sortByBlkno}

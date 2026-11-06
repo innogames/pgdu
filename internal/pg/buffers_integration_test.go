@@ -22,7 +22,7 @@ func TestIntegration_RelationBufferStats(t *testing.T) {
 	}
 	_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS pgdu_bufsplit`)
 	// EXTERNAL storage pushes every doc into TOAST uncompressed, so the toast
-	// pair has pages to buffer; the hash index is an AM pageinspect can't read.
+	// pair has pages to buffer; the hash index gives the split a third relation.
 	for _, sql := range []string{
 		`CREATE TABLE pgdu_bufsplit (id int PRIMARY KEY, doc text)`,
 		`ALTER TABLE pgdu_bufsplit ALTER COLUMN doc SET STORAGE EXTERNAL`,

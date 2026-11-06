@@ -963,10 +963,11 @@ type pageState struct {
 	// Deep-dive context for the index page/tuple views, loaded alongside the
 	// page list (best-effort, so a privilege/redefinition failure just hides the
 	// banner). indexKeyCols drives the "keys: (…) include: (…)" banner;
-	// btreeMeta/brinMeta/ginMeta drive the per-AM metapage banner (GiST has no
-	// metapage). indexPageType is reused generically across access methods to
-	// carry the current page's role string (btree l/r/i/d; gist leaf/intr/del;
-	// brin meta/regular/revmap; gin opaque flags).
+	// btreeMeta/brinMeta/ginMeta/hashMeta drive the per-AM metapage banner (GiST
+	// has no metapage). indexPageType is reused generically across access methods
+	// to carry the current page's role string (btree l/r/i/d; gist leaf/intr/del;
+	// brin meta/regular/revmap; gin opaque flags; hash metapage/bucket/overflow/
+	// bitmap/unused).
 	indexKeyCols []pg.IndexKeyColumn
 	// indexTuples is the last loaded B-tree page as returned by the client, kept
 	// so the row list can be rebuilt without a reload when a posting-list tuple
@@ -978,6 +979,7 @@ type pageState struct {
 	btreeMeta   *pg.BtreeMeta
 	brinMeta    *pg.BrinMeta
 	ginMeta     *pg.GinMeta
+	hashMeta    *pg.HashMeta
 
 	// btreeLevels is the whole-tree page census (pages per level) behind the
 	// "levels:" banner line on the B-tree page list. The scan reads every page

@@ -93,6 +93,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onGinDataLeafFound(msg)
 	case ginItemsLoadedMsg:
 		return m, m.onGinItemsLoaded(msg)
+	case hashPagesLoadedMsg:
+		return m, m.onHashPagesLoaded(msg)
+	case hashItemsLoadedMsg:
+		return m, m.onHashItemsLoaded(msg)
 	case describeLoadedMsg:
 		return m, m.onDescribeLoaded(msg)
 	case describeBuffersLoadedMsg:

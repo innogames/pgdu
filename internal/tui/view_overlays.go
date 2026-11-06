@@ -57,6 +57,8 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 			return m.renderBrinInfo(height, false)
 		case "gin":
 			return m.renderGinInfo(height, false)
+		case "hash":
+			return m.renderHashInfo(height, false)
 		}
 		return m.renderIndexPagesInfo(height)
 	case levelIndexTuples:
@@ -67,6 +69,8 @@ func (m *Model) renderInfoOverlay(s *screen, height int) string {
 			return m.renderBrinInfo(height, true)
 		case "gin":
 			return m.renderGinInfo(height, true)
+		case "hash":
+			return m.renderHashInfo(height, true)
 		}
 		return m.renderIndexTuplesInfo(height)
 	case levelWAL:
@@ -226,6 +230,7 @@ func renderLegend(s *screen) string {
 			swatch(styleGistSeg, "gist") + sep +
 			swatch(styleBrinSeg, "brin") + sep +
 			swatch(styleGinSeg, "gin") + sep +
+			swatch(styleHashSeg, "hash") + sep +
 			swatch(styleToastSeg, "toast")
 	case levelIndexPages:
 		switch s.pages.index.AccessMethod {
@@ -245,6 +250,11 @@ func renderLegend(s *screen) string {
 				styleMuted.Render("░ free") + sep +
 				styleMuted.Render("data-leaf (drillable)") + sep +
 				styleBarAlt.Render("entry/meta")
+		case "hash":
+			return "  " + swatch(styleHashSeg, "used") + sep +
+				styleMuted.Render("░ free") + sep +
+				styleMuted.Render("bucket/overflow (drillable)") + sep +
+				styleBarAlt.Render("metapage/bitmap/unused")
 		}
 		return "  " + swatch(styleIndexSeg, "live") + sep +
 			swatch(styleBloat, "dead") + sep +
@@ -279,6 +289,11 @@ func renderLegend(s *screen) string {
 		case "gin":
 			return "  " + styleMuted.Render("each row = one posting-list segment (compressed heap tids)") + sep +
 				styleMuted.Render("entry-tree pages aren't itemizable via pageinspect")
+		case "hash":
+			return "  " + styleIndexSeg.Render("hash") + " " + styleMuted.Render("the stored 4-byte code — the page keeps no key") + sep +
+				styleMuted.Render("key = projected from the heap row") + sep +
+				styleHeapHot.Render("▸off") + styleMuted.Render(" HOT hop") + sep +
+				styleMuted.Render("↵ → heap tuple")
 		}
 		// Three kinds of bt_page_items rows the user will run into on a
 		// modern leaf page: regular entries (pointing at a heap row, so

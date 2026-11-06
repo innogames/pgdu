@@ -8,8 +8,7 @@ import (
 )
 
 // ListRelations returns the page-inspector tool's mixed list of heap tables,
-// drillable indexes (btree/gist/brin/gin), and TOAST heaps for one schema.
-// Hash indexes are dropped at the SQL layer — pgdu has no hash drill path.
+// drillable indexes (btree/gist/brin/gin/hash), and TOAST heaps for one schema.
 // Result is ordered by pg_relation_size (DESC); callers may resort.
 func (c *Client) ListRelations(ctx context.Context, db, schema string) ([]Relation, error) {
 	pool, err := c.PoolFor(ctx, db)
@@ -36,6 +35,8 @@ func (c *Client) ListRelations(ctx context.Context, db, schema string) ([]Relati
 					r.Kind = RelBrin
 				case "gin":
 					r.Kind = RelGin
+				case "hash":
+					r.Kind = RelHash
 				default:
 					r.Kind = RelBTreeIndex
 				}

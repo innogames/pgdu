@@ -11,7 +11,7 @@ import (
 
 // jumpToPageInspector opens the page-inspector view for the part under the
 // cursor on levelParts: heap → heap pages of the table, toast → heap pages of
-// the TOAST relation, index → index pages (btree/gist/brin/gin). On the
+// the TOAST relation, index → index pages (btree/gist/brin/gin/hash). On the
 // shared-buffers screens it opens the highlighted (or inspected) row the same
 // way: a table's heap pages, or a split-view relation's own pages, so a
 // hot/dirty table or index can be read page by page; on a table describe panel
@@ -103,8 +103,10 @@ func (m *Model) partPagesScreen(t pg.Table, p pg.Part) *screen {
 			r.Kind = pg.RelBrin
 		case "gin":
 			r.Kind = pg.RelGin
+		case "hash":
+			r.Kind = pg.RelHash
 		default:
-			m.notice = p.AccessMethod + " indexes can't be inspected — pageinspect only decodes btree/gist/brin/gin pages"
+			m.notice = p.AccessMethod + " indexes can't be inspected — pageinspect only decodes btree/gist/brin/gin/hash pages"
 			return nil
 		}
 		return &screen{
@@ -152,7 +154,7 @@ func pagesDescribeTarget(s *screen) (descTarget, bool) {
 				DB: r.DB, Schema: r.Schema, OID: r.OID, Name: r.Name,
 				TotalBytes: r.SizeBytes, EstRows: r.EstRows,
 			}}, true
-		case pg.RelBTreeIndex, pg.RelGist, pg.RelBrin, pg.RelGin:
+		case pg.RelBTreeIndex, pg.RelGist, pg.RelBrin, pg.RelGin, pg.RelHash:
 			return descTarget{
 				isIndex:   true,
 				db:        r.DB,

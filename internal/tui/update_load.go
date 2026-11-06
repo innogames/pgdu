@@ -153,6 +153,8 @@ func (m *Model) loadCurrentScreen() tea.Cmd {
 			return m.loadBrinPagesCmd(s.pages.index, s.pages.heapWindowStart, s.pages.heapWindowCount)
 		case "gin":
 			return m.loadGinPagesCmd(s.pages.index, s.pages.heapWindowStart, s.pages.heapWindowCount)
+		case "hash":
+			return m.loadHashPagesCmd(s.pages.index, s.pages.heapWindowStart, s.pages.heapWindowCount)
 		default:
 			// The whole-tree level census reads every page of the index, so it
 			// runs once per screen — window moves and refreshes reuse the cache.
@@ -173,6 +175,8 @@ func (m *Model) loadCurrentScreen() tea.Cmd {
 			return m.loadBrinItemsCmd(s.pages.index, s.pages.indexPageBlkno)
 		case "gin":
 			return m.loadGinItemsCmd(s.pages.index, s.pages.indexPageBlkno)
+		case "hash":
+			return m.loadHashItemsCmd(s.pages.index, s.pages.indexPageBlkno)
 		default:
 			return m.loadIndexTuplesCmd(s.pages.index, s.pages.indexPageBlkno, s.pages.indexPageType)
 		}

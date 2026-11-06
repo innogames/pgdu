@@ -245,9 +245,9 @@ ORDER  BY a.attnum
 // of sqlTables so the user sees tables, their indexes, and their TOAST storage
 // side by side, ranked by on-disk size.
 //
-// btree/gist/brin/gin indexes are listed (each has its own pageinspect drill
-// path keyed on access_method); hash is still filtered out — pageinspect can
-// summarise its pages but pgdu has no hash drill yet.
+// btree/gist/brin/gin/hash indexes are listed — each has its own pageinspect
+// drill path keyed on access_method. An AM pageinspect cannot decode (spgist)
+// stays filtered out here rather than surfacing a row that dead-ends.
 //
 // Three arms in the WHERE:
 //   - Tables:  relkind IN ('r','m','p') AND namespace = $1
@@ -280,7 +280,7 @@ LEFT   JOIN pg_namespace onsp ON onsp.oid = oc.relnamespace
 WHERE  (
          (c.relkind IN ('r','m','p') AND n.nspname = $1)
          OR
-         (c.relkind = 'i' AND am.amname IN ('btree','gist','brin','gin') AND pn.nspname = $1)
+         (c.relkind = 'i' AND am.amname IN ('btree','gist','brin','gin','hash') AND pn.nspname = $1)
          OR
          (c.relkind = 't' AND onsp.nspname = $1)
        )
@@ -778,4 +778,94 @@ SELECT first_tid::text,
        COALESCE(array_to_string(tids[1:20], ' '), '') AS tids_text
 FROM   gin_leafpage_items(get_raw_page($1, $2::int))
 ORDER  BY first_tid
+`
+
+// --- Hash page inspector ---
+
+// sqlHashMeta reads the hash metapage (block 0) via hash_metapage_info. ntuples
+// is float8 there (it tracks an estimate the AM maintains in floating point), so
+// it is cast; the rest are int8. $1 is the index regclass-castable text.
+const sqlHashMeta = `
+SELECT magic::bigint,
+       version::int,
+       ntuples::bigint,
+       ffactor::int,
+       bsize::int,
+       maxbucket::bigint,
+       ovflpoint::int,
+       firstfree::bigint
+FROM   hash_metapage_info(get_raw_page($1, 0))
+`
+
+// sqlHashPagesSummary summarises hash pages by type (metapage/bucket/overflow/
+// bitmap/unused) and free space. hash_page_stats errors on anything that is not
+// a bucket or overflow page, so its counts are reached through a CASE whose THEN
+// arm is a scalar sub-select: CASE short-circuits, so the call is never made for
+// a page type that would raise. The sub-select yields the whole record as jsonb
+// so both counts come from one call; a page without counts yields NULL, which
+// the row renderer shows as nothing — distinct from a bucket page holding zero.
+// Block 0 is browsable (hash_page_type names it). $1 index text; $2 start; $3 count.
+const sqlHashPagesSummary = `
+WITH pages AS (
+  SELECT g.blkno, get_raw_page($1, g.blkno) AS raw
+  FROM   generate_series($2::int, $2::int + $3::int - 1) AS g(blkno)
+), typed AS (
+  SELECT p.blkno,
+         p.raw,
+         hash_page_type(p.raw) AS page_type
+  FROM   pages p
+), counted AS (
+  SELECT t.blkno,
+         t.raw,
+         t.page_type,
+         CASE WHEN t.page_type IN ('bucket','overflow')
+              THEN (SELECT to_jsonb(st) FROM hash_page_stats(t.raw) AS st)
+         END AS stats
+  FROM   typed t
+)
+SELECT c.blkno::int,
+       c.page_type,
+       (c.stats ->> 'live_items')::int AS live_items,
+       (c.stats ->> 'dead_items')::int AS dead_items,
+       (hdr.upper - hdr.lower)::int    AS free_size,
+       hdr.pagesize::int               AS page_size
+FROM   counted c,
+       LATERAL page_header(c.raw) AS hdr
+ORDER  BY c.blkno
+`
+
+// sqlHashItems lists one hash bucket/overflow page's entries. A hash index stores
+// only the 4-byte hash code of the key, never the key itself, so `data` is that
+// code (returned as int8 because it is unsigned on the wire) and the heap pointer
+// is all that identifies the row. Used as the fallback path when the owning table
+// isn't known, so the key cannot be projected. $1 is the index regclass-castable
+// text; $2 the block.
+const sqlHashItems = `
+SELECT itemoffset::int,
+       data::bigint,
+       ctid::text,
+       NULL::text AS key
+FROM   hash_page_items(get_raw_page($1, $2::int))
+ORDER  BY itemoffset
+`
+
+// sqlHashItemsDecoded mirrors sqlHashItems but adds the per-item scalar subquery
+// projecting the index's columns from the heap row — the only way to see what a
+// hash entry is actually for, since the page holds no key. Every hash entry's
+// ctid is a real heap pointer (there are no downlinks or pivots in a hash index),
+// so unlike the B-tree form this applies on every page it can read. The subquery
+// yields NULL when the ctid doesn't resolve to a live row (vacuumed, not visible
+// to our snapshot, or HOT-updated — see sqlHeapRedirectKeys).
+//
+// %s 1 is the index expression list (built by sqlIndexExprList); %s 2 is the
+// parent table's quoted regclass. Both come from quoteIdent and pg_get_indexdef
+// output — safe from injection. $1 is the index regclass-castable text; $2 the
+// block.
+const sqlHashItemsDecoded = `
+SELECT i.itemoffset::int,
+       i.data::bigint,
+       i.ctid::text,
+       (SELECT (%s)::text FROM %s WHERE ctid = i.ctid::tid) AS key
+FROM   hash_page_items(get_raw_page($1, $2::int)) i
+ORDER  BY i.itemoffset
 `

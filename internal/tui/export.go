@@ -387,6 +387,8 @@ func relKindName(k pg.RelationKind) string {
 		return "brin"
 	case pg.RelGin:
 		return "gin"
+	case pg.RelHash:
+		return "hash"
 	case pg.RelToast:
 		return "toast"
 	}

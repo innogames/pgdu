@@ -398,6 +398,26 @@ func (m *Model) onGinPagesLoaded(msg ginPagesLoadedMsg) tea.Cmd {
 	return cmd
 }
 
+func (m *Model) onHashPagesLoaded(msg hashPagesLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexPages)
+	if s == nil || s.pages.index.OID != msg.indexOID || s.pages.heapWindowStart != msg.start {
+		return nil
+	}
+	return m.applyAMPages(s, msg.err, msg.totalPages, msg.keyCols, msg.bufs, msg.bufsErr,
+		len(msg.pages),
+		func(i int) item { return withPageBuf(hashPageToItem(msg.pages[i]), msg.bufs) },
+		func(s *screen) { s.pages.hashMeta = msg.meta })
+}
+
+func (m *Model) onHashItemsLoaded(msg hashItemsLoadedMsg) tea.Cmd {
+	s := m.findLevel(levelIndexTuples)
+	if s == nil || s.pages.index.OID != msg.indexOID || s.pages.indexPageBlkno != msg.blkno {
+		return nil
+	}
+	return m.applyAMItems(s, msg.err, len(msg.items),
+		func(i int) item { return hashItemToItem(msg.items[i]) })
+}
+
 // focusPageBlkno lands the cursor on the block a window move asked for, once
 // that window has loaded and been sorted — the s "go to block" seek on either
 // page list, and GIN's n data-leaf jump. Consumed on the first window that

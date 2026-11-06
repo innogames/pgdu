@@ -268,6 +268,8 @@ func (m *Model) render() string {
 				b.WriteString(m.renderBrinPagesList(s, contentHeight))
 			case "gin":
 				b.WriteString(m.renderGinPagesList(s, contentHeight))
+			case "hash":
+				b.WriteString(m.renderHashPagesList(s, contentHeight))
 			default:
 				b.WriteString(m.renderIndexPagesList(s, contentHeight))
 			}
@@ -279,6 +281,8 @@ func (m *Model) render() string {
 				b.WriteString(m.renderBrinTuplesList(s, contentHeight))
 			case "gin":
 				b.WriteString(m.renderGinTuplesList(s, contentHeight))
+			case "hash":
+				b.WriteString(m.renderHashTuplesList(s, contentHeight))
 			default:
 				b.WriteString(m.renderIndexTuplesList(s, contentHeight))
 			}

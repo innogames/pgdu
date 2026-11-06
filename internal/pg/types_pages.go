@@ -455,3 +455,52 @@ type GinItem struct {
 	TidCount int32
 	TidsText string
 }
+
+// --- Hash page inspector ---
+
+// HashMeta is the hash metapage (block 0) via hash_metapage_info. MaxBucket is
+// the highest bucket number currently in use (so bucket count is MaxBucket+1);
+// FFactor is the target tuples per bucket the AM splits at; OvflPoint is the
+// split level that governs where overflow pages are allocated.
+type HashMeta struct {
+	Magic     int64
+	Version   int32
+	NTuples   int64
+	FFactor   int32
+	BSize     int32
+	MaxBucket int64
+	OvflPoint int32
+	FirstFree int64
+}
+
+// HashPageStat summarises one hash page. PageType is hash_page_type:
+// "metapage" / "bucket" / "overflow" / "bitmap" / "unused". LiveItems and
+// DeadItems are pointers because hash_page_stats only speaks for bucket and
+// overflow pages — nil means the page type carries no item counts at all,
+// which is a different statement from a bucket page holding zero.
+type HashPageStat struct {
+	Blkno     int32
+	PageType  string
+	LiveItems *int32
+	DeadItems *int32
+	FreeSize  int32
+	PageSize  int32
+}
+
+// HashItem is one entry on a hash bucket or overflow page from hash_page_items.
+// Hash is the stored 4-byte hash code of the indexed value — a hash index never
+// stores the key itself, so Ctid is the only way back to the actual row, and Key
+// is that row's indexed columns projected from the heap (nil when the owning
+// table isn't known or the ctid resolves to nothing visible).
+//
+// HotCtid/HotKey mirror IndexTuple's pair: an entry whose line pointer turned out
+// to be a HOT redirect names the live tuple and carries its key, since the plain
+// ctid join cannot reach it.
+type HashItem struct {
+	ItemOffset int32
+	Hash       int64
+	Ctid       string
+	Key        *string
+	HotCtid    *string
+	HotKey     *string
+}

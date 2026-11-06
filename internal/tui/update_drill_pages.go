@@ -88,11 +88,11 @@ func (m *Model) drillRelation(s *screen, cur item) tea.Cmd {
 			sort:  sortByBlkno, sortDesc: sortByBlkno.defaultDesc()}
 		m.stack = append(m.stack, next)
 		return m.loadCurrent()
-	case pg.RelBTreeIndex, pg.RelGist, pg.RelBrin, pg.RelGin:
+	case pg.RelBTreeIndex, pg.RelGist, pg.RelBrin, pg.RelGin, pg.RelHash:
 		// Every drillable index AM uses the shared levelIndexPages screen;
 		// the loader/renderer branch on r.AccessMethod from here on.
 		// B-trees open level-first so the root sits at the top (read the tree
-		// top-down); GiST/BRIN/GIN have no meaningful tree level, so a
+		// top-down); GiST/BRIN/GIN/hash have no meaningful tree level, so a
 		// level sort there would be an inert no-op — keep them block-ordered.
 		pageSort := sortByBlkno
 		if r.Kind == pg.RelBTreeIndex {
@@ -117,6 +117,8 @@ func (m *Model) drillIndexPage(s *screen, cur item) tea.Cmd {
 		return m.drillBrinPage(s, cur)
 	case "gin":
 		return m.drillGinPage(s, cur)
+	case "hash":
+		return m.drillHashPage(s, cur)
 	}
 	p, ok := cur.data.(pg.IndexPageStat)
 	if !ok {
@@ -138,6 +140,8 @@ func (m *Model) drillIndexTuple(s *screen, cur item) tea.Cmd {
 		return m.drillBrinItem(s, cur)
 	case "gin":
 		return nil // GIN posting-list segments are terminal
+	case "hash":
+		return m.drillHashItem(s, cur)
 	}
 	if mem, ok := cur.data.(postingMember); ok {
 		// A posting member is a plain heap pointer: same gate and target as
@@ -324,6 +328,33 @@ func (m *Model) drillIndexLeafEntry(s *screen, t pg.IndexTuple) tea.Cmd {
 		ctid = *t.HotCtid
 	}
 	return m.drillHeapTupleAt(s, ctid)
+}
+
+// drillHashPage opens a hash bucket or overflow page's entries. Those are the
+// only two types hash_page_items speaks for — the metapage, the bitmap pages and
+// unused ones would raise server-side, so they don't drill.
+func (m *Model) drillHashPage(s *screen, cur item) tea.Cmd {
+	p, ok := cur.data.(pg.HashPageStat)
+	if !ok {
+		return nil
+	}
+	if !hashPageHasItems(p.PageType) {
+		m.notice = p.PageType + " page — only bucket and overflow pages hold entries"
+		return nil
+	}
+	m.stack = append(m.stack, indexTuplesScreen(s, "hash entries", p.Blkno, p.PageType))
+	return m.loadCurrent()
+}
+
+// drillHashItem opens the heap row an entry points at. A hash index stores only
+// the hash code, so the ctid is the whole of what the entry says about the row —
+// following it is the only drill it can offer.
+func (m *Model) drillHashItem(s *screen, cur item) tea.Cmd {
+	t, ok := cur.data.(pg.HashItem)
+	if !ok {
+		return nil
+	}
+	return m.drillHeapTupleAt(s, t.Ctid)
 }
 
 // drillHeapTupleAt pushes the parent table's heap-tuples screen for the page a

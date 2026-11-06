@@ -166,8 +166,11 @@ func TestBufferSplitTargets(t *testing.T) {
 	m.stack = m.stack[:len(m.stack)-1]
 
 	at("app.orders › orders_doc")
-	depth := len(m.stack)
-	if m.jumpToPageInspector(s); len(m.stack) != depth || !strings.Contains(m.notice, "hash") {
-		t.Errorf("p on a hash index pushed a screen (depth %d→%d) / notice %q", depth, len(m.stack), m.notice)
+	m.jumpToPageInspector(s)
+	top = m.stack[len(m.stack)-1]
+	if top.level != levelIndexPages || top.pages.index.AccessMethod != "hash" || top.pages.index.Kind != pg.RelHash {
+		t.Errorf("p on a hash index → level %v am %q kind %v, want hash index pages",
+			top.level, top.pages.index.AccessMethod, top.pages.index.Kind)
 	}
+	m.stack = m.stack[:len(m.stack)-1]
 }

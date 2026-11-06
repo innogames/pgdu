@@ -341,13 +341,39 @@ func fillPostingHotChains(ctx context.Context, pool *pgxpool.Pool, exprs, parent
 // offset at or above this is a marker, not an address worth resolving.
 const btAltTIDOffsetBase = 0x1000
 
-// fillHotChains fills HotCtid/HotDecoded for the leaf entries whose ctid didn't
-// resolve to a visible row, by following the HOT redirect line pointer their
-// ctid names (see sqlHeapRedirectKeys for why the plain ctid join can't).
+// hotRedirect is one resolved HOT chain: the live tuple a redirect line pointer
+// points at, with the index's columns projected from that row.
+type hotRedirect struct {
+	root, live string
+	decoded    *string
+}
+
+// resolveHotRedirects maps each root ctid that turns out to be a HOT redirect
+// line pointer to the live tuple holding the row, keyed by the root ctid as the
+// caller spelled it. roots and blocks are parallel in the sense sqlHeapRedirectKeys
+// needs: roots is what to match, blocks the distinct pages to scan.
 //
 // Best-effort by design: this only adds detail to rows that already render, so
 // any failure — a truncated relation, a lost privilege, the caller's timeout —
-// leaves the tuples exactly as the main query returned them.
+// yields an empty map and leaves every row exactly as the main query returned it.
+func resolveHotRedirects(ctx context.Context, pool *pgxpool.Pool, exprs, parent string, roots []string, blocks []int32) []hotRedirect {
+	if len(roots) == 0 {
+		return nil
+	}
+	return collectBestEffort(ctx, pool, fmt.Sprintf(sqlHeapRedirectKeys, exprs, parent),
+		[]any{roots, parent, blocks},
+		func(rows pgx.Rows) (hotRedirect, bool) {
+			var rd hotRedirect
+			if err := rows.Scan(&rd.root, &rd.live, &rd.decoded); err != nil {
+				return rd, false
+			}
+			return rd, true
+		})
+}
+
+// fillHotChains fills HotCtid/HotDecoded for the leaf entries whose ctid didn't
+// resolve to a visible row, by following the HOT redirect line pointer their
+// ctid names (see sqlHeapRedirectKeys for why the plain ctid join can't).
 func fillHotChains(ctx context.Context, pool *pgxpool.Pool, exprs, parent string, tuples []IndexTuple) {
 	roots := make([]string, 0, len(tuples))
 	blocks := make([]int32, 0, len(tuples))
@@ -366,23 +392,7 @@ func fillHotChains(ctx context.Context, pool *pgxpool.Pool, exprs, parent string
 		}
 		byRoot[*t.Ctid] = append(byRoot[*t.Ctid], i)
 	}
-	if len(roots) == 0 {
-		return
-	}
-	type redirect struct {
-		root, live string
-		decoded    *string
-	}
-	hits := collectBestEffort(ctx, pool, fmt.Sprintf(sqlHeapRedirectKeys, exprs, parent),
-		[]any{roots, parent, blocks},
-		func(rows pgx.Rows) (redirect, bool) {
-			var rd redirect
-			if err := rows.Scan(&rd.root, &rd.live, &rd.decoded); err != nil {
-				return rd, false
-			}
-			return rd, true
-		})
-	for _, rd := range hits {
+	for _, rd := range resolveHotRedirects(ctx, pool, exprs, parent, roots, blocks) {
 		live := rd.live
 		for _, i := range byRoot[rd.root] {
 			tuples[i].HotCtid = &live
@@ -941,4 +951,109 @@ func (c *Client) ListGinItems(ctx context.Context, r Relation, blkno int32) ([]G
 			err := row.Scan(&it.FirstTid, &it.NBytes, &it.TidCount, &it.TidsText)
 			return it, err
 		})
+}
+
+// --- Hash ---
+
+// HashMeta reads the hash metapage for the page-list banner. Best-effort.
+func (c *Client) HashMeta(ctx context.Context, r Relation) (HashMeta, error) {
+	var m HashMeta
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return m, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+	if err := queryRelRow(ctx, pool, fmt.Sprintf("hash_metapage_info for %q", r.Qualified()), sqlHashMeta, []any{regclass},
+		&m.Magic, &m.Version, &m.NTuples, &m.FFactor,
+		&m.BSize, &m.MaxBucket, &m.OvflPoint, &m.FirstFree); err != nil {
+		return m, err
+	}
+	return m, nil
+}
+
+// ListHashPages returns up to `count` hash page summaries from `start`. Block 0
+// (the metapage) is browsable — hash_page_type names every page type — so
+// minPages=1, as for BRIN.
+func (c *Client) ListHashPages(ctx context.Context, r Relation, start, count int32) ([]HashPageStat, int32, error) {
+	return listPageWindow(ctx, c, r.DB, r.Schema, r.Name, r.OID, r.Qualified(),
+		fmt.Sprintf("list hash pages in %q", r.Qualified()), sqlHashPagesSummary, start, count, 1,
+		func(row pgx.CollectableRow) (HashPageStat, error) {
+			var p HashPageStat
+			err := row.Scan(&p.Blkno, &p.PageType, &p.LiveItems, &p.DeadItems, &p.FreeSize, &p.PageSize)
+			return p, err
+		})
+}
+
+// ListHashItems lists one hash bucket/overflow page's entries. Any other page
+// type surfaces as a pageinspect error from the server; callers only drill
+// bucket and overflow pages.
+//
+// The index's columns are projected from the heap per entry when the owning
+// table is known — without it the page says nothing but a hash code. Every hash
+// ctid is a real heap pointer, so unlike the B-tree path there is no page type to
+// exclude; entries whose pointer is a HOT redirect are resolved afterwards.
+func (c *Client) ListHashItems(ctx context.Context, r Relation, blkno int32) ([]HashItem, error) {
+	if err := c.EnsurePageInspect(ctx, r.DB); err != nil {
+		return nil, err
+	}
+	pool, err := c.PoolFor(ctx, r.DB)
+	if err != nil {
+		return nil, err
+	}
+	regclass := qualifiedIdent(r.Schema, r.Name)
+
+	sql := sqlHashItems
+	var exprs, parent string
+	if r.ParentOID != 0 && r.ParentName != "" {
+		// Fetched per call, not cached, so a redefinition under us can't print
+		// the wrong columns — one pg_index lookup next to the per-row fetches.
+		if err := pool.QueryRow(ctx, sqlIndexExprList, r.OID).Scan(&exprs); err == nil && exprs != "" {
+			parent = qualifiedIdent(r.Schema, r.ParentName)
+			sql = fmt.Sprintf(sqlHashItemsDecoded, exprs, parent)
+		}
+	}
+
+	items, err := collect(ctx, pool, fmt.Sprintf("list hash items in %q page %d", r.Qualified(), blkno), sql, []any{regclass, blkno},
+		func(row pgx.CollectableRow) (HashItem, error) {
+			var it HashItem
+			err := row.Scan(&it.ItemOffset, &it.Hash, &it.Ctid, &it.Key)
+			return it, err
+		})
+	if err != nil {
+		return nil, err
+	}
+	if parent != "" {
+		fillHashHotChains(ctx, pool, exprs, parent, items)
+	}
+	return items, nil
+}
+
+// fillHashHotChains fills HotCtid/HotKey for the entries whose ctid didn't
+// resolve to a visible row. The B-tree sibling's alt-TID guard has no analogue
+// here: a hash entry's ctid is always a plain heap address.
+func fillHashHotChains(ctx context.Context, pool *pgxpool.Pool, exprs, parent string, items []HashItem) {
+	roots := make([]string, 0, len(items))
+	blocks := make([]int32, 0, len(items))
+	byRoot := make(map[string][]int, len(items))
+	for i, it := range items {
+		if it.Key != nil {
+			continue
+		}
+		blk, _, ok := parseTidText(it.Ctid)
+		if !ok {
+			continue
+		}
+		if _, seen := byRoot[it.Ctid]; !seen {
+			roots = append(roots, it.Ctid)
+			blocks = append(blocks, blk)
+		}
+		byRoot[it.Ctid] = append(byRoot[it.Ctid], i)
+	}
+	for _, rd := range resolveHotRedirects(ctx, pool, exprs, parent, roots, blocks) {
+		live := rd.live
+		for _, i := range byRoot[rd.root] {
+			items[i].HotCtid = &live
+			items[i].HotKey = rd.decoded
+		}
+	}
 }

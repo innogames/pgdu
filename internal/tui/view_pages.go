@@ -233,6 +233,8 @@ func relationTypeLabel(r pg.Relation) string {
 		return "brin"
 	case pg.RelGin:
 		return "gin"
+	case pg.RelHash:
+		return "hash"
 	case pg.RelToast:
 		return "toast"
 	default:
@@ -252,6 +254,8 @@ func relationBarStyle(r pg.Relation) lipgloss.Style {
 		return styleBrinSeg
 	case pg.RelGin:
 		return styleGinSeg
+	case pg.RelHash:
+		return styleHashSeg
 	case pg.RelToast:
 		return styleToastSeg
 	default:
@@ -280,6 +284,8 @@ func (m *Model) renderIndexKeyBanner(s *screen) string {
 			meta = brinMetaLine(s.pages.brinMeta)
 		case "gin":
 			meta = ginMetaLine(s.pages.ginMeta)
+		case "hash":
+			meta = hashMetaLine(s.pages.hashMeta)
 		case "gist":
 			meta = "" // GiST has no metapage (block 0 is the root)
 		default:
@@ -1737,5 +1743,176 @@ func (m *Model) renderGinInfo(height int, tuples bool) string {
 	b.WriteString("    " + styleBarAlt.Render(padRight("meta", 10)) + mu("metapage (block 0): entry/data page counts, pending list") + "\n\n")
 	b.WriteString("  " + mu("The banner shows entry/data page counts and pending-list size. PgUp/PgDn slides") + "\n")
 	b.WriteString("  " + mu("the window; ↵ on a data-leaf page lists its posting segments.") + "\n")
+	return padInfo(&b, height)
+}
+
+// ─── Hash page inspector ─────────────────────────────────────────────────────
+
+// hashMetaLine renders the hash metapage summary above the page list: the tuple
+// estimate the AM maintains, the bucket count (maxbucket is the highest bucket
+// in use, so the count is one more), the fill factor it splits at, and the
+// overflow split point.
+func hashMetaLine(meta *pg.HashMeta) string {
+	if meta == nil {
+		return ""
+	}
+	mu := styleMuted.Render
+	return "  " + mu(fmt.Sprintf("buckets %d", meta.MaxBucket+1)) + mu("  ·  ") +
+		mu(fmt.Sprintf("tuples %d", meta.NTuples)) + mu("  ·  ") +
+		mu(fmt.Sprintf("ffactor %d", meta.FFactor)) + mu("  ·  ") +
+		mu(fmt.Sprintf("ovflpoint %d", meta.OvflPoint)) + mu("  ·  ") +
+		mu(fmt.Sprintf("v%d", meta.Version))
+}
+
+func hashPageTypeStyle(t string) lipgloss.Style {
+	switch t {
+	case "bucket", "overflow":
+		return styleMuted // the drillable, common pages stay muted
+	}
+	return styleBarAlt // metapage / bitmap / unused are structural
+}
+
+// renderHashPagesList draws one row per hash page: type, live/dead item counts
+// (bucket and overflow pages only — hash_page_stats speaks for no other kind),
+// used bytes, free %, block.
+func (m *Model) renderHashPagesList(s *screen, height int) string {
+	barW := m.barWidth(s)
+	showTemp := s.pages.pageBufs != nil
+	return m.renderRowList(s, height, renderHashPagesHeader(s.sort, s.sortDesc, barW, showTemp),
+		func(it item, selected bool) string {
+			p, _ := it.data.(pg.HashPageStat)
+			return renderHashPageRow(it, p, barW, selected, showTemp)
+		})
+}
+
+func renderHashPagesHeader(sort sortMode, sortDesc bool, barW int, showTemp bool) string {
+	line := headerIndent(barW) +
+		padRight(sortMark("type", sort == sortByType, sortDesc), hashPageTypeColW) + "  " +
+		padRight(sortMark("items", sort == sortByDeadRatio, sortDesc), idxPageItemsColW) + "  " +
+		padRight(sortMark("used", sort == sortBySize, sortDesc), idxPageUsedColW) + "  " +
+		padRight(sortMark("free", sort == sortByFreeSpace, sortDesc), idxPageFreeColW) + "  " +
+		pageTempHeaderCol(sort, sortDesc, showTemp) +
+		"  " + sortMark("page", sort == sortByBlkno, sortDesc)
+	return styleMuted.Render(line)
+}
+
+// hashPageItemsCell spells a hash page's item counts as "123L 4D". A page type
+// hash_page_stats refuses gets an em dash, not "0L 0D" — the counts are absent,
+// not zero.
+func hashPageItemsCell(p pg.HashPageStat) string {
+	if p.LiveItems == nil || p.DeadItems == nil {
+		return styleMuted.Render("—")
+	}
+	cell := styleMuted.Render(fmt.Sprintf("%dL", *p.LiveItems))
+	if *p.DeadItems > 0 {
+		cell += " " + styleLPDead.Render(fmt.Sprintf("%dD", *p.DeadItems))
+	}
+	return cell
+}
+
+func renderHashPageRow(it item, p pg.HashPageStat, barW int, selected bool, showTemp bool) string {
+	cursor := selectedCursor(selected)
+	bar := renderSolidBar(it.size, heapPageBlockSize, barW, styleHashSeg)
+	typ := hashPageTypeStyle(p.PageType).Render(p.PageType)
+	used := humanize.Bytes(it.size)
+	free := styleMuted.Render("—")
+	if p.PageSize > 0 {
+		pct := float64(p.FreeSize) * 100 / float64(p.PageSize)
+		free = styleMuted.Render(fmt.Sprintf("%.0f%%", pct))
+	}
+	name := highlightName(it.name, selected)
+	return cursor + bar + "  " +
+		padRight(typ, hashPageTypeColW) + "  " +
+		padRight(hashPageItemsCell(p), idxPageItemsColW) + "  " +
+		padRight(used, idxPageUsedColW) + "  " +
+		padRight(free, idxPageFreeColW) + "  " +
+		pageTempRowCol(it, showTemp) +
+		drillMark(it.hasChildren) + name
+}
+
+// renderHashTuplesList draws one row per entry on a hash bucket or overflow
+// page: the stored hash code (hex and decimal), the heap pointer, and the row's
+// indexed columns projected from the heap. The page itself holds no key — a hash
+// index stores only the code — so the key column is the heap's answer, not the
+// page's, and is blank when the row isn't visible to us.
+func (m *Model) renderHashTuplesList(s *screen, height int) string {
+	const offW, hashW, decW = 6, 12, 12
+	keyW := max(m.width-(colCursor+colMark+offW+colGutter+hashW+colGutter+
+		decW+colGutter+idxTupleCtidColW+colGutter+2), 16)
+	return m.renderRowList(s, height, renderHashTuplesHeader(s.sort, s.sortDesc, offW, hashW, decW),
+		func(it item, selected bool) string {
+			t, _ := it.data.(pg.HashItem)
+			return renderHashTupleRow(t, offW, hashW, decW, keyW, it.hasChildren, selected)
+		})
+}
+
+func renderHashTuplesHeader(sort sortMode, sortDesc bool, offW, hashW, decW int) string {
+	line := strings.Repeat(" ", colCursor+colMark) +
+		padRight(sortMark("off", sort == sortByLP, sortDesc), offW) + "  " +
+		padRight(sortMark("hash", sort == sortBySize, sortDesc), hashW) + "  " +
+		padRight("decimal", decW) + "  " +
+		padRight("heap ctid", idxTupleCtidColW) + "  " +
+		"key"
+	return styleMuted.Render(line)
+}
+
+func renderHashTupleRow(t pg.HashItem, offW, hashW, decW, keyW int, drill, selected bool) string {
+	cursor := selectedCursor(selected) + drillMark(drill)
+	off := fmt.Sprintf("#%04d", t.ItemOffset)
+	if selected {
+		off = styleSelected.Render(off)
+	}
+	hashHex := styleIndexSeg.Render(fmt.Sprintf("0x%08x", uint32(t.Hash)))
+	dec := styleMuted.Render(strconv.FormatInt(t.Hash, 10))
+	// The entry points at a HOT-chain root: show the hop to the tuple actually
+	// holding the row. Only the offset differs — HOT never leaves the page — so
+	// reprinting the block would just eat the column (same as the B-tree view).
+	ctid := t.Ctid
+	if t.HotCtid != nil {
+		if hop, ok := parseCtidOffset(t.HotCtid); ok {
+			ctid += styleHeapHot.Render("▸" + strconv.Itoa(int(hop)))
+		}
+	}
+	// A key resolved through the HOT redirect is the live row's key, so it reads
+	// exactly like a directly projected one. With neither, the row simply isn't
+	// visible from here — an unreachable ctid says nothing about the entry being
+	// dead, and hash_page_items has no LP_DEAD bit to say otherwise.
+	key := styleMuted.Render("—")
+	if k := hashItemKey(t); k != nil {
+		key = truncateValue(k, keyW)
+	}
+	return cursor + padRight(off, offW) + "  " +
+		padRight(hashHex, hashW) + "  " +
+		padRight(dec, decW) + "  " +
+		padRight(ctid, idxTupleCtidColW) + "  " +
+		key
+}
+
+func (m *Model) renderHashInfo(height int, tuples bool) string {
+	mu := styleMuted.Render
+	var b strings.Builder
+	if tuples {
+		infoHeader(&b, "Hash entry reference")
+		b.WriteString("  " + mu("Each row is one entry on a hash bucket or overflow page (hash_page_items).") + "\n\n")
+		b.WriteString("    " + padRight("hash", 10) + mu("the 4-byte hash code of the indexed value, as stored") + "\n")
+		b.WriteString("    " + padRight("decimal", 10) + mu("the same code in base 10 — what the bucket number is derived from") + "\n")
+		b.WriteString("    " + padRight("ctid", 10) + mu("the heap pointer: the only way back to the actual row  ·  ") + styleHeapHot.Render("▸off") + mu(" HOT hop") + "\n")
+		b.WriteString("    " + padRight("key", 10) + mu("the indexed columns, read from that heap row — not from this page") + "\n\n")
+		b.WriteString("  " + mu("A hash index never stores the indexed value, only its hash, so the key column is") + "\n")
+		b.WriteString("  " + mu("the heap's answer and blanks out for a row not visible to this snapshot. That") + "\n")
+		b.WriteString("  " + mu("also means no key-seek: equality is confirmed by rechecking the heap row, which") + "\n")
+		b.WriteString("  " + mu("is what ↵ opens, cursor on that tuple.") + "\n")
+		return padInfo(&b, height)
+	}
+	infoHeader(&b, "Hash page reference")
+	b.WriteString("  " + mu("Hash pages come in five kinds; the banner above carries the metapage summary.") + "\n\n")
+	b.WriteString("    " + styleMuted.Render(padRight("bucket", 10)) + mu("a bucket's primary page — ↵ drills into these") + "\n")
+	b.WriteString("    " + styleMuted.Render(padRight("overflow", 10)) + mu("chained onto a bucket that outgrew its primary page — also drillable") + "\n")
+	b.WriteString("    " + styleBarAlt.Render(padRight("metapage", 10)) + mu("block 0: bucket count, tuple estimate, fill factor, split point") + "\n")
+	b.WriteString("    " + styleBarAlt.Render(padRight("bitmap", 10)) + mu("tracks which overflow pages are free for reuse") + "\n")
+	b.WriteString("    " + styleBarAlt.Render(padRight("unused", 10)) + mu("allocated but not yet in service") + "\n\n")
+	b.WriteString("  " + mu("The items column is blank on every kind but bucket and overflow: hash_page_stats") + "\n")
+	b.WriteString("  " + mu("speaks for no other page, so the counts are absent rather than zero.") + "\n")
+	b.WriteString("  " + mu("Reading hash_* needs a superuser (or pg_read_server_files).") + "\n")
 	return padInfo(&b, height)
 }
