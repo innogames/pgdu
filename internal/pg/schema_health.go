@@ -129,7 +129,15 @@ func (c *Client) runSchemaCheck(ctx context.Context, db string, def schemaCheckD
 	if err != nil {
 		return SchemaCheck{Err: err}
 	}
-	chk := SchemaCheck{Rows: len(res.Rows)}
+	rows := res.Rows
+	if def.bytesCol != "" {
+		// A check that reports "~N wasted" counts only the rows that measured
+		// waste. bloat_table also lists tables whose column stats are missing,
+		// with a NULL bloat_bytes: real findings on their own screen, but here
+		// they would be counted as heavily bloated tables wasting nothing.
+		rows = diagRowsWithNum(res, def.bytesCol)
+	}
+	chk := SchemaCheck{Rows: len(rows)}
 	if def.bytesCol != "" {
 		chk.Bytes = int64(diagSum(res, def.bytesCol))
 	}
@@ -142,7 +150,7 @@ func (c *Client) runSchemaCheck(ctx context.Context, db string, def schemaCheckD
 			idx = append(idx, i)
 		}
 	}
-	for _, row := range res.Rows[:min(len(res.Rows), schemaTopN)] {
+	for _, row := range rows[:min(len(rows), schemaTopN)] {
 		parts := make([]string, 0, len(idx))
 		for _, i := range idx {
 			parts = append(parts, row[i].Display)
@@ -162,6 +170,19 @@ func diagNum(row []DiagCell, idx int) (float64, bool) { return diagres.Num(row, 
 
 // diagSum totals a named column over every row; cells without a number
 // (missing column, NULL, text) contribute nothing.
+// diagRowsWithNum keeps the rows whose col carries a number, dropping the ones
+// where it is NULL or text.
+func diagRowsWithNum(res *DiagResult, col string) [][]DiagCell {
+	idx := res.ColIdx(col)
+	out := make([][]DiagCell, 0, len(res.Rows))
+	for _, row := range res.Rows {
+		if _, ok := diagNum(row, idx); ok {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
 func diagSum(res *DiagResult, col string) float64 {
 	idx := res.ColIdx(col)
 	var sum float64

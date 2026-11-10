@@ -94,6 +94,16 @@ FROM   index_aligned_est
 WHERE  reltuples >= 0
 `
 
+// sqlFillFactorExpr reads a heap's FILLFACTOR out of reloptions, defaulting to
+// the 100 that an absent option means. Every bloat estimator divides the
+// per-page capacity by it, because space a FILLFACTOR deliberately reserves for
+// HOT updates is not waste: a correctly tuned fillfactor=85 table read as 15%
+// bloated, which is exactly the share it was told to keep free. The relation
+// must be in scope as c.
+const sqlFillFactorExpr = `COALESCE((SELECT o.option_value::numeric
+                FROM pg_options_to_table(c.reloptions) AS o
+                WHERE o.option_name = 'fillfactor'), 100)`
+
 // Heap bloat estimation fallback. Uses pg_class.reltuples and per-column
 // avg_width from pg_stats to estimate the minimum on-disk size, then reports
 // the gap to the actual size. Coarse but free, and good enough to flag
@@ -105,7 +115,7 @@ WITH params AS (
 ),
 target AS (
   SELECT c.oid, c.relpages::numeric AS pages, c.reltuples::numeric AS tuples,
-         n.nspname, c.relname
+         n.nspname, c.relname, ` + sqlFillFactorExpr + ` AS fillfactor
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE c.oid = $1
@@ -120,7 +130,7 @@ SELECT GREATEST(0,
   - CEIL(t.tuples * (p.hdr + s.datawidth +
       p.ma - (CASE WHEN (p.hdr + s.datawidth)::int % p.ma::int = 0
                    THEN p.ma ELSE (p.hdr + s.datawidth)::int % p.ma::int END))
-    / NULLIF(p.bs - 24, 0))::bigint * p.bs::bigint
+    / NULLIF((p.bs - 24) * t.fillfactor / 100, 0))::bigint * p.bs::bigint
 )::bigint AS wasted_bytes
 FROM target t, params p, stats s
 `
@@ -157,7 +167,7 @@ SELECT c.oid,
          - CEIL(GREATEST(c.reltuples, 0) * (p.hdr + w.datawidth +
              p.ma - (CASE WHEN (p.hdr + w.datawidth)::int % p.ma::int = 0
                           THEN p.ma ELSE (p.hdr + w.datawidth)::int % p.ma::int END))
-           / NULLIF(p.bs - 24, 0))::bigint * p.bs::bigint
+           / NULLIF((p.bs - 24) * ` + sqlFillFactorExpr + ` / 100, 0))::bigint * p.bs::bigint
        ), 0)::bigint AS wasted_bytes
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace

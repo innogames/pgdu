@@ -1571,7 +1571,7 @@ func renderMaintSchemaHealth(v maintView) string {
 		fmt.Sprintf("%s past 30%% · most-consumed %s%%", plural(h.Sequences.Rows, "sequence", "sequences"), fmt1(h.Sequences.MaxPct)))
 	check("stale statistics", "schema_stale_stats", h.StaleStats, "none", plural(h.StaleStats.Rows, "table", "tables"))
 	check("fk without index", "schema_fk_index", h.FKMissingIndex, "none", plural(h.FKMissingIndex.Rows, "foreign key", "foreign keys"))
-	check("table bloat", "schema_bloat_table", h.TableBloat, "none over 50%",
+	check("table bloat", "schema_bloat_table", h.TableBloat, "none over 30%",
 		plural(h.TableBloat.Rows, "table", "tables")+" · ~"+humanize.Bytes(h.TableBloat.Bytes)+" wasted")
 	check("index bloat", "schema_bloat_index", h.IndexBloat, "none over 50%",
 		plural(h.IndexBloat.Rows, "index", "indexes")+" · ~"+humanize.Bytes(h.IndexBloat.Bytes)+" wasted")

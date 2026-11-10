@@ -212,7 +212,8 @@ stats AS MATERIALIZED (
 no_stats AS (
     SELECT n.nspname AS table_schema, c.relname AS table_name,
         psut.n_live_tup::numeric AS est_rows,
-        pg_table_size(c.oid)::numeric AS table_size
+        pg_table_size(c.oid)::numeric AS table_size,
+        ` + sqlFillFactorExpr + ` AS fillfactor
     FROM pg_class AS c
     JOIN pg_namespace AS n ON n.oid = c.relnamespace
     JOIN pg_stat_user_tables AS psut ON psut.relid = c.oid
@@ -251,28 +252,40 @@ data_headers AS (
         (maxfracsum * (nullhdr + ma - (CASE WHEN nullhdr % ma = 0 THEN ma ELSE nullhdr % ma END))) AS nullhdr2
     FROM null_headers
 ),
-table_estimates AS (
-    SELECT schemaname, tablename, bs,
-        reltuples::numeric AS est_rows,
-        relpages * bs AS table_bytes,
-        CEIL((reltuples * (datahdr + nullhdr2 + 4 + ma -
-            (CASE WHEN datahdr % ma = 0 THEN ma ELSE datahdr % ma END)
-        ) / (bs - 20))) * bs AS expected_bytes,
-        reltoastrelid
+-- Split out of table_estimates only so the fillfactor can be a column the
+-- expected-size expression below divides by: a SELECT cannot reference its own
+-- output alias, and spelling the reloptions lookup twice invites the two copies
+-- to drift.
+table_rels AS (
+    SELECT schemaname, tablename, bs, ma, datahdr, nullhdr2,
+        c.reltuples::numeric AS est_rows,
+        c.relpages * bs AS table_bytes,
+        c.reltoastrelid,
+        ` + sqlFillFactorExpr + ` AS fillfactor
     FROM data_headers
-    JOIN pg_class ON tablename = relname
-    JOIN pg_namespace ON relnamespace = pg_namespace.oid AND schemaname = nspname
-    WHERE pg_class.relkind = 'r'
+    JOIN pg_class AS c ON tablename = c.relname
+    JOIN pg_namespace AS n ON c.relnamespace = n.oid AND schemaname = n.nspname
+    WHERE c.relkind = 'r'
+),
+table_estimates AS (
+    -- The page capacity is scaled by the fillfactor: the share of every page a
+    -- fillfactor < 100 reserves for HOT updates is expected, not wasted.
+    SELECT schemaname, tablename, bs, est_rows, table_bytes, fillfactor,
+        CEIL((est_rows * (datahdr + nullhdr2 + 4 + ma -
+            (CASE WHEN datahdr % ma = 0 THEN ma ELSE datahdr % ma END)
+        ) / ((bs - 20) * fillfactor / 100))) * bs AS expected_bytes,
+        reltoastrelid
+    FROM table_rels
 ),
 estimates_with_toast AS (
-    SELECT schemaname, tablename, TRUE AS can_estimate, est_rows,
+    SELECT schemaname, tablename, TRUE AS can_estimate, est_rows, fillfactor,
         table_bytes + (coalesce(toast.relpages, 0) * bs) AS table_bytes,
         expected_bytes + (ceil(coalesce(toast.reltuples, 0) / 4) * bs) AS expected_bytes
     FROM table_estimates
     LEFT OUTER JOIN pg_class AS toast ON table_estimates.reltoastrelid = toast.oid AND toast.relkind = 't'
 ),
 table_estimates_plus AS (
-    SELECT current_database() AS databasename, schemaname, tablename, can_estimate, est_rows,
+    SELECT current_database() AS databasename, schemaname, tablename, can_estimate, est_rows, fillfactor,
         CASE WHEN table_bytes > 0 THEN table_bytes::NUMERIC ELSE NULL::NUMERIC END AS table_bytes,
         CASE WHEN expected_bytes > 0 THEN expected_bytes::NUMERIC ELSE NULL::NUMERIC END AS expected_bytes,
         CASE WHEN expected_bytes > 0 AND table_bytes > 0 AND expected_bytes <= table_bytes
@@ -280,7 +293,7 @@ table_estimates_plus AS (
     FROM estimates_with_toast
     UNION ALL
     SELECT current_database() AS databasename, table_schema, table_name, FALSE,
-        est_rows, table_size, NULL::NUMERIC, NULL::NUMERIC
+        est_rows, fillfactor, table_size, NULL::NUMERIC, NULL::NUMERIC
     FROM no_stats
 ),
 bloat_data AS (
@@ -288,17 +301,32 @@ bloat_data AS (
     -- which humanizes the value itself. Pre-dividing to MB made humanize.Bytes
     -- treat "86000" MB as 86000 bytes and print "86 KB".
     SELECT databasename, schemaname, tablename, can_estimate, est_rows,
+        -- Only a non-default fillfactor says anything; 100 is every other row.
+        NULLIF(fillfactor, 100) AS fillfactor,
         table_bytes,
         bloat_bytes,
         round(bloat_bytes * 100 / table_bytes) AS pct_bloat
     FROM table_estimates_plus
 )
-SELECT databasename, schemaname, tablename, can_estimate, est_rows, pct_bloat, bloat_bytes, table_bytes
+SELECT databasename, schemaname, tablename, can_estimate, fillfactor, est_rows, pct_bloat, bloat_bytes, table_bytes
 FROM bloat_data
--- Thresholds are in bytes: ≥50 MB or ≥1 GB, matching the Description.
-WHERE (pct_bloat >= 50 AND bloat_bytes >= 50 * 1024^2)
-   OR (pct_bloat >= 25 AND bloat_bytes >= 1000 * 1024^2)
-ORDER BY bloat_bytes DESC
+-- Thresholds are in bytes, and match the Description. The first tier catches a
+-- table that is mostly dead space, the second one a large table whose smaller
+-- share of waste is still worth a rewrite. They were ≥50% / ≥50 MB and
+-- ≥25% / ≥1 GB, which on a cluster vacuumed well enough to stay under half
+-- waste reported nothing at all on any database — a bloat screen that is always
+-- empty says nothing about the cluster.
+WHERE (pct_bloat >= 30 AND bloat_bytes >= 20 * 1024^2)
+   OR (pct_bloat >= 15 AND bloat_bytes >= 500 * 1024^2)
+-- can_estimate = f rows carry a NULL bloat_bytes, so both tiers above drop
+-- them however large they are: the arm that exists to say "stats are missing,
+-- here is the raw size" could never reach the screen. Gate those on the size
+-- itself, at the larger tier's figure — a table big enough that not knowing
+-- its waste is the finding.
+   OR (NOT can_estimate AND table_bytes >= 500 * 1024^2)
+-- NULLS LAST, or DESC would float the unmeasured rows above every measured
+-- one; table_bytes then orders them among themselves.
+ORDER BY bloat_bytes DESC NULLS LAST, table_bytes DESC
 `
 
 // sqlDiagStaleStatistics ranks tables by how stale their planner statistics

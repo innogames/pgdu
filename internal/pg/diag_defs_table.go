@@ -19,20 +19,29 @@ var diagTable = []Diagnostic{
 		PerDB:       true,
 		Title:       "Table bloat (detailed)",
 		Category:    "table",
-		Description: "detailed table bloat estimate (>50% and >50 MB, or >25% and >1 GB)",
+		Description: "detailed table bloat estimate (>30% and >20 MB, or >15% and >500 MB; unmeasurable tables >500 MB)",
 		SQL:         sqlDiagBloatTable,
 		Bar:         "pct_bloat",
 		Sort:        "bloat_bytes",
-		Fix:         fixTableBloat,
+		// DiagFloat for the same reason as the fillfactor advisor's columns: a
+		// fillfactor is a setting, and the Σ footer sums DiagInt columns.
+		Kinds: map[string]DiagColumnKind{"fillfactor": DiagFloat},
+		Fix:   fixTableBloat,
 		Help: `Statistical estimate of heap bloat — dead space plain VACUUM keeps
 			but never returns to the OS — derived from pg_stats row widths; only
-			significant offenders are shown (≥50% and ≥50 MB, or ≥25% and ≥1 GB).
-			can_estimate = f means column stats were missing and the size stands
-			alone. Estimates can be off for heavily padded or toasted rows —
-			confirm with pgstattuple before rewriting anything. Reclaim with
-			VACUUM FULL or pg_repack (the former takes an exclusive lock), then
-			chase the cause: autovacuum not keeping up, or an old transaction /
-			replication slot pinning the xmin horizon.`,
+			significant offenders are shown (≥30% and ≥20 MB, or ≥15% and ≥500 MB).
+			can_estimate = f means column stats were missing, so bloat reads —
+			and the size stands alone; those tables are listed from 500 MB up,
+			and ANALYZE is what makes them measurable. fillfactor shows a
+			non-default setting (— is the default 100) and is already in the
+			estimate: the share of each page a fillfactor reserves for HOT
+			updates is expected space, not waste, so a fillfactor=85 table is
+			not 15% bloated for being exactly what it was told to be.
+			Estimates can be off for heavily padded or toasted rows — confirm
+			with pgstattuple before rewriting anything. Reclaim with VACUUM FULL or pg_repack (the
+			former takes an exclusive lock), then chase the cause: autovacuum
+			not keeping up, or an old transaction / replication slot pinning
+			the xmin horizon.`,
 	},
 	{
 		Key:         "stale_statistics",

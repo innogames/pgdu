@@ -36,6 +36,18 @@ func TestDiagNumAndSum(t *testing.T) {
 	if got := diagSum(res, "a"); got != 0 {
 		t.Errorf("diagSum over text = %v, want 0", got)
 	}
+	// The NULL-bytes row ("z") is what bloat_table emits for a table whose
+	// column stats are missing: it must not be counted as a finding with a
+	// measured size.
+	if got := diagRowsWithNum(res, "b"); len(got) != 2 {
+		t.Errorf("diagRowsWithNum = %d rows, want 2", len(got))
+	}
+	if got := diagRowsWithNum(res, "a"); len(got) != 0 {
+		t.Errorf("diagRowsWithNum over text = %d rows, want 0", len(got))
+	}
+	if got := diagRowsWithNum(res, "missing"); len(got) != 0 {
+		t.Errorf("diagRowsWithNum over a missing column = %d rows, want 0", len(got))
+	}
 }
 
 // Every sweep check names a registered, per-database diagnostic, and the

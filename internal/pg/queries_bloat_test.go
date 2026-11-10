@@ -53,3 +53,33 @@ func TestBloatHeapApproxGatesBeforeSampling(t *testing.T) {
 		t.Error("budget no longer counts only the pages the sample must read")
 	}
 }
+
+// Three statements estimate heap bloat — the one-relation one, its
+// set-returning sibling behind the tables list, and the bloat_table diagnostic
+// — and all three must divide the per-page capacity by the table's FILLFACTOR:
+// the share of a page a fillfactor reserves for HOT updates is expected space,
+// not waste. A copy that loses the factor reports a correctly tuned
+// fillfactor=85 table as 15% bloated, which is exactly what it was told to keep
+// free. Nothing compiles these strings, so the invariant is asserted here.
+func TestBloatEstimatorsScaleByFillFactor(t *testing.T) {
+	for _, tc := range []struct{ name, sql, capacity string }{
+		{"per relation", sqlBloatHeapEstimate, "(p.bs - 24) *"},
+		{"tables list", sqlBloatTablesEstimate, "(p.bs - 24) *"},
+		{"diagnostic", sqlDiagBloatTable, "(bs - 20) *"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			i := strings.Index(tc.sql, tc.capacity)
+			if i < 0 {
+				t.Fatalf("page capacity %q is gone; the divisor was rewritten", tc.capacity)
+			}
+			if tail := tc.sql[i:min(i+240, len(tc.sql))]; !strings.Contains(tail, "fillfactor") {
+				t.Errorf("page capacity is not scaled by the fillfactor: %s", tail)
+			}
+		})
+	}
+	// The diagnostic also reports it, so a row's estimate can be read against
+	// the setting it was made under.
+	if !strings.Contains(sqlDiagBloatTable, "NULLIF(fillfactor, 100) AS fillfactor") {
+		t.Error("the diagnostic no longer projects a non-default fillfactor")
+	}
+}
