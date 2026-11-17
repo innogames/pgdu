@@ -1201,7 +1201,55 @@ func bufSplitWidths(s *screen) (tableW, relW int) {
 // over-scroll and let the view settle it) and padding short content to height so
 // the help row stays pinned.
 func scrollWindow(body string, offset *int, height int) string {
-	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	return scrollLines(bodyLines(body), offset, height)
+}
+
+// bodyLines splits a rendered body into the lines scrollLines pages through.
+func bodyLines(body string) []string {
+	return strings.Split(strings.TrimRight(body, "\n"), "\n")
+}
+
+// lineBuf assembles a scrolling body out of freshly written text and lines
+// that were laid out earlier (a memoized statement). Writing those through a
+// strings.Builder would copy them — the better part of a megabyte for a call
+// with thousands of values — only for scrollWindow to split them apart again,
+// on every frame. Text goes through the embedded Builder exactly as before
+// and must end its line before lines are appended.
+type lineBuf struct {
+	strings.Builder
+
+	lines []string
+}
+
+func (l *lineBuf) flush() {
+	if l.Len() == 0 {
+		return
+	}
+	l.lines = append(l.lines, strings.Split(strings.TrimSuffix(l.String(), "\n"), "\n")...)
+	l.Reset()
+}
+
+// appendLines adds whole lines (no newlines in them) after the text so far.
+func (l *lineBuf) appendLines(lines []string) {
+	l.flush()
+	l.lines = append(l.lines, lines...)
+}
+
+// body returns everything written, without trailing blank lines — the same
+// lines bodyLines makes of the equivalent string.
+func (l *lineBuf) body() []string {
+	l.flush()
+	n := len(l.lines)
+	for n > 0 && l.lines[n-1] == "" {
+		n--
+	}
+	return l.lines[:n]
+}
+
+// scrollLines is scrollWindow over a body already split into lines, for the
+// screens that keep theirs between frames: a key press then costs the visible
+// slice rather than a re-layout of everything above and below it.
+func scrollLines(lines []string, offset *int, height int) string {
 	*offset = max(0, min(*offset, len(lines)-height))
 	end := min(*offset+height, len(lines))
 	var b strings.Builder

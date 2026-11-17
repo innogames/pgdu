@@ -2,7 +2,8 @@ package pg
 
 import "sync"
 
-// MainTable, QueryKind and JoinedTables are pure functions of a statement's
+// MainTable, QueryKind, JoinedTables and the two statement classifiers
+// (ExplainableQuery, ReadOnlyQuery) are pure functions of a statement's
 // normalized text, and that text is stable for a given pg_stat_statements
 // queryid. The top-queries table rebuilds on every refresh tick over every row
 // (thousands of them), so without memoization the shallow SQL parse —
@@ -17,4 +18,9 @@ var (
 	// first relation, so it is the most expensive of the three; the cached
 	// slice is shared with every caller and must not be modified.
 	joinedTablesMemo sync.Map // query string → []string
+	// ExplainableQuery and ReadOnlyQuery gate keys and footer labels, so the
+	// query-detail screen asks them several times per frame, and both lower-case
+	// and split the whole statement. Only an opened detail's text gets here.
+	explainableMemo sync.Map // query string → bool
+	readOnlyMemo    sync.Map // query string → bool
 )

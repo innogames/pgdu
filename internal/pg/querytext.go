@@ -9,6 +9,15 @@ import (
 // First keyword, lower-cased. ORM-generated statements often carry a leading
 // /* … */ tag, so strip comments before looking at the keyword.
 func ExplainableQuery(query string) bool {
+	if v, ok := explainableMemo.Load(query); ok {
+		return v.(bool)
+	}
+	r := parseExplainable(query)
+	explainableMemo.Store(query, r)
+	return r
+}
+
+func parseExplainable(query string) bool {
 	fields := strings.Fields(StripSQLComments(query))
 	if len(fields) == 0 {
 		return false
@@ -96,6 +105,15 @@ func isAdvisoryLock(lower string) bool {
 // running them for real would write. This is stricter than ExplainableQuery,
 // which also admits DML (EXPLAIN without ANALYZE never executes).
 func ReadOnlyQuery(query string) bool {
+	if v, ok := readOnlyMemo.Load(query); ok {
+		return v.(bool)
+	}
+	r := parseReadOnly(query)
+	readOnlyMemo.Store(query, r)
+	return r
+}
+
+func parseReadOnly(query string) bool {
 	fields := strings.Fields(strings.ToLower(StripSQLComments(query)))
 	if len(fields) == 0 {
 		return false

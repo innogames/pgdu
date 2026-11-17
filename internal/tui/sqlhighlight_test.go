@@ -50,6 +50,31 @@ func TestTokenizeSQL(t *testing.T) {
 		{"dotted path", `"t"."col"`, []tok{
 			{tokQuotedIdent, `"t"`}, {tokOp, "."}, {tokQuotedIdent, `"col"`},
 		}},
+		// The scan walks bytes: multi-byte runes must stay whole, in words,
+		// in literals and as lone punctuation.
+		{"non-ascii identifier", "SELECT größe FROM tabelle_ü", []tok{
+			{tokKeyword, "SELECT"}, {tokIdent, "größe"}, {tokKeyword, "FROM"}, {tokIdent, "tabelle_ü"},
+		}},
+		{"non-ascii literal and punctuation", "'日本' … x", []tok{
+			{tokString, "'日本'"}, {tokOp, "…"}, {tokIdent, "x"},
+		}},
+		{"non-ascii dollar tag", "$tág$ a $tág$ b", []tok{
+			{tokString, "$tág$ a $tág$"}, {tokIdent, "b"},
+		}},
+		{"stray byte becomes U+FFFD", "a \xff b", []tok{
+			{tokIdent, "a"}, {tokOp, "\uFFFD"}, {tokIdent, "b"},
+		}},
+		{"exponent needs a digit", "1e x 2e+ 3E5", []tok{
+			{tokNumber, "1"}, {tokIdent, "e"}, {tokIdent, "x"},
+			{tokNumber, "2"}, {tokIdent, "e"}, {tokOp, "+"}, {tokNumber, "3E5"},
+		}},
+		{"keyword by unicode case folding", "ſelect", []tok{{tokKeyword, "ſelect"}}},
+		{"word longer than any keyword", "current_timestamp_but_longer_than_that", []tok{
+			{tokIdent, "current_timestamp_but_longer_than_that"},
+		}},
+		{"operator run stops at a comment", "a - -- c", []tok{
+			{tokIdent, "a"}, {tokOp, "-"}, {tokComment, "-- c"},
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -242,5 +267,78 @@ func TestStyleSQLText(t *testing.T) {
 	lines := highlightSQL("SELECT 1", 100)
 	if len(lines) != 1 || !strings.Contains(lines[0], styleSQLKeyword.Render("SELECT")) {
 		t.Errorf("highlighted line missing bold SELECT: %q", lines)
+	}
+}
+
+// Every keyword must fit the lookup's stack buffer, or it would silently stop
+// reading as one.
+func TestSQLKeywordsFitLookupBuffer(t *testing.T) {
+	for w := range sqlKeywords {
+		if len(w) > sqlMaxKeywordLen {
+			t.Errorf("keyword %q is longer than sqlMaxKeywordLen (%d)", w, sqlMaxKeywordLen)
+		}
+		if !isSQLKeyword(strings.ToLower(w)) || !isSQLKeyword(w) {
+			t.Errorf("keyword %q not recognised in both cases", w)
+		}
+	}
+}
+
+// The token fast path must emit exactly what lipgloss would: it exists only
+// to skip Render's per-call work, never to change a byte on screen.
+func TestSGRPairMatchesRender(t *testing.T) {
+	texts := []string{"SELECT", "$12", "'it''s'", "x", " ", "größe", "'日本'", "-- note", "/* a\n\tb */", "'tab\there'", "", "\x7f"}
+	for _, st := range []lipgloss.Style{styleSQLKeyword, styleSQLLiteral, styleMuted} {
+		p := newSGRPair(st)
+		if p.open == "" || p.close == "" {
+			t.Fatalf("style lost its escape sequences: %+v", p)
+		}
+		for _, text := range texts {
+			if got, want := p.render(text), st.Render(text); got != want {
+				t.Errorf("render(%q) = %q, want %q", text, got, want)
+			}
+		}
+	}
+}
+
+func TestSQLLayoutMemo(t *testing.T) {
+	var l sqlLayout
+	const q = "SELECT a, b FROM t WHERE id = $1 AND x = $2"
+	first := l.get(q, 40, "  ")
+	want := highlightSQL(q, 40)
+	if len(first) != len(want) {
+		t.Fatalf("got %d lines, want %d", len(first), len(want))
+	}
+	for i := range want {
+		if first[i] != "  "+want[i] {
+			t.Errorf("line %d = %q, want indent + %q", i, first[i], want[i])
+		}
+	}
+	// Same inputs: the very same lines, not a second layout.
+	if again := l.get(q, 40, "  "); &again[0] != &first[0] {
+		t.Error("an unchanged statement was laid out again")
+	}
+	// Each input on its own invalidates.
+	if got := l.get(q, 12, "  "); len(got) <= len(first) {
+		t.Errorf("narrower width kept the old layout: %d lines", len(got))
+	}
+	if got := plainLines(l.get("SELECT 2", 12, "  ")); len(got) != 1 || got[0] != "  SELECT 2" {
+		t.Errorf("new text kept the old layout: %q", got)
+	}
+	if got := plainLines(l.get("SELECT 2", 12, "")); len(got) != 1 || got[0] != "SELECT 2" {
+		t.Errorf("new indent kept the old layout: %q", got)
+	}
+	// An empty statement is a valid, cached answer — not a miss every frame.
+	if got := l.get("", 12, ""); len(got) != 0 || !l.valid {
+		t.Errorf("empty statement: %q valid=%v", got, l.valid)
+	}
+	// A token spanning lines must come back as physical lines: the body is
+	// paged by line, and a hidden newline would push the frame a row too tall.
+	for _, ln := range l.get("SELECT 1 /* a\nb */ FROM t", 80, "    ") {
+		if strings.Contains(ln, "\n") {
+			t.Errorf("layout line still holds a newline: %q", ln)
+		}
+	}
+	if got := len(l.get("SELECT 1 /* a\nb */ FROM t", 80, "    ")); got != 3 {
+		t.Errorf("multi-line comment: %d lines, want 3", got)
 	}
 }

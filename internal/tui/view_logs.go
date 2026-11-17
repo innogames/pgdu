@@ -570,6 +570,19 @@ func (m *Model) renderLogGroup(s *screen, height int) string {
 	return b.String()
 }
 
+// logEntryBody is the entry screen's body between frames. Everything on it
+// derives from the record and the width, so a scroll only re-slices the lines
+// — a statement with a few thousand bound values took tens of milliseconds to
+// lay out, per key press. The report is part of the key because a live tail
+// re-parses the newest record in place: the same *Entry can then hold more
+// than it did, and every refresh that changed anything hands out a new report.
+type logEntryBody struct {
+	entry  *pglog.Entry
+	report *pglog.Report
+	width  int
+	lines  []string
+}
+
 // renderLogEntry shows one full record: prefix fields, then each text field
 // with SQL highlighted. Scrolls through s.offset like the statement detail.
 func (m *Model) renderLogEntry(s *screen, height int) string {
@@ -577,9 +590,19 @@ func (m *Model) renderLogEntry(s *screen, height int) string {
 	if e == nil {
 		return strings.Repeat("\n", max(height, 0))
 	}
+	width := max(m.width-4, 20)
+	c := &s.log.entryBody
+	if c.lines == nil || c.entry != e || c.report != s.log.report || c.width != width {
+		*c = logEntryBody{entry: e, report: s.log.report, width: width, lines: bodyLines(logEntryText(e, width))}
+	}
+	return scrollLines(c.lines, &s.offset, height)
+}
+
+// logEntryText lays out the whole record at width. It reads nothing but its
+// arguments — renderLogEntry's memo depends on that.
+func logEntryText(e *pglog.Entry, width int) string {
 	mu := styleMuted.Render
 	var b strings.Builder
-	width := max(m.width-4, 20)
 
 	field := func(k, v string) {
 		if v != "" {
@@ -726,7 +749,7 @@ func (m *Model) renderLogEntry(s *screen, height int) string {
 	section("QUERY", e.Query, true)
 	section("LOCATION", e.Location, false)
 
-	return scrollWindow(b.String(), &s.offset, height)
+	return b.String()
 }
 
 // dedent strips the common leading tab indentation PostgreSQL adds to

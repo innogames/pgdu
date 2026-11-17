@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 )
@@ -114,7 +115,8 @@ const (
 
 // highlightSQL renders a SQL statement as ready-to-print styled lines for the
 // detail panel: width is the usable text width (clamped to 8, like the old
-// hard wrap). Lines never contain newlines, so scrollWindow's split stays valid.
+// hard wrap). A line holds a newline only where a single token does (a
+// multi-line comment or string literal); sqlLayout splits those.
 func highlightSQL(query string, width int) []string {
 	width = max(width, 8)
 	toks := tokenizeSQL(query)
@@ -184,6 +186,38 @@ func highlightSQL(query string, width int) []string {
 	return out
 }
 
+// sqlLayout keeps one statement's highlightSQL lines (each behind indent) for
+// as long as the text and the width stay what they were. The detail body is
+// re-rendered for every frame — every ↓ of a scroll — and laying out a
+// statement with thousands of array elements each time is what made scrolling
+// it crawl. Keyed by value, so whatever replaces the text (a new sample call,
+// a reload) invalidates it without anyone having to remember to.
+type sqlLayout struct {
+	src, indent string
+	width       int
+	lines       []string
+	valid       bool
+}
+
+func (l *sqlLayout) get(src string, width int, indent string) []string {
+	if !l.valid || l.width != width || l.indent != indent || l.src != src {
+		laid := highlightSQL(src, width)
+		lines := make([]string, 0, len(laid))
+		for _, ln := range laid {
+			// A block comment or string literal that spans lines is a single
+			// token and brings its newlines along; the body is paged by
+			// physical line, so those count.
+			if strings.IndexByte(ln, '\n') < 0 {
+				lines = append(lines, indent+ln)
+			} else {
+				lines = append(lines, strings.Split(indent+ln, "\n")...)
+			}
+		}
+		*l = sqlLayout{src: src, indent: indent, width: width, lines: lines, valid: true}
+	}
+	return l.lines
+}
+
 // wrapSQLTokens greedily fills physical lines with one segment's tokens,
 // measuring plain text and styling each token as it is written. The first line
 // starts with lead (the segment's clause-body indent); continuation lines get
@@ -206,9 +240,9 @@ func wrapSQLTokens(toks []sqlToken, width int, lead string) []string {
 		lineW = len(indent)
 		atStart = true
 	}
-	write := func(t sqlToken, text string) {
+	write := func(t sqlToken, text string, w int) {
 		b.WriteString(styleSQLText(t.kind, text))
-		lineW += displayWidth(text)
+		lineW += w
 		atStart = false
 	}
 
@@ -224,10 +258,10 @@ func wrapSQLTokens(toks []sqlToken, width int, lead string) []string {
 				b.WriteByte(' ')
 				lineW++
 			}
-			write(t, t.text)
+			write(t, t.text, tw)
 		case tw <= width-len(indent):
 			newline()
-			write(t, t.text)
+			write(t, t.text, tw)
 		default:
 			// Wider than any full line: hard-split into chunks, each styled on
 			// its own (widths stay right because chunks are still plain text).
@@ -251,7 +285,7 @@ func wrapSQLTokens(toks []sqlToken, width int, lead string) []string {
 					// so the loop always makes progress.
 					chunk, rest = string(r[:1]), r[1:]
 				}
-				write(t, chunk)
+				write(t, chunk, displayWidth(chunk))
 				r = rest
 				if len(r) > 0 {
 					newline()
@@ -280,25 +314,73 @@ func takeRunes(r []rune, room int) (string, []rune) {
 	return string(r[:i]), r[i:]
 }
 
+// sgrPair is a style reduced to the two escape sequences it wraps text in. A
+// statement is styled token by token, and an `= any(ARRAY[…])` with thousands
+// of elements means thousands of Style.Render calls per layout — each one
+// re-deriving the same sequence and running the margin/border/alignment
+// passes a bare foreground never needs. That was over half the layout cost.
+type sgrPair struct {
+	style       lipgloss.Style
+	open, close string
+}
+
+// newSGRPair asks lipgloss once how it would wrap a cell, so the fast path
+// cannot drift from what Render emits. Only for styles that do nothing but
+// set attributes (no padding, width or border): for those Render is exactly
+// open + text + close on single-line text.
+func newSGRPair(st lipgloss.Style) sgrPair {
+	const probe = "x" // not a byte an SGR sequence can contain
+	open, closing, ok := strings.Cut(st.Render(probe), probe)
+	if !ok {
+		open, closing = "", ""
+	}
+	return sgrPair{style: st, open: open, close: closing}
+}
+
+// render is Style.Render for the text a token can be. Control bytes (a tab or
+// newline inside a string literal or comment) and the empty string keep the
+// full path, which expands tabs and styles each line on its own.
+func (p sgrPair) render(text string) string {
+	if text == "" || hasControlByte(text) {
+		return p.style.Render(text)
+	}
+	return p.open + text + p.close
+}
+
+func hasControlByte(s string) bool {
+	for i := range len(s) {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	sgrSQLKeyword = newSGRPair(styleSQLKeyword)
+	sgrSQLLiteral = newSGRPair(styleSQLLiteral)
+	sgrSQLMuted   = newSGRPair(styleMuted)
+)
+
 // styleSQLText styles one token (or a hard-split chunk of one). For quoted
 // identifiers only the quote characters at the chunk's edges dim, so the name
 // itself keeps the default foreground.
 func styleSQLText(kind sqlTokenKind, text string) string {
 	switch kind {
 	case tokKeyword:
-		return styleSQLKeyword.Render(text)
+		return sgrSQLKeyword.render(text)
 	case tokString, tokNumber, tokParam:
-		return styleSQLLiteral.Render(text)
+		return sgrSQLLiteral.render(text)
 	case tokComment:
-		return styleMuted.Render(text)
+		return sgrSQLMuted.render(text)
 	case tokQuotedIdent:
 		pre, post := "", ""
 		if strings.HasPrefix(text, `"`) {
-			pre = styleMuted.Render(`"`)
+			pre = sgrSQLMuted.render(`"`)
 			text = text[1:]
 		}
 		if strings.HasSuffix(text, `"`) {
-			post = styleMuted.Render(`"`)
+			post = sgrSQLMuted.render(`"`)
 			text = text[:len(text)-1]
 		}
 		return pre + text + post
@@ -309,67 +391,127 @@ func styleSQLText(kind sqlTokenKind, text string) string {
 
 const sqlOpRunes = "+-*/<>=!~%^|:&#?@"
 
+// sqlMaxKeywordLen bounds the keyword lookup's stack buffer (the longest
+// entry is CURRENT_TIMESTAMP).
+const sqlMaxKeywordLen = 24
+
+// sqlRuneAt decodes the rune at byte offset i, or (-1, 0) past the end, which
+// no character class below matches. ASCII — nearly all of any statement —
+// skips the decoder.
+func sqlRuneAt(q string, i int) (rune, int) {
+	if i >= len(q) {
+		return -1, 0
+	}
+	if c := q[i]; c < utf8.RuneSelf {
+		return rune(c), 1
+	}
+	return utf8.DecodeRuneInString(q[i:])
+}
+
+func sqlDigitAt(q string, i int) bool {
+	c, _ := sqlRuneAt(q, i)
+	return unicode.IsDigit(c)
+}
+
+func isSQLOpByte(c byte) bool {
+	return strings.IndexByte(sqlOpRunes, c) >= 0
+}
+
+// isSQLKeyword is the case-insensitive set lookup. An ASCII word is folded
+// into a stack buffer so the map probe allocates nothing — a statement with
+// thousands of identifiers used to pay a ToUpper string for each.
+func isSQLKeyword(word string) bool {
+	if len(word) > sqlMaxKeywordLen {
+		return false
+	}
+	var buf [sqlMaxKeywordLen]byte
+	for i := range len(word) {
+		c := word[i]
+		if c >= utf8.RuneSelf {
+			// Unicode case folding can land on ASCII (ſ → S); rare enough to
+			// leave to the allocating path.
+			_, ok := sqlKeywords[strings.ToUpper(word)]
+			return ok
+		}
+		if 'a' <= c && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		buf[i] = c
+	}
+	_, ok := sqlKeywords[string(buf[:len(word)])]
+	return ok
+}
+
 // tokenizeSQL scans the raw (unflattened) query so -- comments still end at
 // their original newline instead of swallowing everything after them. Any
 // malformed input (unterminated string/ident/comment/dollar-quote) consumes
 // the rest as one token — text is never lost and the scan never panics.
+//
+// It walks bytes and hands out sub-slices of q: converting a several-hundred-KB
+// statement to []rune and back, one string per token, was a fifth of the
+// layout cost.
 func tokenizeSQL(q string) []sqlToken {
-	r := []rune(q)
-	var toks []sqlToken
+	if !utf8.ValidString(q) {
+		// One U+FFFD per stray byte (a log in a non-UTF-8 encoding), so the
+		// offsets below always sit on rune boundaries.
+		q = string([]rune(q))
+	}
+	// A rough token-per-bytes guess; append still grows it for dense text.
+	toks := make([]sqlToken, 0, len(q)/4+1)
 	depth := 0
 	space := false
 	i := 0
 	emit := func(kind sqlTokenKind, start, end int) {
-		toks = append(toks, sqlToken{kind: kind, text: string(r[start:end]), spaceBefore: space, depth: depth})
+		toks = append(toks, sqlToken{kind: kind, text: q[start:end], spaceBefore: space, depth: depth})
 		space = false
 	}
-	for i < len(r) {
-		c := r[i]
+	for i < len(q) {
+		c, sz := sqlRuneAt(q, i)
 		switch {
 		case unicode.IsSpace(c):
 			space = true
-			i++
+			i += sz
 		case c == '\'':
 			start := i
-			i = scanQuoted(r, i, '\'')
+			i = scanQuoted(q, i, '\'')
 			emit(tokString, start, i)
 		case c == '"':
 			start := i
-			i = scanQuoted(r, i, '"')
+			i = scanQuoted(q, i, '"')
 			emit(tokQuotedIdent, start, i)
 		case c == '$':
 			start := i
-			kind, end, ok := scanDollar(r, i)
+			kind, end, ok := scanDollar(q, i)
 			if !ok {
 				kind, end = tokOp, i+1
 			}
 			i = end
 			emit(kind, start, i)
-		case c == '-' && i+1 < len(r) && r[i+1] == '-':
+		case c == '-' && i+1 < len(q) && q[i+1] == '-':
 			start := i
-			for i < len(r) && r[i] != '\n' {
-				i++
-			}
-			emit(tokComment, start, i)
-		case c == '/' && i+1 < len(r) && r[i+1] == '*':
-			start := i
-			if end := strings.Index(string(r[i+2:]), "*/"); end >= 0 {
-				i += 2 + len([]rune(string(r[i+2:])[:end])) + 2
+			if nl := strings.IndexByte(q[i:], '\n'); nl >= 0 {
+				i += nl
 			} else {
-				i = len(r)
+				i = len(q)
 			}
 			emit(tokComment, start, i)
-		case unicode.IsDigit(c) || (c == '.' && i+1 < len(r) && unicode.IsDigit(r[i+1])):
+		case c == '/' && i+1 < len(q) && q[i+1] == '*':
 			start := i
-			i = scanNumber(r, i)
+			if end := strings.Index(q[i+2:], "*/"); end >= 0 {
+				i += 2 + end + 2
+			} else {
+				i = len(q)
+			}
+			emit(tokComment, start, i)
+		case unicode.IsDigit(c) || (c == '.' && sqlDigitAt(q, i+1)):
+			start := i
+			i = scanNumber(q, i)
 			emit(tokNumber, start, i)
 		case unicode.IsLetter(c) || c == '_':
 			start := i
-			for i < len(r) && isSQLWordCont(r[i]) {
-				i++
-			}
+			i = scanSQLWord(q, i)
 			kind := tokIdent
-			if _, ok := sqlKeywords[strings.ToUpper(string(r[start:i]))]; ok {
+			if isSQLKeyword(q[start:i]) {
 				kind = tokKeyword
 			}
 			emit(kind, start, i)
@@ -388,20 +530,20 @@ func tokenizeSQL(q string) []sqlToken {
 		case c == '[' || c == ']' || c == ',' || c == ';' || c == '.':
 			emit(tokOp, i, i+1)
 			i++
-		case strings.ContainsRune(sqlOpRunes, c):
+		case c < utf8.RuneSelf && isSQLOpByte(byte(c)):
 			start := i
-			for i < len(r) && strings.ContainsRune(sqlOpRunes, r[i]) {
+			for i < len(q) && isSQLOpByte(q[i]) {
 				// Stop a run before an embedded comment opener (a - -- x, a / /* x).
-				if i > start && i+1 < len(r) &&
-					((r[i] == '-' && r[i+1] == '-') || (r[i] == '/' && r[i+1] == '*')) {
+				if i > start && i+1 < len(q) &&
+					((q[i] == '-' && q[i+1] == '-') || (q[i] == '/' && q[i+1] == '*')) {
 					break
 				}
 				i++
 			}
 			emit(tokOp, start, i)
 		default:
-			emit(tokOp, i, i+1)
-			i++
+			emit(tokOp, i, i+sz)
+			i += sz
 		}
 	}
 	return toks
@@ -411,13 +553,26 @@ func isSQLWordCont(c rune) bool {
 	return unicode.IsLetter(c) || unicode.IsDigit(c) || c == '_'
 }
 
+// scanSQLWord returns the end of the identifier/keyword run starting at i.
+func scanSQLWord(q string, i int) int {
+	for i < len(q) {
+		c, sz := sqlRuneAt(q, i)
+		if !isSQLWordCont(c) {
+			break
+		}
+		i += sz
+	}
+	return i
+}
+
 // scanQuoted consumes a '…' or "…" token starting at the opening quote,
-// treating a doubled quote as an escape. Unterminated → rest of input.
-func scanQuoted(r []rune, i int, q rune) int {
+// treating a doubled quote as an escape. Unterminated → rest of input. The
+// quote is ASCII, so a byte scan cannot land inside a multi-byte rune.
+func scanQuoted(q string, i int, quote byte) int {
 	i++
-	for i < len(r) {
-		if r[i] == q {
-			if i+1 < len(r) && r[i+1] == q {
+	for i < len(q) {
+		if q[i] == quote {
+			if i+1 < len(q) && q[i+1] == quote {
 				i += 2
 				continue
 			}
@@ -431,47 +586,54 @@ func scanQuoted(r []rune, i int, q rune) int {
 // scanDollar disambiguates the three '$' forms: $1 (parameter), $$…$$ /
 // $tag$…$tag$ (dollar-quoted string, scanned to its matching close tag), and a
 // lone '$' (not ours — ok=false).
-func scanDollar(r []rune, i int) (sqlTokenKind, int, bool) {
+func scanDollar(q string, i int) (sqlTokenKind, int, bool) {
 	j := i + 1
-	if j < len(r) && unicode.IsDigit(r[j]) {
-		for j < len(r) && unicode.IsDigit(r[j]) {
-			j++
+	if sqlDigitAt(q, j) {
+		for j < len(q) {
+			c, sz := sqlRuneAt(q, j)
+			if !unicode.IsDigit(c) {
+				break
+			}
+			j += sz
 		}
 		return tokParam, j, true
 	}
 	k := j
-	if k < len(r) && (unicode.IsLetter(r[k]) || r[k] == '_') {
-		k++
-		for k < len(r) && isSQLWordCont(r[k]) {
-			k++
-		}
+	if c, sz := sqlRuneAt(q, k); unicode.IsLetter(c) || c == '_' {
+		k = scanSQLWord(q, k+sz)
 	}
-	if k >= len(r) || r[k] != '$' {
+	if k >= len(q) || q[k] != '$' {
 		return 0, 0, false
 	}
-	tag := string(r[i : k+1])
-	rest := string(r[k+1:])
-	if before, _, ok := strings.Cut(rest, tag); ok {
-		return tokString, k + 1 + len([]rune(before)) + len([]rune(tag)), true
+	tag := q[i : k+1]
+	if before := strings.Index(q[k+1:], tag); before >= 0 {
+		return tokString, k + 1 + before + len(tag), true
 	}
-	return tokString, len(r), true
+	return tokString, len(q), true
 }
 
 // scanNumber consumes digits with at most one '.' and an optional exponent.
-func scanNumber(r []rune, i int) int {
+func scanNumber(q string, i int) int {
 	seenDot := false
-	for i < len(r) {
-		c := r[i]
+	for i < len(q) {
+		c, sz := sqlRuneAt(q, i)
 		switch {
 		case unicode.IsDigit(c):
-			i++
+			i += sz
 		case c == '.' && !seenDot:
 			seenDot = true
 			i++
-		case (c == 'e' || c == 'E') && i+1 < len(r) &&
-			(unicode.IsDigit(r[i+1]) ||
-				((r[i+1] == '+' || r[i+1] == '-') && i+2 < len(r) && unicode.IsDigit(r[i+2]))):
-			i += 2
+		case c == 'e' || c == 'E':
+			// The exponent marker plus the digit or sign after it, when a
+			// digit follows; otherwise the e belongs to the next token.
+			next, nsz := sqlRuneAt(q, i+1)
+			switch {
+			case unicode.IsDigit(next):
+			case (next == '+' || next == '-') && sqlDigitAt(q, i+2):
+			default:
+				return i
+			}
+			i += 1 + nsz
 		default:
 			return i
 		}

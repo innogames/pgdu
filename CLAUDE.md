@@ -145,6 +145,15 @@ fails (missing/corrupt → empty).
   `.pgb`, `.buf`, `.pages`, `.maintenance`, `.desc`, `.reindex`, `.tbl`, `.progress`,
   `.lock`, `.parts` — the `*State` types below `screen` in `app.go`); only the
   list/nav core, the load context and the generic table infra (`diag*`) are top-level.
+- **Scrolling bodies keep their layout between frames**: `View` runs per key press, so
+  a body that scrolls must not re-lay-out what did not change. The query detail
+  memoizes its two statements (`sqlLayout`, keyed by text + width, so a new sample
+  call invalidates itself) and assembles the body as lines (`lineBuf` →
+  `scrollLines`); the log entry keeps its whole body (`logEntryBody`), which is why
+  `logEntryText` may read nothing but the entry and the width — and why the report
+  is in the key: a live tail re-parses the newest record in place. Tokens are styled
+  through `sgrPair`, not `Style.Render`. `view_scroll_test.go` carries the
+  benchmarks (`go test ./internal/tui -bench 'Scroll|Open'`).
 - **Byte decoding is not UI**: tuple layout segments, index-key/jsonb/TOAST decoding live
   in `internal/pageinspect` and return plain strings/segments; styling stays in tui.
   `/proc` and stat(2) reads go through `internal/procfs`, never a per-package

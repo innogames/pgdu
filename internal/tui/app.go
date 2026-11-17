@@ -457,6 +457,9 @@ type stmtState struct {
 	// hotErr records a fetch failure (kept quiet — the row is just omitted).
 	hotStats *pg.TableHotStats
 	hotErr   error
+	// queryLayout/callLayout hold the highlighted lines of the statement and
+	// of the sample call between frames (see sqlLayout).
+	queryLayout, callLayout sqlLayout
 }
 
 // resetSample clears the sample-call state ahead of a (re)load so a refresh can
@@ -631,6 +634,8 @@ type logState struct {
 	cat      pglog.Category
 	catOn    bool
 	autoOpen bool
+	// entryBody is the entry screen's laid-out body, kept between frames.
+	entryBody logEntryBody
 }
 
 // pgbState: PgBouncer tool state.

@@ -26,7 +26,7 @@ func totalTimeShare(s *screen, pct float64, mu func(...string) string) string {
 
 func (m *Model) renderStatementDetail(s *screen, height int) string {
 	mu := styleMuted.Render
-	var b strings.Builder
+	var b lineBuf
 
 	q := s.stat.detail
 	if q == nil {
@@ -152,9 +152,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 
 	// --- query text ---
 	b.WriteString("\n  " + styleHeader.Render(" query ") + "\n")
-	for _, line := range highlightSQL(q.Query, m.width-4) {
-		b.WriteString("    " + line + "\n")
-	}
+	b.appendLines(s.stat.queryLayout.get(q.Query, m.width-4, "    "))
 
 	explainable := pg.ExplainableQuery(q.Query)
 
@@ -173,23 +171,21 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 		// marks exactly the filled-in values. A statement without parameters is
 		// already printed in full just above.
 		if s.stat.sampleSource != sampleNoParams {
-			for _, line := range highlightSQL(s.stat.sampleCall, m.width-4) {
-				b.WriteString("    " + line + "\n")
-			}
+			b.appendLines(s.stat.callLayout.get(s.stat.sampleCall, m.width-4, "    "))
 		}
 	case !s.stat.sampleResolved:
 		b.WriteString("    " + mu("inferring parameters…") + "\n")
 	default:
 		if s.stat.sampleErr != nil {
 			b.WriteString("    " + mu("could not infer parameters: "+s.stat.sampleErr.Error()) + "\n")
-			writeSchemaDriftHint(&b, s.stat.sampleErr)
+			writeSchemaDriftHint(&b.Builder, s.stat.sampleErr)
 		}
 		for _, line := range noSampleLines(s) {
 			b.WriteString("    " + mu(m.clipDetail(line)) + "\n")
 		}
 	}
 	if s.stat.verbose && explainable {
-		m.renderSampleParams(&b, s)
+		m.renderSampleParams(&b.Builder, s)
 	}
 
 	// --- explain ---
@@ -212,7 +208,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 		// The sample-call section has already explained the drift when its
 		// PREPARE hit the same missing object; say it once.
 		if !pg.SchemaDrift(s.stat.sampleErr) {
-			writeSchemaDriftHint(&b, s.stat.explainErr)
+			writeSchemaDriftHint(&b.Builder, s.stat.explainErr)
 		}
 	case s.stat.explain != "":
 		for _, line := range m.colorizeExplain(s.stat.explain, s.stat.explainAnalyze) {
@@ -256,7 +252,7 @@ func (m *Model) renderStatementDetail(s *screen, height int) string {
 	// The detail panel has no list to page through, so it scrolls as a single
 	// body: s.offset is the first visible line. Long sample calls / EXPLAIN
 	// output overflow short terminals otherwise, hiding the header off-screen.
-	return scrollWindow(b.String(), &s.offset, height)
+	return scrollLines(b.body(), &s.offset, height)
 }
 
 // renderSampleParams writes the verbose per-parameter breakdown under the sample
