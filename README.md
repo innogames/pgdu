@@ -496,6 +496,10 @@ pgdu -h db.example.com -U readonly -d production
 pgdu --dsn postgres://user:pass@host:5432/dbname
 ```
 
+A flag's value is its own word or follows `=` (`-p 5433`, `--port=5433`);
+psql's attached form `-p5433` is not accepted, and pgdu takes no positional
+arguments.
+
 Honors the usual libpq environment: `PGHOST`, `PGPORT`, `PGUSER`,
 `PGDATABASE`, `PGPASSWORD`, `PGSSLMODE`, and `~/.pgpass`.
 

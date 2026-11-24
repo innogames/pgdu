@@ -86,6 +86,12 @@ make deb         # Debian package (debian-pkg/)
 Defaults match `psql`: no `-h` → Unix socket + peer auth. `PGPASSWORD` is read directly;
 `~/.pgpass` is honoured at connect time.
 
+Flags are the standard library's `flag`, which has no shorthands: psql's letters
+(`shortFlags` in `internal/cli`) are second flags over the same value, so a value is its
+own word or follows `=` — `-p5433` is an unknown flag — and `usageText` lays `--help` out
+by hand to keep both spellings on one row. A positional argument is an error, not
+ignored: `flag` stops parsing there, and the flags behind it would be dropped silently.
+
 Snapshots (`--snapshot-dir`, default `/tmp/pgdu-snapshots`, `PGDU_SNAPSHOT_DIR`) are
 deliberately world-writable (dir 0o777, files 0o666) so any host user can manage anyone's.
 The directory holds two kinds: query snapshots (`*.json.gz`) and size samples

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"errors"
+	"flag"
 	"net/url"
 	"os"
 	"strings"
@@ -181,6 +183,100 @@ func TestParsePgBouncerTool(t *testing.T) {
 	}
 }
 
+// Both spellings of a connection flag are one flag: whichever is typed sets
+// the same field, with the value as its own word or behind '='.
+func TestParseShortAndLongSpellings(t *testing.T) {
+	for _, args := range [][]string{
+		{"-h", "db", "-p", "6432", "-U", "alice", "-d", "shop"},
+		{"--host", "db", "--port", "6432", "--username", "alice", "--dbname", "shop"},
+		{"--host=db", "-p=6432", "--username=alice", "-d=shop"},
+	} {
+		cfg, err := Parse(args)
+		if err != nil {
+			t.Fatalf("Parse(%v): %v", args, err)
+		}
+		if cfg.Host != "db" || cfg.Port != 6432 || cfg.User != "alice" || cfg.Database != "shop" {
+			t.Errorf("Parse(%v) = host %q port %d user %q db %q", args, cfg.Host, cfg.Port, cfg.User, cfg.Database)
+		}
+	}
+}
+
+// psql's attached form is not a value here: the flag package reads -p5433 as a
+// flag of that name, and that must fail loudly rather than connect to the
+// default port.
+func TestParseRejectsAttachedShortValue(t *testing.T) {
+	for _, arg := range []string{"-p5433", "-Ualice", "-dshop", "-hdb"} {
+		if _, err := Parse([]string{"-U", "u", arg}); err == nil {
+			t.Errorf("%s: want an error", arg)
+		}
+	}
+}
+
+// Parsing stops at the first word that is not a flag, so one has to be an
+// error: otherwise the -U behind it is dropped and pgdu connects as someone
+// else.
+func TestParseRejectsPositionalArgument(t *testing.T) {
+	t.Setenv("PGUSER", "me")
+	_, err := Parse([]string{"shop", "-U", "alice"})
+	if err == nil || !strings.Contains(err.Error(), `"shop"`) {
+		t.Errorf("want an error naming the stray argument, got %v", err)
+	}
+}
+
+// -h is the host, as in psql; only --help asks for help.
+func TestParseHelp(t *testing.T) {
+	if _, err := Parse([]string{"--help"}); !errors.Is(err, ErrHelp) {
+		t.Errorf("--help: err = %v, want ErrHelp", err)
+	}
+	if _, err := Parse([]string{"-U", "u", "-h"}); err == nil || errors.Is(err, ErrHelp) {
+		t.Errorf("-h without a value: err = %v, want a missing-argument error", err)
+	}
+}
+
+// A short spelling shares its long flag's row instead of getting one of its
+// own, zero defaults stay unprinted, and the usage column lines up.
+func TestUsageText(t *testing.T) {
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	fs.String("host", "", "server host")
+	fs.Var(fs.Lookup("host").Value, "h", "")
+	fs.String("snapshot-dir", "/tmp/x", "where snapshots go")
+	fs.Int("sample-retention", 30, "how many to keep")
+	fs.Int("limit", 0, "row limit")
+	fs.Bool("logs", false, "open the log analyzer")
+	lines := strings.Split(usageText(fs), "\n")
+
+	rows := []struct{ flag, usage string }{
+		{"  -h, --host string", "server host"},
+		{"      --logs", "open the log analyzer"},
+		{"      --limit int", "row limit"},
+		{"      --sample-retention int", "how many to keep (default 30)"},
+		{"      --snapshot-dir string", `where snapshots go (default "/tmp/x")`},
+	}
+	col := -1
+	for _, r := range rows {
+		found := false
+		for _, line := range lines {
+			if !strings.HasPrefix(line, r.flag+"  ") || !strings.HasSuffix(line, "  "+r.usage) {
+				continue
+			}
+			found = true
+			if at := len(line) - len(r.usage); col == -1 {
+				col = at
+			} else if at != col {
+				t.Errorf("%q: usage starts at column %d, the rows above at %d", r.flag, at, col)
+			}
+		}
+		if !found {
+			t.Errorf("no row %q … %q in:\n%s", r.flag, r.usage, strings.Join(lines, "\n"))
+		}
+	}
+	for _, line := range lines {
+		if strings.HasPrefix(line, "      --h ") || strings.HasPrefix(line, "  -h ") {
+			t.Errorf("the short spelling got a row of its own: %q", line)
+		}
+	}
+}
+
 func TestParseBytes(t *testing.T) {
 	cases := []struct {
 		in      string
@@ -214,7 +310,8 @@ func TestParseBytes(t *testing.T) {
 
 // The printed --sample-min-bytes default must round-trip through its own
 // parser, or --help advertises a value the flag would reject. (--sample-retention
-// is a plain int, so pflag prints and parses it without a hand-written pair.)
+// is a plain int, so the flag package prints and parses it without a
+// hand-written pair.)
 func TestSampleFlagDefaultsRoundTrip(t *testing.T) {
 	for _, n := range []int64{0, 1 << 20, 1536} {
 		got, err := parseBytes(formatBytes(n))

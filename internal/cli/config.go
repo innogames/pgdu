@@ -2,15 +2,15 @@ package cli
 
 import (
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/spf13/pflag"
 )
 
 // defaultRetention keeps 30 captures of each kind per database per host —
@@ -20,7 +20,18 @@ const defaultRetention = 30
 
 // ErrHelp is returned by Parse when the user asked for --help so callers can
 // exit cleanly without printing a redundant error.
-var ErrHelp = pflag.ErrHelp
+var ErrHelp = flag.ErrHelp
+
+// shortFlags are psql's one-letter spellings, keyed by the long name they
+// stand for. The flag package has no notion of a shorthand, so each is
+// registered as a second flag over the same value — which is why a value must
+// be its own word (or follow `=`): `-p5433` would be a flag of that name.
+var shortFlags = map[string]string{
+	"host":     "h",
+	"port":     "p",
+	"username": "U",
+	"dbname":   "d",
+}
 
 // ErrVersion is returned by Parse when the user asked for --version. The caller
 // owns the version string (injected at build time), so Parse only signals the
@@ -82,7 +93,11 @@ type Config struct {
 }
 
 func Parse(args []string) (Config, error) {
-	fs := pflag.NewFlagSet("pgdu", pflag.ContinueOnError)
+	fs := flag.NewFlagSet("pgdu", flag.ContinueOnError)
+	// The flag package writes the error and the whole usage text itself before
+	// it returns. main already prints the error, and one line is all a typo
+	// deserves, so the set's own output is dropped and --help is printed below.
+	fs.SetOutput(io.Discard)
 
 	// Defaults mirror libpq / psql: empty means "use libpq's default" so an
 	// argless pgdu invocation behaves like an argless psql — Unix socket,
@@ -103,10 +118,13 @@ func Parse(args []string) (Config, error) {
 		AutoSample:      envBoolOr("PGDU_AUTO_SAMPLE", true),
 	}
 
-	fs.StringVarP(&cfg.Host, "host", "h", cfg.Host, "database server host or socket path (empty = libpq default)")
-	fs.IntVarP(&cfg.Port, "port", "p", cfg.Port, "database server port (0 = libpq default 5432)")
-	fs.StringVarP(&cfg.User, "username", "U", cfg.User, "database user name")
-	fs.StringVarP(&cfg.Database, "dbname", "d", cfg.Database, "initial database to connect to (empty = same as user)")
+	fs.StringVar(&cfg.Host, "host", cfg.Host, "database server host or socket path (empty = libpq default)")
+	fs.IntVar(&cfg.Port, "port", cfg.Port, "database server port (0 = libpq default 5432)")
+	fs.StringVar(&cfg.User, "username", cfg.User, "database user name")
+	fs.StringVar(&cfg.Database, "dbname", cfg.Database, "initial database to connect to (empty = same as user)")
+	for long, short := range shortFlags {
+		fs.Var(fs.Lookup(long).Value, short, "")
+	}
 	fs.StringVar(&cfg.SSLMode, "sslmode", cfg.SSLMode, "SSL mode (disable|allow|prefer|require|verify-ca|verify-full)")
 	fs.StringVar(&cfg.DSN, "dsn", "", "full PostgreSQL connection URL (overrides individual flags)")
 	fs.StringVar(&cfg.SnapshotDir, "snapshot-dir", cfg.SnapshotDir, "directory for top-queries snapshots (S saves, L loads)")
@@ -139,16 +157,18 @@ func Parse(args []string) (Config, error) {
 	fs.BoolVar(&pgbouncer, "pgbouncer", false, "start directly in the pgbouncer tool")
 	fs.BoolVar(&growth, "growth", false, "start directly in the size-history/growth tool")
 
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "pgdu - PostgreSQL disk usage explorer (ncdu-style TUI)\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: pgdu [flags]\n\n")
-		fs.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nWith no -h, pgdu connects via the local Unix socket (same as psql).\n")
-		fmt.Fprintf(os.Stderr, "Password: pgdu reads PGPASSWORD; ~/.pgpass is consulted by libpq at connect time.\n")
-	}
-
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(os.Stderr, usageText(fs))
+		}
 		return Config{}, err
+	}
+	// The flag package stops at the first word that is not a flag and leaves
+	// everything after it unparsed. pgdu takes no arguments, so a leftover is a
+	// mistake — and quietly dropping the flags behind it (a -U, a -h) would
+	// connect somewhere other than where the command line says.
+	if fs.NArg() > 0 {
+		return Config{}, fmt.Errorf("unexpected argument %q (pgdu takes flags only)", fs.Arg(0))
 	}
 
 	if showVersion {
@@ -207,6 +227,55 @@ func Parse(args []string) (Config, error) {
 		return Config{}, errors.New("username required: pass -U or set PGUSER")
 	}
 	return cfg, nil
+}
+
+// usageText is what --help prints. The flag package's own listing would show
+// every flag with one dash and psql's letters as four unrelated flags, so the
+// table is laid out here: both spellings on one row, long names with the two
+// dashes the docs use.
+func usageText(fs *flag.FlagSet) string {
+	short := make(map[string]bool, len(shortFlags))
+	for _, s := range shortFlags {
+		short[s] = true
+	}
+
+	type row struct{ flag, usage string }
+	var rows []row
+	width := 0
+	fs.VisitAll(func(f *flag.Flag) {
+		if short[f.Name] {
+			return
+		}
+		name := "      --" + f.Name
+		if s, ok := shortFlags[f.Name]; ok {
+			name = "  -" + s + ", --" + f.Name
+		}
+		typ, usage := flag.UnquoteUsage(f)
+		if typ != "" {
+			name += " " + typ
+		}
+		// A zero default says nothing; any other one came from the environment
+		// or the build, which is exactly what --help is asked for.
+		if d := f.DefValue; d != "" && d != "0" && d != "false" {
+			if typ == "string" {
+				d = strconv.Quote(d)
+			}
+			usage += " (default " + d + ")"
+		}
+		rows = append(rows, row{name, usage})
+		width = max(width, len(name))
+	})
+
+	var b strings.Builder
+	b.WriteString("pgdu - PostgreSQL disk usage explorer (ncdu-style TUI)\n\n")
+	b.WriteString("Usage: pgdu [flags]\n\n")
+	for _, r := range rows {
+		fmt.Fprintf(&b, "%-*s   %s\n", width, r.flag, r.usage)
+	}
+	b.WriteString("\nA value is its own word or follows '=': -p 5433 or --port=5433, not -p5433.\n")
+	b.WriteString("With no -h, pgdu connects via the local Unix socket (same as psql).\n")
+	b.WriteString("Password: pgdu reads PGPASSWORD; ~/.pgpass is consulted by libpq at connect time.\n")
+	return b.String()
 }
 
 // BuildDSN returns a libpq-style key=value connection string for the given
